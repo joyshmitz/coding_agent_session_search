@@ -64,11 +64,11 @@ fn run_index(db_override: Option<PathBuf>, full: bool, watch: bool) -> Result<()
     indexer::run_index(opts)
 }
 
-fn default_db_path() -> PathBuf {
+pub fn default_db_path() -> PathBuf {
     default_data_dir().join("agent_search.db")
 }
 
-fn default_data_dir() -> PathBuf {
+pub fn default_data_dir() -> PathBuf {
     directories::ProjectDirs::from("com", "coding-agent-search", "coding-agent-search")
         .expect("project dirs available")
         .data_dir()
