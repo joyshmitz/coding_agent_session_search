@@ -1,7 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
-use tantivy::collector::TopDocs;
+use anyhow::{Context, Result, anyhow};
 use tantivy::schema::*;
 use tantivy::{Index, IndexReader, IndexWriter, doc};
 
