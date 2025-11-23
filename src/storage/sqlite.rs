@@ -250,10 +250,7 @@ impl SqliteStorage {
         for msg in &conv.messages {
             let msg_id = insert_message(&tx, conv_id, msg)?;
             insert_snippets(&tx, msg_id, &msg.snippets)?;
-            #[cfg(not(test))]
             insert_fts_message(&tx, msg_id, msg, conv)?;
-            #[cfg(test)]
-            let _ = insert_fts_message(&tx, msg_id, msg, conv);
         }
         tx.commit()?;
         Ok(InsertOutcome {
@@ -285,10 +282,7 @@ impl SqliteStorage {
             }
             let msg_id = insert_message(&tx, conversation_id, msg)?;
             insert_snippets(&tx, msg_id, &msg.snippets)?;
-            #[cfg(not(test))]
             insert_fts_message(&tx, msg_id, msg, conv)?;
-            #[cfg(test)]
-            let _ = insert_fts_message(&tx, msg_id, msg, conv);
             inserted_indices.push(msg.idx);
         }
 

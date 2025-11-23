@@ -110,19 +110,36 @@ fn watch_sources<F: Fn(Vec<PathBuf>) + Send + 'static>(callback: F) -> Result<()
     }
 
     let debounce = Duration::from_secs(2);
+    let max_wait = Duration::from_secs(5);
     let mut pending: Vec<PathBuf> = Vec::new();
+    let mut first_event: Option<std::time::Instant> = None;
 
     loop {
         if pending.is_empty() {
             match rx.recv() {
-                Ok(paths) => pending.extend(paths),
+                Ok(paths) => {
+                    pending.extend(paths);
+                    first_event = Some(std::time::Instant::now());
+                }
                 Err(_) => break, // Channel closed
             }
         } else {
-            match rx.recv_timeout(debounce) {
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(first_event.unwrap());
+            if elapsed >= max_wait {
+                callback(std::mem::take(&mut pending));
+                first_event = None;
+                continue;
+            }
+
+            let remaining = max_wait - elapsed;
+            let wait = debounce.min(remaining);
+
+            match rx.recv_timeout(wait) {
                 Ok(paths) => pending.extend(paths),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     callback(std::mem::take(&mut pending));
+                    first_event = None;
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
