@@ -32,6 +32,8 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-dist
         run: cargo install cargo-dist --locked --root ~/.cargo
+      - name: Add cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - name: Build distributions
         env:
           CARGO_TERM_COLOR: always
