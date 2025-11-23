@@ -1,12 +1,12 @@
 //! Ratatui-based interface wired to Tantivy search.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{ExecutableCommand, execute};
-use chrono::{DateTime, Utc};
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
@@ -119,11 +119,16 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     horizontal[1]
 }
 
-fn highlight_terms_owned(text: String, query: &str, palette: ThemePalette) -> Line<'static> {
+fn highlight_terms_owned_with_style(
+    text: String,
+    query: &str,
+    palette: ThemePalette,
+    base: Style,
+) -> Line<'static> {
     let owned = text;
     let mut spans = Vec::new();
     if query.trim().is_empty() {
-        spans.push(Span::raw(owned));
+        spans.push(Span::styled(owned, base));
         let line: Line = spans.into();
         return unsafe { std::mem::transmute::<Line, Line<'static>>(line) };
     }
@@ -133,22 +138,30 @@ fn highlight_terms_owned(text: String, query: &str, palette: ThemePalette) -> Li
     while let Some(pos) = lower[idx..].find(&q) {
         let start = idx + pos;
         if start > idx {
-            spans.push(Span::raw(owned[idx..start].to_string()));
+            spans.push(Span::styled(owned[idx..start].to_string(), base));
         }
         let end = start + q.len();
         spans.push(Span::styled(
             owned[start..end].to_string(),
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD),
+            base.patch(
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ));
         idx = end;
     }
     if idx < owned.len() {
-        spans.push(Span::raw(owned[idx..].to_string()));
+        spans.push(Span::styled(owned[idx..].to_string(), base));
     }
     let line: Line = spans.into();
     unsafe { std::mem::transmute::<Line, Line<'static>>(line) }
+}
+
+fn format_ts(ms: i64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(ms)
+        .map(|dt: DateTime<Utc>| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| ms.to_string())
 }
 
 pub fn footer_legend(show_help: bool) -> &'static str {
@@ -235,7 +248,7 @@ pub fn run_tui() -> Result<()> {
                     InputMode::CreatedFrom => format!("[from ts ms] {}", input_buffer),
                     InputMode::CreatedTo => format!("[to ts ms] {}", input_buffer),
                 };
-                let sb = search_bar(&bar_text);
+                let sb = search_bar(&bar_text, palette, matches!(input_mode, InputMode::Query));
                 f.render_widget(sb, chunks[0]);
 
                 // Filter pills row
@@ -391,7 +404,7 @@ pub fn run_tui() -> Result<()> {
                                     };
                                     let ts = msg
                                         .created_at
-                                        .map(|t| format!(" ({t})"))
+                                        .map(|t| format!(" ({})", format_ts(t)))
                                         .unwrap_or_default();
                                     lines.push(Line::from(vec![
                                         Span::styled(
@@ -400,10 +413,29 @@ pub fn run_tui() -> Result<()> {
                                         ),
                                         Span::raw(ts),
                                     ]));
-                                    let owned = msg.content.clone();
-                                    let content_line =
-                                        highlight_terms_owned(owned, &last_query, palette);
-                                    lines.push(content_line);
+                                    let mut in_code = false;
+                                    for line_text in msg.content.lines() {
+                                        if line_text.trim_start().starts_with("```") {
+                                            in_code = !in_code;
+                                            lines.push(Line::from(Span::styled(
+                                                line_text.to_string(),
+                                                Style::default().fg(palette.hint),
+                                            )));
+                                            continue;
+                                        }
+                                        let base = if in_code {
+                                            Style::default().bg(palette.surface)
+                                        } else {
+                                            Style::default()
+                                        };
+                                        let rendered = highlight_terms_owned_with_style(
+                                            line_text.to_string(),
+                                            &last_query,
+                                            palette,
+                                            base,
+                                        );
+                                        lines.push(rendered);
+                                    }
                                     lines.push(Line::from(""));
                                 }
                                 if lines.is_empty() {
