@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: fmt
+        run: cargo fmt -- --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: check
+        run: cargo check --all-targets
+      - name: tests
+        run: cargo test
+      - name: benches (run, quick)
+        run: cargo bench -- --test-threads=1 --sample-size=10 --warm-up-time 0.1 --measurement-time 0.2
+      - name: UBS (if available)
+        run: |
+          if [ -x ./ubs ]; then ./ubs src || true; fi
+      - name: ratatui snapshot tests
+        run: |
+          if ls tests | grep -q "ui_"; then cargo test --tests; fi
