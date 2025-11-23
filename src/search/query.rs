@@ -4,6 +4,7 @@ use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
 use tantivy::schema::{IndexRecordOption, Term, Value};
+use tantivy::snippet::SnippetGenerator;
 use tantivy::{Index, IndexReader, TantivyDocument};
 
 use rusqlite::Connection;
@@ -106,15 +107,13 @@ impl SearchClient {
             let terms = filters
                 .agents
                 .into_iter()
-                .map(|agent| {
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(fields.agent, &agent),
-                            IndexRecordOption::Basic,
-                        )) as Box<dyn Query>,
-                    )
-                })
+                .map(|agent| (
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(fields.agent, &agent),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>,
+                ))
                 .collect();
             clauses.push((Occur::Must, Box::new(BooleanQuery::new(terms))));
         }
@@ -123,15 +122,13 @@ impl SearchClient {
             let terms = filters
                 .workspaces
                 .into_iter()
-                .map(|ws| {
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(fields.workspace, &ws),
-                            IndexRecordOption::Basic,
-                        )) as Box<dyn Query>,
-                    )
-                })
+                .map(|ws| (
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(fields.workspace, &ws),
+                        IndexRecordOption::Basic,
+                    )) as Box<dyn Query>,
+                ))
                 .collect();
             clauses.push((Occur::Must, Box::new(BooleanQuery::new(terms))));
         }
@@ -158,6 +155,8 @@ impl SearchClient {
             Box::new(BooleanQuery::new(clauses))
         };
 
+        let snippet_generator = SnippetGenerator::create(&searcher, &*q, fields.content)?;
+
         let top_docs = searcher.search(&q, &TopDocs::with_limit(limit).and_offset(offset))?;
         let mut hits = Vec::new();
         for (score, addr) in top_docs {
@@ -177,14 +176,11 @@ impl SearchClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let snippet = content
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or(content.as_str())
-                .trim()
-                .chars()
-                .take(200)
-                .collect::<String>();
+            let snippet = snippet_generator
+                .snippet_from_doc(&doc)
+                .to_html()
+                .replace("<b>", "**")
+                .replace("</b>", "**");
             let source = doc
                 .get_first(fields.source_path)
                 .and_then(|v| v.as_str())
@@ -217,8 +213,7 @@ impl SearchClient {
         offset: usize,
     ) -> Result<Vec<SearchHit>> {
         let mut sql = String::from(
-            "SELECT title, content, agent, workspace, source_path, created_at, bm25(fts_messages) AS score
-             FROM fts_messages WHERE fts_messages MATCH ?",
+            "SELECT title, content, agent, workspace, source_path, created_at, bm25(fts_messages) AS score, snippet(fts_messages, 0, '**', '**', '...', 64) AS snippet\n             FROM fts_messages WHERE fts_messages MATCH ?",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_string())];
 
@@ -267,13 +262,7 @@ impl SearchClient {
                 let workspace: String = row.get(3)?;
                 let source_path: String = row.get(4)?;
                 let score: f32 = row.get::<_, f64>(6)? as f32;
-                let snippet = content
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or(content.as_str())
-                    .chars()
-                    .take(200)
-                    .collect();
+                let snippet: String = row.get(7)?;
                 Ok(SearchHit {
                     title,
                     snippet,
@@ -412,7 +401,7 @@ mod tests {
         let hits = client.search("needle", filters, 10, 0)?;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].workspace, "/ws/b");
-        assert!(hits[0].snippet.starts_with("needle second line"));
+        assert!(hits[0].snippet.contains("second line"));
         Ok(())
     }
 
