@@ -26,6 +26,11 @@ done
 mkdir -p "$DEST"
 OS=$(uname -s | tr 'A-Z' 'a-z')
 ARCH=$(uname -m)
+# normalize arch for release names
+case "$ARCH" in
+  x86_64|amd64) ARCH="x86_64" ;;
+  arm64|aarch64) ARCH="arm64" ;;
+esac
 TAR="coding-agent-search-${VERSION}-${OS}-${ARCH}.tar.gz"
 URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
 
