@@ -59,7 +59,12 @@ impl Connector for GeminiConnector {
                 continue;
             }
             let mut messages = Vec::new();
-            for entry in WalkDir::new(&path).into_iter().flatten() {
+            let mut msg_idx = 0;
+            for entry in WalkDir::new(&path)
+                .sort_by_file_name()
+                .into_iter()
+                .flatten()
+            {
                 if !entry.file_type().is_file() {
                     continue;
                 }
@@ -72,7 +77,7 @@ impl Connector for GeminiConnector {
                 let data = fs::read_to_string(entry.path())
                     .with_context(|| format!("read {}", entry.path().display()))?;
                 if entry.path().extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                    for (idx, line) in data.lines().enumerate() {
+                    for line in data.lines() {
                         if line.trim().is_empty() {
                             continue;
                         }
@@ -84,7 +89,7 @@ impl Connector for GeminiConnector {
                             .and_then(|v| v.as_str())
                             .unwrap_or(line);
                         messages.push(NormalizedMessage {
-                            idx: idx as i64,
+                            idx: msg_idx,
                             role: val
                                 .get("role")
                                 .and_then(|v| v.as_str())
@@ -96,18 +101,19 @@ impl Connector for GeminiConnector {
                             extra: val,
                             snippets: Vec::new(),
                         });
+                        msg_idx += 1;
                     }
                 } else {
                     let val: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
                     if let Some(arr) = val.as_array() {
-                        for (idx, item) in arr.iter().enumerate() {
+                        for item in arr {
                             let content = item
                                 .get("content")
                                 .or_else(|| item.get("text"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
                             messages.push(NormalizedMessage {
-                                idx: idx as i64,
+                                idx: msg_idx,
                                 role: item
                                     .get("role")
                                     .and_then(|v| v.as_str())
@@ -119,6 +125,7 @@ impl Connector for GeminiConnector {
                                 extra: item.clone(),
                                 snippets: Vec::new(),
                             });
+                            msg_idx += 1;
                         }
                     }
                 }
