@@ -49,8 +49,20 @@ maybe_add_path() {
     *:"$DEST":*) return 0;;
     *)
       if [ "$EASY" -eq 1 ]; then
-        if [ -w "$HOME/.bashrc" ]; then echo "export PATH=\"$DEST:\$PATH\"" >> "$HOME/.bashrc"; fi
-        warn "PATH updated in ~/.bashrc; restart shell to use coding-agent-search"
+        UPDATED=0
+        for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+          if [ -e "$rc" ] && [ -w "$rc" ]; then
+            if ! grep -F "$DEST" "$rc" >/dev/null 2>&1; then
+              echo "export PATH=\"$DEST:\$PATH\"" >> "$rc"
+            fi
+            UPDATED=1
+          fi
+        done
+        if [ "$UPDATED" -eq 1 ]; then
+          warn "PATH updated in ~/.zshrc/.bashrc; restart shell to use coding-agent-search"
+        else
+          warn "Add $DEST to PATH to use coding-agent-search"
+        fi
       else
         warn "Add $DEST to PATH to use coding-agent-search"
       fi
@@ -109,12 +121,34 @@ OS=$(uname -s | tr 'A-Z' 'a-z')
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64|amd64) ARCH="x86_64" ;;
-  arm64|aarch64) ARCH="arm64" ;;
+  arm64|aarch64) ARCH="aarch64" ;;
   *) warn "Unknown arch $ARCH, using as-is" ;;
 esac
-TAR="coding-agent-search-${VERSION}-${OS}-${ARCH}.tar.gz"
-URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
-[ -n "$ARTIFACT_URL" ] && URL="$ARTIFACT_URL"
+
+TARGET=""
+case "${OS}-${ARCH}" in
+  linux-x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
+  linux-aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+  darwin-x86_64) TARGET="x86_64-apple-darwin" ;;
+  darwin-aarch64) TARGET="aarch64-apple-darwin" ;;
+  *) :;;
+esac
+
+# Prefer prebuilt artifact when we know the target or the caller supplied a direct URL.
+TAR=""
+URL=""
+if [ "$FROM_SOURCE" -eq 0 ]; then
+  if [ -n "$ARTIFACT_URL" ]; then
+    TAR=$(basename "$ARTIFACT_URL")
+    URL="$ARTIFACT_URL"
+  elif [ -n "$TARGET" ]; then
+    TAR="coding-agent-search-${TARGET}.tar.xz"
+    URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
+  else
+    warn "No prebuilt artifact for ${OS}/${ARCH}; falling back to build-from-source"
+    FROM_SOURCE=1
+  fi
+fi
 
 exec 9>"$LOCK_FILE" || true
 LOCKED=0
@@ -128,8 +162,8 @@ cleanup() {
 TMP=$(mktemp -d)
 trap cleanup EXIT
 
-info "Downloading $URL"
 if [ "$FROM_SOURCE" -eq 0 ]; then
+  info "Downloading $URL"
   if ! curl -fsSL "$URL" -o "$TMP/$TAR"; then
     warn "Artifact download failed; falling back to build-from-source"
     FROM_SOURCE=1
@@ -168,8 +202,14 @@ echo "$CHECKSUM  $TMP/$TAR" | sha256sum -c - || { err "Checksum mismatch"; exit 
 ok "Checksum verified"
 
 info "Extracting"
-tar -xzf "$TMP/$TAR" -C "$TMP"
+tar -xf "$TMP/$TAR" -C "$TMP"
 BIN="$TMP/coding-agent-search"
+if [ ! -x "$BIN" ] && [ -n "$TARGET" ]; then
+  BIN="$TMP/coding-agent-search-${TARGET}/coding-agent-search"
+fi
+if [ ! -x "$BIN" ]; then
+  BIN=$(find "$TMP" -maxdepth 3 -type f -name "coding-agent-search" -perm -111 | head -n 1)
+fi
 [ -x "$BIN" ] || { err "Binary not found in tar"; exit 1; }
 install -m 0755 "$BIN" "$DEST"
 ok "Installed to $DEST/coding-agent-search"
