@@ -4,20 +4,35 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::ui::components::theme::ThemePalette;
+use ratatui::widgets::Wrap;
 
-pub fn search_bar(query: &str, palette: ThemePalette, focused: bool) -> Paragraph<'static> {
-    let title = Span::styled("Search", palette.title());
+pub fn search_bar(
+    query: &str,
+    palette: ThemePalette,
+    focused: bool,
+    mode_label: &str,
+    chips: Vec<Span<'static>>,
+) -> Paragraph<'static> {
+    let title = Span::styled(format!("Search · {mode_label}"), palette.title());
     let style = if focused {
         Style::default().fg(palette.accent)
     } else {
         Style::default().fg(palette.hint)
     };
 
+    let mut first_line = chips;
+    if !first_line.is_empty() {
+        first_line.push(Span::raw(" "));
+    }
+    first_line.push(Span::styled(format!("/ {}", query), style));
+
     let body = vec![
-        Line::from(Span::styled(format!("/ {}", query), style)),
+        Line::from(first_line),
         Line::from(vec![
             Span::styled("Tips: ", palette.title()),
-            Span::raw("a/w/f/t filters • A/W/F clear • x clear all • o open"),
+            Span::raw(
+                "F3 agent • F4 workspace • F5/F6 time • F7 context • F11 clear • F9 mode • F2 theme • F8/Enter open • Ctrl-R history",
+            ),
         ]),
     ];
 
@@ -30,4 +45,5 @@ pub fn search_bar(query: &str, palette: ThemePalette, focused: bool) -> Paragrap
         )
         .style(Style::default())
         .alignment(Alignment::Left)
+        .wrap(Wrap { trim: true })
 }

@@ -28,6 +28,7 @@ pub struct SearchHit {
     pub source_path: String,
     pub agent: String,
     pub workspace: String,
+    pub created_at: Option<i64>,
 }
 
 pub struct SearchClient {
@@ -195,6 +196,7 @@ impl SearchClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let created_at = doc.get_first(fields.created_at).and_then(|v| v.as_i64());
             hits.push(SearchHit {
                 title,
                 snippet,
@@ -203,6 +205,7 @@ impl SearchClient {
                 source_path: source,
                 agent,
                 workspace,
+                created_at,
             });
         }
         Ok(hits)
@@ -265,6 +268,7 @@ impl SearchClient {
                 let agent: String = row.get(2)?;
                 let workspace: String = row.get(3)?;
                 let source_path: String = row.get(4)?;
+                let created_at: Option<i64> = row.get(5).ok();
                 let score: f32 = row.get::<_, f64>(6)? as f32;
                 let snippet: String = row.get(7)?;
                 Ok(SearchHit {
@@ -275,6 +279,7 @@ impl SearchClient {
                     source_path,
                     agent,
                     workspace,
+                    created_at,
                 })
             },
         )?;

@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -10,6 +10,8 @@ use crossterm::{ExecutableCommand, execute};
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::io;
 use std::process::Command as StdCommand;
 use std::time::{Duration, Instant};
@@ -38,55 +40,156 @@ enum DetailTab {
     Raw,
 }
 
-fn render_help_overlay(frame: &mut Frame, palette: ThemePalette) {
-    let area = frame.area();
-    let popup_area = centered_rect(60, 50, area);
-    let sections: Vec<Line> = vec![
-        Line::from(vec![
-            Span::styled("Search", palette.title()),
-            Span::raw(": type to live-search; / focuses query"),
-        ]),
-        Line::from(vec![
-            Span::styled("Filters", palette.title()),
-            Span::raw(
-                ": a agent | w workspace | f from | t to | x clear; pills show below the bar",
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Navigate", palette.title()),
-            Span::raw(": j/k or arrows move • PgUp/PgDn paginate • Tab cycles detail tabs"),
-        ]),
-        Line::from(vec![
-            Span::styled("Detail", palette.title()),
-            Span::raw(
-                ": Messages show full thread with role colors • Snippets / Raw tabs available",
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Actions", palette.title()),
-            Span::raw(": o open hit in $EDITOR • h toggle theme • ? toggle this help"),
-        ]),
-        Line::from(vec![
-            Span::styled("Quit", palette.title()),
-            Span::raw(": q or esc"),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Tip", palette.title()),
-            Span::raw(
-                ": start with a query then narrow with filters; watch row shows active filters.",
-            ),
-        ]),
-    ];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchMode {
+    Standard,
+    Prefix,
+}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RankingMode {
+    RecentHeavy,
+    Balanced,
+    RelevanceHeavy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContextWindow {
+    Small,
+    Medium,
+    Large,
+    XLarge,
+}
+
+impl ContextWindow {
+    fn next(self) -> Self {
+        match self {
+            ContextWindow::Small => ContextWindow::Medium,
+            ContextWindow::Medium => ContextWindow::Large,
+            ContextWindow::Large => ContextWindow::XLarge,
+            ContextWindow::XLarge => ContextWindow::Small,
+        }
+    }
+
+    fn size(self) -> usize {
+        match self {
+            ContextWindow::Small => 80,
+            ContextWindow::Medium => 160,
+            ContextWindow::Large => 320,
+            ContextWindow::XLarge => 640,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ContextWindow::Small => "S",
+            ContextWindow::Medium => "M",
+            ContextWindow::Large => "L",
+            ContextWindow::XLarge => "XL",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct TuiStatePersisted {
+    match_mode: Option<String>,
+    context_window: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct AgentPane {
+    agent: String,
+    hits: Vec<SearchHit>,
+    selected: usize,
+}
+
+fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    let add_section = |title: &str, items: &[&str]| -> Vec<Line<'static>> {
+        let mut v = Vec::new();
+        v.push(Line::from(Span::styled(title.to_string(), palette.title())));
+        for item in items {
+            v.push(Line::from(format!("  {item}")));
+        }
+        v.push(Line::from(""));
+        v
+    };
+
+    lines.extend(add_section(
+        "Search",
+        &["type to live-search; / focuses query; Ctrl-R cycles history"],
+    ));
+    lines.extend(add_section(
+        "Filters",
+        &[
+            "F3 agent | F4 workspace | F5 from | F6 to | F11 clear all",
+            "Shift+F3 scope to active agent | Shift+F4 clear scope | Shift+F5 cycle time presets (24h/7d/30d/all)",
+            "Chips in search bar; Backspace removes last; Enter (query empty) edits last chip",
+        ],
+    ));
+    lines.extend(add_section(
+        "Modes",
+        &[
+            "F9 match mode: prefix (default) ⇄ standard",
+            "F12 ranking: recent-heavy → balanced → relevance-heavy",
+            "F2 theme: dark/light",
+        ],
+    ));
+    lines.extend(add_section(
+        "Context",
+        &[
+            "F7 cycles S/M/L/XL context window",
+            "Space: peek XL for current hit, tap again to restore",
+        ],
+    ));
+    lines.extend(add_section(
+        "Density",
+        &["Shift+=/+ increase pane items; - decrease (min 4, max 50)"],
+    ));
+    lines.extend(add_section(
+        "Navigation",
+        &[
+            "Arrows move; Left/Right pane; PgUp/PgDn page",
+            "Alt+NumPad 1-9 jump pane; g/G jump first/last item",
+            "Tab / Shift-Tab cycle detail tabs",
+        ],
+    ));
+    lines.extend(add_section(
+        "Actions",
+        &[
+            "Enter/F8 open hit in $EDITOR; planned: Ctrl+Enter queue, Ctrl+O open queued",
+            "F1 toggle this help; Esc/F10 quit",
+        ],
+    ));
+    lines.extend(add_section(
+        "States",
+        &["match mode + context persist in tui_state.json (data dir); delete to reset"],
+    ));
+    lines.extend(add_section(
+        "Empty state",
+        &[
+            "Shows recent per-agent hits before typing",
+            "Recent query suggestions appear when query is empty",
+        ],
+    ));
+
+    lines
+}
+
+fn render_help_overlay(frame: &mut Frame, palette: ThemePalette, scroll: u16) {
+    let area = frame.area();
+    let popup_area = centered_rect(70, 70, area);
+    let lines = help_lines(palette);
     let block = Block::default()
-        .title(Span::styled("Help / Onboarding", palette.title()))
+        .title(Span::styled("Help / Shortcuts", palette.title()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.accent));
     frame.render_widget(
-        Paragraph::new(sections)
+        Paragraph::new(lines)
             .block(block)
-            .wrap(Wrap { trim: true }),
+            .wrap(Wrap { trim: true })
+            .scroll((scroll, 0)),
         popup_area,
     );
 }
@@ -117,6 +220,157 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1]);
 
     horizontal[1]
+}
+
+fn build_agent_panes(results: &[SearchHit], per_pane_limit: usize) -> Vec<AgentPane> {
+    let mut panes: Vec<AgentPane> = Vec::new();
+    for hit in results {
+        if let Some(pane) = panes.iter_mut().find(|p| p.agent == hit.agent) {
+            if pane.hits.len() < per_pane_limit {
+                pane.hits.push(hit.clone());
+            }
+        } else {
+            panes.push(AgentPane {
+                agent: hit.agent.clone(),
+                hits: vec![hit.clone()],
+                selected: 0,
+            });
+        }
+    }
+    panes
+}
+
+fn active_hit(panes: &[AgentPane], active_idx: usize) -> Option<&SearchHit> {
+    panes
+        .get(active_idx)
+        .and_then(|pane| pane.hits.get(pane.selected))
+}
+
+fn agent_display_name(agent: &str) -> String {
+    agent
+        .replace(['_', '-'], " ")
+        .split_whitespace()
+        .map(|w| {
+            let mut chars = w.chars();
+            if let Some(first) = chars.next() {
+                format!("{}{}", first.to_uppercase(), chars.as_str())
+            } else {
+                String::new()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn contextual_snippet(text: &str, query: &str, window: ContextWindow) -> String {
+    let size = window.size();
+    if text.is_empty() {
+        return String::new();
+    }
+    let lowercase = text.to_lowercase();
+    let q = query.to_lowercase();
+
+    let byte_pos = if q.is_empty() {
+        Some(0)
+    } else {
+        lowercase.find(&q)
+    }
+    .or_else(|| {
+        q.split_whitespace()
+            .next()
+            .and_then(|first| lowercase.find(first))
+    });
+
+    let chars: Vec<char> = text.chars().collect();
+    let char_pos = byte_pos.map(|b| text[..b].chars().count()).unwrap_or(0);
+    let len = chars.len();
+    let start = char_pos.saturating_sub(size / 2);
+    let end = (start + size).min(len);
+    let slice: String = chars[start..end].iter().collect();
+    let prefix = if start > 0 { "…" } else { "" };
+    let suffix = if end < len { "…" } else { "" };
+    format!("{prefix}{slice}{suffix}")
+}
+
+fn state_path_for(data_dir: &std::path::Path) -> std::path::PathBuf {
+    // Persist lightweight, non-secret UI preferences (match mode, context window).
+    data_dir.join("tui_state.json")
+}
+
+fn chips_for_filters(filters: &SearchFilters, palette: ThemePalette) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span> = Vec::new();
+    if !filters.agents.is_empty() {
+        spans.push(Span::styled(
+            format!(
+                "[agent:{}]",
+                filters.agents.iter().cloned().collect::<Vec<_>>().join("|")
+            ),
+            Style::default()
+                .fg(palette.accent_alt)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    if !filters.workspaces.is_empty() {
+        spans.push(Span::styled(
+            format!(
+                "[ws:{}]",
+                filters
+                    .workspaces
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ),
+            Style::default().fg(palette.accent_alt),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    if filters.created_from.is_some() || filters.created_to.is_some() {
+        spans.push(Span::styled(
+            format!(
+                "[time:{:?}->{:?}]",
+                filters.created_from, filters.created_to
+            ),
+            Style::default().fg(palette.accent_alt),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    spans
+        .into_iter()
+        .map(|s| unsafe { std::mem::transmute::<Span<'_>, Span<'static>>(s) })
+        .collect()
+}
+
+fn load_state(path: &std::path::Path) -> TuiStatePersisted {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_state(path: &std::path::Path, state: &TuiStatePersisted) {
+    if let Ok(body) = serde_json::to_string_pretty(state) {
+        let _ = std::fs::write(path, body);
+    }
+}
+
+fn apply_match_mode(query: &str, mode: MatchMode) -> String {
+    match mode {
+        MatchMode::Standard => query.to_string(),
+        MatchMode::Prefix => query
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .map(|term| {
+                if term.ends_with('*') {
+                    term.to_string()
+                } else {
+                    format!("{term}*")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
 }
 
 fn highlight_terms_owned_with_style(
@@ -166,9 +420,9 @@ fn format_ts(ms: i64) -> String {
 
 pub fn footer_legend(show_help: bool) -> &'static str {
     if show_help {
-        "q/esc quit • arrows/PgUp/PgDn navigate • / focus query • a agent • w workspace • f from • t to • x clear • A/W/F clear-one • tab detail • h theme • o open"
+        "Esc/F10 quit • arrows + Left/Right pane • PgUp/PgDn page • Tab detail • F3/F4/F5/F6 filters • F11 clear • F7 context • F9 mode • F2 theme • Enter/F8 open • Alt+NumPad 1-9 pane • Ctrl-R history"
     } else {
-        "?/hide help | a agent | w workspace | f from | t to | x clear | tab detail | h theme | o open | q quit"
+        "F1 help | F3 agent | F4 workspace | F5/F6 time | F7 context | F11 clear | F9 mode | F2 theme | Enter/F8 open | Alt+NumPad pane | Esc/F10 quit"
     }
 }
 
@@ -190,11 +444,13 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
     let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
     let index_path = index_dir(&data_dir)?;
     let db_path = default_db_path_for(&data_dir);
+    let state_path = state_path_for(&data_dir);
+    let persisted = load_state(&state_path);
     let search_client = SearchClient::open(&index_path, Some(&db_path))?;
     let index_ready = search_client.is_some();
     let mut status = if index_ready {
         format!(
-            "Index ready at {} - type to search (q/esc to quit)",
+            "Index ready at {} - type to search (Esc/F10 quit, F1 help)",
             index_path.display()
         )
     } else {
@@ -208,22 +464,44 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
     let mut filters = SearchFilters::default();
     let mut input_mode = InputMode::Query;
     let mut input_buffer = String::new();
-    let page_size: usize = 20;
+    let page_size: usize = 120;
+    let mut per_pane_limit: usize = 12;
     let mut page: usize = 0;
     let mut results: Vec<SearchHit> = Vec::new();
+    let mut panes: Vec<AgentPane> = Vec::new();
+    let mut active_pane: usize = 0;
+    let mut focus_flash_until: Option<Instant> = None;
     let mut last_tick = Instant::now();
-    let tick_rate = Duration::from_millis(200);
-    let debounce = Duration::from_millis(150);
-    let mut dirty_since: Option<Instant> = None;
+    let tick_rate = Duration::from_millis(120);
+    let debounce = Duration::from_millis(60);
+    let mut dirty_since: Option<Instant> = Some(Instant::now());
 
-    let mut selected: Option<usize> = None;
     let mut detail_tab = DetailTab::Messages;
     let mut theme_dark = true;
-    // Show onboarding overlay on first launch; user can dismiss with '?'.
+    // Show onboarding overlay on first launch; user can dismiss with F1.
     let mut show_help = true;
     let mut cached_detail: Option<(String, ConversationView)> = None;
     let mut last_query = String::new();
     let mut needs_draw = true;
+    let mut query_history: VecDeque<String> = VecDeque::new();
+    let history_cap: usize = 50;
+    let mut history_cursor: Option<usize> = None;
+    let mut suggestion_idx: Option<usize> = None;
+    let mut match_mode = match persisted.match_mode.as_deref() {
+        Some("standard") => MatchMode::Standard,
+        _ => MatchMode::Prefix,
+    };
+    let mut ranking_mode = RankingMode::Balanced;
+    let mut context_window = match persisted.context_window.as_deref() {
+        Some("S") => ContextWindow::Small,
+        Some("M") => ContextWindow::Medium,
+        Some("L") => ContextWindow::Large,
+        Some("XL") => ContextWindow::XLarge,
+        _ => ContextWindow::Medium,
+    };
+    let mut peek_window_saved: Option<ContextWindow> = None;
+    let mut peek_badge_until: Option<Instant> = None;
+    let mut help_scroll: u16 = 0;
     let editor_cmd = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let editor_line_flag = std::env::var("EDITOR_LINE_FLAG").unwrap_or_else(|_| "+".into());
 
@@ -257,7 +535,18 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     InputMode::CreatedFrom => format!("[from ts ms] {}", input_buffer),
                     InputMode::CreatedTo => format!("[to ts ms] {}", input_buffer),
                 };
-                let sb = search_bar(&bar_text, palette, matches!(input_mode, InputMode::Query));
+                let mode_label = match match_mode {
+                    MatchMode::Standard => "standard",
+                    MatchMode::Prefix => "prefix",
+                };
+                let chips = chips_for_filters(&filters, palette);
+                let sb = search_bar(
+                    &bar_text,
+                    palette,
+                    matches!(input_mode, InputMode::Query),
+                    mode_label,
+                    chips,
+                );
                 f.render_widget(sb, chunks[0]);
 
                 // Filter pills row
@@ -265,7 +554,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                 if !filters.agents.is_empty() {
                     pill_spans.push(Span::styled(
                         format!(
-                            "[a] agent:{}",
+                            "[F3] agent:{}",
                             filters.agents.iter().cloned().collect::<Vec<_>>().join("|")
                         ),
                         Style::default()
@@ -277,7 +566,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                 if !filters.workspaces.is_empty() {
                     pill_spans.push(Span::styled(
                         format!(
-                            "[w] ws:{}",
+                            "[F4] ws:{}",
                             filters
                                 .workspaces
                                 .iter()
@@ -292,7 +581,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                 if filters.created_from.is_some() || filters.created_to.is_some() {
                     pill_spans.push(Span::styled(
                         format!(
-                            "[f/t] time:{:?}->{:?}",
+                            "[F5/F6] time:{:?}->{:?}",
                             filters.created_from, filters.created_to
                         ),
                         Style::default().fg(palette.accent_alt),
@@ -300,57 +589,152 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                 }
                 if pill_spans.is_empty() {
                     pill_spans.push(Span::styled(
-                        "filters: none (press a/w/f/t)",
+                        "filters: none (press F3/F4/F5/F6)",
                         Style::default().fg(palette.hint),
                     ));
                 }
                 let pill_para = Paragraph::new(Line::from(pill_spans));
                 f.render_widget(pill_para, chunks[1]);
 
-                let items: Vec<ListItem> = if results.is_empty() {
-                    vec![ListItem::new("No results yet - start typing to search.")]
-                } else {
-                    results
-                        .iter()
-                        .map(|hit| {
-                            let title = if hit.title.is_empty() {
-                                "(untitled)"
-                            } else {
-                                hit.title.as_str()
-                            };
-                            let header = Line::from(vec![
-                                Span::raw(format!("{:.2} ", hit.score)),
-                                Span::styled(title, Style::default().fg(palette.accent)),
-                                Span::raw(format!(" [{}]", hit.agent)),
-                            ]);
-                            let location = if hit.workspace.is_empty() {
-                                hit.source_path.clone()
-                            } else {
-                                format!("{} ({})", hit.source_path, hit.workspace)
-                            };
-                            let body = Line::from(format!("{location} • {}", hit.snippet));
-                            ListItem::new(vec![header, body])
-                        })
-                        .collect()
-                };
-                let list_block = Block::default().title("Results").borders(Borders::ALL);
-
-                let mut list_state = ListState::default();
-                list_state.select(selected);
-
-                let split = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+                let main_split = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
                     .split(chunks[2]);
 
-                f.render_stateful_widget(
-                    List::new(items).block(list_block),
-                    split[0],
-                    &mut list_state,
-                );
+                let results_area = main_split[0];
+                let detail_area = main_split[1];
 
-                let detail_area = split[1];
-                if let Some(hit) = selected.and_then(|idx| results.get(idx)) {
+                if panes.is_empty() {
+                    let mut lines: Vec<Line> = Vec::new();
+                    if query.trim().is_empty() && !query_history.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            "Recent queries (Enter to load):",
+                            palette.title(),
+                        )));
+                        for (idx, q) in query_history.iter().take(5).enumerate() {
+                            let selected = suggestion_idx == Some(idx);
+                            lines.push(Line::from(Span::styled(
+                                format!("{} {}", if selected { "▶" } else { " " }, q),
+                                if selected {
+                                    Style::default()
+                                        .fg(palette.accent)
+                                        .add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(palette.hint)
+                                },
+                            )));
+                        }
+                    } else {
+                        lines.push(Line::from("No results yet - start typing to search."));
+                        lines.push(Line::from(Span::raw(
+                            "Tip: toggle F9 prefix mode or clear filters with F7",
+                        )));
+                    }
+
+                    let block = Block::default().title("Results").borders(Borders::ALL);
+                    f.render_widget(Paragraph::new(lines).block(block), results_area);
+                } else {
+                    let pane_width = (100 / std::cmp::max(panes.len(), 1)) as u16;
+                    let pane_constraints: Vec<Constraint> = panes
+                        .iter()
+                        .map(|_| Constraint::Percentage(pane_width))
+                        .collect();
+                    let pane_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints(pane_constraints)
+                        .split(results_area);
+
+                    for (idx, pane) in panes.iter().enumerate() {
+                        let theme = ThemePalette::agent_pane(&pane.agent);
+                        let mut state = ListState::default();
+                        state.select(Some(pane.selected));
+
+                        let items: Vec<ListItem> = pane
+                            .hits
+                            .iter()
+                            .map(|hit| {
+                                let title = if hit.title.is_empty() {
+                                    "(untitled)"
+                                } else {
+                                    hit.title.as_str()
+                                };
+                                let header = Line::from(vec![
+                                    Span::styled(
+                                        format!("{:.1}", hit.score),
+                                        Style::default().fg(theme.accent),
+                                    ),
+                                    Span::raw(" "),
+                                    Span::styled(
+                                        title.to_string(),
+                                        Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                                    ),
+                                ]);
+                                let location = if hit.workspace.is_empty() {
+                                    hit.source_path.clone()
+                                } else {
+                                    format!("{} ({})", hit.source_path, hit.workspace)
+                                };
+                                let raw_snippet =
+                                    contextual_snippet(&hit.content, &last_query, context_window);
+                                let body_line = highlight_terms_owned_with_style(
+                                    format!("{location} • {raw_snippet}"),
+                                    &last_query,
+                                    palette,
+                                    Style::default().fg(theme.fg),
+                                );
+                                ListItem::new(vec![header, body_line])
+                            })
+                            .collect();
+
+                        let flash_active = focus_flash_until
+                            .map(|t| t > Instant::now())
+                            .unwrap_or(false)
+                            && idx == active_pane;
+
+                        let block = Block::default()
+                            .title(Span::styled(
+                                format!(
+                                    "{} ({})",
+                                    agent_display_name(&pane.agent),
+                                    pane.hits.len()
+                                ),
+                                Style::default().fg(theme.accent).add_modifier(
+                                    if idx == active_pane {
+                                        Modifier::BOLD
+                                    } else {
+                                        Modifier::empty()
+                                    },
+                                ),
+                            ))
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(if idx == active_pane {
+                                theme.accent
+                            } else {
+                                palette.hint
+                            }))
+                            .style(
+                                Style::default()
+                                    .bg(if flash_active { theme.accent } else { theme.bg })
+                                    .fg(if flash_active { theme.bg } else { theme.fg }),
+                            );
+
+                        let list = List::new(items)
+                            .block(block)
+                            .highlight_style(
+                                Style::default()
+                                    .bg(theme.accent)
+                                    .fg(theme.bg)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                            .style(Style::default().bg(theme.bg).fg(theme.fg));
+
+                        if let Some(area) = pane_chunks.get(idx) {
+                            f.render_stateful_widget(list, *area, &mut state);
+                        }
+                    }
+                }
+
+                if let Some(hit) = active_hit(&panes, active_pane) {
                     let tabs = ["Messages", "Snippets", "Raw"];
                     let tab_titles: Vec<Line> = tabs
                         .iter()
@@ -365,13 +749,17 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         .highlight_style(Style::default().fg(palette.accent));
 
                     let mut meta_lines = Vec::new();
+                    let agent_theme = ThemePalette::agent_pane(&hit.agent);
                     meta_lines.push(Line::from(vec![
                         Span::styled("Title: ", palette.title()),
                         Span::raw(hit.title.clone()),
                     ]));
                     meta_lines.push(Line::from(vec![
-                        Span::styled("Agent: ", Style::default().fg(palette.hint)),
-                        Span::raw(hit.agent.clone()),
+                        Span::styled("Agent: ", Style::default().fg(agent_theme.accent)),
+                        Span::styled(
+                            agent_display_name(&hit.agent),
+                            Style::default().fg(agent_theme.fg),
+                        ),
                     ]));
                     meta_lines.push(Line::from(vec![
                         Span::styled("Workspace: ", Style::default().fg(palette.hint)),
@@ -401,7 +789,6 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         }
                         loaded
                     };
-
                     let content_para = match detail_tab {
                         DetailTab::Messages => {
                             if let Some(full) = detail {
@@ -551,11 +938,32 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     );
                 }
 
-                let footer = Paragraph::new(format!("{} | {}", status, footer_legend(show_help)));
+                let mut footer_line = format!(
+                    "{} | mode:{} | rank:{} | ctx:{} | {}",
+                    status,
+                    match match_mode {
+                        MatchMode::Standard => "standard",
+                        MatchMode::Prefix => "prefix",
+                    },
+                    match ranking_mode {
+                        RankingMode::RecentHeavy => "recent",
+                        RankingMode::Balanced => "balanced",
+                        RankingMode::RelevanceHeavy => "relevance",
+                    },
+                    context_window.label(),
+                    footer_legend(show_help)
+                );
+                if peek_badge_until
+                    .map(|t| t > Instant::now())
+                    .unwrap_or(false)
+                {
+                    footer_line.push_str(" | PEEK");
+                }
+                let footer = Paragraph::new(footer_line);
                 f.render_widget(footer, chunks[3]);
 
                 if show_help {
-                    render_help_overlay(f, palette);
+                    render_help_overlay(f, palette, help_scroll);
                 }
             })?;
             needs_draw = false;
@@ -573,134 +981,421 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
             && let Event::Key(key) = event::read()?
         {
             needs_draw = true;
-            match input_mode {
-                InputMode::Query => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if let Some(idx) = selected {
-                            if idx + 1 < results.len() {
-                                selected = Some(idx + 1);
-                            }
-                        } else if !results.is_empty() {
-                            selected = Some(0);
-                        }
+
+            // While help is open, keys scroll the help modal and do not affect panes.
+            if show_help {
+                match key.code {
+                    KeyCode::Esc | KeyCode::F(1) => {
+                        show_help = false;
+                        help_scroll = 0;
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if let Some(idx) = selected
-                            && idx > 0
-                        {
-                            selected = Some(idx - 1);
-                        }
+                    KeyCode::Up => {
+                        help_scroll = help_scroll.saturating_sub(1);
                     }
-                    KeyCode::Char('a') => {
-                        input_mode = InputMode::Agent;
-                        input_buffer.clear();
-                        status = "Agent filter: type slug, Enter=apply, Esc=cancel".to_string();
+                    KeyCode::Down => {
+                        help_scroll = help_scroll.saturating_add(1);
                     }
-                    KeyCode::Char('w') => {
-                        input_mode = InputMode::Workspace;
-                        input_buffer.clear();
-                        status = "Workspace filter: type path fragment, Enter=apply, Esc=cancel"
-                            .to_string();
+                    KeyCode::PageUp => {
+                        help_scroll = help_scroll.saturating_sub(5);
                     }
-                    KeyCode::Char('f') => {
-                        input_mode = InputMode::CreatedFrom;
-                        input_buffer.clear();
-                        status =
-                            "Created-from (ms since epoch): Enter=apply, Esc=cancel".to_string();
+                    KeyCode::PageDown => {
+                        help_scroll = help_scroll.saturating_add(5);
                     }
-                    KeyCode::Char('t') => {
-                        input_mode = InputMode::CreatedTo;
-                        input_buffer.clear();
-                        status = "Created-to (ms since epoch): Enter=apply, Esc=cancel".to_string();
-                    }
-                    KeyCode::Char('x') => {
-                        filters = SearchFilters::default();
-                        page = 0;
-                        status = "Filters cleared".to_string();
-                        dirty_since = Some(Instant::now());
-                        needs_draw = true;
-                    }
-                    KeyCode::Char('A') => {
-                        filters.agents.clear();
-                        page = 0;
-                        status = "Agent filter cleared".to_string();
-                        dirty_since = Some(Instant::now());
-                        needs_draw = true;
-                    }
-                    KeyCode::Char('W') => {
-                        filters.workspaces.clear();
-                        page = 0;
-                        status = "Workspace filter cleared".to_string();
-                        dirty_since = Some(Instant::now());
-                        needs_draw = true;
-                    }
-                    KeyCode::Char('F') => {
-                        filters.created_from = None;
-                        filters.created_to = None;
-                        page = 0;
-                        status = "Time filter cleared".to_string();
-                        dirty_since = Some(Instant::now());
-                        needs_draw = true;
-                    }
-                    KeyCode::PageDown | KeyCode::Char(']') => {
-                        page = page.saturating_add(1);
-                    }
-                    KeyCode::PageUp | KeyCode::Char('[') => {
-                        page = page.saturating_sub(1);
-                    }
-                    KeyCode::Char('h') => {
-                        theme_dark = !theme_dark;
-                        status = if theme_dark {
-                            "Theme: dark".to_string()
-                        } else {
-                            "Theme: light".to_string()
-                        };
-                    }
-                    KeyCode::Char('o') => {
-                        if let Some(hit) = selected.and_then(|idx| results.get(idx)) {
-                            let path = &hit.source_path;
-                            let line_hint = hit
-                                .snippet
-                                .find("line ")
-                                .and_then(|i| hit.snippet[i + 5..].split_whitespace().next())
-                                .and_then(|s| s.parse::<usize>().ok());
-                            let mut cmd = StdCommand::new(&editor_cmd);
-                            if let Some(line) = line_hint {
-                                cmd.arg(format!("{}{}", editor_line_flag, line));
-                            }
-                            let _ = cmd.arg(path).status();
-                        }
-                    }
-                    KeyCode::Char('E') => {
-                        input_mode = InputMode::Query;
-                        status = "Set editor command (current: $EDITOR) not implemented; set env EDITOR/EDITOR_LINE_FLAG before launch."
-                            .to_string();
-                    }
-                    KeyCode::Char('?') => {
-                        show_help = !show_help;
-                    }
-                    KeyCode::Tab => {
-                        detail_tab = match detail_tab {
-                            DetailTab::Messages => DetailTab::Snippets,
-                            DetailTab::Snippets => DetailTab::Raw,
-                            DetailTab::Raw => DetailTab::Messages,
-                        };
-                    }
-                    KeyCode::Char(c) => {
-                        query.push(c);
-                        page = 0;
-                        selected = None;
-                        dirty_since = Some(Instant::now());
-                    }
-                    KeyCode::Backspace => {
-                        query.pop();
-                        page = 0;
-                        selected = None;
-                        dirty_since = Some(Instant::now());
-                    }
+                    KeyCode::Home => help_scroll = 0,
+                    KeyCode::End => help_scroll = help_lines(ThemePalette::dark()).len() as u16,
                     _ => {}
-                },
+                }
+                continue;
+            }
+            match input_mode {
+                InputMode::Query => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        match key.code {
+                            KeyCode::Char('r') => {
+                                if query_history.is_empty() {
+                                    status = "No query history yet".to_string();
+                                } else {
+                                    let next = history_cursor
+                                        .map(|idx| (idx + 1) % query_history.len())
+                                        .unwrap_or(0);
+                                    if let Some(saved) = query_history.get(next) {
+                                        history_cursor = Some(next);
+                                        query = saved.clone();
+                                        page = 0;
+                                        dirty_since = Some(Instant::now());
+                                        status = format!("Loaded query #{next} from history");
+                                    }
+                                }
+                            }
+                            KeyCode::Char('c') => break,
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    match key.code {
+                        KeyCode::Esc | KeyCode::F(10) => break,
+                        KeyCode::Down => {
+                            if panes.is_empty()
+                                && query.trim().is_empty()
+                                && !query_history.is_empty()
+                            {
+                                let max_idx = query_history.len().min(5).saturating_sub(1);
+                                let next = suggestion_idx.unwrap_or(0).saturating_add(1);
+                                suggestion_idx = Some(std::cmp::min(next, max_idx));
+                                status = "Enter to load selected recent query".to_string();
+                            } else if let Some(pane) = panes.get_mut(active_pane)
+                                && pane.selected + 1 < pane.hits.len()
+                            {
+                                pane.selected += 1;
+                            }
+                        }
+                        KeyCode::Up => {
+                            if panes.is_empty()
+                                && query.trim().is_empty()
+                                && !query_history.is_empty()
+                            {
+                                let next = suggestion_idx.unwrap_or(0).saturating_sub(1);
+                                suggestion_idx = Some(next);
+                                status = "Enter to load selected recent query".to_string();
+                            } else if let Some(pane) = panes.get_mut(active_pane)
+                                && pane.selected > 0
+                            {
+                                pane.selected -= 1;
+                            }
+                        }
+                        KeyCode::Left => {
+                            active_pane = active_pane.saturating_sub(1);
+                            focus_flash_until = Some(Instant::now() + Duration::from_millis(220));
+                        }
+                        KeyCode::Right => {
+                            if active_pane + 1 < panes.len() {
+                                active_pane += 1;
+                                focus_flash_until =
+                                    Some(Instant::now() + Duration::from_millis(220));
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            page = page.saturating_add(1);
+                            dirty_since = Some(Instant::now());
+                        }
+                        KeyCode::PageUp => {
+                            page = page.saturating_sub(1);
+                            dirty_since = Some(Instant::now());
+                        }
+                        KeyCode::F(1) => {
+                            show_help = !show_help;
+                            help_scroll = 0;
+                        }
+                        KeyCode::F(2) => {
+                            theme_dark = !theme_dark;
+                            status = format!(
+                                "Theme: {}, mode: {}",
+                                if theme_dark { "dark" } else { "light" },
+                                match match_mode {
+                                    MatchMode::Standard => "standard",
+                                    MatchMode::Prefix => "prefix",
+                                }
+                            );
+                        }
+                        KeyCode::F(3) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            if let Some(hit) = active_hit(&panes, active_pane) {
+                                filters.agents.clear();
+                                filters.agents.insert(hit.agent.clone());
+                                status = format!("Scoped to agent {}", hit.agent);
+                                page = 0;
+                                dirty_since = Some(Instant::now());
+                            }
+                        }
+                        KeyCode::F(3) => {
+                            input_mode = InputMode::Agent;
+                            input_buffer.clear();
+                            status = "Agent filter: type slug, Enter=apply, Esc=cancel".to_string();
+                        }
+                        KeyCode::F(4) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            filters.agents.clear();
+                            status = "Scope: all agents".to_string();
+                            page = 0;
+                            dirty_since = Some(Instant::now());
+                        }
+                        KeyCode::F(4) => {
+                            input_mode = InputMode::Workspace;
+                            input_buffer.clear();
+                            status =
+                                "Workspace filter: type path fragment, Enter=apply, Esc=cancel"
+                                    .to_string();
+                        }
+                        KeyCode::F(5) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            let now = chrono::Utc::now().timestamp_millis();
+                            let presets = [
+                                Some(now - 86_400_000),    // 24h
+                                Some(now - 604_800_000),   // 7d
+                                Some(now - 2_592_000_000), // 30d
+                                None,
+                            ];
+                            let current = filters.created_from;
+                            let idx = presets
+                                .iter()
+                                .position(|p| *p == current)
+                                .unwrap_or(usize::MAX);
+                            let next = presets.get((idx + 1) % presets.len()).copied().flatten();
+                            filters.created_from = next;
+                            filters.created_to = None;
+                            page = 0;
+                            status = match next {
+                                Some(_) => "Time preset: since recent".to_string(),
+                                None => "Time preset: all".to_string(),
+                            };
+                            dirty_since = Some(Instant::now());
+                        }
+                        KeyCode::F(5) => {
+                            input_mode = InputMode::CreatedFrom;
+                            input_buffer.clear();
+                            status = "Created-from (ms since epoch): Enter=apply, Esc=cancel"
+                                .to_string();
+                        }
+                        KeyCode::F(6) => {
+                            input_mode = InputMode::CreatedTo;
+                            input_buffer.clear();
+                            status =
+                                "Created-to (ms since epoch): Enter=apply, Esc=cancel".to_string();
+                        }
+                        KeyCode::F(7) => {
+                            context_window = context_window.next();
+                            status = format!(
+                                "Context window: {} ({} chars)",
+                                context_window.label(),
+                                context_window.size()
+                            );
+                            dirty_since = Some(Instant::now());
+                        }
+                        KeyCode::F(12) => {
+                            ranking_mode = match ranking_mode {
+                                RankingMode::RecentHeavy => RankingMode::Balanced,
+                                RankingMode::Balanced => RankingMode::RelevanceHeavy,
+                                RankingMode::RelevanceHeavy => RankingMode::RecentHeavy,
+                            };
+                            status = format!(
+                                "Ranking: {}",
+                                match ranking_mode {
+                                    RankingMode::RecentHeavy => "recent-heavy",
+                                    RankingMode::Balanced => "balanced",
+                                    RankingMode::RelevanceHeavy => "relevance-heavy",
+                                }
+                            );
+                            dirty_since = Some(Instant::now());
+                        }
+                        KeyCode::F(11) => {
+                            filters = SearchFilters::default();
+                            page = 0;
+                            status = format!(
+                                "Filters cleared | mode: {}",
+                                match match_mode {
+                                    MatchMode::Standard => "standard",
+                                    MatchMode::Prefix => "prefix",
+                                }
+                            );
+                            dirty_since = Some(Instant::now());
+                        }
+                        KeyCode::F(8) => {
+                            if let Some(hit) = active_hit(&panes, active_pane) {
+                                let path = &hit.source_path;
+                                let line_hint = hit
+                                    .snippet
+                                    .find("line ")
+                                    .and_then(|i| hit.snippet[i + 5..].split_whitespace().next())
+                                    .and_then(|s| s.parse::<usize>().ok());
+                                let mut cmd = StdCommand::new(&editor_cmd);
+                                if let Some(line) = line_hint {
+                                    cmd.arg(format!("{}{}", editor_line_flag, line));
+                                }
+                                let _ = cmd.arg(path).status();
+                            }
+                        }
+                        KeyCode::F(9) => {
+                            match_mode = match match_mode {
+                                MatchMode::Standard => MatchMode::Prefix,
+                                MatchMode::Prefix => MatchMode::Standard,
+                            };
+                            status = format!(
+                                "Match mode: {}",
+                                match match_mode {
+                                    MatchMode::Standard => "standard",
+                                    MatchMode::Prefix => "prefix",
+                                }
+                            );
+                            dirty_since = Some(Instant::now());
+                        }
+                        KeyCode::Tab => {
+                            detail_tab = match detail_tab {
+                                DetailTab::Messages => DetailTab::Snippets,
+                                DetailTab::Snippets => DetailTab::Raw,
+                                DetailTab::Raw => DetailTab::Messages,
+                            };
+                        }
+                        KeyCode::BackTab => {
+                            detail_tab = match detail_tab {
+                                DetailTab::Messages => DetailTab::Raw,
+                                DetailTab::Snippets => DetailTab::Messages,
+                                DetailTab::Raw => DetailTab::Snippets,
+                            };
+                        }
+                        KeyCode::Char(c) => {
+                            if key.modifiers.contains(KeyModifiers::ALT) {
+                                if ('1'..='9').contains(&c) {
+                                    let target = c.to_digit(10).unwrap_or(1) as usize - 1;
+                                    if target < panes.len() {
+                                        active_pane = target;
+                                        focus_flash_until =
+                                            Some(Instant::now() + Duration::from_millis(220));
+                                    }
+                                }
+                                continue;
+                            }
+                            if key.modifiers.contains(KeyModifiers::SHIFT) && matches!(c, '+' | '=')
+                            {
+                                per_pane_limit = (per_pane_limit + 2).min(50);
+                                status = format!("Pane size: {} items", per_pane_limit);
+                                panes = build_agent_panes(&results, per_pane_limit);
+                                dirty_since = Some(Instant::now());
+                                continue;
+                            }
+                            if key.modifiers.is_empty() && c == '-' {
+                                per_pane_limit = per_pane_limit.saturating_sub(2).max(4);
+                                status = format!("Pane size: {} items", per_pane_limit);
+                                panes = build_agent_panes(&results, per_pane_limit);
+                                dirty_since = Some(Instant::now());
+                                continue;
+                            }
+                            if key.modifiers.is_empty()
+                                && c == ' '
+                                && !panes.is_empty()
+                                && active_hit(&panes, active_pane).is_some()
+                            {
+                                // Space acts as a momentary zoom: swap to XL context, tap again to restore.
+                                if let Some(saved) = peek_window_saved.take() {
+                                    context_window = saved;
+                                    status = format!(
+                                        "Context window: {} ({} chars)",
+                                        context_window.label(),
+                                        context_window.size()
+                                    );
+                                    peek_badge_until = None;
+                                } else {
+                                    peek_window_saved = Some(context_window);
+                                    context_window = ContextWindow::XLarge;
+                                    status = "Peek: XL context (Space to toggle back)".to_string();
+                                    peek_badge_until =
+                                        Some(Instant::now() + Duration::from_millis(600));
+                                }
+                                dirty_since = Some(Instant::now());
+                                continue;
+                            }
+                            if c == 'g' {
+                                if let Some(pane) = panes.get_mut(active_pane) {
+                                    pane.selected = 0;
+                                }
+                                continue;
+                            }
+                            if c == 'G' {
+                                if let Some(pane) = panes.get_mut(active_pane)
+                                    && !pane.hits.is_empty()
+                                {
+                                    pane.selected = pane.hits.len() - 1;
+                                }
+                                continue;
+                            }
+                            query.push(c);
+                            page = 0;
+                            history_cursor = None;
+                            suggestion_idx = None;
+                            dirty_since = Some(Instant::now());
+                        }
+                        KeyCode::Backspace => {
+                            if query.is_empty() {
+                                if filters.created_to.take().is_some() {
+                                    status = "Cleared to-timestamp filter".into();
+                                } else if filters.created_from.take().is_some() {
+                                    status = "Cleared from-timestamp filter".into();
+                                } else if let Some(ws) = filters.workspaces.iter().next().cloned() {
+                                    filters.workspaces.remove(&ws);
+                                    status = format!("Removed workspace filter {ws}");
+                                } else if let Some(agent) = filters.agents.iter().next().cloned() {
+                                    filters.agents.remove(&agent);
+                                    status = format!("Removed agent filter {agent}");
+                                } else {
+                                    status = "Nothing to delete".into();
+                                }
+                            } else {
+                                query.pop();
+                            }
+                            page = 0;
+                            history_cursor = None;
+                            suggestion_idx = None;
+                            dirty_since = Some(Instant::now());
+                        }
+                        KeyCode::Enter => {
+                            if panes.is_empty() && query.trim().is_empty() {
+                                if let Some(idx) = suggestion_idx
+                                    .and_then(|i| query_history.get(i))
+                                    .or_else(|| query_history.front())
+                                {
+                                    query = idx.clone();
+                                    status = format!("Loaded recent query: {idx}");
+                                    dirty_since = Some(Instant::now());
+                                    continue;
+                                }
+                                if !filters.agents.is_empty() {
+                                    input_mode = InputMode::Agent;
+                                    if let Some(last) = filters.agents.iter().next() {
+                                        input_buffer = last.clone();
+                                    }
+                                    status =
+                                        "Edit agent filter (Enter apply, Esc cancel)".to_string();
+                                    continue;
+                                }
+                                if !filters.workspaces.is_empty() {
+                                    input_mode = InputMode::Workspace;
+                                    if let Some(last) = filters.workspaces.iter().next() {
+                                        input_buffer = last.clone();
+                                    }
+                                    status = "Edit workspace filter (Enter apply, Esc cancel)"
+                                        .to_string();
+                                    continue;
+                                }
+                                if filters.created_from.is_some() {
+                                    input_mode = InputMode::CreatedFrom;
+                                    input_buffer =
+                                        filters.created_from.unwrap_or_default().to_string();
+                                    status =
+                                        "Edit from timestamp (Enter apply, Esc cancel)".to_string();
+                                    continue;
+                                }
+                                if filters.created_to.is_some() {
+                                    input_mode = InputMode::CreatedTo;
+                                    input_buffer =
+                                        filters.created_to.unwrap_or_default().to_string();
+                                    status =
+                                        "Edit to timestamp (Enter apply, Esc cancel)".to_string();
+                                    continue;
+                                }
+                            } else if let Some(hit) = active_hit(&panes, active_pane) {
+                                let path = &hit.source_path;
+                                let line_hint = hit
+                                    .snippet
+                                    .find("line ")
+                                    .and_then(|i| hit.snippet[i + 5..].split_whitespace().next())
+                                    .and_then(|s| s.parse::<usize>().ok());
+                                let mut cmd = StdCommand::new(&editor_cmd);
+                                if let Some(line) = line_hint {
+                                    cmd.arg(format!("{}{}", editor_line_flag, line));
+                                }
+                                let _ = cmd.arg(path).status();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 InputMode::Agent => match key.code {
                     KeyCode::Esc => {
                         input_mode = InputMode::Query;
@@ -714,7 +1409,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         }
                         page = 0;
                         input_mode = InputMode::Query;
-                        selected = None;
+                        active_pane = 0;
                         status = format!(
                             "Agent filter set to {}",
                             filters
@@ -746,7 +1441,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         }
                         page = 0;
                         input_mode = InputMode::Query;
-                        selected = None;
+                        active_pane = 0;
                         status = format!(
                             "Workspace filter set to {}",
                             filters
@@ -775,7 +1470,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         filters.created_from = input_buffer.trim().parse::<i64>().ok();
                         page = 0;
                         input_mode = InputMode::Query;
-                        selected = None;
+                        active_pane = 0;
                         status = format!(
                             "created_from={:?}, created_to={:?}",
                             filters.created_from, filters.created_to
@@ -799,7 +1494,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         filters.created_to = input_buffer.trim().parse::<i64>().ok();
                         page = 0;
                         input_mode = InputMode::Query;
-                        selected = None;
+                        active_pane = 0;
                         status = format!(
                             "created_from={:?}, created_to={:?}",
                             filters.created_from, filters.created_to
@@ -822,32 +1517,92 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     .map(|t| t.elapsed() >= debounce)
                     .unwrap_or(false);
 
-                if should_search && !query.trim().is_empty() {
+                if should_search {
                     last_query = query.clone();
-                    match client.search(&query, filters.clone(), page_size, page * page_size) {
+                    let prev_agent = active_hit(&panes, active_pane)
+                        .map(|h| h.agent.clone())
+                        .or_else(|| panes.get(active_pane).map(|p| p.agent.clone()));
+                    let prev_path = active_hit(&panes, active_pane).map(|h| h.source_path.clone());
+                    let q = apply_match_mode(&query, match_mode);
+                    match client.search(&q, filters.clone(), page_size, page * page_size) {
                         Ok(hits) => {
                             dirty_since = None;
                             if hits.is_empty() && page > 0 {
                                 page = page.saturating_sub(1);
-                                selected = None;
+                                active_pane = 0;
+                                dirty_since = Some(Instant::now());
                                 needs_draw = true;
                             } else {
                                 results = hits;
+                                let max_created = results
+                                    .iter()
+                                    .filter_map(|h| h.created_at)
+                                    .max()
+                                    .unwrap_or(0)
+                                    as f32;
+                                let alpha = match ranking_mode {
+                                    RankingMode::RecentHeavy => 1.0,
+                                    RankingMode::Balanced => 0.4,
+                                    RankingMode::RelevanceHeavy => 0.1,
+                                };
+                                results.sort_by(|a, b| {
+                                    let recency = |h: &SearchHit| -> f32 {
+                                        if max_created <= 0.0 {
+                                            return 0.0;
+                                        }
+                                        h.created_at.map(|v| v as f32 / max_created).unwrap_or(0.0)
+                                    };
+                                    let score_a = a.score + alpha * recency(a);
+                                    let score_b = b.score + alpha * recency(b);
+                                    score_b
+                                        .partial_cmp(&score_a)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                panes = build_agent_panes(&results, per_pane_limit);
+                                if !panes.is_empty()
+                                    && let Some(agent) = prev_agent
+                                {
+                                    if let Some(idx) =
+                                        panes.iter().position(|pane| pane.agent == agent)
+                                    {
+                                        active_pane = idx;
+                                        if let Some(path) = prev_path
+                                            && let Some(hit_idx) = panes[idx]
+                                                .hits
+                                                .iter()
+                                                .position(|h| h.source_path == path)
+                                        {
+                                            panes[idx].selected = hit_idx;
+                                        }
+                                    } else {
+                                        active_pane = 0;
+                                    }
+                                }
+                                if panes.is_empty() {
+                                    active_pane = 0;
+                                }
                                 status = format!(
-                                    "Page {} | filters: a={:?} w={:?} t=({:?},{:?})",
+                                    "Page {} | agents:{} | mode:{} | filters a={:?} w={:?} t=({:?},{:?})",
                                     page + 1,
+                                    panes.len(),
+                                    match match_mode {
+                                        MatchMode::Standard => "standard",
+                                        MatchMode::Prefix => "prefix",
+                                    },
                                     filters.agents,
                                     filters.workspaces,
                                     filters.created_from,
                                     filters.created_to
                                 );
-                                if !results.is_empty() && selected.is_none() {
-                                    selected = Some(0);
-                                } else if let Some(idx) = selected
-                                    && idx >= results.len()
+                                if !query.trim().is_empty()
+                                    && query_history.front().map(|q| q != &query).unwrap_or(true)
                                 {
-                                    selected = Some(results.len() - 1);
+                                    query_history.push_front(query.clone());
+                                    if query_history.len() > history_cap {
+                                        query_history.pop_back();
+                                    }
                                 }
+                                history_cursor = None;
                                 needs_draw = true;
                             }
                         }
@@ -856,20 +1611,29 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                             status = "Search error (see footer).".to_string();
                             tracing::warn!("search error: {err}");
                             results.clear();
+                            panes.clear();
+                            active_pane = 0;
                             needs_draw = true;
                         }
                     }
-                } else if query.trim().is_empty() {
-                    results.clear();
-                    status =
-                        "Type to search. Hotkeys: a agent, w workspace, f from, t to, x clear, PgUp/PgDn paginate, q quit."
-                            .to_string();
-                    needs_draw = true;
                 }
             }
             last_tick = Instant::now();
         }
     }
+
+    if let Some(saved) = peek_window_saved.take() {
+        context_window = saved;
+    }
+
+    let persisted_out = TuiStatePersisted {
+        match_mode: Some(match match_mode {
+            MatchMode::Standard => "standard".into(),
+            MatchMode::Prefix => "prefix".into(),
+        }),
+        context_window: Some(context_window.label().into()),
+    };
+    save_state(&state_path, &persisted_out);
 
     teardown_terminal()
 }
@@ -893,4 +1657,40 @@ fn teardown_terminal() -> Result<()> {
     disable_raw_mode()?;
     execute!(stdout, LeaveAlternateScreen)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn state_roundtrip_persists_mode_and_context() {
+        let dir = TempDir::new().unwrap();
+        let path = state_path_for(dir.path());
+
+        let state = TuiStatePersisted {
+            match_mode: Some("prefix".into()),
+            context_window: Some("XL".into()),
+        };
+        save_state(&path, &state);
+
+        let loaded = load_state(&path);
+        assert_eq!(loaded.match_mode.as_deref(), Some("prefix"));
+        assert_eq!(loaded.context_window.as_deref(), Some("XL"));
+    }
+
+    #[test]
+    fn contextual_snippet_handles_multibyte_and_short_text() {
+        let text = "こんにちは世界"; // 5+2 chars in Japanese
+        let out = contextual_snippet(text, "世界", ContextWindow::Small);
+        assert!(out.contains("世界"));
+
+        let short = "hi";
+        let out_short = contextual_snippet(short, "hi", ContextWindow::XLarge);
+        assert_eq!(out_short, "hi");
+
+        let empty_q = contextual_snippet(text, "", ContextWindow::Small);
+        assert!(!empty_q.is_empty());
+    }
 }
