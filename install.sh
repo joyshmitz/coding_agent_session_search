@@ -155,8 +155,13 @@ fi
 if [ -z "$CHECKSUM" ]; then
   [ -z "$CHECKSUM_URL" ] && CHECKSUM_URL="${URL}.sha256"
   info "Fetching checksum from ${CHECKSUM_URL}"
-  CHECKSUM=$(curl -fsSL "$CHECKSUM_URL" || true)
-  if [ -z "$CHECKSUM" ]; then err "Checksum required and could not be fetched"; exit 1; fi
+  CHECKSUM_FILE="$TMP/checksum.sha256"
+  if ! curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_FILE"; then
+    err "Checksum required and could not be fetched"; exit 1;
+  fi
+  # Extract just the hash (first field) from the file
+  CHECKSUM=$(awk '{print $1}' "$CHECKSUM_FILE")
+  if [ -z "$CHECKSUM" ]; then err "Empty checksum file"; exit 1; fi
 fi
 
 echo "$CHECKSUM  $TMP/$TAR" | sha256sum -c - || { err "Checksum mismatch"; exit 1; }
