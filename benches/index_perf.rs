@@ -21,6 +21,7 @@ fn bench_index_full(c: &mut Criterion) {
         watch: false,
         db_path,
         data_dir: data_dir.clone(),
+        progress: None,
     };
 
     // create empty index dir so Tantivy opens cleanly
