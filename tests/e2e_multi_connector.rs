@@ -72,7 +72,7 @@ fn multi_connector_pipeline() {
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let xdg_data = home.join("xdg_data");
-    let config_home = home.join(".config"); // For Cline on Linux usually, but our fixture path was mostly hardcoded in the connector? 
+    let _config_home = home.join(".config"); // For Cline on Linux usually, but our fixture path was mostly hardcoded in the connector? 
     // ClineConnector uses: 
     // dirs::home_dir().join(".config/Code/User/globalStorage/saoudrizwan.claude-dev")
     // So we just need HOME set correctly.
