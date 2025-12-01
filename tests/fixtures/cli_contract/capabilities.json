@@ -1,0 +1,34 @@
+{
+  "crate_version": "0.1.30",
+  "api_version": 1,
+  "contract_version": "1",
+  "features": [
+    "json_output",
+    "jsonl_output",
+    "robot_meta",
+    "time_filters",
+    "field_selection",
+    "content_truncation",
+    "aggregations",
+    "wildcard_fallback",
+    "view_command",
+    "status_command",
+    "state_command",
+    "api_version_command",
+    "introspect_command"
+  ],
+  "connectors": [
+    "codex",
+    "claude_code",
+    "gemini",
+    "opencode",
+    "amp",
+    "cline"
+  ],
+  "limits": {
+    "max_limit": 10000,
+    "max_content_length": 0,
+    "max_fields": 50,
+    "max_agg_buckets": 10
+  }
+}

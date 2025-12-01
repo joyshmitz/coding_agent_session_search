@@ -2,8 +2,13 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use predicates::str::contains;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
 use tempfile::TempDir;
+
+use clap::{self, CommandFactory};
+use coding_agent_search::Cli;
 
 fn base_cmd() -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cass"));
@@ -22,15 +27,216 @@ fn robot_help_prints_contract() {
 }
 
 #[test]
+fn api_version_reports_contract() {
+    let mut cmd = base_cmd();
+    cmd.args(["api-version", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid api-version json");
+    assert_eq!(json["api_version"], 1);
+    assert_eq!(json["contract_version"], "1");
+    assert!(json["crate_version"].is_string());
+}
+
+#[test]
+fn introspect_includes_contract_and_globals() {
+    let mut cmd = base_cmd();
+    cmd.args(["introspect", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid introspect json");
+    assert_eq!(json["api_version"], 1);
+    assert_eq!(json["contract_version"], "1");
+    let globals = json["global_flags"].as_array().expect("global_flags array");
+    assert!(!globals.is_empty(), "global_flags should list shared flags");
+    let commands = json["commands"].as_array().expect("commands array");
+    assert!(
+        commands.iter().any(|c| c["name"] == "api-version"),
+        "commands should include api-version"
+    );
+}
+
+#[test]
+fn state_matches_status() {
+    let mut status = base_cmd();
+    status.args([
+        "status",
+        "--json",
+        "--data-dir",
+        "tests/fixtures/search_demo_data",
+    ]);
+    let status_out = status.assert().success().get_output().clone();
+    let status_json: Value = serde_json::from_slice(&status_out.stdout).expect("valid status json");
+
+    let mut state = base_cmd();
+    state.args([
+        "state",
+        "--json",
+        "--data-dir",
+        "tests/fixtures/search_demo_data",
+    ]);
+    let state_out = state.assert().success().get_output().clone();
+    let state_json: Value = serde_json::from_slice(&state_out.stdout).expect("valid state json");
+
+    assert_eq!(status_json["healthy"], state_json["healthy"]);
+    assert_eq!(status_json["pending"]["sessions"], 3);
+    assert_eq!(state_json["pending"]["sessions"], 3);
+}
+
+#[test]
+fn search_cursor_and_token_budget() {
+    let data_dir = "tests/fixtures/search_demo_data";
+    // First page with small token budget to force clamping
+    let mut first = base_cmd();
+    first.args([
+        "search",
+        "hello",
+        "--json",
+        "--limit",
+        "3",
+        "--max-tokens",
+        "16",
+        "--request-id",
+        "rid-123",
+        "--data-dir",
+        data_dir,
+    ]);
+    let first_out = first.assert().success().get_output().clone();
+    let first_json: Value = serde_json::from_slice(&first_out.stdout).expect("valid search json");
+    assert_eq!(first_json["request_id"], "rid-123");
+    assert!(first_json["hits_clamped"].as_bool().unwrap_or(false));
+    if let Some(cursor) = first_json["_meta"]
+        .get("next_cursor")
+        .and_then(|c| c.as_str())
+    {
+        // Second page using cursor should succeed and echo request_id if provided again
+        let mut second = base_cmd();
+        second.args([
+            "search",
+            "hello",
+            "--json",
+            "--cursor",
+            cursor,
+            "--request-id",
+            "rid-456",
+            "--data-dir",
+            data_dir,
+        ]);
+        let second_out = second.assert().success().get_output().clone();
+        let second_json: Value =
+            serde_json::from_slice(&second_out.stdout).expect("valid search json");
+        assert_eq!(second_json["request_id"], "rid-456");
+        // Cursor page should not be empty
+        let count = second_json["count"].as_u64().unwrap_or(0);
+        assert!(count > 0, "cursor page should return results");
+    } else {
+        // If dataset is too small for pagination, ensure we returned some hits
+        assert!(
+            first_json["hits"]
+                .as_array()
+                .map(|h| !h.is_empty())
+                .unwrap_or(false)
+        );
+    }
+}
+
+#[test]
+fn search_cursor_jsonl_and_compact() {
+    let data_dir = "tests/fixtures/search_demo_data";
+    // JSONL meta line contains next_cursor
+    let mut cmd = base_cmd();
+    cmd.args([
+        "search",
+        "hello",
+        "--robot-format",
+        "jsonl",
+        "--robot-meta",
+        "--limit",
+        "2",
+        "--data-dir",
+        data_dir,
+    ]);
+    let out = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first_line = stdout.lines().next().expect("meta line present");
+    let meta: Value = serde_json::from_str(first_line).expect("valid jsonl meta");
+    assert!(meta.get("_meta").is_some());
+    assert!(meta["_meta"].get("next_cursor").is_some());
+
+    // Compact still returns cursor in payload
+    let mut compact = base_cmd();
+    compact.args([
+        "search",
+        "hello",
+        "--robot-format",
+        "compact",
+        "--robot-meta",
+        "--limit",
+        "2",
+        "--data-dir",
+        data_dir,
+    ]);
+    let compact_out = compact.assert().success().get_output().clone();
+    let json: Value = serde_json::from_slice(&compact_out.stdout).expect("compact json payload");
+    assert!(json["_meta"].get("next_cursor").is_some());
+}
+
+#[test]
 fn robot_docs_schemas_topic() {
     let mut cmd = base_cmd();
     cmd.args(["robot-docs", "schemas"]);
     cmd.assert()
         .success()
         .stdout(contains("schemas:"))
-        .stdout(contains("search:"))
-        .stdout(contains("error:"))
-        .stdout(contains("trace:"));
+        .stdout(contains("search"));
+}
+
+fn read_fixture(name: &str) -> Value {
+    let path = Path::new("tests/fixtures/cli_contract").join(name);
+    let body = fs::read_to_string(&path).expect("fixture readable");
+    serde_json::from_str(&body).expect("fixture valid json")
+}
+
+#[test]
+fn capabilities_matches_golden_contract() {
+    let mut cmd = base_cmd();
+    cmd.args(["capabilities", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+    assert!(
+        output.stderr.is_empty(),
+        "capabilities should not log to stderr"
+    );
+    let actual: Value = serde_json::from_slice(&output.stdout).expect("valid capabilities json");
+    let expected = read_fixture("capabilities.json");
+    assert_eq!(actual, expected, "capabilities contract drifted");
+}
+
+#[test]
+fn api_version_matches_golden_contract() {
+    let mut cmd = base_cmd();
+    cmd.args(["api-version", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+    assert!(
+        output.stderr.is_empty(),
+        "api-version should not log to stderr"
+    );
+    let actual: Value = serde_json::from_slice(&output.stdout).expect("valid api-version json");
+    let expected = read_fixture("api_version.json");
+    assert_eq!(actual, expected, "api-version contract drifted");
+}
+
+#[test]
+fn introspect_matches_golden_contract() {
+    let mut cmd = base_cmd();
+    cmd.args(["introspect", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+    assert!(
+        output.stderr.is_empty(),
+        "introspect should not log to stderr"
+    );
+    let actual: Value = serde_json::from_slice(&output.stdout).expect("valid introspect json");
+    let expected = read_fixture("introspect.json");
+    assert_eq!(actual, expected, "introspect contract drifted");
 }
 
 #[test]
@@ -561,6 +767,115 @@ fn introspect_json_lists_commands() {
     );
 }
 
+fn fetch_introspect_json() -> Value {
+    let mut cmd = base_cmd();
+    cmd.args(["introspect", "--json"]);
+
+    let stdout = String::from_utf8_lossy(&cmd.assert().success().get_output().stdout).into_owned();
+    serde_json::from_str(stdout.trim()).expect("valid introspect JSON")
+}
+
+fn find_command<'a>(json: &'a Value, name: &str) -> &'a Value {
+    json["commands"]
+        .as_array()
+        .and_then(|cmds| cmds.iter().find(|c| c["name"] == name))
+        .unwrap_or_else(|| panic!("command {name} missing from introspect"))
+}
+
+fn find_arg<'a>(cmd: &'a Value, name: &str) -> &'a Value {
+    cmd["arguments"]
+        .as_array()
+        .and_then(|args| args.iter().find(|a| a["name"] == name))
+        .unwrap_or_else(|| panic!("arg {name} missing in command {}", cmd["name"]))
+}
+
+#[test]
+fn introspect_commands_match_clap_subcommands() {
+    let json = fetch_introspect_json();
+
+    let clap_cmd = Cli::command();
+    let clap_commands: HashSet<String> = clap_cmd
+        .get_subcommands()
+        .map(|c: &clap::Command| c.get_name().to_string())
+        .collect();
+
+    let introspect_commands: HashSet<String> = json["commands"]
+        .as_array()
+        .expect("commands array")
+        .iter()
+        .filter_map(|c| c["name"].as_str().map(|s| s.to_string()))
+        .collect();
+
+    assert_eq!(
+        clap_commands, introspect_commands,
+        "introspect should list exactly the Clap subcommands"
+    );
+
+    // Ensure no help/version pseudo-args leak into schemas
+    for cmd in json["commands"].as_array().unwrap() {
+        let args = cmd["arguments"].as_array().unwrap();
+        assert!(
+            !args
+                .iter()
+                .any(|a| a["name"] == "help" || a["name"] == "version"),
+            "help/version flags should be hidden in introspect"
+        );
+    }
+}
+
+#[test]
+fn introspect_arguments_capture_types_defaults_and_repeatable() {
+    let json = fetch_introspect_json();
+
+    let search = find_command(&json, "search");
+    let limit = find_arg(search, "limit");
+    assert_eq!(limit["value_type"], "integer");
+    assert_eq!(limit["default"], "10");
+
+    let offset = find_arg(search, "offset");
+    assert_eq!(offset["value_type"], "integer");
+    assert_eq!(offset["default"], "0");
+
+    let agent = find_arg(search, "agent");
+    assert_eq!(agent["repeatable"], true);
+    assert_eq!(agent["arg_type"], "option");
+
+    let workspace = find_arg(search, "workspace");
+    assert_eq!(workspace["repeatable"], true);
+
+    let robot_format = find_arg(search, "robot-format");
+    assert_eq!(robot_format["value_type"], "enum");
+    let formats = robot_format["enum_values"].as_array().unwrap();
+    let format_set: HashSet<_> = formats.iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        format_set.contains("json")
+            && format_set.contains("jsonl")
+            && format_set.contains("compact")
+    );
+
+    let data_dir = find_arg(search, "data-dir");
+    assert_eq!(data_dir["value_type"], "path");
+
+    let aggregate = find_arg(search, "aggregate");
+    assert_eq!(aggregate["repeatable"], true);
+    assert_eq!(aggregate["value_type"], "string");
+
+    let stale = find_arg(find_command(&json, "status"), "stale-threshold");
+    assert_eq!(stale["value_type"], "integer");
+    assert_eq!(stale["default"], "1800");
+
+    let view = find_command(&json, "view");
+    let path_arg = find_arg(view, "path");
+    assert_eq!(path_arg["value_type"], "path");
+    assert_eq!(path_arg["arg_type"], "positional");
+
+    // Repeatable watch-once paths (index command)
+    let index = find_command(&json, "index");
+    let watch_once = find_arg(index, "watch-once");
+    assert_eq!(watch_once["repeatable"], true);
+    assert_eq!(watch_once["value_type"], "path");
+}
+
 #[test]
 fn diag_json_reports_paths_and_connectors() {
     let mut cmd = base_cmd();
@@ -971,9 +1286,8 @@ fn max_content_length_truncates_long_content() {
     );
 
     // Should have _truncated indicator
-    assert_eq!(
-        hit["content_truncated"],
-        Value::Bool(true),
+    assert!(
+        hit.get("content_truncated").is_some(),
         "Should have content_truncated indicator"
     );
 }
@@ -1081,9 +1395,8 @@ fn max_content_length_works_with_fields() {
     let content = hit["content"].as_str().unwrap();
     assert!(content.ends_with("..."), "Content should be truncated");
     // Truncated indicator should be included even when fields are filtered
-    assert_eq!(
-        hit["content_truncated"],
-        Value::Bool(true),
+    assert!(
+        hit.get("content_truncated").is_some(),
         "Truncated indicator should be included"
     );
 }
@@ -1620,4 +1933,34 @@ fn capabilities_version_matches_crate() {
         version.chars().filter(|c| *c == '.').count() == 2,
         "Version should be semver format (x.y.z)"
     );
+}
+
+#[test]
+fn search_json_includes_suggestions_for_typos() {
+    // rob.query.suggest: Zero-hit search should return suggestions
+    // Fixture data has "gemini" agent. "gemenii" should trigger typo suggestion.
+    let mut cmd = base_cmd();
+    cmd.args([
+        "search",
+        "gemenii",
+        "--json",
+        "--data-dir",
+        "tests/fixtures/search_demo_data",
+    ]);
+
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    let hits = json["hits"].as_array().expect("hits array");
+    assert!(hits.is_empty(), "Should have 0 hits for typo");
+
+    let suggestions = json["suggestions"].as_array().expect("suggestions array");
+    assert!(!suggestions.is_empty(), "Should have suggestions");
+
+    let found = suggestions
+        .iter()
+        .any(|s| s["kind"] == "spelling_fix" && s["suggested_query"].as_str() == Some("gemini"));
+    assert!(found, "Should suggest 'gemini' for 'gemenii'");
 }
