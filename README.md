@@ -56,7 +56,7 @@ install.ps1 -EasyMode -Verify
 
 ### The Problem
 
-AI coding agents are transforming how we write software. Claude Code, Codex, Cursor, Copilot, Aider—each creates a trail of conversations, debugging sessions, and problem-solving attempts. But this wealth of knowledge is **scattered and unsearchable**:
+AI coding agents are transforming how we write software. Claude Code, Codex, Cursor, Copilot, Aider; each creates a trail of conversations, debugging sessions, and problem-solving attempts. But this wealth of knowledge is **scattered and unsearchable**:
 
 - **Fragmented storage**: Each agent stores data differently—JSONL files, SQLite databases, markdown logs, proprietary JSON formats
 - **No cross-agent visibility**: Solutions discovered in Cursor are invisible when you're using Claude Code
