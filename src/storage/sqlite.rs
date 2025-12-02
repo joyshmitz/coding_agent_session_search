@@ -299,8 +299,10 @@ impl SqliteStorage {
         }
 
         if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
+            // Use IFNULL to handle NULL ended_at values correctly.
+            // SQLite's scalar MAX(NULL, x) returns NULL, so we need to coalesce first.
             tx.execute(
-                "UPDATE conversations SET ended_at = MAX(ended_at, ?) WHERE id = ?",
+                "UPDATE conversations SET ended_at = MAX(IFNULL(ended_at, 0), ?) WHERE id = ?",
                 params![last_ts, conversation_id],
             )?;
         }

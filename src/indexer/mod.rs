@@ -58,11 +58,20 @@ pub fn run_index(
     let index_path = index_dir(&opts.data_dir)?;
 
     // Detect if we are rebuilding due to missing meta/schema mismatch
+    let schema_matches = index_path.join("schema_hash.json").exists()
+        && std::fs::read_to_string(index_path.join("schema_hash.json"))
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|json| {
+                json.get("schema_hash")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .as_deref()
+            == Some(crate::search::tantivy::SCHEMA_HASH);
     let needs_rebuild = opts.force_rebuild
         || !index_path.join("meta.json").exists()
-        || (index_path.join("schema_hash.json").exists()
-            && !std::fs::read_to_string(index_path.join("schema_hash.json"))?
-                .contains(crate::search::tantivy::SCHEMA_HASH));
+        || (index_path.join("schema_hash.json").exists() && !schema_matches);
 
     if needs_rebuild && let Some(p) = &opts.progress {
         p.is_rebuilding.store(true, Ordering::Relaxed);
@@ -340,15 +349,19 @@ fn watch_roots() -> Vec<PathBuf> {
 }
 
 fn reset_storage(storage: &mut SqliteStorage) -> Result<()> {
+    // Wrap in transaction to ensure atomic reset - if any DELETE fails,
+    // all changes are rolled back to prevent inconsistent state
     storage.raw().execute_batch(
-        "DELETE FROM fts_messages;
+        "BEGIN TRANSACTION;
+         DELETE FROM fts_messages;
          DELETE FROM snippets;
          DELETE FROM messages;
          DELETE FROM conversations;
          DELETE FROM agents;
          DELETE FROM workspaces;
          DELETE FROM tags;
-         DELETE FROM conversation_tags;",
+         DELETE FROM conversation_tags;
+         COMMIT;",
     )?;
     Ok(())
 }
