@@ -126,6 +126,7 @@ fn pi_agent_connector_handles_model_change() {
 
     let sample = r#"{"type":"session","id":"model-test","timestamp":"2024-01-15T10:30:00.000Z","cwd":"/test","provider":"anthropic","modelId":"claude-sonnet-4","thinkingLevel":"off"}
 {"type":"message","timestamp":"2024-01-15T10:30:01.000Z","message":{"role":"user","content":"hello"}}
+{"type":"message","timestamp":"2024-01-15T10:30:02.000Z","message":{"role":"assistant","content":"Hello with Sonnet!"}}
 {"type":"model_change","timestamp":"2024-01-15T10:31:00.000Z","provider":"anthropic","modelId":"claude-opus-4"}
 {"type":"message","timestamp":"2024-01-15T10:31:05.000Z","message":{"role":"assistant","content":"Hello! I'm now using Opus."}}
 "#;
@@ -144,11 +145,19 @@ fn pi_agent_connector_handles_model_change() {
     assert_eq!(convs.len(), 1);
     let c = &convs[0];
 
-    // Model change events are tracked in metadata
+    assert_eq!(c.messages.len(), 3);
+
+    // Model change events are tracked in metadata (final model)
     assert_eq!(
         c.metadata.get("model_id").and_then(|v| v.as_str()),
         Some("claude-opus-4")
     );
+
+    // First assistant message (before model_change) uses initial modelId
+    assert_eq!(c.messages[1].author, Some("claude-sonnet-4".to_string()));
+
+    // Second assistant message (after model_change) uses updated modelId
+    assert_eq!(c.messages[2].author, Some("claude-opus-4".to_string()));
 }
 
 #[test]
@@ -512,4 +521,47 @@ fn pi_agent_connector_skips_thinking_level_change() {
     for msg in &c.messages {
         assert!(!msg.content.contains("thinking_level_change"));
     }
+}
+
+#[test]
+#[serial]
+fn pi_agent_connector_populates_author_for_assistant_messages() {
+    let dir = TempDir::new().unwrap();
+    let sessions = dir.path().join("sessions/--author--");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("2024-01-15T10-30-00_author.jsonl");
+
+    let sample = r#"{"type":"session","id":"test","timestamp":"2024-01-15T10:30:00.000Z","cwd":"/test","provider":"anthropic","modelId":"claude-sonnet-4","thinkingLevel":"off"}
+{"type":"message","timestamp":"2024-01-15T10:30:01.000Z","message":{"role":"user","content":"test question"}}
+{"type":"message","timestamp":"2024-01-15T10:30:02.000Z","message":{"role":"assistant","content":"response without explicit model"}}
+{"type":"message","timestamp":"2024-01-15T10:30:03.000Z","message":{"role":"assistant","model":"claude-opus-4-5","content":"response with explicit model"}}
+"#;
+    fs::write(&file, sample).unwrap();
+
+    unsafe {
+        std::env::set_var("PI_CODING_AGENT_DIR", dir.path());
+    }
+
+    let connector = PiAgentConnector::new();
+    let ctx = ScanContext {
+        data_root: dir.path().to_path_buf(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    let c = &convs[0];
+    assert_eq!(c.messages.len(), 3);
+
+    // User message should have no author
+    assert_eq!(c.messages[0].role, "user");
+    assert!(c.messages[0].author.is_none());
+
+    // First assistant message uses modelId from session header
+    assert_eq!(c.messages[1].role, "assistant");
+    assert_eq!(c.messages[1].author, Some("claude-sonnet-4".to_string()));
+
+    // Second assistant message uses explicit model from message
+    assert_eq!(c.messages[2].role, "assistant");
+    assert_eq!(c.messages[2].author, Some("claude-opus-4-5".to_string()));
 }
