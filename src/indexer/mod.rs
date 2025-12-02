@@ -95,7 +95,10 @@ pub fn run_index(
     let since_ts = if opts.full || needs_rebuild {
         None
     } else {
-        storage.get_last_scan_ts().unwrap_or(None)
+        storage
+            .get_last_scan_ts()
+            .unwrap_or(None)
+            .map(|ts| ts.saturating_sub(1))
     };
 
     if since_ts.is_some() {
@@ -123,8 +126,8 @@ pub fn run_index(
     let mut pending_batches = Vec::new();
     if let Some(p) = &opts.progress {
         p.phase.store(1, Ordering::Relaxed); // Scanning
-        // Seed totals to avoid 0/0 progress display; will be updated during scanning.
-        p.total.store(1, Ordering::Relaxed);
+        // Reset; totals will be populated during scanning.
+        p.total.store(0, Ordering::Relaxed);
         p.current.store(0, Ordering::Relaxed);
     }
 
@@ -438,6 +441,7 @@ fn reindex_paths(
                 .get(&kind)
                 .copied()
                 .or_else(|| ts.map(|v| v.saturating_sub(1)))
+                .map(|v| v.saturating_sub(1))
         };
         let ctx = crate::connectors::ScanContext {
             data_root: opts.data_dir.clone(),
@@ -521,7 +525,7 @@ fn classify_paths(paths: Vec<PathBuf>) -> Vec<(ConnectorKind, Option<i64>)> {
             && let Ok(dur) = time.duration_since(std::time::UNIX_EPOCH)
         {
             let ts = Some(dur.as_millis() as i64);
-            let s = p.to_string_lossy();
+            let s = p.to_string_lossy().replace('\\', "/");
             let tag =
                 if s.contains(".codex") || s.contains("codex/sessions") || s.contains("rollout-") {
                     Some(ConnectorKind::Codex)
@@ -872,14 +876,14 @@ mod tests {
         let amp_file = amp_dir.join("thread-002.json");
         std::fs::write(
             &amp_file,
-            r#"{{
+            r#"{
   "id": "thread-002",
   "title": "Amp test",
   "messages": [
-    {{"role":"user","text":"hi","createdAt":1700000000100}},
-    {{"role":"assistant","text":"hello","createdAt":1700000000200}}
+    {"role":"user","text":"hi","createdAt":1700000000100},
+    {"role":"assistant","text":"hello","createdAt":1700000000200}
   ]
-}} "#,
+}"#,
         )
         .unwrap();
 

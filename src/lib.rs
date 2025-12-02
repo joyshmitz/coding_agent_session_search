@@ -1492,7 +1492,7 @@ async fn execute_cli(
                     until,
                     aggregate,
                     explain,
-                    dry_run: _,
+                    dry_run,
                     timeout,
                 } => {
                     run_cli_search(
@@ -1524,7 +1524,7 @@ async fn execute_cli(
                         ),
                         aggregate,
                         explain,
-                        false,
+                        dry_run,
                         timeout,
                     )?;
                 }
@@ -1670,7 +1670,10 @@ fn state_meta_json(data_dir: &Path, db_path: &Path, stale_threshold: u64) -> ser
         let ts_secs = ts / 1000;
         now_secs.saturating_sub(ts_secs as u64)
     });
-    let is_stale = index_age_secs.is_none_or(|age| age > stale_threshold);
+    let is_stale = match index_age_secs {
+        None => true,
+        Some(age) => age > stale_threshold,
+    };
     let fresh = index_exists && !is_stale;
 
     let ts_str = chrono::DateTime::from_timestamp(now_secs as i64, 0)
@@ -2114,7 +2117,8 @@ impl TimeFilter {
         let now = Local::now();
         let today_start = Local
             .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
-            .unwrap();
+            .single()
+            .unwrap_or(now);
 
         let (since, until) = if today {
             (Some(today_start.timestamp_millis()), None)
@@ -2916,8 +2920,8 @@ fn output_robot_results(
                     m.insert("index_freshness".to_string(), freshness);
                 }
                 // Add timeout info to _meta if timeout was configured
-                if let serde_json::Value::Object(ref mut m) = meta
-                    && let Some(timeout) = timeout_ms
+                if let Some(timeout) = timeout_ms
+                    && let serde_json::Value::Object(ref mut m) = meta
                 {
                     m.insert("timeout_ms".to_string(), serde_json::json!(timeout));
                     m.insert("timed_out".to_string(), serde_json::json!(timed_out));
@@ -3114,8 +3118,8 @@ fn output_robot_results(
                     m.insert("index_freshness".to_string(), freshness);
                 }
                 // Add timeout info to _meta if timeout was configured
-                if let serde_json::Value::Object(ref mut m) = meta
-                    && let Some(timeout) = timeout_ms
+                if let Some(timeout) = timeout_ms
+                    && let serde_json::Value::Object(ref mut m) = meta
                 {
                     m.insert("timeout_ms".to_string(), serde_json::json!(timeout));
                     m.insert("timed_out".to_string(), serde_json::json!(timed_out));
@@ -3484,8 +3488,11 @@ fn truncate_start(s: &str, max_chars: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_chars {
         s.to_string()
+    } else if max_chars <= 3 {
+        // Not enough room for any content plus "..."
+        "...".to_string()
     } else {
-        let skip = char_count - (max_chars - 3); // -3 for "..."
+        let skip = char_count.saturating_sub(max_chars.saturating_sub(3));
         format!("...{}", s.chars().skip(skip).collect::<String>())
     }
 }
@@ -3496,8 +3503,11 @@ fn truncate_end(s: &str, max_chars: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_chars {
         s.to_string()
+    } else if max_chars <= 3 {
+        // Not enough room for any content plus "..."
+        "...".to_string()
     } else {
-        let take = max_chars - 3; // -3 for "..."
+        let take = max_chars.saturating_sub(3);
         format!("{}...", s.chars().take(take).collect::<String>())
     }
 }
@@ -3560,7 +3570,10 @@ fn run_status(
         let ts_secs = ts / 1000; // Convert millis to secs
         now_secs.saturating_sub(ts_secs as u64)
     });
-    let is_stale = index_age_secs.is_none_or(|age| age > stale_threshold);
+    let is_stale = match index_age_secs {
+        None => true,
+        Some(age) => age > stale_threshold,
+    };
 
     // Check for pending sessions from watch_state.json
     let pending_sessions = if watch_state_path.exists() {
@@ -3595,6 +3608,9 @@ fn run_status(
     };
 
     if json {
+        let ts_str = chrono::DateTime::from_timestamp(now_secs as i64, 0)
+            .unwrap_or_else(chrono::Utc::now)
+            .to_rfc3339();
         let payload = serde_json::json!({
             "healthy": healthy,
             "index": {
@@ -3616,8 +3632,14 @@ fn run_status(
             },
             "pending": {
                 "sessions": pending_sessions,
+                "watch_active": watch_state_path.exists(),
             },
             "recommended_action": recommended_action,
+            "_meta": {
+                "timestamp": ts_str,
+                "data_dir": data_dir.display().to_string(),
+                "db_path": db_path.display().to_string(),
+            },
         });
         println!(
             "{}",

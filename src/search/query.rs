@@ -501,12 +501,16 @@ impl QuerySuggestion {
         }
     }
 
-    fn remove_agent_filter(current_agent: &str) -> Self {
+    fn remove_agent_filter(current_agent: &str, current_filters: &SearchFilters) -> Self {
+        // Clone current filters and only clear the agent filter, preserving
+        // workspace and date range filters
+        let mut filters = current_filters.clone();
+        filters.agents.clear();
         Self {
             kind: SuggestionKind::RemoveFilter,
             message: format!("Remove agent filter (currently: {current_agent})"),
             suggested_query: None,
-            suggested_filters: Some(SearchFilters::default()),
+            suggested_filters: Some(filters),
             shortcut: None,
         }
     }
@@ -1346,11 +1350,14 @@ impl SearchClient {
                     self.maybe_log_cache_metrics("hit");
                     return Ok(filtered);
                 }
+                // Cache had entries but not enough to satisfy limit - shortfall, not miss
                 self.metrics.inc_cache_shortfall();
                 self.maybe_log_cache_metrics("shortfall");
+            } else {
+                // No cached prefix at all - this is the actual miss
+                self.metrics.inc_cache_miss();
+                self.maybe_log_cache_metrics("miss");
             }
-            self.metrics.inc_cache_miss();
-            self.maybe_log_cache_metrics("miss");
         }
 
         // Tantivy is the primary high-performance engine.
@@ -1514,7 +1521,8 @@ impl SearchClient {
                 .map(std::string::String::as_str)
                 .collect();
             let agent_str = agents.join(", ");
-            suggestions.push(QuerySuggestion::remove_agent_filter(&agent_str).with_shortcut(2));
+            suggestions
+                .push(QuerySuggestion::remove_agent_filter(&agent_str, filters).with_shortcut(2));
         }
 
         // 3. Suggest common agent names if query looks like a typo of one
@@ -1678,7 +1686,15 @@ impl SearchClient {
         let q: Box<dyn Query> = if clauses.is_empty() {
             Box::new(AllQuery)
         } else if clauses.len() == 1 {
-            clauses.pop().unwrap().1
+            let (occur, query_box) = clauses.pop().unwrap();
+            match occur {
+                // For Must, we can safely unwrap and use the inner query directly
+                Occur::Must => query_box,
+                // For MustNot or Should, we must preserve the Occur by wrapping
+                // in a BooleanQuery. A lone MustNot (e.g., "NOT foo") should match
+                // nothing, not match "foo".
+                _ => Box::new(BooleanQuery::new(vec![(occur, query_box)])),
+            }
         } else {
             Box::new(BooleanQuery::new(clauses))
         };
@@ -2045,12 +2061,26 @@ fn is_prefix_only(query: &str) -> bool {
 }
 
 fn quick_prefix_snippet(content: &str, query: &str, max_chars: usize) -> String {
+    let content_char_count = content.chars().count();
+
+    // Handle empty query case first
+    if query.is_empty() {
+        let snippet: String = content.chars().take(max_chars).collect();
+        return if content_char_count > max_chars {
+            format!("{snippet}…")
+        } else {
+            snippet
+        };
+    }
+
     let lc_content = content.to_lowercase();
     let lc_query = query.to_lowercase();
-    let content_char_count = content.chars().count();
     if let Some(pos) = lc_content.find(&lc_query) {
-        // convert byte index to char index
-        let start_char = content[..pos].chars().count().saturating_sub(15);
+        // Convert byte index in the lowercased string to a character index.
+        // IMPORTANT: Use lc_content[..pos], not content[..pos], because pos is a byte
+        // index valid only for the lowercased string (Unicode case mappings can change
+        // byte lengths, e.g., German ß → SS).
+        let start_char = lc_content[..pos].chars().count().saturating_sub(15);
         let snippet: String = content.chars().skip(start_char).take(max_chars).collect();
         // Check if we truncated: snippet covers chars [start_char, start_char + snippet_len)
         let snippet_char_count = snippet.chars().count();
@@ -2077,7 +2107,11 @@ fn cached_prefix_snippet(content: &str, query: &str, max_chars: usize) -> Option
     let lc_query = query.to_lowercase();
     let content_char_count = content.chars().count();
     lc_content.find(&lc_query).map(|pos| {
-        let start_char = content[..pos].chars().count().saturating_sub(15);
+        // Convert byte index in the lowercased string to a character index.
+        // IMPORTANT: Use lc_content[..pos], not content[..pos], because pos is a byte
+        // index valid only for the lowercased string (Unicode case mappings can change
+        // byte lengths, e.g., German ß → SS).
+        let start_char = lc_content[..pos].chars().count().saturating_sub(15);
         let snippet: String = content.chars().skip(start_char).take(max_chars).collect();
         // Check if we truncated: snippet covers chars [start_char, start_char + snippet_len)
         let snippet_char_count = snippet.chars().count();
@@ -2140,7 +2174,7 @@ impl SearchClient {
         }
         let stats = self.cache_stats();
         tracing::debug!(
-            event,
+            event = event,
             hits = stats.cache_hits,
             miss = stats.cache_miss,
             shortfall = stats.cache_shortfall,

@@ -278,13 +278,11 @@ impl SqliteStorage {
     ) -> Result<InsertOutcome> {
         let tx = self.conn.transaction()?;
 
-        let max_idx: Option<i64> = tx
-            .query_row(
-                "SELECT MAX(idx) FROM messages WHERE conversation_id = ?",
-                params![conversation_id],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let max_idx: Option<i64> = tx.query_row(
+            "SELECT MAX(idx) FROM messages WHERE conversation_id = ?",
+            params![conversation_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
         let cutoff = max_idx.unwrap_or(-1);
 
         let mut inserted_indices = Vec::new();
@@ -347,7 +345,7 @@ impl SqliteStorage {
             Ok(crate::model::types::Workspace {
                 id: Some(row.get(0)?),
                 path: Path::new(&row.get::<_, String>(1)?).to_path_buf(),
-                display_name: row.get(2).ok(),
+                display_name: row.get::<_, Option<String>>(2)?,
             })
         })?;
         let mut out = Vec::new();
@@ -364,7 +362,7 @@ impl SqliteStorage {
                 FROM conversations c
                 JOIN agents a ON c.agent_id = a.id
                 LEFT JOIN workspaces w ON c.workspace_id = w.id
-                ORDER BY c.started_at DESC NULLS LAST, c.id DESC
+                ORDER BY c.started_at IS NULL, c.started_at DESC, c.id DESC
                 LIMIT ? OFFSET ?",
         )?;
 
@@ -411,8 +409,8 @@ impl SqliteStorage {
                     "system" => MessageRole::System,
                     other => MessageRole::Other(other.to_string()),
                 },
-                author: row.get(3).ok(),
-                created_at: row.get(4).ok(),
+                author: row.get::<_, Option<String>>(3)?,
+                created_at: row.get::<_, Option<i64>>(4)?,
                 content: row.get(5)?,
                 extra_json: row
                     .get::<_, Option<String>>(6)?
@@ -449,7 +447,10 @@ impl SqliteStorage {
             .query_row(
                 "SELECT value FROM meta WHERE key = 'last_scan_ts'",
                 [],
-                |row| Ok(row.get::<_, String>(0).ok().and_then(|s| s.parse().ok())),
+                |row| {
+                    let s: String = row.get(0)?;
+                    Ok(s.parse().ok())
+                },
             )
             .optional()?
             .flatten();
@@ -531,35 +532,34 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         .optional()?
         .unwrap_or(0);
 
+    if current == SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    let tx = conn.transaction()?;
+
     match current {
         0 => {
-            conn.execute_batch(MIGRATION_V1)?;
-            conn.execute_batch(MIGRATION_V2)?;
-            conn.execute_batch(MIGRATION_V3)?;
-            conn.execute(
-                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-                params![SCHEMA_VERSION.to_string()],
-            )?;
+            tx.execute_batch(MIGRATION_V1)?;
+            tx.execute_batch(MIGRATION_V2)?;
+            tx.execute_batch(MIGRATION_V3)?;
         }
         1 => {
-            conn.execute_batch(MIGRATION_V2)?;
-            conn.execute_batch(MIGRATION_V3)?;
-            conn.execute(
-                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-                params![SCHEMA_VERSION.to_string()],
-            )?;
+            tx.execute_batch(MIGRATION_V2)?;
+            tx.execute_batch(MIGRATION_V3)?;
         }
         2 => {
-            conn.execute_batch(MIGRATION_V3)?;
-            conn.execute(
-                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-                params![SCHEMA_VERSION.to_string()],
-            )?;
+            tx.execute_batch(MIGRATION_V3)?;
         }
-        v if v == SCHEMA_VERSION => {}
         v => return Err(anyhow!("unsupported schema version {v}")),
     }
 
+    tx.execute(
+        "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+        params![SCHEMA_VERSION.to_string()],
+    )?;
+
+    tx.commit()?;
     Ok(())
 }
 
