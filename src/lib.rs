@@ -3797,7 +3797,7 @@ fn run_status(
     db_override: Option<PathBuf>,
     json: bool,
     stale_threshold: u64,
-    robot_meta: bool,
+    _robot_meta: bool,
 ) -> CliResult<()> {
     use rusqlite::Connection;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3991,7 +3991,7 @@ fn run_health(
     db_override: Option<PathBuf>,
     json: bool,
     stale_threshold: u64,
-    robot_meta: bool,
+    _robot_meta: bool,
 ) -> CliResult<()> {
     use std::time::Instant;
 
@@ -4601,6 +4601,7 @@ fn run_capabilities(json: bool) -> CliResult<()> {
             "cline".to_string(),
             "aider".to_string(),
             "cursor".to_string(),
+            "chatgpt".to_string(),
         ],
         limits: CapabilitiesLimits {
             max_limit: 10000,

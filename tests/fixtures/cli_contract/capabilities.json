@@ -20,7 +20,11 @@
     "status_command",
     "state_command",
     "api_version_command",
-    "introspect_command"
+    "introspect_command",
+    "export_command",
+    "expand_command",
+    "timeline_command",
+    "highlight_matches"
   ],
   "connectors": [
     "codex",
@@ -29,7 +33,9 @@
     "opencode",
     "amp",
     "cline",
-    "aider"
+    "aider",
+    "cursor",
+    "chatgpt"
   ],
   "limits": {
     "max_limit": 10000,
