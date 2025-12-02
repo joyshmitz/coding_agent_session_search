@@ -121,152 +121,283 @@ Ingests history from all major local agents, normalizing them into a unified `Co
 - **ChatGPT**: `~/Library/Application Support/com.openai.chat` (v1 unencrypted JSON; v2/v3 encrypted—see Environment)
 - **Aider**: `~/.aider.chat.history.md` and per-project `.aider.chat.history.md` files (Markdown)
 
----
+## 🤖 AI / Automation Mode
 
-## 🏎️ Performance Engineering: Caching & Warming
-To achieve sub-60ms latency on large datasets, `cass` implements a multi-tier caching strategy in `src/search/query.rs`:
+`cass` is purpose-built for consumption by AI coding agents—not just as an afterthought, but as a first-class design goal. When you're an AI agent working on a codebase, your own session history and those of other agents become an invaluable knowledge base: solutions to similar problems, context about design decisions, debugging approaches that worked, and institutional memory that would otherwise be lost.
 
-1.  **Sharded LRU Cache**: The `prefix_cache` is split into shards (default 256 entries each) to reduce mutex contention during concurrent reads/writes from the async searcher.
-2.  **Bloom Filter Pre-checks**: Each cached hit stores a 64-bit Bloom filter mask of its content tokens. When a user types more characters, we check the mask first. If the new token isn't in the mask, we reject the cache entry immediately without a string comparison.
-3.  **Predictive Warming**: A background `WarmJob` thread watches the input. When the user pauses typing, it triggers a lightweight "warm-up" query against the Tantivy reader to pre-load relevant index segments into the OS page cache.
+### Why Cross-Agent Search Matters
 
-## 🔌 The Connector Interface (Polymorphism)
-The system is designed for extensibility via the `Connector` trait (`src/connectors/mod.rs`). This allows `cass` to treat disparate log formats as a uniform stream of events.
+Imagine you're Claude Code working on a React authentication bug. With `cass`, you can instantly search across:
+- Your own previous sessions where you solved similar auth issues
+- Codex sessions where someone debugged OAuth flows
+- Cursor conversations about token refresh patterns
+- Aider chats about security best practices
 
-```mermaid
-classDiagram
-    class Connector {
-        <<interface>>
-        +detect() DetectionResult
-        +scan(ScanContext) Vec~NormalizedConversation~
-    }
-    class NormalizedConversation {
-        +agent_slug String
-        +messages Vec~NormalizedMessage~
-    }
+This cross-pollination of knowledge across different AI agents is transformative. Each agent has different strengths, different context windows, and encounters different problems. `cass` unifies all this collective intelligence into a single, searchable index.
 
-    Connector <|-- CodexConnector
-    Connector <|-- ClineConnector
-    Connector <|-- ClaudeCodeConnector
-    Connector <|-- GeminiConnector
-    Connector <|-- OpenCodeConnector
-    Connector <|-- AmpConnector
-    Connector <|-- CursorConnector
-    Connector <|-- ChatGptConnector
-    Connector <|-- AiderConnector
+### Self-Documenting API
 
-    CodexConnector ..> NormalizedConversation : emits
-    ClineConnector ..> NormalizedConversation : emits
-    ClaudeCodeConnector ..> NormalizedConversation : emits
-    GeminiConnector ..> NormalizedConversation : emits
-    OpenCodeConnector ..> NormalizedConversation : emits
-    AmpConnector ..> NormalizedConversation : emits
-    CursorConnector ..> NormalizedConversation : emits
-    ChatGptConnector ..> NormalizedConversation : emits
-    AiderConnector ..> NormalizedConversation : emits
+`cass` teaches agents how to use it—no external documentation required:
+
+```bash
+# Quick capability check: what features exist?
+cass capabilities --json
+# → {"features": ["json_output", "cursor_pagination", "highlight_matches", ...], "connectors": [...], "limits": {...}}
+
+# Full API schema with argument types, defaults, and response shapes
+cass introspect --json
+
+# Topic-based help optimized for LLM consumption
+cass robot-docs commands # All commands and flags
+cass robot-docs schemas # Response JSON schemas
+cass robot-docs examples # Copy-paste invocations
+cass robot-docs exit-codes # Error handling guide
+cass robot-docs guide # Quick-start walkthrough
 ```
 
-- **Polymorphic Scanning**: The indexer runs connector factories in parallel via rayon, creating fresh `Box<dyn Connector>` instances that are unaware of each other's underlying file formats (JSONL, SQLite, specialized JSON).
-- **Resilient Parsing**: Connectors handle legacy formats (e.g., integer vs ISO timestamps) and flatten complex tool-use blocks into searchable text.
+### Forgiving Syntax (Agent-Friendly Parsing)
 
----
+AI agents sometimes make syntax mistakes. `cass` aggressively normalizes input to maximize acceptance when intent is clear:
 
-## 🧠 Architecture & Engineering
+| What you type | What `cass` understands | Correction note |
+|---------------|------------------------|-----------------|
+| `cass serach "error"` | `cass search "error"` | "Did you mean 'search'?" |
+| `cass -robot -limit=5` | `cass --robot --limit=5` | Single-dash long flags normalized |
+| `cass --Robot --LIMIT 5` | `cass --robot --limit 5` | Case normalized |
+| `cass find "auth"` | `cass search "auth"` | `find`/`query`/`q` → `search` |
+| `cass --robot-docs` | `cass robot-docs` | Flag-as-subcommand detected |
+| `cass search --limt 5` | `cass search --limit 5` | Levenshtein distance ≤2 corrected |
 
-`cass` employs a dual-storage strategy to balance data integrity with search performance.
+The CLI applies multiple normalization layers:
+1. **Typo correction**: Flags within edit distance 2 are auto-corrected
+2. **Case normalization**: `--Robot`, `--LIMIT` → `--robot`, `--limit`
+3. **Single-dash recovery**: `-robot` → `--robot` (common LLM mistake)
+4. **Subcommand aliases**: `find`/`query`/`q` → `search`, `ls`/`list` → `stats`
+5. **Global flag hoisting**: Position-independent flag handling
 
-### The Pipeline
-1.  **Ingestion**: Connectors scan proprietary agent files and normalize them into standard structs.
-2.  **Storage (SQLite)**: The **Source of Truth**. Data is persisted to a normalized SQLite schema (`messages`, `conversations`, `agents`). This ensures ACID compliance, reliable storage, and supports complex relational queries (stats, grouping).
-3.  **Search Index (Tantivy)**: The **Speed Layer**. New messages are incrementally pushed to a Tantivy full-text index. This index is optimized for speed:
-    *   **Fields**: `title`, `content`, `agent`, `workspace`, `created_at`.
-    *   **Prefix Fields**: `title_prefix` and `content_prefix` use **Index-Time Edge N-Grams** (not stored on disk to save space) for instant prefix matching.
-    *   **Deduping**: Search results are deduplicated by content hash to remove noise from repeated tool outputs.
+When corrections are applied, `cass` emits a teaching note to stderr so agents learn the canonical syntax.
 
-```mermaid
-flowchart LR
-    classDef pastel fill:#f4f2ff,stroke:#c2b5ff,color:#2e2963;
-    classDef pastel2 fill:#e6f7ff,stroke:#9bd5f5,color:#0f3a4d;
-    classDef pastel3 fill:#e8fff3,stroke:#9fe3c5,color:#0f3d28;
-    classDef pastel4 fill:#fff7e6,stroke:#f2c27f,color:#4d350f;
-    classDef pastel5 fill:#ffeef2,stroke:#f5b0c2,color:#4d1f2c;
+### Structured Output Formats
 
-    subgraph Sources
-      A1[Codex]:::pastel
-      A2[Cline]:::pastel
-      A3[Gemini]:::pastel
-      A4[Claude]:::pastel
-      A5[OpenCode]:::pastel
-      A6[Amp]:::pastel
-      A7[Cursor]:::pastel
-      A8[ChatGPT]:::pastel
-      A9[Aider]:::pastel
-    end
+Every command supports machine-readable output:
 
-    subgraph "Ingestion Layer"
-      C1["Connectors\nDetect & Scan\nNormalize & Dedupe"]:::pastel2
-    end
+```bash
+# Pretty-printed JSON (default robot mode)
+cass search "error" --robot
 
-    subgraph "Dual Storage"
-      S1["SQLite (WAL)\nSource of Truth\nRelational Data\nMigrations"]:::pastel3
-      T1["Tantivy Index\nSearch Optimized\nEdge N-Grams\nPrefix Cache"]:::pastel4
-    end
+# Streaming JSONL: header line with _meta, then one hit per line
+cass search "error" --robot-format jsonl
 
-    subgraph "Presentation"
-      U1["TUI (Ratatui)\nAsync Search\nFilter Pills\nDetails"]:::pastel5
-      U2["CLI / Robot\nJSON Output\nAutomation"]:::pastel5
-    end
+# Compact single-line JSON (minimal bytes)
+cass search "error" --robot-format compact
 
-    A1 --> C1
-    A2 --> C1
-    A3 --> C1
-    A4 --> C1
-    A5 --> C1
-    A6 --> C1
-    A7 --> C1
-    A8 --> C1
-    A9 --> C1
-    C1 -->|Persist| S1
-    C1 -->|Index| T1
-    S1 -.->|Rebuild| T1
-    T1 -->|Query| U1
-    T1 -->|Query| U2
+# Include performance metadata
+cass search "error" --robot --robot-meta
+# → { "hits": [...], "_meta": { "elapsed_ms": 12, "cache_hit": true, "wildcard_fallback": false, ... } }
 ```
 
-### Background Indexing & Watch Mode
-- **Non-Blocking**: The indexer runs in a background thread. You can search while it works.
-- **Parallel Discovery**: Connector detection and scanning run in parallel across all CPU cores using rayon, significantly reducing startup time when multiple agents are installed.
-- **Watch Mode**: Uses file system watchers (`notify`) to detect changes in agent logs. When you save a file or an agent replies, `cass` re-indexes just that conversation and refreshes the search view automatically.
-- **Real-Time Progress**: The TUI footer updates in real-time showing discovered agents during scanning (e.g., "🔍 Discovering (5 agents found)") and indexing progress with sparkline visualization (e.g., "📦 Indexing 150/2000 (7%) ▁▂▄▆█").
+**Design principle**: stdout contains only parseable JSON data; all diagnostics, warnings, and progress go to stderr.
 
-## 🔍 Deep Dive: Internals
+### Token Budget Management
 
-### The TUI Engine (State Machine & Async Loop)
-The interactive interface (`src/ui/tui.rs`) is the largest component (~3.5k lines), implementing a sophisticated **Immediate Mode** architecture using `ratatui`.
+LLMs have context limits. `cass` provides multiple levers to control output size:
 
-1.  **Application State**: A monolithic struct tracks the entire UI state (search query, cursor position, scroll offsets, active filters, and cached details).
-2.  **Event Loop**: A polling loop handles standard inputs (keyboard/mouse) and custom events (Search results ready, Progress updates).
-3.  **Debouncing**: User input triggers an async search task via a `tokio` channel. To prevent UI freezing, we debounce keystrokes (150ms) and run queries on a separate thread, updating the state only when results return.
-4.  **Optimistic Rendering**: The UI renders the *current* state immediately (60 FPS), drawing "stale" results or loading skeletons while waiting for the async searcher.
+| Flag | Effect |
+|------|--------|
+| `--fields minimal` | Only `source_path`, `line_number`, `agent` |
+| `--fields summary` | Adds `title`, `score` |
+| `--fields score,title,snippet` | Custom field selection |
+| `--max-content-length 500` | Truncate long fields (UTF-8 safe, adds "...") |
+| `--max-tokens 2000` | Soft budget (~4 chars/token); adjusts truncation dynamically |
+| `--limit 5` | Cap number of results |
 
-```mermaid
-graph TD
-    Input([User Input]) -->|Key/Mouse| EventLoop
-    EventLoop -->|Update| State[App State]
-    State -->|Render| Terminal
-    
-    State -->|Query Change| Debounce{Debounce}
-    Debounce -->|Fire| SearchTask[Async Search]
-    SearchTask -->|Results| Channel
-    Channel -->|Poll| EventLoop
+Truncated fields include a `*_truncated: true` indicator so agents know when they're seeing partial content.
+
+### Error Handling for Agents
+
+Errors are structured, actionable, and include recovery hints:
+
+```json
+{
+ "error": {
+ "code": 3,
+ "kind": "index_missing",
+ "message": "Search index not found",
+ "hint": "Run 'cass index --full' to build the index",
+ "retryable": false
+ }
+}
 ```
 
-### Append-Only Storage Strategy
-Data integrity is paramount. `cass` treats the SQLite database (`src/storage/sqlite.rs`) as an **append-only log** for conversations:
+**Exit codes** follow a semantic convention:
+| Code | Meaning | Typical action |
+|------|---------|----------------|
+| 0 | Success | Parse stdout |
+| 2 | Usage error | Fix syntax (hint provided) |
+| 3 | Index missing | Run `cass index --full` |
+| 4 | Not found | Try different query/path |
+| 5 | Idempotency mismatch | Retry with new key |
+| 9 | Unknown error | Check `retryable` flag |
+| 10 | Timeout exceeded | Increase `--timeout` or reduce scope |
 
-- **Immutable History**: When an agent adds a message to a conversation, we don't update the existing row. We insert the new message linked to the conversation ID.
-- **Deduplication**: The connector layer uses content hashing to prevent duplicate messages if an agent re-writes a file.
-- **Versioning**: A `schema_version` meta-table and strict migration path ensure that upgrades (like the recent move to v3) are safe and atomic.
+The `retryable` field tells agents whether a retry might succeed (e.g., transient I/O) vs. guaranteed failure (e.g., invalid path).
+
+### Session Analysis Commands
+
+Beyond search, `cass` provides commands for deep-diving into specific sessions:
+
+```bash
+# Export full conversation to shareable format
+cass export /path/to/session.jsonl --format markdown -o conversation.md
+cass export /path/to/session.jsonl --format html -o conversation.html
+cass export /path/to/session.jsonl --format json --include-tools
+
+# Expand context around a specific line (from search result)
+cass expand /path/to/session.jsonl -n 42 -C 5 --json
+# → Shows 5 messages before and after line 42
+
+# Activity timeline: when were agents active?
+cass timeline --today --json --group-by hour
+cass timeline --since 7d --agent claude --json
+# → Grouped activity counts, useful for understanding work patterns
+```
+
+### Match Highlighting
+
+The `--highlight` flag wraps matching terms for visual/programmatic identification:
+
+```bash
+cass search "authentication error" --robot --highlight
+# In text output: **authentication** and **error** are bold-wrapped
+# In HTML export: <mark>authentication</mark> and <mark>error</mark>
+```
+
+Highlighting is query-aware: quoted phrases like `"auth error"` highlight as a unit; individual terms highlight separately.
+
+### Pagination & Cursors
+
+For large result sets, use cursor-based pagination:
+
+```bash
+# First page
+cass search "TODO" --robot --robot-meta --limit 20
+# → { "hits": [...], "_meta": { "next_cursor": "eyJ..." } }
+
+# Next page
+cass search "TODO" --robot --robot-meta --limit 20 --cursor "eyJ..."
+```
+
+Cursors are opaque tokens encoding the pagination state. They remain valid as long as the index isn't rebuilt.
+
+### Request Correlation
+
+For debugging and logging, attach a request ID:
+
+```bash
+cass search "bug" --robot --request-id "req-12345"
+# → { "hits": [...], "_meta": { "request_id": "req-12345" } }
+```
+
+### Idempotent Operations
+
+For safe retries (e.g., in CI pipelines or flaky networks):
+
+```bash
+cass index --full --idempotency-key "build-$(date +%Y%m%d)"
+# If same key + params were used in last 24h, returns cached result
+```
+
+### Query Analysis
+
+Debug why a search returned unexpected results:
+
+```bash
+cass search "auth*" --robot --explain
+# → Includes parsed query AST, term expansion, cost estimates
+
+cass search "auth error" --robot --dry-run
+# → Validates query syntax without executing
+```
+
+### Traceability
+
+For debugging agent pipelines:
+
+```bash
+cass search "error" --robot --trace-file /tmp/cass-trace.json
+# Appends execution span with timing, exit code, and command details
+```
+
+### Search Flags Reference
+
+| Flag | Purpose |
+|------|---------|
+| `--robot` / `--json` | JSON output (pretty-printed) |
+| `--robot-format jsonl\|compact` | Streaming or single-line JSON |
+| `--robot-meta` | Include `_meta` block (elapsed_ms, cache stats, index freshness) |
+| `--fields minimal\|summary\|<list>` | Reduce payload size |
+| `--max-content-length N` | Truncate content fields to N chars |
+| `--max-tokens N` | Soft token budget (~4 chars/token) |
+| `--timeout N` | Timeout in milliseconds; returns partial results on expiry |
+| `--cursor <token>` | Cursor-based pagination (from `_meta.next_cursor`) |
+| `--request-id ID` | Echoed in response for correlation |
+| `--aggregate agent,workspace,date` | Server-side aggregations |
+| `--explain` | Include query analysis (parsed query, cost estimate) |
+| `--dry-run` | Validate query without executing |
+| `--highlight` | Wrap matching terms with markers |
+
+### Index Flags Reference
+
+| Flag | Purpose |
+|------|---------|
+| `--idempotency-key KEY` | Safe retries: same key + params returns cached result (24h TTL) |
+| `--json` | JSON output with stats |
+
+### Ready-to-paste blurb for AGENTS.md / CLAUDE.md
+
+```
+🔎 cass — Search All Your Agent History
+
+ What: cass indexes conversations from Claude Code, Codex, Cursor, Gemini, Aider, ChatGPT, and more into a unified, searchable index. Before solving a problem from scratch, check if any agent already solved something similar.
+
+ ⚠️ NEVER run bare cass — it launches an interactive TUI. Always use --robot or --json.
+
+ Quick Start
+
+ # Check if index is healthy (exit 0=ok, 1=run index first)
+ cass health
+
+ # Search across all agent histories
+ cass search "authentication error" --robot --limit 5
+
+ # View a specific result (from search output)
+ cass view /path/to/session.jsonl -n 42 --json
+
+ # Expand context around a line
+ cass expand /path/to/session.jsonl -n 42 -C 3 --json
+
+ # Learn the full API
+ cass capabilities --json # Feature discovery
+ cass robot-docs guide # LLM-optimized docs
+
+ Why Use It
+
+ - Cross-agent knowledge: Find solutions from Codex when using Claude, or vice versa
+ - Forgiving syntax: Typos and wrong flags are auto-corrected with teaching notes
+ - Token-efficient: --fields minimal returns only essential data
+
+ Key Flags
+
+ | Flag | Purpose |
+ |------------------|--------------------------------------------------------|
+ | --robot / --json | Machine-readable JSON output (required!) |
+ | --fields minimal | Reduce payload: source_path, line_number, agent only |
+ | --limit N | Cap result count |
+ | --agent NAME | Filter to specific agent (claude, codex, cursor, etc.) |
+ | --days N | Limit to recent N days |
+
+ stdout = data only, stderr = diagnostics. Exit 0 = success.
+```
 
 ---
 
@@ -728,6 +859,153 @@ Bookmarks are stored separately from the main index:
 
 ---
 
+## 🏎️ Performance Engineering: Caching & Warming
+To achieve sub-60ms latency on large datasets, `cass` implements a multi-tier caching strategy in `src/search/query.rs`:
+
+1. **Sharded LRU Cache**: The `prefix_cache` is split into shards (default 256 entries each) to reduce mutex contention during concurrent reads/writes from the async searcher.
+2. **Bloom Filter Pre-checks**: Each cached hit stores a 64-bit Bloom filter mask of its content tokens. When a user types more characters, we check the mask first. If the new token isn't in the mask, we reject the cache entry immediately without a string comparison.
+3. **Predictive Warming**: A background `WarmJob` thread watches the input. When the user pauses typing, it triggers a lightweight "warm-up" query against the Tantivy reader to pre-load relevant index segments into the OS page cache.
+
+## 🔌 The Connector Interface (Polymorphism)
+The system is designed for extensibility via the `Connector` trait (`src/connectors/mod.rs`). This allows `cass` to treat disparate log formats as a uniform stream of events.
+
+```mermaid
+classDiagram
+ class Connector {
+ <<interface>>
+ +detect() DetectionResult
+ +scan(ScanContext) Vec~NormalizedConversation~
+ }
+ class NormalizedConversation {
+ +agent_slug String
+ +messages Vec~NormalizedMessage~
+ }
+
+ Connector <|-- CodexConnector
+ Connector <|-- ClineConnector
+ Connector <|-- ClaudeCodeConnector
+ Connector <|-- GeminiConnector
+ Connector <|-- OpenCodeConnector
+ Connector <|-- AmpConnector
+ Connector <|-- CursorConnector
+ Connector <|-- ChatGptConnector
+ Connector <|-- AiderConnector
+
+ CodexConnector ..> NormalizedConversation : emits
+ ClineConnector ..> NormalizedConversation : emits
+ ClaudeCodeConnector ..> NormalizedConversation : emits
+ GeminiConnector ..> NormalizedConversation : emits
+ OpenCodeConnector ..> NormalizedConversation : emits
+ AmpConnector ..> NormalizedConversation : emits
+ CursorConnector ..> NormalizedConversation : emits
+ ChatGptConnector ..> NormalizedConversation : emits
+ AiderConnector ..> NormalizedConversation : emits
+```
+
+- **Polymorphic Scanning**: The indexer runs connector factories in parallel via rayon, creating fresh `Box<dyn Connector>` instances that are unaware of each other's underlying file formats (JSONL, SQLite, specialized JSON).
+- **Resilient Parsing**: Connectors handle legacy formats (e.g., integer vs ISO timestamps) and flatten complex tool-use blocks into searchable text.
+
+---
+
+## 🧠 Architecture & Engineering
+
+`cass` employs a dual-storage strategy to balance data integrity with search performance.
+
+### The Pipeline
+1. **Ingestion**: Connectors scan proprietary agent files and normalize them into standard structs.
+2. **Storage (SQLite)**: The **Source of Truth**. Data is persisted to a normalized SQLite schema (`messages`, `conversations`, `agents`). This ensures ACID compliance, reliable storage, and supports complex relational queries (stats, grouping).
+3. **Search Index (Tantivy)**: The **Speed Layer**. New messages are incrementally pushed to a Tantivy full-text index. This index is optimized for speed:
+ * **Fields**: `title`, `content`, `agent`, `workspace`, `created_at`.
+ * **Prefix Fields**: `title_prefix` and `content_prefix` use **Index-Time Edge N-Grams** (not stored on disk to save space) for instant prefix matching.
+ * **Deduping**: Search results are deduplicated by content hash to remove noise from repeated tool outputs.
+
+```mermaid
+flowchart LR
+ classDef pastel fill:#f4f2ff,stroke:#c2b5ff,color:#2e2963;
+ classDef pastel2 fill:#e6f7ff,stroke:#9bd5f5,color:#0f3a4d;
+ classDef pastel3 fill:#e8fff3,stroke:#9fe3c5,color:#0f3d28;
+ classDef pastel4 fill:#fff7e6,stroke:#f2c27f,color:#4d350f;
+ classDef pastel5 fill:#ffeef2,stroke:#f5b0c2,color:#4d1f2c;
+
+ subgraph Sources
+ A1[Codex]:::pastel
+ A2[Cline]:::pastel
+ A3[Gemini]:::pastel
+ A4[Claude]:::pastel
+ A5[OpenCode]:::pastel
+ A6[Amp]:::pastel
+ A7[Cursor]:::pastel
+ A8[ChatGPT]:::pastel
+ A9[Aider]:::pastel
+ end
+
+ subgraph "Ingestion Layer"
+ C1["Connectors\nDetect & Scan\nNormalize & Dedupe"]:::pastel2
+ end
+
+ subgraph "Dual Storage"
+ S1["SQLite (WAL)\nSource of Truth\nRelational Data\nMigrations"]:::pastel3
+ T1["Tantivy Index\nSearch Optimized\nEdge N-Grams\nPrefix Cache"]:::pastel4
+ end
+
+ subgraph "Presentation"
+ U1["TUI (Ratatui)\nAsync Search\nFilter Pills\nDetails"]:::pastel5
+ U2["CLI / Robot\nJSON Output\nAutomation"]:::pastel5
+ end
+
+ A1 --> C1
+ A2 --> C1
+ A3 --> C1
+ A4 --> C1
+ A5 --> C1
+ A6 --> C1
+ A7 --> C1
+ A8 --> C1
+ A9 --> C1
+ C1 -->|Persist| S1
+ C1 -->|Index| T1
+ S1 -.->|Rebuild| T1
+ T1 -->|Query| U1
+ T1 -->|Query| U2
+```
+
+### Background Indexing & Watch Mode
+- **Non-Blocking**: The indexer runs in a background thread. You can search while it works.
+- **Parallel Discovery**: Connector detection and scanning run in parallel across all CPU cores using rayon, significantly reducing startup time when multiple agents are installed.
+- **Watch Mode**: Uses file system watchers (`notify`) to detect changes in agent logs. When you save a file or an agent replies, `cass` re-indexes just that conversation and refreshes the search view automatically.
+- **Real-Time Progress**: The TUI footer updates in real-time showing discovered agents during scanning (e.g., "🔍 Discovering (5 agents found)") and indexing progress with sparkline visualization (e.g., "📦 Indexing 150/2000 (7%) ▁▂▄▆█").
+
+## 🔍 Deep Dive: Internals
+
+### The TUI Engine (State Machine & Async Loop)
+The interactive interface (`src/ui/tui.rs`) is the largest component (~3.5k lines), implementing a sophisticated **Immediate Mode** architecture using `ratatui`.
+
+1. **Application State**: A monolithic struct tracks the entire UI state (search query, cursor position, scroll offsets, active filters, and cached details).
+2. **Event Loop**: A polling loop handles standard inputs (keyboard/mouse) and custom events (Search results ready, Progress updates).
+3. **Debouncing**: User input triggers an async search task via a `tokio` channel. To prevent UI freezing, we debounce keystrokes (150ms) and run queries on a separate thread, updating the state only when results return.
+4. **Optimistic Rendering**: The UI renders the *current* state immediately (60 FPS), drawing "stale" results or loading skeletons while waiting for the async searcher.
+
+```mermaid
+graph TD
+ Input([User Input]) -->|Key/Mouse| EventLoop
+ EventLoop -->|Update| State[App State]
+ State -->|Render| Terminal
+ 
+ State -->|Query Change| Debounce{Debounce}
+ Debounce -->|Fire| SearchTask[Async Search]
+ SearchTask -->|Results| Channel
+ Channel -->|Poll| EventLoop
+```
+
+### Append-Only Storage Strategy
+Data integrity is paramount. `cass` treats the SQLite database (`src/storage/sqlite.rs`) as an **append-only log** for conversations:
+
+- **Immutable History**: When an agent adds a message to a conversation, we don't update the existing row. We insert the new message linked to the conversation ID.
+- **Deduplication**: The connector layer uses content hashing to prevent duplicate messages if an agent re-writes a file.
+- **Versioning**: A `schema_version` meta-table and strict migration path ensure that upgrades (like the recent move to v3) are safe and atomic.
+
+---
+
 ## 🛡️ Index Resilience & Recovery
 
 `cass` is designed to handle index corruption gracefully and recover automatically.
@@ -948,283 +1226,6 @@ cass completions bash > ~/.bash_completion.d/cass
 | `expand <path> -n N` | Show messages around a specific line number |
 | `timeline` | Activity timeline with grouping by hour/day |
 
-## 🤖 AI / Automation Mode
-
-`cass` is purpose-built for consumption by AI coding agents—not just as an afterthought, but as a first-class design goal. When you're an AI agent working on a codebase, your own session history and those of other agents become an invaluable knowledge base: solutions to similar problems, context about design decisions, debugging approaches that worked, and institutional memory that would otherwise be lost.
-
-### Why Cross-Agent Search Matters
-
-Imagine you're Claude Code working on a React authentication bug. With `cass`, you can instantly search across:
-- Your own previous sessions where you solved similar auth issues
-- Codex sessions where someone debugged OAuth flows
-- Cursor conversations about token refresh patterns
-- Aider chats about security best practices
-
-This cross-pollination of knowledge across different AI agents is transformative. Each agent has different strengths, different context windows, and encounters different problems. `cass` unifies all this collective intelligence into a single, searchable index.
-
-### Self-Documenting API
-
-`cass` teaches agents how to use it—no external documentation required:
-
-```bash
-# Quick capability check: what features exist?
-cass capabilities --json
-# → {"features": ["json_output", "cursor_pagination", "highlight_matches", ...], "connectors": [...], "limits": {...}}
-
-# Full API schema with argument types, defaults, and response shapes
-cass introspect --json
-
-# Topic-based help optimized for LLM consumption
-cass robot-docs commands    # All commands and flags
-cass robot-docs schemas     # Response JSON schemas
-cass robot-docs examples    # Copy-paste invocations
-cass robot-docs exit-codes  # Error handling guide
-cass robot-docs guide       # Quick-start walkthrough
-```
-
-### Forgiving Syntax (Agent-Friendly Parsing)
-
-AI agents sometimes make syntax mistakes. `cass` aggressively normalizes input to maximize acceptance when intent is clear:
-
-| What you type | What `cass` understands | Correction note |
-|---------------|------------------------|-----------------|
-| `cass serach "error"` | `cass search "error"` | "Did you mean 'search'?" |
-| `cass -robot -limit=5` | `cass --robot --limit=5` | Single-dash long flags normalized |
-| `cass --Robot --LIMIT 5` | `cass --robot --limit 5` | Case normalized |
-| `cass find "auth"` | `cass search "auth"` | `find`/`query`/`q` → `search` |
-| `cass --robot-docs` | `cass robot-docs` | Flag-as-subcommand detected |
-| `cass search --limt 5` | `cass search --limit 5` | Levenshtein distance ≤2 corrected |
-
-The CLI applies multiple normalization layers:
-1. **Typo correction**: Flags within edit distance 2 are auto-corrected
-2. **Case normalization**: `--Robot`, `--LIMIT` → `--robot`, `--limit`
-3. **Single-dash recovery**: `-robot` → `--robot` (common LLM mistake)
-4. **Subcommand aliases**: `find`/`query`/`q` → `search`, `ls`/`list` → `stats`
-5. **Global flag hoisting**: Position-independent flag handling
-
-When corrections are applied, `cass` emits a teaching note to stderr so agents learn the canonical syntax.
-
-### Structured Output Formats
-
-Every command supports machine-readable output:
-
-```bash
-# Pretty-printed JSON (default robot mode)
-cass search "error" --robot
-
-# Streaming JSONL: header line with _meta, then one hit per line
-cass search "error" --robot-format jsonl
-
-# Compact single-line JSON (minimal bytes)
-cass search "error" --robot-format compact
-
-# Include performance metadata
-cass search "error" --robot --robot-meta
-# → { "hits": [...], "_meta": { "elapsed_ms": 12, "cache_hit": true, "wildcard_fallback": false, ... } }
-```
-
-**Design principle**: stdout contains only parseable JSON data; all diagnostics, warnings, and progress go to stderr.
-
-### Token Budget Management
-
-LLMs have context limits. `cass` provides multiple levers to control output size:
-
-| Flag | Effect |
-|------|--------|
-| `--fields minimal` | Only `source_path`, `line_number`, `agent` |
-| `--fields summary` | Adds `title`, `score` |
-| `--fields score,title,snippet` | Custom field selection |
-| `--max-content-length 500` | Truncate long fields (UTF-8 safe, adds "...") |
-| `--max-tokens 2000` | Soft budget (~4 chars/token); adjusts truncation dynamically |
-| `--limit 5` | Cap number of results |
-
-Truncated fields include a `*_truncated: true` indicator so agents know when they're seeing partial content.
-
-### Error Handling for Agents
-
-Errors are structured, actionable, and include recovery hints:
-
-```json
-{
-  "error": {
-    "code": 3,
-    "kind": "index_missing",
-    "message": "Search index not found",
-    "hint": "Run 'cass index --full' to build the index",
-    "retryable": false
-  }
-}
-```
-
-**Exit codes** follow a semantic convention:
-| Code | Meaning | Typical action |
-|------|---------|----------------|
-| 0 | Success | Parse stdout |
-| 2 | Usage error | Fix syntax (hint provided) |
-| 3 | Index missing | Run `cass index --full` |
-| 4 | Not found | Try different query/path |
-| 5 | Idempotency mismatch | Retry with new key |
-| 9 | Unknown error | Check `retryable` flag |
-| 10 | Timeout exceeded | Increase `--timeout` or reduce scope |
-
-The `retryable` field tells agents whether a retry might succeed (e.g., transient I/O) vs. guaranteed failure (e.g., invalid path).
-
-### Session Analysis Commands
-
-Beyond search, `cass` provides commands for deep-diving into specific sessions:
-
-```bash
-# Export full conversation to shareable format
-cass export /path/to/session.jsonl --format markdown -o conversation.md
-cass export /path/to/session.jsonl --format html -o conversation.html
-cass export /path/to/session.jsonl --format json --include-tools
-
-# Expand context around a specific line (from search result)
-cass expand /path/to/session.jsonl -n 42 -C 5 --json
-# → Shows 5 messages before and after line 42
-
-# Activity timeline: when were agents active?
-cass timeline --today --json --group-by hour
-cass timeline --since 7d --agent claude --json
-# → Grouped activity counts, useful for understanding work patterns
-```
-
-### Match Highlighting
-
-The `--highlight` flag wraps matching terms for visual/programmatic identification:
-
-```bash
-cass search "authentication error" --robot --highlight
-# In text output: **authentication** and **error** are bold-wrapped
-# In HTML export: <mark>authentication</mark> and <mark>error</mark>
-```
-
-Highlighting is query-aware: quoted phrases like `"auth error"` highlight as a unit; individual terms highlight separately.
-
-### Pagination & Cursors
-
-For large result sets, use cursor-based pagination:
-
-```bash
-# First page
-cass search "TODO" --robot --robot-meta --limit 20
-# → { "hits": [...], "_meta": { "next_cursor": "eyJ..." } }
-
-# Next page
-cass search "TODO" --robot --robot-meta --limit 20 --cursor "eyJ..."
-```
-
-Cursors are opaque tokens encoding the pagination state. They remain valid as long as the index isn't rebuilt.
-
-### Request Correlation
-
-For debugging and logging, attach a request ID:
-
-```bash
-cass search "bug" --robot --request-id "req-12345"
-# → { "hits": [...], "_meta": { "request_id": "req-12345" } }
-```
-
-### Idempotent Operations
-
-For safe retries (e.g., in CI pipelines or flaky networks):
-
-```bash
-cass index --full --idempotency-key "build-$(date +%Y%m%d)"
-# If same key + params were used in last 24h, returns cached result
-```
-
-### Query Analysis
-
-Debug why a search returned unexpected results:
-
-```bash
-cass search "auth*" --robot --explain
-# → Includes parsed query AST, term expansion, cost estimates
-
-cass search "auth error" --robot --dry-run
-# → Validates query syntax without executing
-```
-
-### Traceability
-
-For debugging agent pipelines:
-
-```bash
-cass search "error" --robot --trace-file /tmp/cass-trace.json
-# Appends execution span with timing, exit code, and command details
-```
-
-### Search Flags Reference
-
-| Flag | Purpose |
-|------|---------|
-| `--robot` / `--json` | JSON output (pretty-printed) |
-| `--robot-format jsonl\|compact` | Streaming or single-line JSON |
-| `--robot-meta` | Include `_meta` block (elapsed_ms, cache stats, index freshness) |
-| `--fields minimal\|summary\|<list>` | Reduce payload size |
-| `--max-content-length N` | Truncate content fields to N chars |
-| `--max-tokens N` | Soft token budget (~4 chars/token) |
-| `--timeout N` | Timeout in milliseconds; returns partial results on expiry |
-| `--cursor <token>` | Cursor-based pagination (from `_meta.next_cursor`) |
-| `--request-id ID` | Echoed in response for correlation |
-| `--aggregate agent,workspace,date` | Server-side aggregations |
-| `--explain` | Include query analysis (parsed query, cost estimate) |
-| `--dry-run` | Validate query without executing |
-| `--highlight` | Wrap matching terms with markers |
-
-### Index Flags Reference
-
-| Flag | Purpose |
-|------|---------|
-| `--idempotency-key KEY` | Safe retries: same key + params returns cached result (24h TTL) |
-| `--json` | JSON output with stats |
-
-### Ready-to-paste blurb for AGENTS.md / CLAUDE.md
-
-```
-🔎 cass — Search All Your Agent History
-
- What: cass indexes conversations from Claude Code, Codex, Cursor, Gemini, Aider, ChatGPT, and more into a unified, searchable index. Before solving a problem from scratch, check if any agent already solved something similar.
-
- ⚠️ NEVER run bare cass — it launches an interactive TUI. Always use --robot or --json.
-
- Quick Start
-
- # Check if index is healthy (exit 0=ok, 1=run index first)
- cass health
-
- # Search across all agent histories
- cass search "authentication error" --robot --limit 5
-
- # View a specific result (from search output)
- cass view /path/to/session.jsonl -n 42 --json
-
- # Expand context around a line
- cass expand /path/to/session.jsonl -n 42 -C 3 --json
-
- # Learn the full API
- cass capabilities --json # Feature discovery
- cass robot-docs guide # LLM-optimized docs
-
- Why Use It
-
- - Cross-agent knowledge: Find solutions from Codex when using Claude, or vice versa
- - Forgiving syntax: Typos and wrong flags are auto-corrected with teaching notes
- - Token-efficient: --fields minimal returns only essential data
-
- Key Flags
-
- | Flag | Purpose |
- |------------------|--------------------------------------------------------|
- | --robot / --json | Machine-readable JSON output (required!) |
- | --fields minimal | Reduce payload: source_path, line_number, agent only |
- | --limit N | Cap result count |
- | --agent NAME | Filter to specific agent (claude, codex, cursor, etc.) |
- | --days N | Limit to recent N days |
-
- stdout = data only, stderr = diagnostics. Exit 0 = success.
-```
 ---
 
 ## 🔒 Integrity & Safety
