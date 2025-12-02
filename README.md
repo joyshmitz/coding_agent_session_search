@@ -1183,19 +1183,49 @@ cass search "error" --robot --trace-file /tmp/cass-trace.json
 
 ### Ready-to-paste blurb for AGENTS.md / CLAUDE.md
 
-> **cass (Coding Agent Session Search)** — High-performance local search for agent history.
-> - **Discovery**: `cass capabilities --json` or `cass introspect --json`.
-> - **Search**: `cass search "query" --robot --robot-meta --fields minimal [--highlight]`.
-> - **Paginate**: Use `_meta.next_cursor` → `--cursor <value>`.
-> - **Context**: `cass context <path> --json` (related sessions).
-> - **Inspect**: `cass view <source_path> -n <line> --json`.
-> - **Expand**: `cass expand <path> -n <line> -C 3 --json` (messages around line).
-> - **Export**: `cass export <path> --format markdown` (full conversation).
-> - **Timeline**: `cass timeline --today --json` (activity overview).
-> - **Health**: `cass health` (exit 0=ok, 1=unhealthy).
-> - **Manage**: `cass index --full --idempotency-key <key>`.
-> - **Design**: stdout is data-only JSON; stderr is diagnostics.
+```
+🔎 cass — Search All Your Agent History
 
+ What: cass indexes conversations from Claude Code, Codex, Cursor, Gemini, Aider, ChatGPT, and more into a unified, searchable index. Before solving a problem from scratch, check if any agent already solved something similar.
+
+ ⚠️ NEVER run bare cass — it launches an interactive TUI. Always use --robot or --json.
+
+ Quick Start
+
+ # Check if index is healthy (exit 0=ok, 1=run index first)
+ cass health
+
+ # Search across all agent histories
+ cass search "authentication error" --robot --limit 5
+
+ # View a specific result (from search output)
+ cass view /path/to/session.jsonl -n 42 --json
+
+ # Expand context around a line
+ cass expand /path/to/session.jsonl -n 42 -C 3 --json
+
+ # Learn the full API
+ cass capabilities --json # Feature discovery
+ cass robot-docs guide # LLM-optimized docs
+
+ Why Use It
+
+ - Cross-agent knowledge: Find solutions from Codex when using Claude, or vice versa
+ - Forgiving syntax: Typos and wrong flags are auto-corrected with teaching notes
+ - Token-efficient: --fields minimal returns only essential data
+
+ Key Flags
+
+ | Flag | Purpose |
+ |------------------|--------------------------------------------------------|
+ | --robot / --json | Machine-readable JSON output (required!) |
+ | --fields minimal | Reduce payload: source_path, line_number, agent only |
+ | --limit N | Cap result count |
+ | --agent NAME | Filter to specific agent (claude, codex, cursor, etc.) |
+ | --days N | Limit to recent N days |
+
+ stdout = data only, stderr = diagnostics. Exit 0 = success.
+```
 ---
 
 ## 🔒 Integrity & Safety
