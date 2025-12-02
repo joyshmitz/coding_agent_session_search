@@ -259,10 +259,21 @@ impl Connector for PiAgentConnector {
                             }
                             ended_at = created.or(ended_at);
 
+                            // Extract author (model) for assistant messages
+                            // Check message.model first, fall back to tracked model_id
+                            let author = if normalized_role == "assistant" {
+                                msg.get("model")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from)
+                                    .or_else(|| model_id.clone())
+                            } else {
+                                None
+                            };
+
                             messages.push(NormalizedMessage {
                                 idx: messages.len() as i64,
                                 role: normalized_role.to_string(),
-                                author: None,
+                                author,
                                 created_at: created,
                                 content: content_str,
                                 extra: val.clone(),
