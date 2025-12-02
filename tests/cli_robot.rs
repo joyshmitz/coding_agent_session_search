@@ -137,6 +137,69 @@ fn introspect_global_flags_have_types_and_defaults() {
     }
 }
 
+/// Introspect should mark repeatable args and detect path/integer types.
+#[test]
+fn introspect_repeatable_and_value_types() {
+    let mut cmd = base_cmd();
+    cmd.args(["introspect", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid introspect json");
+    let commands = json["commands"].as_array().expect("commands array");
+
+    let search = commands
+        .iter()
+        .find(|c| c["name"] == "search")
+        .expect("search command present");
+    let args = search["arguments"].as_array().expect("search args");
+
+    let mut found_agent = false;
+    let mut found_workspace = false;
+    let mut found_data_dir = false;
+    let mut found_limit = false;
+    let mut found_aggregate = false;
+
+    for arg in args {
+        let name = arg["name"].as_str().unwrap_or_default();
+        match name {
+            "agent" => {
+                found_agent = true;
+                assert_eq!(arg["repeatable"], true);
+            }
+            "workspace" => {
+                found_workspace = true;
+                assert_eq!(arg["repeatable"], true);
+            }
+            "data-dir" => {
+                found_data_dir = true;
+                assert_eq!(arg["value_type"], "path");
+            }
+            "limit" => {
+                found_limit = true;
+                assert_eq!(arg["value_type"], "integer");
+                assert_eq!(arg["default"], 10);
+            }
+            "aggregate" => {
+                found_aggregate = true;
+                assert_eq!(arg["repeatable"], true);
+            }
+            _ => {}
+        }
+    }
+
+    assert!(found_agent, "search should document repeatable agent arg");
+    assert!(
+        found_workspace,
+        "search should document repeatable workspace arg"
+    );
+    assert!(found_data_dir, "search should document data-dir path type");
+    assert!(found_limit, "search should document integer limit");
+    assert!(
+        found_aggregate,
+        "search should document repeatable aggregate"
+    );
+}
+
 #[test]
 fn state_matches_status() {
     let mut status = base_cmd();

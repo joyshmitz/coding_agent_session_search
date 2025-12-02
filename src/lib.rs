@@ -14,6 +14,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::Utc;
 use clap::{Arg, ArgAction, Command, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use indexer::IndexOptions;
+use itertools::Itertools;
 use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -483,8 +484,286 @@ impl WrapConfig {
     }
 }
 
+/// Normalize common robot-mode invocation mistakes to make the CLI more forgiving.
+/// - Converts `--robot-docs` (and `--robot-docs=topic`) into the `robot-docs` subcommand.
+/// - Lifts global flags (color/progress/wrap/nowrap/db/quiet/verbose/trace-file/robot-help)
+///   in front of subcommands so `cass robot-docs commands --color=never` is accepted.
+/// Returns normalized argv plus an optional note for stderr when changes were made.
+fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
+    if raw.is_empty() {
+        return (raw, None);
+    }
+    let prog = &raw[0];
+    let mut globals: Vec<String> = Vec::new();
+    let mut rest: Vec<String> = Vec::new();
+    let mut sub_seen = false;
+    let mut rewrote = false;
+
+    let mut push_global = |arg: String, globals: &mut Vec<String>, rewrote: &mut bool| {
+        globals.push(arg);
+        *rewrote = true;
+    };
+
+    for arg in raw.iter().skip(1) {
+        // Handle --robot-docs and --robot-docs=topic
+        if arg == "--robot-docs" {
+            rest.push("robot-docs".into());
+            rewrote = true;
+            continue;
+        }
+        if let Some(topic) = arg.strip_prefix("--robot-docs=") {
+            rest.push("robot-docs".into());
+            if !topic.is_empty() {
+                rest.push(topic.to_string());
+            }
+            rewrote = true;
+            continue;
+        }
+
+        let is_global = |s: &str| {
+            s == "--color"
+                || s.starts_with("--color=")
+                || s == "--progress"
+                || s.starts_with("--progress=")
+                || s == "--wrap"
+                || s.starts_with("--wrap=")
+                || s == "--nowrap"
+                || s == "--db"
+                || s.starts_with("--db=")
+                || s == "--quiet"
+                || s == "-q"
+                || s == "--verbose"
+                || s == "-v"
+                || s == "--trace-file"
+                || s.starts_with("--trace-file=")
+                || s == "--robot-help"
+        };
+
+        if is_global(arg) {
+            push_global(arg.to_string(), &mut globals, &mut rewrote);
+            continue;
+        }
+
+        if !sub_seen && !arg.starts_with('-') {
+            sub_seen = true;
+        }
+        rest.push(arg.to_string());
+    }
+
+    let mut normalized = Vec::with_capacity(1 + globals.len() + rest.len());
+    normalized.push(prog.clone());
+    normalized.extend(globals);
+    normalized.extend(rest);
+
+    let note = rewrote.then(|| {
+        let joined = if normalized.len() > 1 {
+            normalized[1..].join(" ")
+        } else {
+            String::new()
+        };
+        format!("Normalized arguments for you: {joined}")
+    });
+    (normalized, note)
+}
+
+/// Build a friendly parse error with actionable examples.
+fn format_friendly_parse_error(err: clap::Error, raw: &[String], normalized: &[String]) -> String {
+    let mut parts = Vec::new();
+    parts.push("Argument parsing failed; command intent unclear.".to_string());
+    parts.push(format!("clap error: {err}"));
+    if raw != normalized && normalized.len() > 1 {
+        parts.push(format!("Normalized attempt: {}", normalized[1..].join(" ")));
+    }
+    parts.push("Examples:".to_string());
+    parts.push("  cass --color=never robot-docs commands".to_string());
+    parts.push("  cass robot-docs schemas".to_string());
+    parts.push("  cass search \"error\" --json --limit 5".to_string());
+    parts.push("  cass capabilities --json".to_string());
+    parts.join("\n")
+}
+
+/// Heuristic recovery for command-line errors to help agents.
+/// Returns `(corrected_args, correction_note)` if a likely intent is found.
+fn heuristic_parse_recovery(
+    err: &clap::Error,
+    raw_args: &[String],
+) -> Option<(Vec<String>, String)> {
+    // Only attempt recovery for "unknown argument" or "unrecognized subcommand" errors
+    let is_unknown = err.kind() == clap::error::ErrorKind::UnknownArgument
+        || err.kind() == clap::error::ErrorKind::InvalidSubcommand;
+
+    if !is_unknown || raw_args.len() < 2 {
+        return None;
+    }
+
+    let prog = &raw_args[0];
+    let args = &raw_args[1..];
+    let mut corrected = Vec::new();
+    corrected.push(prog.clone());
+
+    let mut made_correction = false;
+    let mut notes = Vec::new();
+
+    // 1. Detect implicit "search" subcommand
+    // If the first arg isn't a known subcommand or flag, and looks like a query, assume "search".
+    let known_cmds = [
+        "search",
+        "index",
+        "stats",
+        "status",
+        "diag",
+        "view",
+        "capabilities",
+        "introspect",
+        "robot-docs",
+        "tui",
+        "help",
+        "--help",
+        "-h",
+        "--version",
+        "-V",
+    ];
+    if !args.is_empty() && !args[0].starts_with('-') && !known_cmds.contains(&args[0].as_str()) {
+        corrected.push("search".to_string());
+        // If the arg looks like `query="foo"`, strip the key
+        if args[0].starts_with("query=") || args[0].starts_with("q=") {
+            let val = args[0].split_once('=').map(|(_, v)| v).unwrap_or(&args[0]);
+            corrected.push(val.to_string());
+            notes.push(format!(
+                "Assumed 'search' subcommand and stripped query key from '{}'",
+                args[0]
+            ));
+        } else {
+            corrected.push(args[0].clone());
+            notes.push(format!(
+                "Assumed 'search' subcommand for positional argument '{}'",
+                args[0]
+            ));
+        }
+        made_correction = true;
+        corrected.extend_from_slice(&args[1..]);
+    } else {
+        // Just copy original structure to start
+        corrected.extend_from_slice(args);
+    }
+
+    // 2. Fuzzy match flags and fix key=value syntax
+    let mut final_args = Vec::new();
+    final_args.push(corrected[0].clone()); // prog
+
+    for arg in corrected.iter().skip(1) {
+        if arg.starts_with("--") {
+            // Split --flag=value or --flag
+            let (flag, value) = if let Some((f, v)) = arg.split_once('=') {
+                (f, Some(v))
+            } else {
+                (arg.as_str(), None)
+            };
+
+            // Known flags for fuzzy matching
+            let known_flags = [
+                "--robot",
+                "--json",
+                "--limit",
+                "--offset",
+                "--agent",
+                "--workspace",
+                "--fields",
+                "--max-tokens",
+                "--request-id",
+                "--cursor",
+                "--since",
+                "--until",
+                "--days",
+                "--today",
+                "--week",
+                "--full",
+                "--watch",
+                "--data-dir",
+                "--verbose",
+                "--quiet",
+            ];
+
+            // Check for exact match
+            if known_flags.contains(&flag) {
+                final_args.push(arg.clone());
+                continue;
+            }
+
+            // Check for typos (levenshtein distance <= 2)
+            let best_match = known_flags
+                .iter()
+                .min_by_key(|k| strsim::levenshtein(flag, k))
+                .filter(|k| strsim::levenshtein(flag, k) <= 2);
+
+            if let Some(&correction) = best_match {
+                if let Some(v) = value {
+                    final_args.push(format!("{correction}={v}"));
+                } else {
+                    final_args.push(correction.to_string());
+                }
+                notes.push(format!("Corrected typo '{flag}' to '{correction}'"));
+                made_correction = true;
+            } else {
+                // Keep as is if no good guess
+                final_args.push(arg.clone());
+            }
+        } else if arg.contains('=') && !arg.starts_with('-') {
+            // 3. Handle `limit=5` (missing --)
+            let (key, val) = arg.split_once('=').unwrap();
+            let flag_candidate = format!("--{key}");
+            // Quick check if adding -- makes it a valid flag
+            let known_flags = ["--limit", "--offset", "--agent", "--workspace", "--days"];
+            if known_flags.contains(&flag_candidate.as_str()) {
+                final_args.push(flag_candidate);
+                final_args.push(val.to_string());
+                notes.push(format!(
+                    "Interpreted '{arg}' as flag '{key}' with value '{val}'"
+                ));
+                made_correction = true;
+            } else {
+                final_args.push(arg.clone());
+            }
+        } else {
+            final_args.push(arg.clone());
+        }
+    }
+
+    if made_correction {
+        Some((final_args, notes.join("; ")))
+    } else {
+        None
+    }
+}
+
 pub async fn run() -> CliResult<()> {
-    let cli = Cli::parse();
+    let raw_args: Vec<String> = std::env::args().collect();
+    // First normalization pass (global flags lift)
+    let (normalized_args, parse_note) = normalize_args(raw_args.clone());
+
+    let (cli, heuristic_note) = match Cli::try_parse_from(&normalized_args) {
+        Ok(cli) => (cli, None),
+        Err(err) => {
+            // Attempt heuristic recovery
+            if let Some((recovered_args, note)) = heuristic_parse_recovery(&err, &normalized_args) {
+                // Try parsing again with recovered args
+                match Cli::try_parse_from(&recovered_args) {
+                    Ok(cli) => (cli, Some(note)),
+                    Err(_) => {
+                        // Recovery failed to produce valid args, fail with original error + friendly help
+                        let friendly =
+                            format_friendly_parse_error(err, &raw_args, &normalized_args);
+                        return Err(CliError::usage("Could not parse arguments", Some(friendly)));
+                    }
+                }
+            } else {
+                // No recovery possible
+                let friendly = format_friendly_parse_error(err, &raw_args, &normalized_args);
+                return Err(CliError::usage("Could not parse arguments", Some(friendly)));
+            }
+        }
+    };
+
     let stdout_is_tty = io::stdout().is_terminal();
     let stderr_is_tty = io::stderr().is_terminal();
     configure_color(cli.color, stdout_is_tty, stderr_is_tty);
@@ -495,6 +774,17 @@ pub async fn run() -> CliResult<()> {
     let start_ts = Utc::now();
     let start_instant = Instant::now();
     let command_label = describe_command(&cli);
+
+    // If robot mode, we might output JSON.
+    // If we have a heuristic correction note, we need to inject it into the JSON output _if possible_,
+    // or print it to stderr if we are strict.
+    // For now, let's print to stderr as a warning so agents can see it in their logs.
+    if let Some(note) = parse_note {
+        eprintln!("WARN: {note}");
+    }
+    if let Some(note) = heuristic_note {
+        eprintln!("WARN: Auto-corrected command: {note}");
+    }
 
     let result = execute_cli(
         &cli,

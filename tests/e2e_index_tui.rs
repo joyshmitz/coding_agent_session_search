@@ -22,7 +22,7 @@ fn index_then_tui_once_headless() {
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
 
-    let data_dir = coding_agent_search::default_data_dir();
+    let data_dir = tmp.path().join("data");
     fs::create_dir_all(&data_dir).unwrap();
 
     // Codex fixture under CODEX_HOME to satisfy detection.

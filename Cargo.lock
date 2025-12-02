@@ -435,6 +435,7 @@ dependencies = [
  "glob",
  "indicatif",
  "insta",
+ "itertools 0.13.0",
  "lru",
  "notify",
  "once_cell",
