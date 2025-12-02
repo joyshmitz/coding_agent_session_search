@@ -5278,7 +5278,7 @@ fn run_index_with_data(
         let cached: Option<(String, String)> = conn
             .query_row(
                 "SELECT params_hash, result_json FROM idempotency_keys WHERE key = ?1 AND expires_at > ?2",
-                [key, &now_ms.to_string()],
+                rusqlite::params![key, now_ms],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .ok();

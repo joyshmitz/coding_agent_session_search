@@ -5,8 +5,8 @@
 ![Status](https://img.shields.io/badge/status-alpha-purple.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-**Unified, high-performance TUI to index and search your local coding agent history.**  
-Aggregates sessions from Codex, Claude Code, Gemini CLI, Cline, OpenCode, and Amp into a single, searchable timeline.
+**Unified, high-performance TUI to index and search your local coding agent history.**
+Aggregates sessions from Codex, Claude Code, Gemini CLI, Cline, OpenCode, Amp, Cursor, ChatGPT, and Aider into a single, searchable timeline.
 
 <div align="center">
 

@@ -50,6 +50,14 @@ once_cell = "*"
 syntect = "*"
 itertools = "*"
 
+# Crypto for ChatGPT encrypted conversations
+aes-gcm = "0.10"
+ring = "0.17"
+
+# macOS keychain access (optional, for ChatGPT decryption)
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2.11"
+
 [build-dependencies]
 vergen = { version = "*", default-features = false, features = ["build", "cargo"] }
 

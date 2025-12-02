@@ -196,11 +196,15 @@ fn multi_connector_pipeline() {
     );
     fs::write(sessions.join("rollout-2.jsonl"), content).unwrap();
 
-    // Index again (incremental)
+    // Index again (incremental) - must pass same env vars as full index
     cargo_bin_cmd!("cass")
         .arg("index")
         .arg("--data-dir")
         .arg(&data_dir)
+        .env("HOME", home.to_string_lossy().as_ref())
+        .env("XDG_DATA_HOME", xdg_data.to_string_lossy().as_ref())
+        .env("CODEX_HOME", dot_codex.to_string_lossy().as_ref())
+        .env("GEMINI_HOME", dot_gemini.to_string_lossy().as_ref())
         .assert()
         .success();
 
