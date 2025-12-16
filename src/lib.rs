@@ -424,6 +424,23 @@ pub enum SourcesCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Add a new remote source
+    Add {
+        /// Source URL (e.g., user@host or ssh://user@host)
+        url: String,
+        /// Friendly name for this source (becomes source_id)
+        #[arg(long)]
+        name: Option<String>,
+        /// Use preset paths for platform (macos-defaults, linux-defaults)
+        #[arg(long)]
+        preset: Option<String>,
+        /// Paths to sync (can be specified multiple times)
+        #[arg(long = "path", short = 'p')]
+        paths: Vec<String>,
+        /// Skip connectivity test
+        #[arg(long)]
+        no_test: bool,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -6876,6 +6893,15 @@ fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
         SourcesCommand::List { verbose, json } => {
             run_sources_list(verbose, json)?;
         }
+        SourcesCommand::Add {
+            url,
+            name,
+            preset,
+            paths,
+            no_test,
+        } => {
+            run_sources_add(&url, name, preset, paths, no_test)?;
+        }
     }
     Ok(())
 }
@@ -6989,6 +7015,199 @@ fn run_sources_list(verbose: bool, json: bool) -> CliResult<()> {
         }
 
         println!("Total: {} source(s)", config.sources.len());
+    }
+
+    Ok(())
+}
+
+/// Add a new remote source (P5.2)
+fn run_sources_add(
+    url: &str,
+    name: Option<String>,
+    preset: Option<String>,
+    paths_arg: Vec<String>,
+    no_test: bool,
+) -> CliResult<()> {
+    use crate::sources::config::{get_preset_paths, Platform, SourceDefinition, SourcesConfig};
+    use crate::sources::provenance::SourceKind;
+
+    // Parse URL to extract host
+    let (host, source_id) = parse_source_url(url, name.as_deref())?;
+
+    // Determine paths: preset, explicit args, or error
+    let paths = if let Some(ref preset_name) = preset {
+        get_preset_paths(preset_name).map_err(|e| CliError {
+            code: 10,
+            kind: "config",
+            message: format!("Invalid preset: {e}"),
+            hint: Some("Valid presets: macos-defaults, linux-defaults".into()),
+            retryable: false,
+        })?
+    } else if !paths_arg.is_empty() {
+        paths_arg
+    } else {
+        return Err(CliError {
+            code: 10,
+            kind: "config",
+            message: "No paths specified".into(),
+            hint: Some("Use --preset macos-defaults or --path <path> to specify paths".into()),
+            retryable: false,
+        });
+    };
+
+    // Test SSH connectivity unless --no-test
+    if !no_test {
+        println!("Testing SSH connectivity to {host}...");
+        test_ssh_connectivity(&host)?;
+        println!("  Connected successfully");
+    }
+
+    // Load existing config
+    let mut config = SourcesConfig::load().map_err(|e| CliError {
+        code: 9,
+        kind: "config",
+        message: format!("Failed to load sources config: {e}"),
+        hint: None,
+        retryable: false,
+    })?;
+
+    // Check for duplicate
+    if config.sources.iter().any(|s| s.name == source_id) {
+        return Err(CliError {
+            code: 10,
+            kind: "config",
+            message: format!("Source '{source_id}' already exists"),
+            hint: Some("Use a different --name or remove the existing source first".into()),
+            retryable: false,
+        });
+    }
+
+    // Determine platform from preset
+    let platform = preset.as_ref().and_then(|p| {
+        if p.contains("macos") {
+            Some(Platform::Macos)
+        } else if p.contains("linux") {
+            Some(Platform::Linux)
+        } else {
+            None
+        }
+    });
+
+    // Create source definition
+    let source = SourceDefinition {
+        name: source_id.clone(),
+        source_type: SourceKind::Ssh,
+        host: Some(host.clone()),
+        paths: paths.clone(),
+        platform,
+        ..Default::default()
+    };
+
+    // Add and save
+    config.add_source(source).map_err(|e| CliError {
+        code: 10,
+        kind: "config",
+        message: format!("Failed to add source: {e}"),
+        hint: None,
+        retryable: false,
+    })?;
+
+    config.save().map_err(|e| CliError {
+        code: 11,
+        kind: "config",
+        message: format!("Failed to save config: {e}"),
+        hint: Some("Check file permissions on config directory".into()),
+        retryable: false,
+    })?;
+
+    // Success output
+    let config_path = SourcesConfig::config_path()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "~/.config/cass/sources.toml".into());
+
+    println!();
+    println!("Added source '{source_id}'");
+    println!("  Host: {host}");
+    println!("  Paths: {} path(s)", paths.len());
+    println!("  Config: {config_path}");
+    println!();
+    println!("Next steps:");
+    println!("  cass sources sync {source_id}   # Fetch sessions from this source");
+    println!("  cass sources list               # View all configured sources");
+
+    Ok(())
+}
+
+/// Parse source URL and extract host and source_id.
+/// Accepts formats: user@host, ssh://user@host
+fn parse_source_url(url: &str, name: Option<&str>) -> Result<(String, String), CliError> {
+    // Strip ssh:// prefix if present
+    let host = url.strip_prefix("ssh://").unwrap_or(url);
+
+    // Validate URL contains @
+    if !host.contains('@') {
+        return Err(CliError {
+            code: 10,
+            kind: "config",
+            message: "Invalid URL format: missing username".into(),
+            hint: Some("Use format: user@hostname (e.g., user@laptop.local)".into()),
+            retryable: false,
+        });
+    }
+
+    // Generate source_id from hostname if not provided
+    let source_id = if let Some(n) = name {
+        n.to_string()
+    } else {
+        // Extract hostname part (after @)
+        let hostname_part = host.split('@').nth(1).unwrap_or(host);
+        // Take first segment before any dots
+        hostname_part
+            .split('.')
+            .next()
+            .unwrap_or(hostname_part)
+            .to_string()
+    };
+
+    Ok((host.to_string(), source_id))
+}
+
+/// Test SSH connectivity to a host.
+fn test_ssh_connectivity(host: &str) -> CliResult<()> {
+    let output = std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            host,
+            "echo",
+            "ok",
+        ])
+        .output()
+        .map_err(|e| CliError {
+            code: 12,
+            kind: "ssh",
+            message: format!("Failed to run ssh command: {e}"),
+            hint: Some("Ensure ssh is installed and in PATH".into()),
+            retryable: false,
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CliError {
+            code: 12,
+            kind: "ssh",
+            message: format!("SSH connection failed to {host}"),
+            hint: Some(format!(
+                "Error: {}. Ensure SSH key is set up for this host.",
+                stderr.trim()
+            )),
+            retryable: true,
+        });
     }
 
     Ok(())
