@@ -407,6 +407,23 @@ pub enum Commands {
         #[arg(long)]
         source: Option<String>,
     },
+    /// Manage remote sources (P5.x)
+    #[command(subcommand)]
+    Sources(SourcesCommand),
+}
+
+/// Subcommands for managing remote sources (P5.x)
+#[derive(Subcommand, Debug, Clone)]
+pub enum SourcesCommand {
+    /// List configured sources
+    List {
+        /// Show detailed information
+        #[arg(long, short)]
+        verbose: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -1537,7 +1554,8 @@ async fn execute_cli(
         | Commands::Stats { .. }
         | Commands::Diag { .. }
         | Commands::Status { .. }
-        | Commands::View { .. } => {
+        | Commands::View { .. }
+        | Commands::Sources(..) => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_writer(std::io::stderr)
@@ -1759,6 +1777,9 @@ async fn execute_cli(
                         source,
                     )?;
                 }
+                Commands::Sources(subcmd) => {
+                    run_sources_command(subcmd)?;
+                }
                 _ => {}
             }
         }
@@ -1918,6 +1939,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Export { .. }) => "export".to_string(),
         Some(Commands::Expand { .. }) => "expand".to_string(),
         Some(Commands::Timeline { .. }) => "timeline".to_string(),
+        Some(Commands::Sources(..)) => "sources".to_string(),
         None => "(default)".to_string(),
     }
 }
@@ -6845,6 +6867,130 @@ fn run_timeline(
         println!("\n{}", "─".repeat(70));
         println!("   Total: {} sessions\n", sessions.len());
     }
+    Ok(())
+}
+
+/// Handle sources subcommands (P5.x)
+fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
+    match cmd {
+        SourcesCommand::List { verbose, json } => {
+            run_sources_list(verbose, json)?;
+        }
+    }
+    Ok(())
+}
+
+/// List configured sources (P5.3)
+fn run_sources_list(verbose: bool, json: bool) -> CliResult<()> {
+    use crate::sources::config::SourcesConfig;
+
+    let config = SourcesConfig::load().map_err(|e| CliError {
+        code: 9,
+        kind: "config",
+        message: format!("Failed to load sources config: {e}"),
+        hint: Some("Run 'cass sources add' to configure a source".into()),
+        retryable: false,
+    })?;
+
+    // Get config path for display
+    let config_path = SourcesConfig::config_path()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "unknown".into());
+
+    if json {
+        let sources_json: Vec<serde_json::Value> = config
+            .sources
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "type": s.source_type.as_str(),
+                    "host": s.host,
+                    "paths": s.paths,
+                    "sync_schedule": s.sync_schedule.to_string(),
+                    "platform": s.platform.map(|p| p.to_string()),
+                })
+            })
+            .collect();
+
+        let output = serde_json::json!({
+            "config_path": config_path,
+            "sources": sources_json,
+            "total": config.sources.len(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).unwrap_or_default()
+        );
+    } else {
+        println!("CASS Sources Configuration");
+        println!("===========================");
+        println!("Config: {config_path}");
+        println!();
+
+        if config.sources.is_empty() {
+            println!("No sources configured.");
+            println!();
+            println!("To add a source, run:");
+            println!("  cass sources add user@hostname --preset macos-defaults");
+            return Ok(());
+        }
+
+        if verbose {
+            // Verbose output with full details
+            for source in &config.sources {
+                println!("Source: {}", source.name);
+                println!("  Type: {}", source.source_type);
+                if let Some(ref host) = source.host {
+                    println!("  Host: {host}");
+                }
+                println!("  Schedule: {}", source.sync_schedule);
+                if let Some(platform) = source.platform {
+                    println!("  Platform: {platform}");
+                }
+                if !source.paths.is_empty() {
+                    println!("  Paths:");
+                    for path in &source.paths {
+                        println!("    - {path}");
+                    }
+                }
+                if !source.path_mappings.is_empty() {
+                    println!("  Path Mappings:");
+                    for (from, to) in &source.path_mappings {
+                        println!("    {from} -> {to}");
+                    }
+                }
+                println!();
+            }
+        } else {
+            // Table output
+            println!(
+                "  {:15} {:8} {:30} {:>5}",
+                "NAME", "TYPE", "HOST", "PATHS"
+            );
+            println!("  {}", "-".repeat(62));
+            for source in &config.sources {
+                let host = source.host.as_deref().unwrap_or("-");
+                let host_truncated = if host.len() > 30 {
+                    format!("{}...", &host[..27])
+                } else {
+                    host.to_string()
+                };
+                println!(
+                    "  {:15} {:8} {:30} {:>5}",
+                    source.name,
+                    source.source_type.as_str(),
+                    host_truncated,
+                    source.paths.len()
+                );
+            }
+            println!();
+        }
+
+        println!("Total: {} source(s)", config.sources.len());
+    }
+
     Ok(())
 }
 
