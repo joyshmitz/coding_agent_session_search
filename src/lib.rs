@@ -441,6 +441,17 @@ pub enum SourcesCommand {
         #[arg(long)]
         no_test: bool,
     },
+    /// Remove a configured source
+    Remove {
+        /// Name of source to remove
+        name: String,
+        /// Also delete synced session data from index
+        #[arg(long)]
+        purge: bool,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -6902,6 +6913,9 @@ fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
         } => {
             run_sources_add(&url, name, preset, paths, no_test)?;
         }
+        SourcesCommand::Remove { name, purge, yes } => {
+            run_sources_remove(&name, purge, yes)?;
+        }
     }
     Ok(())
 }
@@ -7208,6 +7222,92 @@ fn test_ssh_connectivity(host: &str) -> CliResult<()> {
             )),
             retryable: true,
         });
+    }
+
+    Ok(())
+}
+
+/// Remove a configured source (P5.7)
+fn run_sources_remove(name: &str, purge: bool, skip_confirm: bool) -> CliResult<()> {
+    use crate::sources::config::SourcesConfig;
+
+    // Load existing config
+    let mut config = SourcesConfig::load().map_err(|e| CliError {
+        code: 9,
+        kind: "config",
+        message: format!("Failed to load sources config: {e}"),
+        hint: None,
+        retryable: false,
+    })?;
+
+    // Check source exists
+    if !config.sources.iter().any(|s| s.name == name) {
+        return Err(CliError {
+            code: 13,
+            kind: "not_found",
+            message: format!("Source '{name}' not found"),
+            hint: Some("Run 'cass sources list' to see configured sources".into()),
+            retryable: false,
+        });
+    }
+
+    // Confirmation prompt
+    if !skip_confirm {
+        let msg = if purge {
+            format!(
+                "Remove source '{name}' and delete indexed data? This cannot be undone. [y/N]: "
+            )
+        } else {
+            format!("Remove source '{name}' from configuration? [y/N]: ")
+        };
+        print!("{msg}");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).map_err(|e| CliError {
+            code: 14,
+            kind: "io",
+            message: format!("Failed to read input: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+
+        let input = input.trim().to_lowercase();
+        if input != "y" && input != "yes" {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Remove from config
+    config.remove_source(name);
+    config.save().map_err(|e| CliError {
+        code: 11,
+        kind: "config",
+        message: format!("Failed to save config: {e}"),
+        hint: Some("Check file permissions on config directory".into()),
+        retryable: false,
+    })?;
+
+    println!("Removed '{name}' from configuration.");
+
+    // Handle purge
+    if purge {
+        // Find and remove synced data directory
+        if let Some(data_dir) = dirs::data_local_dir() {
+            let source_dir = data_dir.join("cass").join("remotes").join(name);
+            if source_dir.exists() {
+                std::fs::remove_dir_all(&source_dir).map_err(|e| CliError {
+                    code: 15,
+                    kind: "io",
+                    message: format!("Failed to delete synced data: {e}"),
+                    hint: None,
+                    retryable: false,
+                })?;
+                println!("Deleted synced data at {}", source_dir.display());
+            }
+        }
+        println!("Note: Run 'cass reindex' to remove entries from the search index.");
     }
 
     Ok(())
