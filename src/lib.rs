@@ -242,6 +242,12 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Filter by source: 'local', 'remote', 'all', or a specific source hostname
+        #[arg(long)]
+        source: Option<String>,
+        /// Show breakdown by source
+        #[arg(long)]
+        by_source: bool,
     },
     /// Output diagnostic information for troubleshooting
     Diag {
@@ -1630,8 +1636,8 @@ async fn execute_cli(
                         source,
                     )?;
                 }
-                Commands::Stats { data_dir, json } => {
-                    run_stats(&data_dir, cli.db.clone(), json)?;
+                Commands::Stats { data_dir, json, source, by_source } => {
+                    run_stats(&data_dir, cli.db.clone(), json, source.as_deref(), by_source)?;
                 }
                 Commands::Diag {
                     data_dir,
@@ -3479,7 +3485,10 @@ fn run_stats(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
     json: bool,
+    source: Option<&str>,
+    by_source: bool,
 ) -> CliResult<()> {
+    use crate::sources::provenance::SourceFilter;
     use rusqlite::Connection;
 
     let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
@@ -3506,56 +3515,119 @@ fn run_stats(
         retryable: false,
     })?;
 
-    // Get counts and statistics
-    let conversation_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
-        .unwrap_or(0);
-    let message_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
-        .unwrap_or(0);
+    // Parse source filter (P3.7)
+    let source_filter = source.map(SourceFilter::parse);
 
-    // Get per-agent breakdown (need to JOIN with agents table)
-    let mut agent_stmt = conn
-        .prepare(
-            "SELECT a.slug, COUNT(*) FROM conversations c JOIN agents a ON c.agent_id = a.id GROUP BY a.slug ORDER BY COUNT(*) DESC"
+    // Build WHERE clause for source filtering
+    let (source_where, source_param): (String, Option<String>) = match &source_filter {
+        None | Some(SourceFilter::All) => (String::new(), None),
+        Some(SourceFilter::Local) => (" WHERE c.source_id = 'local'".to_string(), None),
+        Some(SourceFilter::Remote) => (" WHERE c.source_id != 'local'".to_string(), None),
+        Some(SourceFilter::SourceId(id)) => (" WHERE c.source_id = ?".to_string(), Some(id.clone())),
+    };
+
+    // Get counts and statistics with source filter
+    let conversation_count: i64 = if let Some(ref param) = source_param {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM conversations c{source_where}"),
+            [param],
+            |r| r.get(0),
         )
-        .map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
-    let agent_rows: Vec<(String, i64)> = agent_stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-        .map_err(|e| CliError::unknown(format!("query: {e}")))?
-        .filter_map(std::result::Result::ok)
-        .collect();
-
-    // Get workspace breakdown (top 10, need to JOIN with workspaces table)
-    let mut ws_stmt = conn
-        .prepare(
-            "SELECT w.path, COUNT(*) FROM conversations c JOIN workspaces w ON c.workspace_id = w.id GROUP BY w.path ORDER BY COUNT(*) DESC LIMIT 10"
-        )
-        .map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
-    let ws_rows: Vec<(String, i64)> = ws_stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-        .map_err(|e| CliError::unknown(format!("query: {e}")))?
-        .filter_map(std::result::Result::ok)
-        .collect();
-
-    // Get date range
-    let oldest: Option<i64> = conn
-        .query_row(
-            "SELECT MIN(started_at) FROM conversations WHERE started_at IS NOT NULL",
+    } else {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM conversations c{source_where}"),
             [],
             |r| r.get(0),
         )
-        .ok();
-    let newest: Option<i64> = conn
-        .query_row(
-            "SELECT MAX(started_at) FROM conversations WHERE started_at IS NOT NULL",
+    }
+    .unwrap_or(0);
+
+    let message_count: i64 = if let Some(ref param) = source_param {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM messages m JOIN conversations c ON m.conversation_id = c.id{source_where}"
+            ),
+            [param],
+            |r| r.get(0),
+        )
+    } else {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM messages m JOIN conversations c ON m.conversation_id = c.id{source_where}"
+            ),
             [],
             |r| r.get(0),
         )
-        .ok();
+    }
+    .unwrap_or(0);
+
+    // Get per-agent breakdown with source filter
+    let agent_sql = format!(
+        "SELECT a.slug, COUNT(*) FROM conversations c JOIN agents a ON c.agent_id = a.id{source_where} GROUP BY a.slug ORDER BY COUNT(*) DESC"
+    );
+    let agent_rows: Vec<(String, i64)> = if let Some(ref param) = source_param {
+        let mut stmt = conn.prepare(&agent_sql).map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
+        stmt.query_map([param], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| CliError::unknown(format!("query: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .collect()
+    } else {
+        let mut stmt = conn.prepare(&agent_sql).map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| CliError::unknown(format!("query: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .collect()
+    };
+
+    // Get workspace breakdown with source filter (top 10)
+    let ws_sql = format!(
+        "SELECT w.path, COUNT(*) FROM conversations c JOIN workspaces w ON c.workspace_id = w.id{source_where} GROUP BY w.path ORDER BY COUNT(*) DESC LIMIT 10"
+    );
+    let ws_rows: Vec<(String, i64)> = if let Some(ref param) = source_param {
+        let mut stmt = conn.prepare(&ws_sql).map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
+        stmt.query_map([param], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| CliError::unknown(format!("query: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .collect()
+    } else {
+        let mut stmt = conn.prepare(&ws_sql).map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| CliError::unknown(format!("query: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .collect()
+    };
+
+    // Get date range with source filter
+    let date_sql = format!(
+        "SELECT MIN(started_at), MAX(started_at) FROM conversations c{source_where} WHERE started_at IS NOT NULL"
+    );
+    let (oldest, newest): (Option<i64>, Option<i64>) = if let Some(ref param) = source_param {
+        conn.query_row(&date_sql, [param], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap_or((None, None))
+    } else {
+        conn.query_row(&date_sql, [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap_or((None, None))
+    };
+
+    // Get per-source breakdown if requested (P3.7)
+    let source_rows: Vec<(String, i64, i64)> = if by_source {
+        let mut stmt = conn.prepare(
+            "SELECT c.source_id, COUNT(DISTINCT c.id) as convs, COUNT(m.id) as msgs
+             FROM conversations c
+             LEFT JOIN messages m ON m.conversation_id = c.id
+             GROUP BY c.source_id
+             ORDER BY convs DESC"
+        ).map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
+        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))
+            .map_err(|e| CliError::unknown(format!("query: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     if json {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "conversations": conversation_count,
             "messages": message_count,
             "by_agent": agent_rows.iter().map(|(a, c)| serde_json::json!({"agent": a, "count": c})).collect::<Vec<_>>(),
@@ -3566,15 +3638,52 @@ fn run_stats(
             },
             "db_path": db_path.display().to_string(),
         });
+
+        // Add source filter info if specified (P3.7)
+        if let Some(ref filter) = source_filter {
+            payload["source_filter"] = serde_json::json!(filter.to_string());
+        }
+
+        // Add by_source breakdown if requested (P3.7)
+        if by_source && !source_rows.is_empty() {
+            payload["by_source"] = serde_json::json!(
+                source_rows.iter().map(|(s, convs, msgs)| {
+                    serde_json::json!({
+                        "source_id": s,
+                        "conversations": convs,
+                        "messages": msgs
+                    })
+                }).collect::<Vec<_>>()
+            );
+        }
+
         println!(
             "{}",
             serde_json::to_string_pretty(&payload).unwrap_or_default()
         );
     } else {
-        println!("CASS Index Statistics");
-        println!("=====================");
+        // Header with source filter indicator
+        let title = if let Some(ref filter) = source_filter {
+            format!("CASS Index Statistics (source: {})", filter)
+        } else {
+            "CASS Index Statistics".to_string()
+        };
+        println!("{title}");
+        println!("{}", "=".repeat(title.len()));
         println!("Database: {}", db_path.display());
         println!();
+
+        // Show by_source breakdown if requested (P3.7)
+        if by_source && !source_rows.is_empty() {
+            println!("By Source:");
+            println!("  {:20} {:>10} {:>12}", "Source", "Convs", "Messages");
+            println!("  {}", "-".repeat(44));
+            for (src, convs, msgs) in &source_rows {
+                println!("  {:20} {:>10} {:>12}", src, convs, msgs);
+            }
+            println!();
+        }
+
         println!("Totals:");
         println!("  Conversations: {conversation_count}");
         println!("  Messages: {message_count}");
