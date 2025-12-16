@@ -319,6 +319,9 @@ mod tests {
             created_at: Some(1700000000000),
             line_number: Some(42),
             match_type: crate::search::query::MatchType::Exact,
+            source_id: "local".to_string(),
+            origin_kind: "local".to_string(),
+            origin_host: None,
         }
     }
 

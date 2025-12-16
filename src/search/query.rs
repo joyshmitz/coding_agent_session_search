@@ -548,6 +548,24 @@ pub struct SearchHit {
     /// How this result matched the query (exact, prefix wildcard, etc.)
     #[serde(default)]
     pub match_type: MatchType,
+    // Provenance fields (P3.3)
+    /// Source identifier (e.g., "local", "work-laptop")
+    #[serde(default = "default_source_id")]
+    pub source_id: String,
+    /// Origin kind ("local" or "ssh")
+    #[serde(default = "default_origin_kind")]
+    pub origin_kind: String,
+    /// Origin host label for remote sources
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_host: Option<String>,
+}
+
+fn default_source_id() -> String {
+    "local".to_string()
+}
+
+fn default_origin_kind() -> String {
+    "local".to_string()
 }
 
 /// Result of a search operation with metadata about how matches were found
@@ -1233,12 +1251,16 @@ fn is_tool_invocation_noise(content: &str) -> bool {
     false
 }
 
-/// Deduplicate search hits by content, keeping only the highest-scored hit for each unique content.
-/// This removes duplicate results when the same message appears multiple times (e.g., user repeated
-/// themselves in a conversation, or the same content was indexed from multiple sources).
+/// Deduplicate search hits by (source_id, content), keeping only the highest-scored hit
+/// for each unique content within a source.
+///
+/// This respects source boundaries (P2.3): the same content from different sources
+/// appears as separate results, since they represent distinct conversations.
+///
 /// Also filters out tool invocation noise that isn't useful for search results.
 fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    // Key: (source_id, normalized_content) -> index in deduped
+    let mut seen: HashMap<(String, String), usize> = HashMap::new();
     let mut deduped: Vec<SearchHit> = Vec::new();
 
     for hit in hits {
@@ -1250,14 +1272,17 @@ fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
         // Normalize content for comparison (trim whitespace, collapse multiple spaces)
         let normalized = hit.content.split_whitespace().collect::<Vec<_>>().join(" ");
 
-        if let Some(&existing_idx) = seen.get(&normalized) {
+        // Include source_id in the key so different sources keep their results
+        let key = (hit.source_id.clone(), normalized);
+
+        if let Some(&existing_idx) = seen.get(&key) {
             // If existing hit has lower score, replace it
             if deduped[existing_idx].score < hit.score {
                 deduped[existing_idx] = hit;
             }
             // Otherwise keep existing (higher score)
         } else {
-            seen.insert(normalized, deduped.len());
+            seen.insert(key, deduped.len());
             deduped.push(hit);
         }
     }
@@ -1754,6 +1779,22 @@ impl SearchClient {
                 .get_first(fields.msg_idx)
                 .and_then(|v| v.as_u64())
                 .map(|i| (i + 1) as usize);
+            // Provenance fields (P3.3)
+            let source_id = doc
+                .get_first(fields.source_id)
+                .and_then(|v| v.as_str())
+                .unwrap_or("local")
+                .to_string();
+            let origin_kind = doc
+                .get_first(fields.origin_kind)
+                .and_then(|v| v.as_str())
+                .unwrap_or("local")
+                .to_string();
+            let origin_host = doc
+                .get_first(fields.origin_host)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             hits.push(SearchHit {
                 title,
                 snippet,
@@ -1765,6 +1806,9 @@ impl SearchClient {
                 created_at,
                 line_number,
                 match_type: query_match_type,
+                source_id,
+                origin_kind,
+                origin_host,
             });
         }
         Ok(hits)
@@ -1842,6 +1886,7 @@ impl SearchClient {
                 // idx is 0-indexed message index; convert to 1-indexed line number for JSONL files
                 let idx: Option<i64> = row.get(8).ok();
                 let line_number = idx.map(|i| (i + 1) as usize);
+                // SQLite FTS doesn't have provenance - use defaults (local)
                 Ok(SearchHit {
                     title,
                     snippet,
@@ -1853,6 +1898,9 @@ impl SearchClient {
                     created_at,
                     line_number,
                     match_type: query_match_type,
+                    source_id: default_source_id(),
+                    origin_kind: default_origin_kind(),
+                    origin_host: None,
                 })
             },
         )?;
@@ -2308,6 +2356,9 @@ mod tests {
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
         }];
 
         client.put_cache("こん", &SearchFilters::default(), &hits);
@@ -2332,6 +2383,9 @@ mod tests {
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
         };
         let cached = cached_hit_from(&hit);
         assert!(hit_matches_query_cached(&cached, "hello"));
@@ -2882,6 +2936,9 @@ mod tests {
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
         };
         let hits = vec![hit];
 
@@ -2931,6 +2988,9 @@ mod tests {
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
         };
         let hits = vec![hit.clone()];
 
@@ -3007,6 +3067,9 @@ mod tests {
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
         };
 
         // Put 3 entries - should trigger 1 eviction (cap is 2)
@@ -3064,6 +3127,9 @@ mod tests {
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
         };
 
         // Put 3 large entries - should trigger byte-based evictions
@@ -3347,6 +3413,9 @@ mod tests {
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
             },
             SearchHit {
                 title: "title2".into(),
@@ -3359,6 +3428,9 @@ mod tests {
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(), // same source_id = will dedupe
+                origin_kind: "local".into(),
+                origin_host: None,
             },
         ];
 
@@ -3382,6 +3454,9 @@ mod tests {
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
             },
             SearchHit {
                 title: "title2".into(),
@@ -3394,6 +3469,9 @@ mod tests {
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
             },
         ];
 
@@ -3417,6 +3495,9 @@ mod tests {
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
             },
             SearchHit {
                 title: "title2".into(),
@@ -3429,6 +3510,9 @@ mod tests {
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
             },
         ];
 
@@ -3450,6 +3534,9 @@ mod tests {
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
             },
             SearchHit {
                 title: "title2".into(),
@@ -3462,6 +3549,9 @@ mod tests {
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
             },
         ];
 
@@ -3484,6 +3574,9 @@ mod tests {
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
             },
             SearchHit {
                 title: "title2".into(),
@@ -3496,6 +3589,9 @@ mod tests {
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
             },
             SearchHit {
                 title: "title3".into(),
@@ -3508,11 +3604,57 @@ mod tests {
                 created_at: Some(300),
                 line_number: None,
                 match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
             },
         ];
 
         let deduped = deduplicate_hits(hits);
         assert_eq!(deduped.len(), 3); // all unique
+    }
+
+    /// P2.3: Deduplication respects source boundaries - same content from different sources
+    /// should appear as separate results.
+    #[test]
+    fn deduplicate_hits_respects_source_boundaries() {
+        let hits = vec![
+            SearchHit {
+                title: "local title".into(),
+                snippet: "snip".into(),
+                content: "hello world".into(),
+                score: 1.0,
+                source_path: "a.jsonl".into(),
+                agent: "agent".into(),
+                workspace: "ws".into(),
+                created_at: Some(100),
+                line_number: None,
+                match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+            },
+            SearchHit {
+                title: "remote title".into(),
+                snippet: "snip".into(),
+                content: "hello world".into(), // same content
+                score: 0.9,
+                source_path: "b.jsonl".into(),
+                agent: "agent".into(),
+                workspace: "ws".into(),
+                created_at: Some(200),
+                line_number: None,
+                match_type: MatchType::Exact,
+                source_id: "work-laptop".into(), // different source = no dedupe
+                origin_kind: "ssh".into(),
+                origin_host: Some("work-laptop.local".into()),
+            },
+        ];
+
+        let deduped = deduplicate_hits(hits);
+        assert_eq!(deduped.len(), 2, "same content from different sources should not dedupe");
+        assert!(deduped.iter().any(|h| h.source_id == "local"));
+        assert!(deduped.iter().any(|h| h.source_id == "work-laptop"));
     }
 
     #[test]

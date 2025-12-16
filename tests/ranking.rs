@@ -26,6 +26,9 @@ fn exact_hits_rank_above_wildcards_at_equal_recency_and_score() {
         created_at: Some(max_created),
         line_number: None,
         match_type: MatchType::Exact,
+        source_id: "local".into(),
+        origin_kind: "local".into(),
+        origin_host: None,
     };
 
     let prefix = SearchHit {
@@ -74,6 +77,9 @@ fn recency_boost_can_outweigh_quality_when_far_newer() {
         created_at: Some(1_000_000),
         line_number: None,
         match_type: MatchType::Exact,
+        source_id: "local".into(),
+        origin_kind: "local".into(),
+        origin_host: None,
     };
 
     let newer_suffix = SearchHit {
@@ -87,6 +93,9 @@ fn recency_boost_can_outweigh_quality_when_far_newer() {
         created_at: Some(2_000_000),
         line_number: None,
         match_type: MatchType::Suffix, // quality factor 0.8 vs 1.0
+        source_id: "local".into(),
+        origin_kind: "local".into(),
+        origin_host: None,
     };
 
     let max_created = newer_suffix.created_at.unwrap();
@@ -116,6 +125,9 @@ fn relevance_heavy_mode_prefers_quality_over_recency() {
         created_at: Some(500_000), // Much older
         line_number: None,
         match_type: MatchType::Exact, // quality factor 1.0
+        source_id: "local".into(),
+        origin_kind: "local".into(),
+        origin_host: None,
     };
 
     let newer_substring = SearchHit {
@@ -129,6 +141,9 @@ fn relevance_heavy_mode_prefers_quality_over_recency() {
         created_at: Some(max_created), // Most recent
         line_number: None,
         match_type: MatchType::Substring, // quality factor 0.7
+        source_id: "local".into(),
+        origin_kind: "local".into(),
+        origin_host: None,
     };
 
     let older_score = blended_score(&older_exact, max_created, alpha);
@@ -159,6 +174,9 @@ fn match_quality_heavy_mode_balances_quality_and_recency() {
         created_at: Some(max_created),
         line_number: None,
         match_type: MatchType::Exact,
+        source_id: "local".into(),
+        origin_kind: "local".into(),
+        origin_host: None,
     };
 
     let implicit = SearchHit {
@@ -201,6 +219,9 @@ fn ranking_handles_missing_created_at() {
         created_at: Some(max_created),
         line_number: None,
         match_type: MatchType::Prefix, // quality factor 0.9
+        source_id: "local".into(),
+        origin_kind: "local".into(),
+        origin_host: None,
     };
 
     let hit_without_date = SearchHit {
@@ -214,6 +235,9 @@ fn ranking_handles_missing_created_at() {
         created_at: None, // Missing date
         line_number: None,
         match_type: MatchType::Exact, // quality factor 1.0
+        source_id: "local".into(),
+        origin_kind: "local".into(),
+        origin_host: None,
     };
 
     let with_date_score = blended_score(&hit_with_date, max_created, alpha);
@@ -245,6 +269,9 @@ fn ranking_handles_zero_max_created() {
         created_at: Some(1_000_000),
         line_number: None,
         match_type: MatchType::Exact,
+        source_id: "local".into(),
+        origin_kind: "local".into(),
+        origin_host: None,
     };
 
     let score = blended_score(&hit, max_created, alpha);
@@ -274,6 +301,9 @@ fn all_ranking_modes_maintain_quality_ordering_at_equal_inputs() {
             created_at: Some(max_created),
             line_number: None,
             match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
         };
 
         let exact_score = blended_score(&base, max_created, alpha);

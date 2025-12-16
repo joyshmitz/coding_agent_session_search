@@ -6660,6 +6660,9 @@ mod tests {
             created_at: None,
             line_number: None,
             match_type: crate::search::query::MatchType::default(),
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
         }
     }
 
