@@ -1,207 +1,166 @@
+//! Tests for the OpenCode connector (JSON file-based storage)
+
 use coding_agent_search::connectors::opencode::OpenCodeConnector;
 use coding_agent_search::connectors::{Connector, ScanContext};
-use rusqlite::Connection;
+use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-// Helper to create a basic schema
-fn init_db(path: &PathBuf) -> Connection {
-    let conn = Connection::open(path).unwrap();
-    conn.execute(
-        "CREATE TABLE sessions (
-            id INTEGER PRIMARY KEY,
-            title TEXT,
-            workspace TEXT,
-            created_at INTEGER
-        )",
-        [],
-    )
-    .unwrap();
+/// Helper to create a JSON-based OpenCode storage structure
+fn create_test_storage(
+    dir: &std::path::Path,
+    sessions: &[TestSession],
+) -> std::io::Result<()> {
+    // Create directories
+    fs::create_dir_all(dir.join("session"))?;
+    fs::create_dir_all(dir.join("message"))?;
+    fs::create_dir_all(dir.join("part"))?;
 
-    conn.execute(
-        "CREATE TABLE messages (
-            id INTEGER PRIMARY KEY,
-            session_id INTEGER,
-            role TEXT,
-            content TEXT,
-            created_at INTEGER
-        )",
-        [],
-    )
-    .unwrap();
+    for session in sessions {
+        // Create project dir
+        let project_dir = dir.join("session").join(&session.project_id);
+        fs::create_dir_all(&project_dir)?;
 
-    conn
-}
+        // Write session file
+        let session_json = serde_json::json!({
+            "id": session.id,
+            "title": session.title,
+            "directory": session.directory,
+            "projectID": session.project_id,
+            "time": {
+                "created": session.created,
+                "updated": session.updated
+            }
+        });
+        fs::write(
+            project_dir.join(format!("{}.json", session.id)),
+            serde_json::to_string_pretty(&session_json)?,
+        )?;
 
-#[test]
-fn opencode_parses_sqlite_fixture() {
-    let fixture_root = PathBuf::from("tests/fixtures/opencode");
-    let conn = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: fixture_root.clone(),
-        since_ts: None,
-    };
-    // This relies on the existing binary fixture
-    let convs = conn.scan(&ctx).expect("scan");
-    assert_eq!(convs.len(), 1);
-    let c = &convs[0];
-    assert_eq!(c.title.as_deref(), Some("OpenCode Session"));
-    assert_eq!(c.messages.len(), 2);
-}
+        // Create message directory for this session
+        let msg_dir = dir.join("message").join(&session.id);
+        fs::create_dir_all(&msg_dir)?;
 
-#[test]
-fn opencode_filters_messages_with_since_ts() {
-    let fixture_root = PathBuf::from("tests/fixtures/opencode");
-    let conn = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: fixture_root.clone(),
-        since_ts: Some(1_700_000_000_000),
-    };
-    let convs = conn.scan(&ctx).expect("scan");
-    assert_eq!(convs.len(), 1);
-    let c = &convs[0];
-    assert_eq!(c.messages.len(), 1);
-    assert_eq!(c.messages[0].created_at, Some(1_700_000_005_000));
-}
+        for msg in &session.messages {
+            // Write message file
+            let msg_json = serde_json::json!({
+                "id": msg.id,
+                "sessionID": session.id,
+                "role": msg.role,
+                "modelID": msg.model_id,
+                "time": {
+                    "created": msg.created
+                }
+            });
+            fs::write(
+                msg_dir.join(format!("{}.json", msg.id)),
+                serde_json::to_string_pretty(&msg_json)?,
+            )?;
 
-/// Test basic session parsing from a fresh DB
-#[test]
-fn opencode_parses_created_db() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("test.db");
-    let conn = init_db(&db_path);
+            // Create part directory and write parts
+            let part_dir = dir.join("part").join(&msg.id);
+            fs::create_dir_all(&part_dir)?;
 
-    conn.execute(
-        "INSERT INTO sessions (id, title, workspace, created_at) VALUES (1, 'My Session', '/tmp', 1000)",
-        [],
-    ).unwrap();
-
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content, created_at) VALUES (1, 'user', 'hello', 1000)",
-        [],
-    ).unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content, created_at) VALUES (1, 'assistant', 'hi', 2000)",
-        [],
-    ).unwrap();
-
-    // Close connection to ensure flush
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-
-    let c = &convs[0];
-    assert_eq!(c.title, Some("My Session".to_string()));
-    assert_eq!(c.workspace, Some(PathBuf::from("/tmp")));
-    assert_eq!(c.messages.len(), 2);
-    assert_eq!(c.messages[0].content, "hello");
-    assert_eq!(c.messages[1].content, "hi");
-}
-
-/// Test handling of DB without sessions table (fallback mode)
-#[test]
-fn opencode_handles_missing_sessions_table() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("nosessions.db");
-    let conn = Connection::open(&db_path).unwrap();
-
-    // Only messages table
-    conn.execute(
-        "CREATE TABLE messages (
-            role TEXT,
-            content TEXT,
-            created_at INTEGER
-        )",
-        [],
-    )
-    .unwrap();
-
-    conn.execute(
-        "INSERT INTO messages (role, content, created_at) VALUES ('user', 'orphan', 1000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-
-    // Should be treated as a fallback conversation
-    let c = &convs[0];
-    assert!(c.messages[0].content.contains("orphan"));
-    assert!(c.workspace.is_none());
-}
-
-/// Test column name fallbacks
-#[test]
-fn opencode_maps_alternate_columns() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("altcols.db");
-    let conn = Connection::open(&db_path).unwrap();
-
-    conn.execute(
-        "CREATE TABLE messages (
-            sender TEXT,    -- instead of role
-            text TEXT,      -- instead of content
-            timestamp INTEGER -- instead of created_at
-        )",
-        [],
-    )
-    .unwrap();
-
-    conn.execute(
-        "INSERT INTO messages (sender, text, timestamp) VALUES ('bot', 'alternate', 5000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-
-    let c = &convs[0];
-    assert_eq!(c.messages[0].role, "bot");
-    assert_eq!(c.messages[0].content, "alternate");
-    assert_eq!(c.messages[0].created_at, Some(5000));
-}
-
-/// Test that CASS internal DBs are ignored
-#[test]
-fn opencode_ignores_internal_dbs() {
-    let dir = TempDir::new().unwrap();
-
-    // Create ignored DBs
-    for name in ["agent_search.db", "conversations.db"] {
-        let path = dir.path().join(name);
-        let conn = Connection::open(&path).unwrap();
-        conn.execute("CREATE TABLE messages (content TEXT)", [])
-            .unwrap();
+            for (i, part) in msg.parts.iter().enumerate() {
+                let part_json = serde_json::json!({
+                    "id": format!("part{}", i),
+                    "messageID": msg.id,
+                    "type": part.part_type,
+                    "text": part.text,
+                    "state": part.state.as_ref().map(|s| serde_json::json!({
+                        "output": s
+                    }))
+                });
+                fs::write(
+                    part_dir.join(format!("part{}.json", i)),
+                    serde_json::to_string_pretty(&part_json)?,
+                )?;
+            }
+        }
     }
 
-    // Create valid DB
-    let valid_path = dir.path().join("valid.sqlite");
-    let conn = Connection::open(&valid_path).unwrap();
-    conn.execute("CREATE TABLE messages (content TEXT)", [])
-        .unwrap();
-    conn.execute("INSERT INTO messages (content) VALUES ('valid')", [])
-        .unwrap();
-    drop(conn);
+    Ok(())
+}
+
+struct TestSession {
+    id: String,
+    project_id: String,
+    title: Option<String>,
+    directory: Option<String>,
+    created: Option<i64>,
+    updated: Option<i64>,
+    messages: Vec<TestMessage>,
+}
+
+struct TestMessage {
+    id: String,
+    role: String,
+    model_id: Option<String>,
+    created: Option<i64>,
+    parts: Vec<TestPart>,
+}
+
+struct TestPart {
+    part_type: String,
+    text: Option<String>,
+    state: Option<String>,
+}
+
+#[test]
+fn opencode_parses_json_fixture() {
+    let fixture_root = PathBuf::from("tests/fixtures/opencode_json");
+    let conn = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_root: fixture_root.clone(),
+        since_ts: None,
+    };
+    let convs = conn.scan(&ctx).expect("scan");
+    assert_eq!(convs.len(), 1);
+    let c = &convs[0];
+    assert_eq!(c.title.as_deref(), Some("OpenCode JSON Session"));
+    assert_eq!(c.messages.len(), 2);
+    assert_eq!(c.workspace, Some(PathBuf::from("/tmp/test-project")));
+}
+
+#[test]
+fn opencode_parses_created_storage() {
+    let dir = TempDir::new().unwrap();
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "test-session-1".into(),
+            project_id: "proj1".into(),
+            title: Some("My Test Session".into()),
+            directory: Some("/home/user/project".into()),
+            created: Some(1000),
+            updated: Some(5000),
+            messages: vec![
+                TestMessage {
+                    id: "msg1".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(1000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("Hello world".into()),
+                        state: None,
+                    }],
+                },
+                TestMessage {
+                    id: "msg2".into(),
+                    role: "assistant".into(),
+                    model_id: Some("claude-3".into()),
+                    created: Some(2000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("Hi there!".into()),
+                        state: None,
+                    }],
+                },
+            ],
+        }],
+    )
+    .unwrap();
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -209,71 +168,64 @@ fn opencode_ignores_internal_dbs() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-
-    // Should only find the valid one
     assert_eq!(convs.len(), 1);
-    assert!(
-        convs[0]
-            .source_path
-            .to_string_lossy()
-            .contains("valid.sqlite")
-    );
+
+    let c = &convs[0];
+    assert_eq!(c.title, Some("My Test Session".to_string()));
+    assert_eq!(c.workspace, Some(PathBuf::from("/home/user/project")));
+    assert_eq!(c.messages.len(), 2);
+    assert_eq!(c.messages[0].content, "Hello world");
+    assert_eq!(c.messages[1].content, "Hi there!");
+    assert_eq!(c.messages[1].author, Some("claude-3".to_string()));
 }
 
-/// Test `since_ts` filtering logic
 #[test]
-fn opencode_since_ts_logic() {
+fn opencode_handles_multiple_sessions() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("since.db");
-    let conn = init_db(&db_path);
-
-    // Old message
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content, created_at) VALUES (1, 'u', 'old', 1000)",
-        [],
+    create_test_storage(
+        dir.path(),
+        &[
+            TestSession {
+                id: "session-a".into(),
+                project_id: "proj1".into(),
+                title: Some("Session A".into()),
+                directory: None,
+                created: Some(1000),
+                updated: None,
+                messages: vec![TestMessage {
+                    id: "msg-a1".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(1000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("Message A".into()),
+                        state: None,
+                    }],
+                }],
+            },
+            TestSession {
+                id: "session-b".into(),
+                project_id: "proj2".into(),
+                title: Some("Session B".into()),
+                directory: None,
+                created: Some(2000),
+                updated: None,
+                messages: vec![TestMessage {
+                    id: "msg-b1".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(2000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("Message B".into()),
+                        state: None,
+                    }],
+                }],
+            },
+        ],
     )
     .unwrap();
-    // New message
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content, created_at) VALUES (1, 'u', 'new', 3000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: Some(2000),
-    };
-    let convs = connector.scan(&ctx).unwrap();
-
-    assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].messages.len(), 1);
-    assert_eq!(convs[0].messages[0].content, "new");
-}
-
-/// Test orphaned messages (no matching session) are collected
-#[test]
-fn opencode_collects_orphaned_messages() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("orphans.db");
-    let conn = init_db(&db_path);
-
-    // Message with session_id that doesn't exist in sessions table
-    // (Note: the code doesn't strictly require FK existence, it just groups by session_id)
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content, created_at) VALUES (999, 'u', 'orphan_session', 1000)",
-        [],
-    ).unwrap();
-
-    // Message with NULL session_id
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content, created_at) VALUES (NULL, 'u', 'null_session', 2000)",
-        [],
-    ).unwrap();
-
-    drop(conn);
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -281,51 +233,46 @@ fn opencode_collects_orphaned_messages() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-
-    // We expect:
-    // 1 conversation for session 999 (even if not in sessions table, it has an ID)
-    // 1 conversation for fallback messages (NULL session_id)
     assert_eq!(convs.len(), 2);
 
-    let has_999 = convs
-        .iter()
-        .any(|c| c.messages[0].content == "orphan_session");
-    let has_null = convs
-        .iter()
-        .any(|c| c.messages[0].content == "null_session");
-
-    assert!(has_999);
-    assert!(has_null);
+    let titles: Vec<_> = convs.iter().filter_map(|c| c.title.as_deref()).collect();
+    assert!(titles.contains(&"Session A"));
+    assert!(titles.contains(&"Session B"));
 }
 
-/// Test title extraction from sessions table
 #[test]
-fn opencode_title_extraction() {
+fn opencode_handles_tool_parts() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("titles.db");
-    let conn = init_db(&db_path);
-
-    conn.execute(
-        "INSERT INTO sessions (id, title, created_at) VALUES (1, 'Explicit Title', 1000)",
-        [],
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "tool-session".into(),
+            project_id: "proj1".into(),
+            title: Some("Tool Session".into()),
+            directory: None,
+            created: Some(1000),
+            updated: None,
+            messages: vec![TestMessage {
+                id: "tool-msg".into(),
+                role: "assistant".into(),
+                model_id: None,
+                created: Some(1000),
+                parts: vec![
+                    TestPart {
+                        part_type: "text".into(),
+                        text: Some("Let me check that file.".into()),
+                        state: None,
+                    },
+                    TestPart {
+                        part_type: "tool".into(),
+                        text: None,
+                        state: Some("file contents here".into()),
+                    },
+                ],
+            }],
+        }],
     )
     .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'msg', 1000)",
-        [],
-    )
-    .unwrap();
-
-    // Session 2: No title, fallback to first message
-    conn.execute("INSERT INTO sessions (id, created_at) VALUES (2, 2000)", [])
-        .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (2, 'First Line', 2000)",
-        [],
-    )
-    .unwrap();
-
-    drop(conn);
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -333,33 +280,47 @@ fn opencode_title_extraction() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
 
-    let t1 = convs
-        .iter()
-        .find(|c| c.external_id.as_ref().unwrap().contains("session-1"))
-        .unwrap();
-    assert_eq!(t1.title, Some("Explicit Title".to_string()));
-
-    let t2 = convs
-        .iter()
-        .find(|c| c.external_id.as_ref().unwrap().contains("session-2"))
-        .unwrap();
-    assert_eq!(t2.title, Some("First Line".to_string()));
+    let content = &convs[0].messages[0].content;
+    assert!(content.contains("Let me check that file."));
+    assert!(content.contains("[Tool Output]"));
+    assert!(content.contains("file contents here"));
 }
 
-/// Test multiple databases in directory
 #[test]
-fn opencode_scans_multiple_dbs() {
+fn opencode_handles_reasoning_parts() {
     let dir = TempDir::new().unwrap();
-
-    for i in 1..=3 {
-        let path = dir.path().join(format!("db{i}.sqlite"));
-        let conn = Connection::open(&path).unwrap();
-        conn.execute("CREATE TABLE messages (content TEXT)", [])
-            .unwrap();
-        conn.execute("INSERT INTO messages (content) VALUES ('msg')", [])
-            .unwrap();
-    }
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "reasoning-session".into(),
+            project_id: "proj1".into(),
+            title: Some("Reasoning Session".into()),
+            directory: None,
+            created: Some(1000),
+            updated: None,
+            messages: vec![TestMessage {
+                id: "reasoning-msg".into(),
+                role: "assistant".into(),
+                model_id: None,
+                created: Some(1000),
+                parts: vec![
+                    TestPart {
+                        part_type: "reasoning".into(),
+                        text: Some("I need to think about this...".into()),
+                        state: None,
+                    },
+                    TestPart {
+                        part_type: "text".into(),
+                        text: Some("The answer is 42.".into()),
+                        state: None,
+                    },
+                ],
+            }],
+        }],
+    )
+    .unwrap();
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -367,25 +328,40 @@ fn opencode_scans_multiple_dbs() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 3);
+    assert_eq!(convs.len(), 1);
+
+    let content = &convs[0].messages[0].content;
+    assert!(content.contains("[Reasoning]"));
+    assert!(content.contains("I need to think about this..."));
+    assert!(content.contains("The answer is 42."));
 }
 
-// ============================================================================
-// Additional edge case tests
-// ============================================================================
-
-/// Test `agent_slug` is always "opencode"
 #[test]
 fn opencode_sets_correct_agent_slug() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("slug.db");
-    let conn = init_db(&db_path);
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'test', 1000)",
-        [],
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "slug-test".into(),
+            project_id: "proj1".into(),
+            title: Some("Test".into()),
+            directory: None,
+            created: Some(1000),
+            updated: None,
+            messages: vec![TestMessage {
+                id: "msg".into(),
+                role: "user".into(),
+                model_id: None,
+                created: Some(1000),
+                parts: vec![TestPart {
+                    part_type: "text".into(),
+                    text: Some("test".into()),
+                    state: None,
+                }],
+            }],
+        }],
     )
     .unwrap();
-    drop(conn);
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -397,157 +373,12 @@ fn opencode_sets_correct_agent_slug() {
     assert_eq!(convs[0].agent_slug, "opencode");
 }
 
-/// Test `source_path` is set to DB path
 #[test]
-fn opencode_sets_source_path() {
+fn opencode_handles_empty_storage() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("sourcepath.db");
-    let conn = init_db(&db_path);
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'test', 1000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].source_path, db_path);
-}
-
-/// Test `started_at` and `ended_at` computation
-#[test]
-fn opencode_computes_started_ended_at() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("times.db");
-    let conn = init_db(&db_path);
-
-    // Session with started_at
-    conn.execute("INSERT INTO sessions (id, created_at) VALUES (1, 500)", [])
-        .unwrap();
-
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'first', 1000)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'second', 2000)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'third', 3000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-
-    // started_at comes from session, ended_at from last message
-    assert_eq!(convs[0].started_at, Some(500));
-    assert_eq!(convs[0].ended_at, Some(3000));
-}
-
-/// Test sequential index assignment
-#[test]
-fn opencode_assigns_sequential_indices() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("indices.db");
-    let conn = init_db(&db_path);
-
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'm0', 1000)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'm1', 2000)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'm2', 3000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-
-    let msgs = &convs[0].messages;
-    for (i, msg) in msgs.iter().enumerate() {
-        assert_eq!(msg.idx, i as i64);
-    }
-}
-
-/// Test workspace extraction from `root_path` column
-#[test]
-fn opencode_workspace_from_root_path() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("rootpath.db");
-    let conn = Connection::open(&db_path).unwrap();
-
-    // Schema with root_path instead of workspace
-    conn.execute(
-        "CREATE TABLE sessions (id INTEGER PRIMARY KEY, root_path TEXT, created_at INTEGER)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "CREATE TABLE messages (session_id INTEGER, content TEXT, created_at INTEGER)",
-        [],
-    )
-    .unwrap();
-
-    conn.execute(
-        "INSERT INTO sessions (id, root_path, created_at) VALUES (1, '/my/project', 1000)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'test', 1000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].workspace, Some(PathBuf::from("/my/project")));
-}
-
-/// Test empty database handling
-#[test]
-fn opencode_handles_empty_db() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("empty.db");
-    let conn = init_db(&db_path);
-    // No messages inserted
-    drop(conn);
+    fs::create_dir_all(dir.path().join("session")).unwrap();
+    fs::create_dir_all(dir.path().join("message")).unwrap();
+    fs::create_dir_all(dir.path().join("part")).unwrap();
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -558,21 +389,10 @@ fn opencode_handles_empty_db() {
     assert!(convs.is_empty());
 }
 
-/// Test DB without messages table
 #[test]
-fn opencode_handles_db_without_messages() {
+fn opencode_handles_missing_storage() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("nomsg.db");
-    let conn = Connection::open(&db_path).unwrap();
-    // Only sessions table, no messages
-    conn.execute(
-        "CREATE TABLE sessions (id INTEGER PRIMARY KEY, title TEXT)",
-        [],
-    )
-    .unwrap();
-    conn.execute("INSERT INTO sessions (id, title) VALUES (1, 'Test')", [])
-        .unwrap();
-    drop(conn);
+    // Don't create any directories
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -583,224 +403,56 @@ fn opencode_handles_db_without_messages() {
     assert!(convs.is_empty());
 }
 
-/// Test `task_id` as alternative to `session_id`
-#[test]
-fn opencode_groups_by_task_id() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("taskid.db");
-    let conn = Connection::open(&db_path).unwrap();
-
-    conn.execute(
-        "CREATE TABLE messages (task_id INTEGER, content TEXT, created_at INTEGER)",
-        [],
-    )
-    .unwrap();
-
-    conn.execute(
-        "INSERT INTO messages (task_id, content, created_at) VALUES (100, 'task100', 1000)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (task_id, content, created_at) VALUES (200, 'task200', 2000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-
-    // Should have 2 conversations (one per task_id)
-    assert_eq!(convs.len(), 2);
-}
-
-/// Test author extraction from sender column
-#[test]
-fn opencode_extracts_author() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("author.db");
-    let conn = Connection::open(&db_path).unwrap();
-
-    conn.execute(
-        "CREATE TABLE messages (sender TEXT, content TEXT, created_at INTEGER)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (sender, content, created_at) VALUES ('claude-3', 'hello', 1000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-
-    // sender column used for both role and author
-    let msg = &convs[0].messages[0];
-    assert_eq!(msg.role, "claude-3");
-    assert_eq!(msg.author, Some("claude-3".to_string()));
-}
-
-/// Test "message" as alternate content column
-#[test]
-fn opencode_message_column_fallback() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("msgcol.db");
-    let conn = Connection::open(&db_path).unwrap();
-
-    conn.execute(
-        "CREATE TABLE messages (message TEXT, created_at INTEGER)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (message, created_at) VALUES ('from message col', 1000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].messages[0].content, "from message col");
-}
-
-/// Test "name" as alternate title column in sessions
-#[test]
-fn opencode_name_column_for_title() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("namecol.db");
-    let conn = Connection::open(&db_path).unwrap();
-
-    conn.execute(
-        "CREATE TABLE sessions (id INTEGER PRIMARY KEY, name TEXT)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "CREATE TABLE messages (session_id INTEGER, content TEXT)",
-        [],
-    )
-    .unwrap();
-
-    conn.execute(
-        "INSERT INTO sessions (id, name) VALUES (1, 'Name As Title')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content) VALUES (1, 'msg')",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].title, Some("Name As Title".to_string()));
-}
-
-/// Test "ts" as alternate timestamp column
-#[test]
-fn opencode_ts_column_fallback() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("tscol.db");
-    let conn = Connection::open(&db_path).unwrap();
-
-    conn.execute("CREATE TABLE messages (content TEXT, ts INTEGER)", [])
-        .unwrap();
-    conn.execute(
-        "INSERT INTO messages (content, ts) VALUES ('ts time', 5000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].messages[0].created_at, Some(5000));
-}
-
-/// Test external ID format includes session ID and DB hash
-#[test]
-fn opencode_external_id_format() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("extid.db");
-    let conn = init_db(&db_path);
-
-    conn.execute("INSERT INTO sessions (id) VALUES (42)", [])
-        .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content) VALUES (42, 'msg')",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-
-    let ext_id = convs[0].external_id.as_ref().unwrap();
-    assert!(ext_id.starts_with("session-42-"));
-    // Should contain hex hash
-    assert!(ext_id.chars().any(|c| c.is_ascii_hexdigit()));
-}
-
-/// Test message ordering by timestamp
 #[test]
 fn opencode_orders_messages_by_timestamp() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("order.db");
-    let conn = init_db(&db_path);
-
-    // Insert out of order
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'third', 3000)",
-        [],
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "order-session".into(),
+            project_id: "proj1".into(),
+            title: Some("Order Test".into()),
+            directory: None,
+            created: Some(1000),
+            updated: None,
+            messages: vec![
+                TestMessage {
+                    id: "msg-late".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(3000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("third".into()),
+                        state: None,
+                    }],
+                },
+                TestMessage {
+                    id: "msg-early".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(1000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("first".into()),
+                        state: None,
+                    }],
+                },
+                TestMessage {
+                    id: "msg-middle".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(2000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("second".into()),
+                        state: None,
+                    }],
+                },
+            ],
+        }],
     )
     .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'first', 1000)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'second', 2000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -816,20 +468,56 @@ fn opencode_orders_messages_by_timestamp() {
     assert_eq!(msgs[2].content, "third");
 }
 
-/// Test nested directory scanning
 #[test]
-fn opencode_scans_nested_directories() {
+fn opencode_assigns_sequential_indices() {
     let dir = TempDir::new().unwrap();
-    let nested = dir.path().join("nested").join("deep");
-    std::fs::create_dir_all(&nested).unwrap();
-
-    let db_path = nested.join("deep.db");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute("CREATE TABLE messages (content TEXT)", [])
-        .unwrap();
-    conn.execute("INSERT INTO messages (content) VALUES ('deep')", [])
-        .unwrap();
-    drop(conn);
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "idx-session".into(),
+            project_id: "proj1".into(),
+            title: Some("Index Test".into()),
+            directory: None,
+            created: Some(1000),
+            updated: None,
+            messages: vec![
+                TestMessage {
+                    id: "m0".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(1000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("first".into()),
+                        state: None,
+                    }],
+                },
+                TestMessage {
+                    id: "m1".into(),
+                    role: "assistant".into(),
+                    model_id: None,
+                    created: Some(2000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("second".into()),
+                        state: None,
+                    }],
+                },
+                TestMessage {
+                    id: "m2".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(3000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("third".into()),
+                        state: None,
+                    }],
+                },
+            ],
+        }],
+    )
+    .unwrap();
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -838,21 +526,169 @@ fn opencode_scans_nested_directories() {
     };
     let convs = connector.scan(&ctx).unwrap();
     assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].messages[0].content, "deep");
+
+    let msgs = &convs[0].messages;
+    for (i, msg) in msgs.iter().enumerate() {
+        assert_eq!(msg.idx, i as i64);
+    }
 }
 
-/// Test metadata contains `db_path`
 #[test]
-fn opencode_metadata_contains_db_path() {
+fn opencode_title_fallback_to_first_message() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("meta.db");
-    let conn = init_db(&db_path);
-    conn.execute(
-        "INSERT INTO messages (session_id, content) VALUES (1, 'test')",
-        [],
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "no-title".into(),
+            project_id: "proj1".into(),
+            title: None, // No title
+            directory: None,
+            created: Some(1000),
+            updated: None,
+            messages: vec![TestMessage {
+                id: "msg".into(),
+                role: "user".into(),
+                model_id: None,
+                created: Some(1000),
+                parts: vec![TestPart {
+                    part_type: "text".into(),
+                    text: Some("This is the first message content".into()),
+                    state: None,
+                }],
+            }],
+        }],
     )
     .unwrap();
-    drop(conn);
+
+    let connector = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_root: dir.path().to_path_buf(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    // Title should fall back to first line of first message
+    assert_eq!(
+        convs[0].title,
+        Some("This is the first message content".to_string())
+    );
+}
+
+#[test]
+fn opencode_computes_started_ended_at() {
+    let dir = TempDir::new().unwrap();
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "time-session".into(),
+            project_id: "proj1".into(),
+            title: Some("Time Test".into()),
+            directory: None,
+            created: Some(500), // Session created at 500
+            updated: Some(4000), // Session updated at 4000
+            messages: vec![
+                TestMessage {
+                    id: "m0".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(1000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("first".into()),
+                        state: None,
+                    }],
+                },
+                TestMessage {
+                    id: "m1".into(),
+                    role: "assistant".into(),
+                    model_id: None,
+                    created: Some(3000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("last".into()),
+                        state: None,
+                    }],
+                },
+            ],
+        }],
+    )
+    .unwrap();
+
+    let connector = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_root: dir.path().to_path_buf(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    // started_at comes from session time.created
+    assert_eq!(convs[0].started_at, Some(500));
+    // ended_at comes from session time.updated
+    assert_eq!(convs[0].ended_at, Some(4000));
+}
+
+#[test]
+fn opencode_skips_sessions_without_messages() {
+    let dir = TempDir::new().unwrap();
+
+    // Create session dir but no messages
+    let project_dir = dir.path().join("session").join("proj1");
+    fs::create_dir_all(&project_dir).unwrap();
+
+    let session_json = serde_json::json!({
+        "id": "empty-session",
+        "title": "Empty Session",
+        "projectID": "proj1"
+    });
+    fs::write(
+        project_dir.join("empty-session.json"),
+        serde_json::to_string_pretty(&session_json).unwrap(),
+    )
+    .unwrap();
+
+    // Create empty message directory
+    fs::create_dir_all(dir.path().join("message").join("empty-session")).unwrap();
+    fs::create_dir_all(dir.path().join("part")).unwrap();
+
+    let connector = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_root: dir.path().to_path_buf(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+
+    // Should skip sessions without messages
+    assert!(convs.is_empty());
+}
+
+#[test]
+fn opencode_metadata_contains_session_id() {
+    let dir = TempDir::new().unwrap();
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "meta-test".into(),
+            project_id: "proj1".into(),
+            title: Some("Meta Test".into()),
+            directory: None,
+            created: Some(1000),
+            updated: None,
+            messages: vec![TestMessage {
+                id: "msg".into(),
+                role: "user".into(),
+                model_id: None,
+                created: Some(1000),
+                parts: vec![TestPart {
+                    part_type: "text".into(),
+                    text: Some("test".into()),
+                    state: None,
+                }],
+            }],
+        }],
+    )
+    .unwrap();
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -863,87 +699,42 @@ fn opencode_metadata_contains_db_path() {
     assert_eq!(convs.len(), 1);
 
     let metadata = &convs[0].metadata;
-    assert!(metadata.get("db_path").is_some());
-    assert!(metadata.get("session_id").is_some());
+    assert_eq!(
+        metadata.get("session_id").and_then(|v| v.as_str()),
+        Some("meta-test")
+    );
+    assert_eq!(
+        metadata.get("project_id").and_then(|v| v.as_str()),
+        Some("proj1")
+    );
 }
 
-/// Test empty directory handling
 #[test]
-fn opencode_handles_empty_directory() {
+fn opencode_external_id_is_session_id() {
     let dir = TempDir::new().unwrap();
-    // No DBs created
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert!(convs.is_empty());
-}
-
-/// Test messages with NULL content are preserved
-#[test]
-fn opencode_preserves_null_content() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("nullcontent.db");
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute(
-        "CREATE TABLE messages (content TEXT, created_at INTEGER)",
-        [],
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "external-id-test".into(),
+            project_id: "proj1".into(),
+            title: Some("External ID Test".into()),
+            directory: None,
+            created: Some(1000),
+            updated: None,
+            messages: vec![TestMessage {
+                id: "msg".into(),
+                role: "user".into(),
+                model_id: None,
+                created: Some(1000),
+                parts: vec![TestPart {
+                    part_type: "text".into(),
+                    text: Some("test".into()),
+                    state: None,
+                }],
+            }],
+        }],
     )
     .unwrap();
-    conn.execute(
-        "INSERT INTO messages (content, created_at) VALUES (NULL, 1000)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (content, created_at) VALUES ('valid', 2000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].messages.len(), 2);
-    assert_eq!(convs[0].messages[0].content, ""); // NULL becomes empty string
-    assert_eq!(convs[0].messages[1].content, "valid");
-}
-
-/// Test `started_at` fallback to first message timestamp when session has no timestamp
-#[test]
-fn opencode_started_at_fallback() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("fallback.db");
-    let conn = Connection::open(&db_path).unwrap();
-
-    conn.execute(
-        "CREATE TABLE sessions (id INTEGER PRIMARY KEY, title TEXT)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "CREATE TABLE messages (session_id INTEGER, content TEXT, created_at INTEGER)",
-        [],
-    )
-    .unwrap();
-
-    // Session without created_at
-    conn.execute("INSERT INTO sessions (id, title) VALUES (1, 'Test')", [])
-        .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 'msg', 5000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
@@ -952,61 +743,9 @@ fn opencode_started_at_fallback() {
     };
     let convs = connector.scan(&ctx).unwrap();
     assert_eq!(convs.len(), 1);
-    // started_at falls back to first message timestamp
-    assert_eq!(convs[0].started_at, Some(5000));
-}
 
-/// Test multiple sessions in same DB
-#[test]
-fn opencode_multiple_sessions_same_db() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("multi.db");
-    let conn = init_db(&db_path);
-
-    conn.execute(
-        "INSERT INTO sessions (id, title) VALUES (1, 'Session 1')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO sessions (id, title) VALUES (2, 'Session 2')",
-        [],
-    )
-    .unwrap();
-
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 's1m1', 1000)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (1, 's1m2', 2000)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, content, created_at) VALUES (2, 's2m1', 3000)",
-        [],
-    )
-    .unwrap();
-    drop(conn);
-
-    let connector = OpenCodeConnector::new();
-    let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
-        since_ts: None,
-    };
-    let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 2);
-
-    let s1 = convs
-        .iter()
-        .find(|c| c.title == Some("Session 1".to_string()));
-    let s2 = convs
-        .iter()
-        .find(|c| c.title == Some("Session 2".to_string()));
-    assert!(s1.is_some());
-    assert!(s2.is_some());
-    assert_eq!(s1.unwrap().messages.len(), 2);
-    assert_eq!(s2.unwrap().messages.len(), 1);
+    assert_eq!(
+        convs[0].external_id.as_deref(),
+        Some("external-id-test")
+    );
 }
