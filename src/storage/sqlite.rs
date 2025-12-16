@@ -7,6 +7,201 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
+
+// -------------------------------------------------------------------------
+// Migration Error Types (P1.5)
+// -------------------------------------------------------------------------
+
+/// Error type for schema migration operations.
+#[derive(Debug, Error)]
+pub enum MigrationError {
+    /// The schema requires a full rebuild. The database has been backed up.
+    #[error("Rebuild required: {reason}")]
+    RebuildRequired {
+        reason: String,
+        backup_path: Option<std::path::PathBuf>,
+    },
+
+    /// A database error occurred during migration.
+    #[error("Database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    /// An I/O error occurred during backup.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Other migration error.
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<anyhow::Error> for MigrationError {
+    fn from(e: anyhow::Error) -> Self {
+        MigrationError::Other(e.to_string())
+    }
+}
+
+/// Maximum number of backup files to retain.
+const MAX_BACKUPS: usize = 3;
+
+/// Files that contain user-authored state and must NEVER be deleted during rebuild.
+const USER_DATA_FILES: &[&str] = &[
+    "bookmarks.db",
+    "tui_state.json",
+    "sources.toml",
+    ".env",
+];
+
+/// Check if a file is user-authored data that must be preserved during rebuild.
+pub fn is_user_data_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|name| USER_DATA_FILES.contains(&name))
+        .unwrap_or(false)
+}
+
+/// Create a timestamped backup of the database file.
+///
+/// Returns the path to the backup file, or None if the source doesn't exist.
+pub fn create_backup(db_path: &Path) -> Result<Option<std::path::PathBuf>, MigrationError> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let backup_name = format!(
+        "{}.backup.{}",
+        db_path.file_name().and_then(|n| n.to_str()).unwrap_or("db"),
+        timestamp
+    );
+
+    let backup_path = db_path.with_file_name(backup_name);
+    fs::copy(db_path, &backup_path)?;
+
+    Ok(Some(backup_path))
+}
+
+/// Remove old backup files, keeping only the most recent `keep_count`.
+pub fn cleanup_old_backups(db_path: &Path, keep_count: usize) -> Result<(), std::io::Error> {
+    let parent = match db_path.parent() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    let db_name = db_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("db");
+
+    let prefix = format!("{}.backup.", db_name);
+
+    // Collect backup files matching the pattern
+    let mut backups: Vec<(std::path::PathBuf, SystemTime)> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with(&prefix)
+                && let Ok(meta) = fs::metadata(&path)
+                && let Ok(mtime) = meta.modified()
+            {
+                backups.push((path, mtime));
+            }
+        }
+    }
+
+    // Sort by modification time, newest first
+    backups.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Delete oldest backups beyond keep_count
+    for (path, _) in backups.into_iter().skip(keep_count) {
+        let _ = fs::remove_file(&path);
+    }
+
+    Ok(())
+}
+
+/// Public schema version constant for external checks.
+pub const CURRENT_SCHEMA_VERSION: i64 = 5;
+
+/// Result of checking schema compatibility.
+#[derive(Debug, Clone)]
+pub enum SchemaCheck {
+    /// Schema is up to date, no migration needed.
+    Compatible,
+    /// Schema needs migration but can be done incrementally.
+    NeedsMigration,
+    /// Schema is incompatible and needs a full rebuild (with reason).
+    NeedsRebuild(String),
+}
+
+/// Check schema compatibility without modifying the database.
+///
+/// Opens the database read-only and checks the schema version.
+fn check_schema_compatibility(path: &Path) -> std::result::Result<SchemaCheck, rusqlite::Error> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+
+    // Check if meta table exists
+    let meta_exists: i32 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='meta'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if meta_exists == 0 {
+        // No meta table - could be empty or very old schema, needs rebuild
+        // But first check if there are any tables at all
+        let table_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        if table_count == 0 {
+            // Empty database, will be initialized fresh
+            return Ok(SchemaCheck::NeedsMigration);
+        }
+
+        // Has tables but no meta - very old or corrupted
+        return Ok(SchemaCheck::NeedsRebuild(
+            "Database missing schema version metadata".to_string(),
+        ));
+    }
+
+    // Get the schema version
+    let version: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0).map(|s| s.parse().ok()),
+        )
+        .ok()
+        .flatten();
+
+    match version {
+        Some(v) if v == SCHEMA_VERSION => Ok(SchemaCheck::Compatible),
+        Some(v) if v < SCHEMA_VERSION => Ok(SchemaCheck::NeedsMigration),
+        Some(v) => {
+            // v > SCHEMA_VERSION - database is from a newer version
+            Ok(SchemaCheck::NeedsRebuild(format!(
+                "Schema version {} is newer than supported version {}",
+                v, SCHEMA_VERSION
+            )))
+        }
+        None => Ok(SchemaCheck::NeedsRebuild(
+            "Schema version not found or invalid".to_string(),
+        )),
+    }
+}
 
 const SCHEMA_VERSION: i64 = 5;
 
@@ -239,6 +434,69 @@ impl SqliteStorage {
         .with_context(|| format!("opening sqlite db readonly at {}", path.display()))?;
 
         apply_common_pragmas(&conn)?;
+
+        Ok(Self { conn })
+    }
+
+    /// Open database with migration, backing up and signaling rebuild if schema is incompatible.
+    ///
+    /// This is the recommended entry point for the indexer. It handles:
+    /// - Schema version checking
+    /// - Automatic backup before destructive operations
+    /// - Cleanup of old backups
+    /// - Clear signaling when a full rebuild is required
+    ///
+    /// # Returns
+    /// - `Ok(storage)` if migration succeeded or no migration was needed
+    /// - `Err(MigrationError::RebuildRequired { .. })` if the caller should rebuild from scratch
+    ///
+    /// When `RebuildRequired` is returned, the caller should:
+    /// 1. Delete the database file (it's already backed up)
+    /// 2. Create a fresh database
+    /// 3. Re-index all conversations from source files
+    pub fn open_or_rebuild(path: &Path) -> std::result::Result<Self, MigrationError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Check if we need to handle an incompatible schema before opening
+        if path.exists() {
+            let check_result = check_schema_compatibility(path);
+            match check_result {
+                Ok(SchemaCheck::Compatible) => {
+                    // Continue with normal open
+                }
+                Ok(SchemaCheck::NeedsMigration) => {
+                    // Continue with normal open, migration will handle it
+                }
+                Ok(SchemaCheck::NeedsRebuild(reason)) => {
+                    // Schema from future or otherwise incompatible - trigger rebuild
+                    let backup_path = create_backup(path)?;
+                    cleanup_old_backups(path, MAX_BACKUPS)?;
+                    fs::remove_file(path)?;
+                    return Err(MigrationError::RebuildRequired {
+                        reason,
+                        backup_path,
+                    });
+                }
+                Err(_) => {
+                    // If we can't even check, it's likely corrupt - trigger rebuild
+                    let backup_path = create_backup(path)?;
+                    cleanup_old_backups(path, MAX_BACKUPS)?;
+                    fs::remove_file(path)?;
+                    return Err(MigrationError::RebuildRequired {
+                        reason: "Database appears corrupted".to_string(),
+                        backup_path,
+                    });
+                }
+            }
+        }
+
+        // Now open and migrate normally
+        let mut conn = Connection::open(path)?;
+        apply_pragmas(&mut conn).map_err(|e| MigrationError::Other(e.to_string()))?;
+        init_meta(&mut conn).map_err(|e| MigrationError::Other(e.to_string()))?;
+        migrate(&mut conn).map_err(|e| MigrationError::Other(e.to_string()))?;
 
         Ok(Self { conn })
     }

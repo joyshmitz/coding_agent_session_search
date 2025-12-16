@@ -1048,3 +1048,298 @@ fn migration_from_v3_creates_sources_table() {
         "local source should exist after migration"
     );
 }
+
+// -------------------------------------------------------------------------
+// P1.5 Migration Safety Tests
+// -------------------------------------------------------------------------
+
+use coding_agent_search::storage::sqlite::{
+    MigrationError, CURRENT_SCHEMA_VERSION, cleanup_old_backups, create_backup, is_user_data_file,
+};
+
+#[test]
+fn is_user_data_file_detects_protected_files() {
+    use std::path::Path;
+
+    // Protected files
+    assert!(is_user_data_file(Path::new("/data/bookmarks.db")));
+    assert!(is_user_data_file(Path::new("/data/tui_state.json")));
+    assert!(is_user_data_file(Path::new("/data/sources.toml")));
+    assert!(is_user_data_file(Path::new("/data/.env")));
+
+    // Not protected
+    assert!(!is_user_data_file(Path::new("/data/agent_search.db")));
+    assert!(!is_user_data_file(Path::new("/data/index")));
+    assert!(!is_user_data_file(Path::new("/data/something.txt")));
+}
+
+#[test]
+fn current_schema_version_matches_internal() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("version.db");
+    let storage = SqliteStorage::open(&db_path).expect("open");
+
+    assert_eq!(
+        storage.schema_version().unwrap(),
+        CURRENT_SCHEMA_VERSION,
+        "CURRENT_SCHEMA_VERSION should match actual schema version"
+    );
+}
+
+#[test]
+fn create_backup_creates_timestamped_copy() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("backup_test.db");
+
+    // Create a database file
+    std::fs::write(&db_path, b"test database content").unwrap();
+
+    // Create backup
+    let backup = create_backup(&db_path).expect("create_backup");
+    assert!(backup.is_some(), "backup should be created");
+
+    let backup_path = backup.unwrap();
+    assert!(backup_path.exists(), "backup file should exist");
+    assert!(
+        backup_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("backup_test.db.backup."),
+        "backup should have correct name pattern"
+    );
+
+    // Verify content matches
+    let original = std::fs::read(&db_path).unwrap();
+    let backed_up = std::fs::read(&backup_path).unwrap();
+    assert_eq!(original, backed_up, "backup content should match original");
+}
+
+#[test]
+fn create_backup_returns_none_for_nonexistent_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("nonexistent.db");
+
+    let backup = create_backup(&db_path).expect("create_backup");
+    assert!(backup.is_none(), "backup should be None for nonexistent file");
+}
+
+#[test]
+fn cleanup_old_backups_keeps_recent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("cleanup_test.db");
+
+    // Create 5 backup files with different timestamps
+    for i in 0..5 {
+        let backup_name = format!("cleanup_test.db.backup.{}", 1000 + i);
+        let backup_path = tmp.path().join(&backup_name);
+        std::fs::write(&backup_path, format!("backup {}", i)).unwrap();
+        // Add small delay to ensure different mtimes
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // Keep only 2
+    cleanup_old_backups(&db_path, 2).expect("cleanup");
+
+    // Count remaining backups
+    let remaining: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with("cleanup_test.db.backup."))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    assert_eq!(remaining.len(), 2, "should keep only 2 backups");
+}
+
+#[test]
+fn open_or_rebuild_creates_fresh_db() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("fresh.db");
+
+    // Open fresh database
+    let storage = SqliteStorage::open_or_rebuild(&db_path).expect("open_or_rebuild");
+
+    assert_eq!(
+        storage.schema_version().unwrap(),
+        CURRENT_SCHEMA_VERSION,
+        "fresh db should have current schema version"
+    );
+}
+
+#[test]
+fn open_or_rebuild_migrates_compatible_schema() {
+    use rusqlite::Connection;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("migrate.db");
+
+    // Create a v4 database (without provenance columns in conversations)
+    {
+        let conn = Connection::open(&db_path).expect("create v4 db");
+        conn.execute_batch(
+            r"
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta(key, value) VALUES('schema_version', '4');
+
+            CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                version TEXT,
+                kind TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE workspaces (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                display_name TEXT
+            );
+
+            CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                workspace_id INTEGER REFERENCES workspaces(id),
+                external_id TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL,
+                started_at INTEGER,
+                ended_at INTEGER,
+                approx_tokens INTEGER,
+                metadata_json TEXT,
+                UNIQUE(agent_id, external_id)
+            );
+
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                idx INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                author TEXT,
+                created_at INTEGER,
+                content TEXT NOT NULL,
+                extra_json TEXT,
+                UNIQUE(conversation_id, idx)
+            );
+
+            CREATE TABLE snippets (
+                id INTEGER PRIMARY KEY,
+                message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                file_path TEXT,
+                start_line INTEGER,
+                end_line INTEGER,
+                language TEXT,
+                snippet_text TEXT
+            );
+
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+
+            CREATE TABLE conversation_tags (
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                PRIMARY KEY (conversation_id, tag_id)
+            );
+
+            CREATE TABLE sources (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                host_label TEXT,
+                machine_id TEXT,
+                platform TEXT,
+                config_json TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO sources (id, kind, host_label, created_at, updated_at)
+            VALUES ('local', 'local', NULL, 0, 0);
+
+            CREATE VIRTUAL TABLE fts_messages USING fts5(
+                content, title, agent, workspace, source_path,
+                created_at UNINDEXED, message_id UNINDEXED,
+                tokenize='porter'
+            );
+            ",
+        )
+        .expect("create v4 schema");
+    }
+
+    // Open with open_or_rebuild - should migrate successfully
+    let storage = SqliteStorage::open_or_rebuild(&db_path).expect("open_or_rebuild");
+
+    assert_eq!(
+        storage.schema_version().unwrap(),
+        CURRENT_SCHEMA_VERSION,
+        "should migrate to current version"
+    );
+}
+
+#[test]
+fn open_or_rebuild_triggers_rebuild_for_future_version() {
+    use rusqlite::Connection;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("future.db");
+
+    // Create a database with a future schema version
+    {
+        let conn = Connection::open(&db_path).expect("create future db");
+        conn.execute_batch(
+            r"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta(key, value) VALUES('schema_version', '999');
+            ",
+        )
+        .expect("create future schema");
+    }
+
+    // Open with open_or_rebuild - should trigger rebuild
+    let result = SqliteStorage::open_or_rebuild(&db_path);
+
+    match result {
+        Err(MigrationError::RebuildRequired { reason, backup_path }) => {
+            assert!(
+                reason.contains("999"),
+                "reason should mention future version: {}",
+                reason
+            );
+            assert!(backup_path.is_some(), "backup should be created");
+            let backup = backup_path.unwrap();
+            assert!(backup.exists(), "backup file should exist");
+        }
+        Ok(_) => panic!("should have triggered rebuild for future version"),
+        Err(e) => panic!("unexpected error: {}", e),
+    }
+
+    // Original database should be deleted
+    assert!(!db_path.exists(), "original db should be deleted");
+}
+
+#[test]
+fn open_or_rebuild_handles_corrupted_db() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("corrupt.db");
+
+    // Create a corrupted database file
+    std::fs::write(&db_path, b"this is not a valid sqlite database").unwrap();
+
+    // Open with open_or_rebuild - should trigger rebuild
+    let result = SqliteStorage::open_or_rebuild(&db_path);
+
+    match result {
+        Err(MigrationError::RebuildRequired { backup_path, .. }) => {
+            assert!(backup_path.is_some(), "backup should be created");
+        }
+        Err(_) => {
+            // Also acceptable - database error during check
+        }
+        Ok(_) => panic!("should have failed for corrupted db"),
+    }
+}
