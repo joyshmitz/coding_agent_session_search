@@ -41,7 +41,8 @@ fn claude_skips_invalid_json_syntax() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -66,7 +67,8 @@ fn claude_skips_missing_type_field() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -92,7 +94,8 @@ fn claude_handles_wrong_field_types() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -116,7 +119,8 @@ fn claude_handles_truncated_json() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -146,7 +150,8 @@ fn claude_handles_binary_in_content() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     // Should not panic - gracefully handle the file
@@ -172,7 +177,8 @@ fn claude_returns_error_on_invalid_utf8() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     // fs::read_to_string fails on invalid UTF-8, which is acceptable behavior
@@ -192,7 +198,8 @@ fn claude_handles_empty_file() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -212,7 +219,8 @@ fn claude_handles_whitespace_only_file() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -236,7 +244,8 @@ fn gemini_skips_invalid_json() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -264,7 +273,8 @@ fn gemini_handles_missing_messages() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -292,7 +302,8 @@ fn gemini_handles_wrong_messages_type() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     // Should not panic
@@ -320,7 +331,8 @@ fn codex_skips_invalid_json() {
 
     let conn = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: codex_home,
+        data_dir: codex_home,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     // Invalid JSON causes read error, which propagates
@@ -354,7 +366,8 @@ fn codex_handles_missing_events() {
 
     let conn = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: codex_home,
+        data_dir: codex_home,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     // Should not panic - gracefully handle missing fields
@@ -378,7 +391,8 @@ fn cline_skips_invalid_json() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -404,7 +418,8 @@ fn cline_handles_missing_task_history() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     // Should not panic
@@ -438,7 +453,8 @@ fn claude_processes_valid_files_despite_bad_ones() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -471,7 +487,8 @@ fn claude_handles_extremely_long_content() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     // Should not panic or hang
@@ -499,7 +516,8 @@ fn claude_handles_deeply_nested_json() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     // Should not panic

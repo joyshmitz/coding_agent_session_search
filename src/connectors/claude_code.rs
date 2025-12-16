@@ -44,13 +44,13 @@ impl Connector for ClaudeCodeConnector {
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Use data_root only if it looks like a Claude projects directory (for testing)
         // Otherwise use the default projects_root
-        let root = if ctx.data_root.join("projects").exists()
+        let root = if ctx.data_dir.join("projects").exists()
             || ctx
-                .data_root
+                .data_dir
                 .file_name()
                 .is_some_and(|n| n.to_str().unwrap_or("").contains("claude"))
         {
-            ctx.data_root.clone()
+            ctx.data_dir.clone()
         } else {
             Self::projects_root()
         };

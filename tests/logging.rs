@@ -60,7 +60,8 @@ fn amp_connector_emits_scan_span() {
     let fixture_root = std::path::PathBuf::from("tests/fixtures/amp");
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root,
+        data_dir: fixture_root,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();

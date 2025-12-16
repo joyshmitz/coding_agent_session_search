@@ -27,7 +27,8 @@ fn codex_connector_reads_modern_envelope_jsonl() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -65,7 +66,8 @@ fn codex_connector_includes_agent_reasoning() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -112,7 +114,8 @@ fn codex_connector_filters_token_count() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -159,7 +162,8 @@ fn codex_connector_respects_since_ts_at_file_level_only() {
     let connector = CodexConnector::new();
     // since_ts does NOT filter individual messages anymore - only whole files
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: Some(1_700_000_000_000),
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -215,7 +219,8 @@ fn codex_connector_reads_legacy_json_format() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -293,7 +298,8 @@ fn codex_connector_handles_user_message_event() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -330,7 +336,8 @@ also not valid
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -365,7 +372,8 @@ fn codex_connector_handles_multiple_sessions() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -398,7 +406,8 @@ fn codex_connector_filters_empty_content() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -432,7 +441,8 @@ fn codex_connector_extracts_title() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -465,7 +475,8 @@ fn codex_connector_assigns_sequential_indices() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -498,7 +509,8 @@ fn codex_connector_sets_external_id_from_filename() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -527,7 +539,8 @@ fn codex_connector_handles_empty_sessions() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -556,7 +569,8 @@ fn codex_connector_parses_millis_timestamp() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -592,7 +606,8 @@ fn codex_connector_flattens_tool_use_blocks() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -629,7 +644,8 @@ fn codex_connector_handles_missing_cwd() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -671,7 +687,8 @@ fn codex_connector_ignores_non_rollout_files() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -710,7 +727,8 @@ fn codex_connector_handles_legacy_json_missing_session() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -743,7 +761,8 @@ fn codex_connector_title_fallback_to_first_message() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -774,7 +793,8 @@ fn codex_connector_handles_nested_directories() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -804,7 +824,8 @@ fn codex_connector_filters_turn_aborted() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -841,7 +862,8 @@ fn codex_connector_truncates_long_title() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -872,7 +894,8 @@ fn codex_connector_sets_source_path() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -908,7 +931,8 @@ fn codex_connector_metadata_indicates_format() {
 
     let connector = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();

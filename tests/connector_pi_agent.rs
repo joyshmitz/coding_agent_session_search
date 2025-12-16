@@ -25,7 +25,8 @@ fn pi_agent_connector_reads_session_jsonl() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -59,7 +60,8 @@ fn pi_agent_connector_includes_thinking_content() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -96,7 +98,8 @@ fn pi_agent_connector_handles_tool_calls() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -138,7 +141,8 @@ fn pi_agent_connector_handles_model_change() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -214,7 +218,8 @@ also not valid
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -246,7 +251,8 @@ fn pi_agent_connector_handles_string_content() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -279,7 +285,8 @@ fn pi_agent_connector_filters_empty_content() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -311,7 +318,8 @@ fn pi_agent_connector_extracts_title_from_first_user_message() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -344,7 +352,8 @@ fn pi_agent_connector_truncates_long_title() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -376,7 +385,8 @@ fn pi_agent_connector_assigns_sequential_indices() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -408,7 +418,8 @@ fn pi_agent_connector_metadata_includes_provider_info() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -459,7 +470,8 @@ fn pi_agent_connector_ignores_files_without_underscore() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -481,7 +493,8 @@ fn pi_agent_connector_handles_empty_sessions() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -509,7 +522,8 @@ fn pi_agent_connector_skips_thinking_level_change() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -544,7 +558,8 @@ fn pi_agent_connector_populates_author_for_assistant_messages() {
 
     let connector = PiAgentConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();

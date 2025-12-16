@@ -67,12 +67,12 @@ impl Connector for CodexConnector {
         // Check for `.codex` in path OR explicit directory name ending in "codex".
         // This avoids false positives from unrelated "sessions" directories.
         let is_codex_dir = ctx
-            .data_root
+            .data_dir
             .to_str()
             .map(|s| s.contains(".codex") || s.ends_with("/codex") || s.ends_with("\\codex"))
             .unwrap_or(false);
         let home = if is_codex_dir {
-            ctx.data_root.clone()
+            ctx.data_dir.clone()
         } else {
             Self::home()
         };

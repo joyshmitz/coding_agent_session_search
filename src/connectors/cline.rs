@@ -45,10 +45,10 @@ impl Connector for ClineConnector {
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         let root = if ctx
-            .data_root
+            .data_dir
             .file_name()
             .is_some_and(|n| n.to_str().unwrap_or("").contains("claude-dev"))
-            || fs::read_dir(&ctx.data_root)
+            || fs::read_dir(&ctx.data_dir)
                 .map(|mut d| {
                     d.any(|e| {
                         e.ok().is_some_and(|e| {
@@ -61,7 +61,7 @@ impl Connector for ClineConnector {
                 })
                 .unwrap_or(false)
         {
-            ctx.data_root.clone()
+            ctx.data_dir.clone()
         } else {
             Self::storage_root()
         };

@@ -108,7 +108,8 @@ fn opencode_parses_json_fixture() {
     let fixture_root = PathBuf::from("tests/fixtures/opencode_json");
     let conn = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root.clone(),
+        data_dir: fixture_root.clone(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -161,7 +162,8 @@ fn opencode_parses_created_storage() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -226,7 +228,8 @@ fn opencode_handles_multiple_sessions() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -273,7 +276,8 @@ fn opencode_handles_tool_parts() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -321,7 +325,8 @@ fn opencode_handles_reasoning_parts() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -362,7 +367,8 @@ fn opencode_sets_correct_agent_slug() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -379,7 +385,8 @@ fn opencode_handles_empty_storage() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -393,7 +400,8 @@ fn opencode_handles_missing_storage() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -453,7 +461,8 @@ fn opencode_orders_messages_by_timestamp() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -518,7 +527,8 @@ fn opencode_assigns_sequential_indices() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -559,7 +569,8 @@ fn opencode_title_fallback_to_first_message() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -614,7 +625,8 @@ fn opencode_computes_started_ended_at() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -651,7 +663,8 @@ fn opencode_skips_sessions_without_messages() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -689,7 +702,8 @@ fn opencode_metadata_contains_session_id() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
@@ -735,7 +749,8 @@ fn opencode_external_id_is_session_id() {
 
     let connector = OpenCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();

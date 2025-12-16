@@ -18,7 +18,8 @@ fn claude_parses_project_fixture() {
     // Run scan on temp dir
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -59,7 +60,8 @@ fn claude_connector_parses_jsonl_format() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -98,7 +100,8 @@ fn claude_connector_filters_summary_entries() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -127,7 +130,8 @@ fn claude_connector_extracts_model_as_author() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -152,7 +156,8 @@ fn claude_connector_flattens_tool_use() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -179,7 +184,8 @@ fn claude_connector_extracts_title_from_user() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -202,7 +208,8 @@ fn claude_connector_title_fallback_to_workspace() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -228,7 +235,8 @@ also not json
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -252,7 +260,8 @@ fn claude_connector_filters_empty_content() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -278,7 +287,8 @@ fn claude_connector_assigns_sequential_indices() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -309,7 +319,8 @@ fn claude_connector_handles_multiple_files() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -335,7 +346,8 @@ fn claude_connector_parses_json_format() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -364,7 +376,8 @@ fn claude_connector_parses_claude_extension() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -381,7 +394,8 @@ fn claude_connector_handles_empty_directory() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -402,7 +416,8 @@ fn claude_connector_sets_external_id() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -427,7 +442,8 @@ fn claude_connector_sets_source_path() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -450,7 +466,8 @@ fn claude_connector_parses_timestamps() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -480,7 +497,8 @@ fn claude_connector_truncates_long_title() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -515,7 +533,8 @@ fn claude_connector_ignores_other_extensions() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -536,7 +555,8 @@ fn claude_connector_handles_nested_projects() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -559,7 +579,8 @@ fn claude_connector_uses_entry_type_as_role() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();

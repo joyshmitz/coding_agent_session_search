@@ -13,7 +13,8 @@ fn cline_parses_fixture_task() {
     let fixture_root = PathBuf::from("tests/fixtures/cline");
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root.clone(),
+        data_dir: fixture_root.clone(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -62,7 +63,8 @@ fn cline_respects_since_ts_and_resequences_indices() {
 
     let connector = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: Some(1_500),
     };
 
@@ -115,7 +117,8 @@ fn cline_prefers_ui_messages() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -141,7 +144,8 @@ fn cline_fallback_to_api_history() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -164,7 +168,8 @@ fn cline_handles_multiple_tasks() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -188,7 +193,8 @@ fn cline_skips_task_history_json() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -210,7 +216,8 @@ fn cline_extracts_title_from_metadata() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -232,7 +239,8 @@ fn cline_title_fallback_to_first_message() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -254,7 +262,8 @@ fn cline_extracts_workspace_from_rootpath() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -279,7 +288,8 @@ fn cline_extracts_workspace_from_cwd() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -305,7 +315,8 @@ fn cline_filters_empty_content() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -330,7 +341,8 @@ fn cline_sorts_messages_by_timestamp() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -359,7 +371,8 @@ fn cline_sets_external_id_from_directory() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -378,7 +391,8 @@ fn cline_sets_source_path_to_task_dir() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -393,7 +407,8 @@ fn cline_handles_empty_directory() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -409,7 +424,8 @@ fn cline_skips_task_without_messages() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -430,7 +446,8 @@ fn cline_sets_started_and_ended_at() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -450,7 +467,8 @@ fn cline_sets_agent_slug() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -472,7 +490,8 @@ fn cline_parses_alternate_content_fields() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -500,7 +519,8 @@ fn cline_parses_alternate_timestamp_fields() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -522,7 +542,8 @@ fn cline_uses_type_as_role_fallback() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -544,7 +565,8 @@ fn cline_truncates_long_title() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -564,7 +586,8 @@ fn cline_sets_metadata_source() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -591,7 +614,8 @@ fn cline_ignores_files_in_root() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -611,7 +635,8 @@ fn cline_parses_iso_timestamps() {
 
     let conn = ClineConnector::new();
     let ctx = ScanContext {
-        data_root: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();

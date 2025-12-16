@@ -28,7 +28,8 @@ fn scan_nonexistent_directory_handles_gracefully() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: nonexistent,
+        data_dir: nonexistent,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -61,7 +62,8 @@ fn file_deleted_mid_scan_handles_gracefully() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -83,7 +85,8 @@ fn empty_directory_returns_no_conversations() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -102,7 +105,8 @@ fn missing_session_file_in_project() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -138,7 +142,8 @@ fn symlink_to_valid_file_is_followed() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -164,7 +169,8 @@ fn broken_symlink_is_handled_gracefully() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -198,7 +204,8 @@ fn symlink_to_directory_is_followed() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: mock_claude,
+        data_dir: mock_claude,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -227,7 +234,8 @@ fn directory_named_like_session_file() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -251,7 +259,8 @@ fn zero_byte_file_handles_gracefully() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -272,7 +281,8 @@ fn newlines_only_file_handles_gracefully() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -301,7 +311,8 @@ fn path_with_spaces_is_handled() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -326,7 +337,8 @@ fn path_with_unicode_is_handled() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -356,7 +368,8 @@ fn deeply_nested_directory_is_handled() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -382,7 +395,8 @@ fn gemini_handles_missing_chats_dir() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -406,7 +420,8 @@ fn codex_handles_missing_sessions_dir() {
 
     let conn = CodexConnector::new();
     let ctx = ScanContext {
-        data_root: codex_home,
+        data_dir: codex_home,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -432,7 +447,8 @@ fn error_contains_path_context() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -475,7 +491,8 @@ fn multiple_bad_files_dont_prevent_good_file_processing() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -519,7 +536,8 @@ fn file_readable_with_other_handle() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("mock-claude"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 

@@ -408,14 +408,14 @@ impl Connector for CursorConnector {
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Determine base directory
-        let base = if ctx.data_root.join("globalStorage").exists()
-            || ctx.data_root.join("workspaceStorage").exists()
+        let base = if ctx.data_dir.join("globalStorage").exists()
+            || ctx.data_dir.join("workspaceStorage").exists()
             || ctx
-                .data_root
+                .data_dir
                 .file_name()
                 .is_some_and(|n| n.to_str().unwrap_or("").contains("Cursor"))
         {
-            ctx.data_root.clone()
+            ctx.data_dir.clone()
         } else if let Some(default_base) = Self::app_support_dir() {
             default_base
         } else {

@@ -21,7 +21,8 @@ fn amp_parses_minimal_cache() {
     let conn = AmpConnector::new();
     // Detection may fail on systems without amp cache; force scan with our fixture root.
     let ctx = ScanContext {
-        data_root: fixture_root.clone(),
+        data_dir: fixture_root.clone(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -40,7 +41,8 @@ fn amp_includes_all_messages_when_file_modified() {
     let fixture_root = PathBuf::from("tests/fixtures/amp");
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root.clone(),
+        data_dir: fixture_root.clone(),
+        scan_roots: Vec::new(),
         since_ts: Some(1_700_000_000_000),
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -86,7 +88,8 @@ fn amp_skips_malformed_json() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -130,7 +133,8 @@ fn amp_parses_alternate_fields() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -176,7 +180,8 @@ fn amp_handles_timestamp_formats() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -222,7 +227,8 @@ fn amp_extracts_workspace() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -270,7 +276,8 @@ fn amp_handles_nested_structure() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -308,7 +315,8 @@ fn amp_extracts_title() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -345,7 +353,8 @@ fn amp_detects_valid_files() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -375,7 +384,8 @@ fn amp_normalizes_roles() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -416,7 +426,8 @@ fn amp_extracts_external_id() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -465,7 +476,8 @@ fn amp_filters_empty_content() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -499,7 +511,8 @@ fn amp_extracts_author_field() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -524,7 +537,8 @@ fn amp_handles_empty_directory() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -548,7 +562,8 @@ fn amp_sets_correct_agent_slug() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -570,7 +585,8 @@ fn amp_sets_source_path() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -599,7 +615,8 @@ fn amp_computes_started_ended_at() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -632,7 +649,8 @@ fn amp_assigns_sequential_indices() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -707,7 +725,8 @@ fn amp_workspace_from_alternate_keys() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -777,7 +796,8 @@ fn amp_skips_json_without_messages() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -811,7 +831,8 @@ fn amp_handles_camel_case_timestamps() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -849,7 +870,8 @@ fn amp_scans_nested_directories() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -888,7 +910,8 @@ fn amp_filters_whitespace_content() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
@@ -932,7 +955,8 @@ fn amp_skips_empty_content_conversations() {
 
     let conn = AmpConnector::new();
     let ctx = ScanContext {
-        data_root: amp_dir,
+        data_dir: amp_dir,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();

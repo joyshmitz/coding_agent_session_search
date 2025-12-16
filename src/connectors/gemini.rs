@@ -185,15 +185,15 @@ impl Connector for GeminiConnector {
         // Use data_root only if it looks like a Gemini directory (for testing)
         // Otherwise use the default root
         let root = if ctx
-            .data_root
+            .data_dir
             .file_name()
             .is_some_and(|n| n.to_str().unwrap_or("").contains("gemini"))
-            || ctx.data_root.join("chats").exists()
-            || fs::read_dir(&ctx.data_root)
+            || ctx.data_dir.join("chats").exists()
+            || fs::read_dir(&ctx.data_dir)
                 .map(|mut d| d.any(|e| e.ok().is_some_and(|e| e.path().join("chats").exists())))
                 .unwrap_or(false)
         {
-            ctx.data_root.clone()
+            ctx.data_dir.clone()
         } else {
             Self::root()
         };

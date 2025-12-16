@@ -158,7 +158,7 @@ impl Connector for AiderConnector {
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
-        let files = Self::find_chat_files(std::slice::from_ref(&ctx.data_root.as_path()));
+        let files = Self::find_chat_files(std::slice::from_ref(&ctx.data_dir.as_path()));
 
         let mut conversations = Vec::new();
         for path in files {

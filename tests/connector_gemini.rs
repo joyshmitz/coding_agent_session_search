@@ -9,7 +9,8 @@ fn gemini_parses_jsonl_fixture() {
     let fixture_root = PathBuf::from("tests/fixtures/gemini");
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root.clone(),
+        data_dir: fixture_root.clone(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -28,7 +29,8 @@ fn gemini_maps_model_role_to_assistant() {
     let fixture_root = PathBuf::from("tests/fixtures/gemini");
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root,
+        data_dir: fixture_root,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -46,7 +48,8 @@ fn gemini_extracts_metadata() {
     let fixture_root = PathBuf::from("tests/fixtures/gemini");
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root,
+        data_dir: fixture_root,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -66,7 +69,8 @@ fn gemini_parses_timestamps() {
     let fixture_root = PathBuf::from("tests/fixtures/gemini");
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root,
+        data_dir: fixture_root,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -140,7 +144,8 @@ fn gemini_includes_all_messages_when_file_modified() {
         .timestamp_millis();
 
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: Some(since_ts),
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -186,7 +191,8 @@ fn gemini_extracts_workspace_from_agents_md_content() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -226,7 +232,8 @@ fn gemini_extracts_workspace_from_working_directory() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -273,7 +280,8 @@ fn gemini_filters_empty_messages() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -318,7 +326,8 @@ fn gemini_skips_malformed_json() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -349,7 +358,8 @@ fn gemini_skips_sessions_without_messages() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
 
@@ -389,7 +399,8 @@ fn gemini_extracts_title_from_first_user_message() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -439,7 +450,8 @@ fn gemini_assigns_sequential_message_indices() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -458,7 +470,8 @@ fn gemini_sets_agent_slug() {
     let fixture_root = PathBuf::from("tests/fixtures/gemini");
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root,
+        data_dir: fixture_root,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -475,7 +488,8 @@ fn gemini_sets_source_path() {
     let fixture_root = PathBuf::from("tests/fixtures/gemini");
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root.clone(),
+        data_dir: fixture_root.clone(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -516,7 +530,8 @@ fn gemini_handles_multiple_sessions() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -551,7 +566,8 @@ fn gemini_falls_back_to_hash_directory_for_workspace() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");

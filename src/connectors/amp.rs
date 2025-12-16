@@ -67,16 +67,16 @@ impl Connector for AmpConnector {
         let mut convs = Vec::new();
         let mut seen_ids = std::collections::HashSet::new();
 
-        // allow tests to override via ctx.data_root
+        // allow tests to override via ctx.data_dir
         let roots = if ctx
-            .data_root
+            .data_dir
             .file_name()
             .is_some_and(|n| n.to_str().unwrap_or("").contains("amp"))
-            || std::fs::read_dir(&ctx.data_root)
+            || std::fs::read_dir(&ctx.data_dir)
                 .map(|mut d| d.any(|e| e.ok().is_some_and(|e| is_amp_log_file(&e.path()))))
                 .unwrap_or(false)
         {
-            vec![ctx.data_root.clone()]
+            vec![ctx.data_dir.clone()]
         } else {
             Self::candidate_roots()
         };

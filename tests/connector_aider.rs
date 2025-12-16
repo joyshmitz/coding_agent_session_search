@@ -27,7 +27,8 @@ fn aider_parses_chat_history() {
     let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/aider");
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: fixture_root,
+        data_dir: fixture_root,
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -71,7 +72,8 @@ fn aider_sets_agent_slug() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -88,7 +90,8 @@ fn aider_sets_source_path() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -105,7 +108,8 @@ fn aider_sets_external_id_from_filename() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -125,7 +129,8 @@ fn aider_title_includes_path() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -148,7 +153,8 @@ fn aider_sets_workspace_to_parent() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -170,7 +176,8 @@ fn aider_timestamps_from_mtime() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -192,7 +199,8 @@ fn aider_since_ts_filters_old_files() {
     // Use a future timestamp to filter out all files
     let future_ts = chrono::Utc::now().timestamp_millis() + 100_000_000;
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: Some(future_ts),
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -209,7 +217,8 @@ fn aider_no_since_ts_includes_all() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -233,7 +242,8 @@ fn aider_message_indices_sequential() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -259,7 +269,8 @@ fn aider_author_matches_role() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -282,7 +293,8 @@ fn aider_user_messages_from_prefix() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -310,7 +322,8 @@ fn aider_multiline_user_input() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -338,7 +351,8 @@ fn aider_assistant_after_user() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -364,7 +378,8 @@ fn aider_multiple_turns() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -396,7 +411,8 @@ fn aider_empty_file() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -413,7 +429,8 @@ fn aider_whitespace_only_file() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -434,7 +451,8 @@ fn aider_only_user_messages() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -458,7 +476,8 @@ fn aider_no_user_prefix_content() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -498,7 +517,8 @@ fn aider_scans_subdirectories() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -519,7 +539,8 @@ fn aider_only_scans_chat_history_files() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -545,7 +566,8 @@ fn aider_multiple_projects() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -577,7 +599,8 @@ fn aider_preserves_commands() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -601,7 +624,8 @@ fn aider_code_blocks_in_response() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -627,7 +651,8 @@ fn aider_markdown_formatting() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -655,7 +680,8 @@ fn aider_gt_in_code_not_user_input() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -755,7 +781,8 @@ fn aider_metadata_is_empty() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -772,7 +799,8 @@ fn aider_message_extra_is_empty() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -791,7 +819,8 @@ fn aider_message_created_at_is_none() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -810,7 +839,8 @@ fn aider_message_snippets_empty() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -830,7 +860,8 @@ fn aider_message_snippets_empty() {
 fn aider_nonexistent_directory() {
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: PathBuf::from("/nonexistent/path/that/does/not/exist"),
+        data_dir: PathBuf::from("/nonexistent/path/that/does/not/exist"),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -845,7 +876,8 @@ fn aider_empty_directory() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -866,7 +898,8 @@ fn aider_long_user_input() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -889,7 +922,8 @@ fn aider_special_characters() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -913,7 +947,8 @@ fn aider_blank_lines_between_messages() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -936,7 +971,8 @@ fn aider_consecutive_user_lines_combined() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
@@ -964,7 +1000,8 @@ fn aider_trailing_whitespace() {
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
-        data_root: tmp.path().to_path_buf(),
+        data_dir: tmp.path().to_path_buf(),
+        scan_roots: Vec::new(),
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");

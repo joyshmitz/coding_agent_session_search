@@ -148,9 +148,9 @@ impl Connector for OpenCodeConnector {
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Determine the storage root
-        let storage_root = if ctx.data_root.exists() && looks_like_opencode_storage(&ctx.data_root)
+        let storage_root = if ctx.data_dir.exists() && looks_like_opencode_storage(&ctx.data_dir)
         {
-            ctx.data_root.clone()
+            ctx.data_dir.clone()
         } else {
             match Self::storage_root() {
                 Some(root) => root,

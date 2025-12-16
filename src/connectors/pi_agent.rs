@@ -147,14 +147,14 @@ impl Connector for PiAgentConnector {
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Use data_root if it looks like a pi-agent directory (for testing)
         let is_pi_agent_dir = ctx
-            .data_root
+            .data_dir
             .to_str()
             .map(|s| {
                 s.contains(".pi/agent") || s.ends_with("/pi-agent") || s.ends_with("\\pi-agent")
             })
             .unwrap_or(false);
         let home = if is_pi_agent_dir {
-            ctx.data_root.clone()
+            ctx.data_dir.clone()
         } else {
             Self::home()
         };

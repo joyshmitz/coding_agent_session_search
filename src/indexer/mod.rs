@@ -168,10 +168,7 @@ pub fn run_index(
                 }
             }
 
-            let ctx = crate::connectors::ScanContext {
-                data_root: data_dir.clone(),
-                since_ts,
-            };
+            let ctx = crate::connectors::ScanContext::local_default(data_dir.clone(), since_ts);
 
             match conn.scan(&ctx) {
                 Ok(convs) => {
@@ -483,10 +480,7 @@ fn reindex_paths(
                 .or_else(|| ts.map(|v| v.saturating_sub(1)))
                 .map(|v| v.saturating_sub(1))
         };
-        let ctx = crate::connectors::ScanContext {
-            data_root: opts.data_dir.clone(),
-            since_ts,
-        };
+        let ctx = crate::connectors::ScanContext::local_default(opts.data_dir.clone(), since_ts);
         let convs = conn.scan(&ctx)?;
 
         // Update total and phase to indexing

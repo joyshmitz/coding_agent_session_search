@@ -459,12 +459,12 @@ impl Connector for ChatGptConnector {
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Determine base directory
         let base = if ctx
-            .data_root
+            .data_dir
             .file_name()
             .is_some_and(|n| n.to_str().unwrap_or("").contains("openai"))
-            || ctx.data_root.join("conversations-").exists()
+            || ctx.data_dir.join("conversations-").exists()
         {
-            ctx.data_root.clone()
+            ctx.data_dir.clone()
         } else if let Some(default_base) = Self::app_support_dir() {
             default_base
         } else {
