@@ -11,8 +11,9 @@ use tantivy::{Index, IndexReader, IndexWriter, doc};
 use tracing::{debug, info, warn};
 
 use crate::connectors::NormalizedConversation;
+use crate::sources::provenance::LOCAL_SOURCE_ID;
 
-const SCHEMA_VERSION: &str = "v4";
+const SCHEMA_VERSION: &str = "v5";
 
 /// Minimum time (ms) between merge operations
 const MERGE_COOLDOWN_MS: i64 = 300_000; // 5 minutes
@@ -47,7 +48,7 @@ impl MergeStatus {
 }
 
 // Bump this when schema/tokenizer changes. Used to trigger rebuilds.
-pub const SCHEMA_HASH: &str = "tantivy-schema-v4-edge-ngram-agent-string";
+pub const SCHEMA_HASH: &str = "tantivy-schema-v5-provenance";
 
 #[derive(Clone, Copy)]
 pub struct Fields {
@@ -61,6 +62,10 @@ pub struct Fields {
     pub title_prefix: Field,
     pub content_prefix: Field,
     pub preview: Field,
+    // Provenance fields (P1.4)
+    pub source_id: Field,
+    pub origin_kind: Field,
+    pub origin_host: Field,
 }
 
 pub struct TantivyIndex {
@@ -263,6 +268,9 @@ impl TantivyIndex {
                 self.fields.source_path => conv.source_path.to_string_lossy().into_owned(),
                 self.fields.msg_idx => msg.idx as u64,
                 self.fields.content => msg.content.clone(),
+                // Provenance fields - default to local until Phase 2 adds origin to NormalizedConversation
+                self.fields.source_id => LOCAL_SOURCE_ID,
+                self.fields.origin_kind => "local",
             };
             if let Some(ws) = &conv.workspace {
                 d.add_text(self.fields.workspace, ws.to_string_lossy());
@@ -279,6 +287,8 @@ impl TantivyIndex {
                 generate_edge_ngrams(&msg.content),
             );
             d.add_text(self.fields.preview, build_preview(&msg.content, 400));
+            // Note: origin_host not added here as it's empty for local sources
+            // Will be populated in Phase 2 when NormalizedConversation has origin
             self.writer.add_document(d)?;
         }
         Ok(())
@@ -332,6 +342,10 @@ pub fn build_schema() -> Schema {
     schema_builder.add_text_field("title_prefix", text_not_stored.clone());
     schema_builder.add_text_field("content_prefix", text_not_stored);
     schema_builder.add_text_field("preview", TEXT | STORED);
+    // Provenance fields (P1.4) - STRING for exact match filtering
+    schema_builder.add_text_field("source_id", STRING | STORED);
+    schema_builder.add_text_field("origin_kind", STRING | STORED);
+    schema_builder.add_text_field("origin_host", STRING | STORED);
     schema_builder.build()
 }
 
@@ -352,6 +366,9 @@ pub fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         title_prefix: get("title_prefix")?,
         content_prefix: get("content_prefix")?,
         preview: get("preview")?,
+        source_id: get("source_id")?,
+        origin_kind: get("origin_kind")?,
+        origin_host: get("origin_host")?,
     })
 }
 
@@ -646,6 +663,10 @@ mod tests {
         assert!(schema.get_field("title_prefix").is_ok());
         assert!(schema.get_field("content_prefix").is_ok());
         assert!(schema.get_field("preview").is_ok());
+        // Provenance fields (P1.4)
+        assert!(schema.get_field("source_id").is_ok());
+        assert!(schema.get_field("origin_kind").is_ok());
+        assert!(schema.get_field("origin_host").is_ok());
     }
 
     #[test]
@@ -664,6 +685,10 @@ mod tests {
         let _ = fields.title_prefix;
         let _ = fields.content_prefix;
         let _ = fields.preview;
+        // Provenance fields (P1.4)
+        let _ = fields.source_id;
+        let _ = fields.origin_kind;
+        let _ = fields.origin_host;
     }
 
     #[test]

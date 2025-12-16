@@ -50,5 +50,5 @@ fn index_then_tui_once_headless() {
 
     // Ensure index artifacts exist.
     assert!(data_dir.join("agent_search.db").exists());
-    assert!(data_dir.join("index/v4").exists());
+    assert!(data_dir.join("index/v5").exists());
 }
