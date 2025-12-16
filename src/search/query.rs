@@ -4555,8 +4555,10 @@ mod tests {
         let client = SearchClient::open(dir.path(), None)?.expect("index present");
 
         // Filter for local sources
-        let mut filters = SearchFilters::default();
-        filters.source_filter = SourceFilter::Local;
+        let filters = SearchFilters {
+            source_filter: SourceFilter::Local,
+            ..Default::default()
+        };
 
         let hits = client.search("source", filters.clone(), 10, 0)?;
 
@@ -4571,8 +4573,10 @@ mod tests {
         assert!(!hits.is_empty(), "Should have found local results");
 
         // Filter for specific source ID
-        let mut filters_id = SearchFilters::default();
-        filters_id.source_filter = SourceFilter::SourceId("local".to_string());
+        let filters_id = SearchFilters {
+            source_filter: SourceFilter::SourceId("local".to_string()),
+            ..Default::default()
+        };
 
         let hits_id = client.search("source", filters_id, 10, 0)?;
         for hit in &hits_id {

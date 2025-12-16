@@ -8,7 +8,7 @@
 //!
 //! - **config**: Configuration types for defining remote sources
 //! - **provenance**: Types for tracking conversation origins
-//! - **sync** (future): Sync engine for pulling sessions from remotes
+//! - **sync**: Sync engine for pulling sessions from remotes via rsync/SSH
 //! - **status** (future): Sync status tracking
 //!
 //! # Configuration
@@ -37,6 +37,23 @@
 //! let remote = Origin::remote("work-laptop");
 //! ```
 //!
+//! # Syncing
+//!
+//! The sync engine uses rsync over SSH for efficient delta transfers:
+//!
+//! ```rust,ignore
+//! use coding_agent_search::sources::sync::SyncEngine;
+//! use coding_agent_search::sources::config::SourcesConfig;
+//!
+//! let config = SourcesConfig::load()?;
+//! let engine = SyncEngine::new(&data_dir);
+//!
+//! for source in config.remote_sources() {
+//!     let report = engine.sync_source(source)?;
+//!     println!("Synced {}: {} files", source.name, report.total_files());
+//! }
+//! ```
+//!
 //! # Usage
 //!
 //! ```rust,ignore
@@ -53,6 +70,7 @@
 
 pub mod config;
 pub mod provenance;
+pub mod sync;
 
 // Re-export commonly used config types
 pub use config::{
@@ -61,3 +79,6 @@ pub use config::{
 
 // Re-export commonly used provenance types
 pub use provenance::{LOCAL_SOURCE_ID, Origin, Source, SourceFilter, SourceKind};
+
+// Re-export commonly used sync types
+pub use sync::{PathSyncResult, SyncEngine, SyncError, SyncMethod, SyncReport};
