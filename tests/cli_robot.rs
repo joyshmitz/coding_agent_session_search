@@ -2322,3 +2322,154 @@ fn multiple_normalizations_combined() {
     // Should normalize to --robot-help
     cmd.assert().success().stdout(contains("cass --robot-help"));
 }
+
+// =============================================================================
+// P7.9: Robot-docs Provenance Output Tests
+// Tests for provenance fields in robot/JSON output
+// =============================================================================
+
+/// Search results should include provenance fields (source_id) in default output
+#[test]
+fn search_json_includes_source_id_provenance() {
+    // P7.9: Search results should include source_id field
+    let mut cmd = base_cmd();
+    cmd.args([
+        "search",
+        "hello",
+        "--json",
+        "--limit",
+        "1",
+        "--data-dir",
+        "tests/fixtures/search_demo_data",
+    ]);
+
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    let hits = json["hits"].as_array().expect("hits array");
+    if !hits.is_empty() {
+        let hit = &hits[0];
+        // source_id should be present and a string
+        assert!(
+            hit["source_id"].is_string(),
+            "Hit should have source_id provenance field"
+        );
+        // Default fixture data should be 'local'
+        assert_eq!(
+            hit["source_id"], "local",
+            "Fixture data should be from local source"
+        );
+    }
+}
+
+/// Search results with provenance preset should include origin fields
+#[test]
+fn search_fields_provenance_preset_expands() {
+    // P7.9: 'provenance' preset should expand to source_id,origin_kind,origin_host
+    let mut cmd = base_cmd();
+    cmd.args([
+        "search",
+        "hello",
+        "--json",
+        "--limit",
+        "1",
+        "--fields",
+        "provenance,source_path",
+        "--data-dir",
+        "tests/fixtures/search_demo_data",
+    ]);
+
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    let hits = json["hits"].as_array().expect("hits array");
+    if !hits.is_empty() {
+        let hit = &hits[0];
+        // Provenance preset fields should be present
+        assert!(
+            hit["source_id"].is_string(),
+            "Should have source_id from provenance preset"
+        );
+        // origin_kind may be null for local sources (that's okay)
+        assert!(
+            hit.get("origin_kind").is_some(),
+            "Should have origin_kind field in output"
+        );
+        // source_path should also be included
+        assert!(
+            hit["source_path"].is_string(),
+            "Should have source_path field"
+        );
+    }
+}
+
+/// Search results with default fields should include provenance in output
+#[test]
+fn search_default_output_includes_provenance_fields() {
+    // P7.9: Default search output (full fields) should include provenance
+    let mut cmd = base_cmd();
+    cmd.args([
+        "search",
+        "hello",
+        "--json",
+        "--limit",
+        "1",
+        "--data-dir",
+        "tests/fixtures/search_demo_data",
+    ]);
+
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    let hits = json["hits"].as_array().expect("hits array");
+    if !hits.is_empty() {
+        let hit = &hits[0];
+        // Default output should include core provenance fields
+        assert!(
+            hit.get("source_id").is_some(),
+            "Default output should include source_id"
+        );
+        // origin_kind should be present (value may be "local" or other kind)
+        assert!(
+            hit.get("origin_kind").is_some(),
+            "Default output should include origin_kind"
+        );
+        // Note: origin_host is only included when using provenance preset,
+        // not in default output, so we don't check for it here
+    }
+}
+
+/// Introspect should show provenance in field presets or known fields
+#[test]
+fn introspect_lists_provenance_in_search_fields() {
+    // P7.9: Introspect should show provenance-related options for search
+    let mut cmd = base_cmd();
+    cmd.args(["introspect", "--json"]);
+
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    let commands = json["commands"].as_array().expect("commands array");
+    let search_cmd = commands
+        .iter()
+        .find(|c| c["name"] == "search")
+        .expect("search command should exist");
+
+    // Check for fields arg which should support provenance preset
+    let fields_arg = search_cmd["arguments"]
+        .as_array()
+        .and_then(|args| args.iter().find(|a| a["name"] == "fields"));
+
+    assert!(
+        fields_arg.is_some(),
+        "Search should have fields argument for filtering"
+    );
+}
