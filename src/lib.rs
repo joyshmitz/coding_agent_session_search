@@ -4,6 +4,7 @@ pub mod export;
 pub mod indexer;
 pub mod model;
 pub mod search;
+pub mod sources;
 pub mod storage;
 pub mod ui;
 pub mod update_check;
