@@ -481,6 +481,119 @@ fn parse_rsync_stats(output: &str) -> RsyncStats {
     stats
 }
 
+// =============================================================================
+// Sync Status Persistence
+// =============================================================================
+
+/// Result of a sync operation for a source.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncResult {
+    /// Sync completed successfully.
+    Success,
+    /// Some paths synced, some failed.
+    PartialFailure(String),
+    /// Sync failed completely.
+    Failed(String),
+    /// Sync was skipped (e.g., dry run).
+    #[default]
+    Skipped,
+}
+
+/// Sync information for a single source.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SourceSyncInfo {
+    /// Timestamp of last sync attempt.
+    pub last_sync: Option<i64>,
+    /// Result of last sync.
+    pub last_result: SyncResult,
+    /// Number of files synced in last sync.
+    pub files_synced: u64,
+    /// Number of bytes transferred in last sync.
+    pub bytes_transferred: u64,
+    /// Duration of last sync in milliseconds.
+    pub duration_ms: u64,
+}
+
+/// Persistent sync status for all sources.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SyncStatus {
+    /// Sync info per source (keyed by source name).
+    pub sources: std::collections::HashMap<String, SourceSyncInfo>,
+}
+
+impl SyncStatus {
+    /// Load sync status from disk.
+    pub fn load(data_dir: &Path) -> Result<Self, std::io::Error> {
+        let path = Self::status_path(data_dir);
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            serde_json::from_str(&content).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+            })
+        } else {
+            Ok(Self::default())
+        }
+    }
+
+    /// Save sync status to disk.
+    pub fn save(&self, data_dir: &Path) -> Result<(), std::io::Error> {
+        let path = Self::status_path(data_dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, content)
+    }
+
+    /// Update status for a source from a sync report.
+    pub fn update(&mut self, source_name: &str, report: &SyncReport) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        let result = if report.all_succeeded {
+            SyncResult::Success
+        } else if report.successful_paths() > 0 {
+            let errors: Vec<String> = report
+                .path_results
+                .iter()
+                .filter_map(|r| r.error.clone())
+                .collect();
+            SyncResult::PartialFailure(errors.join("; "))
+        } else {
+            let errors: Vec<String> = report
+                .path_results
+                .iter()
+                .filter_map(|r| r.error.clone())
+                .collect();
+            SyncResult::Failed(errors.join("; "))
+        };
+
+        self.sources.insert(
+            source_name.to_string(),
+            SourceSyncInfo {
+                last_sync: Some(now),
+                last_result: result,
+                files_synced: report.total_files(),
+                bytes_transferred: report.total_bytes(),
+                duration_ms: report.total_duration_ms,
+            },
+        );
+    }
+
+    /// Get sync info for a source.
+    pub fn get(&self, source_name: &str) -> Option<&SourceSyncInfo> {
+        self.sources.get(source_name)
+    }
+
+    /// Get the path to the status file.
+    fn status_path(data_dir: &Path) -> PathBuf {
+        data_dir.join("sync_status.json")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

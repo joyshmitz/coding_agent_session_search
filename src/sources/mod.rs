@@ -81,4 +81,7 @@ pub use config::{
 pub use provenance::{LOCAL_SOURCE_ID, Origin, Source, SourceFilter, SourceKind};
 
 // Re-export commonly used sync types
-pub use sync::{PathSyncResult, SyncEngine, SyncError, SyncMethod, SyncReport};
+pub use sync::{
+    PathSyncResult, SourceSyncInfo, SyncEngine, SyncError, SyncMethod, SyncReport, SyncResult,
+    SyncStatus,
+};

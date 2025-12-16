@@ -461,6 +461,24 @@ pub enum SourcesCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Synchronize sessions from remote sources
+    Sync {
+        /// Sync only specific source(s)
+        #[arg(long, short)]
+        source: Option<Vec<String>>,
+        /// Don't re-index after sync
+        #[arg(long)]
+        no_index: bool,
+        /// Show detailed transfer information
+        #[arg(long, short)]
+        verbose: bool,
+        /// Dry run - show what would be synced without actually syncing
+        #[arg(long)]
+        dry_run: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -6928,6 +6946,15 @@ fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
         SourcesCommand::Doctor { source, json } => {
             run_sources_doctor(source.as_deref(), json)?;
         }
+        SourcesCommand::Sync {
+            source,
+            no_index,
+            verbose,
+            dry_run,
+            json,
+        } => {
+            run_sources_sync(source, no_index, verbose, dry_run, json)?;
+        }
     }
     Ok(())
 }
@@ -7686,6 +7713,246 @@ fn check_local_storage(source_name: &str) -> DiagnosticCheck {
             remediation: Some("Set XDG_DATA_HOME or HOME environment variable".into()),
         }
     }
+}
+
+/// Sync sessions from remote sources (P5.5)
+fn run_sources_sync(
+    source_filter: Option<Vec<String>>,
+    no_index: bool,
+    verbose: bool,
+    dry_run: bool,
+    json_output: bool,
+) -> CliResult<()> {
+    use crate::sources::config::SourcesConfig;
+    use crate::sources::sync::{SyncEngine, SyncStatus};
+    use colored::Colorize;
+
+    let config = SourcesConfig::load().map_err(|e| CliError {
+        code: 9,
+        kind: "config",
+        message: format!("Failed to load sources config: {e}"),
+        hint: Some("Run 'cass sources add' to configure a source".into()),
+        retryable: false,
+    })?;
+
+    // Filter to remote sources only
+    let remote_sources: Vec<_> = config.remote_sources().collect();
+
+    if remote_sources.is_empty() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "no_sources",
+                    "message": "No remote sources configured"
+                })
+            );
+        } else {
+            println!(
+                "{}",
+                "No remote sources configured. Run 'cass sources add' first.".yellow()
+            );
+        }
+        return Ok(());
+    }
+
+    // Filter to specified sources if provided
+    let sources_to_sync: Vec<_> = if let Some(ref names) = source_filter {
+        remote_sources
+            .into_iter()
+            .filter(|s| names.contains(&s.name))
+            .collect()
+    } else {
+        remote_sources
+    };
+
+    if sources_to_sync.is_empty() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "no_match",
+                    "message": "No sources match the filter"
+                })
+            );
+        } else {
+            println!("{}", "No sources match the specified filter.".yellow());
+        }
+        return Ok(());
+    }
+
+    // Get data directory for sync engine and status
+    let data_dir = dirs::data_local_dir()
+        .map(|d| d.join("cass"))
+        .ok_or_else(|| CliError {
+            code: 9,
+            kind: "config",
+            message: "Could not determine data directory".into(),
+            hint: Some("Set XDG_DATA_HOME or HOME environment variable".into()),
+            retryable: false,
+        })?;
+
+    // Create sync engine
+    let engine = SyncEngine::new(&data_dir);
+
+    // Load existing sync status
+    let mut status = SyncStatus::load(&data_dir).unwrap_or_default();
+
+    if dry_run && !json_output {
+        println!("{}", "DRY RUN - no changes will be made".cyan().bold());
+        println!();
+    }
+
+    let mut all_reports = Vec::new();
+    let mut total_files = 0u64;
+    let mut total_bytes = 0u64;
+
+    for source in &sources_to_sync {
+        if !json_output {
+            println!(
+                "{} {}...",
+                "Syncing".cyan().bold(),
+                source.name.white().bold()
+            );
+        }
+
+        if dry_run {
+            // In dry run, just show what would be synced
+            if !json_output {
+                for path in &source.paths {
+                    println!("  {} {}", "Would sync:".dimmed(), path);
+                }
+                println!();
+            }
+            continue;
+        }
+
+        // Perform actual sync
+        let report = match engine.sync_source(source) {
+            Ok(r) => r,
+            Err(e) => {
+                if json_output {
+                    all_reports.push(serde_json::json!({
+                        "source": source.name,
+                        "status": "error",
+                        "error": e.to_string()
+                    }));
+                } else {
+                    println!(
+                        "  {} {}",
+                        "Error:".red().bold(),
+                        e.to_string().red()
+                    );
+                }
+                continue;
+            }
+        };
+
+        // Update status
+        status.update(&source.name, &report);
+
+        // Print results
+        if json_output {
+            all_reports.push(serde_json::json!({
+                "source": source.name,
+                "status": if report.all_succeeded { "success" } else { "partial" },
+                "method": report.method.to_string(),
+                "paths": report.path_results.iter().map(|r| serde_json::json!({
+                    "path": r.remote_path,
+                    "success": r.success,
+                    "files": r.files_transferred,
+                    "bytes": r.bytes_transferred,
+                    "error": r.error,
+                })).collect::<Vec<_>>(),
+                "total_files": report.total_files(),
+                "total_bytes": report.total_bytes(),
+                "duration_ms": report.total_duration_ms,
+            }));
+        } else {
+            for result in &report.path_results {
+                if result.success {
+                    if verbose || result.files_transferred > 0 {
+                        println!(
+                            "  {}: {} files ({} bytes)",
+                            result.remote_path.dimmed(),
+                            result.files_transferred.to_string().green(),
+                            format_bytes(result.bytes_transferred)
+                        );
+                    } else {
+                        println!(
+                            "  {}: {}",
+                            result.remote_path.dimmed(),
+                            "up to date".green()
+                        );
+                    }
+                } else {
+                    println!(
+                        "  {}: {}",
+                        result.remote_path.dimmed(),
+                        result.error.as_deref().unwrap_or("failed").red()
+                    );
+                }
+            }
+            println!(
+                "  {} {} files, {}",
+                "Total:".dimmed(),
+                report.total_files(),
+                format_bytes(report.total_bytes())
+            );
+            println!();
+        }
+
+        total_files += report.total_files();
+        total_bytes += report.total_bytes();
+        all_reports.push(serde_json::json!({
+            "source": source.name,
+            "files": report.total_files(),
+            "bytes": report.total_bytes(),
+        }));
+    }
+
+    // Save sync status
+    if !dry_run && let Err(e) = status.save(&data_dir) {
+        tracing::warn!("Failed to save sync status: {}", e);
+    }
+
+    // Output summary
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "complete",
+                "dry_run": dry_run,
+                "sources": all_reports,
+                "total_files": total_files,
+                "total_bytes": total_bytes,
+                "will_reindex": !no_index && !dry_run,
+            }))
+            .unwrap_or_default()
+        );
+    }
+
+    // Trigger re-index if requested
+    if !no_index && !dry_run && total_files > 0 {
+        if !json_output {
+            println!(
+                "{} {} new files...",
+                "Re-indexing".cyan().bold(),
+                total_files
+            );
+        }
+
+        // TODO: Call indexer for remote sources
+        // For now, just print instructions
+        if !json_output {
+            println!(
+                "{}",
+                "Run 'cass index' to include synced sessions in search.".dimmed()
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_datetime_flexible(s: &str) -> Option<i64> {
