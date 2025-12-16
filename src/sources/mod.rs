@@ -7,6 +7,7 @@
 //! # Architecture
 //!
 //! - **config**: Configuration types for defining remote sources
+//! - **provenance**: Types for tracking conversation origins
 //! - **sync** (future): Sync engine for pulling sessions from remotes
 //! - **status** (future): Sync status tracking
 //!
@@ -20,6 +21,20 @@
 //! type = "ssh"
 //! host = "user@laptop.local"
 //! paths = ["~/.claude/projects", "~/.cursor"]
+//! ```
+//!
+//! # Provenance
+//!
+//! Each conversation tracks where it came from via [`provenance::Origin`]:
+//!
+//! ```rust,ignore
+//! use coding_agent_search::sources::provenance::{Origin, SourceKind};
+//!
+//! // Local conversation
+//! let local = Origin::local();
+//!
+//! // Remote conversation
+//! let remote = Origin::remote("work-laptop");
 //! ```
 //!
 //! # Usage
@@ -37,9 +52,12 @@
 //! ```
 
 pub mod config;
+pub mod provenance;
 
-// Re-export commonly used types
+// Re-export commonly used config types
 pub use config::{
-    ConfigError, Platform, SourceConnectionType, SourceDefinition, SourcesConfig, SyncSchedule,
-    get_preset_paths,
+    ConfigError, Platform, SourceDefinition, SourcesConfig, SyncSchedule, get_preset_paths,
 };
+
+// Re-export commonly used provenance types
+pub use provenance::{LOCAL_SOURCE_ID, Origin, Source, SourceFilter, SourceKind};

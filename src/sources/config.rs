@@ -27,6 +27,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use thiserror::Error;
 
+use super::provenance::SourceKind;
+
 /// Errors that can occur when loading or saving source configuration.
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -63,7 +65,7 @@ pub struct SourceDefinition {
 
     /// Connection type (local, ssh, etc.).
     #[serde(rename = "type", default)]
-    pub source_type: SourceConnectionType,
+    pub source_type: SourceKind,
 
     /// Remote host for SSH connections (e.g., "user@laptop.local").
     #[serde(default)]
@@ -95,7 +97,7 @@ impl SourceDefinition {
     pub fn local(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            source_type: SourceConnectionType::Local,
+            source_type: SourceKind::Local,
             ..Default::default()
         }
     }
@@ -104,7 +106,7 @@ impl SourceDefinition {
     pub fn ssh(name: impl Into<String>, host: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            source_type: SourceConnectionType::Ssh,
+            source_type: SourceKind::Ssh,
             host: Some(host.into()),
             ..Default::default()
         }
@@ -112,7 +114,7 @@ impl SourceDefinition {
 
     /// Check if this source requires SSH connectivity.
     pub fn is_remote(&self) -> bool {
-        matches!(self.source_type, SourceConnectionType::Ssh)
+        matches!(self.source_type, SourceKind::Ssh)
     }
 
     /// Validate the source definition.
@@ -150,26 +152,6 @@ impl SourceDefinition {
         }
 
         path.to_string()
-    }
-}
-
-/// Connection type for a source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SourceConnectionType {
-    /// Local machine (default).
-    #[default]
-    Local,
-    /// Remote machine via SSH.
-    Ssh,
-}
-
-impl std::fmt::Display for SourceConnectionType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Local => write!(f, "local"),
-            Self::Ssh => write!(f, "ssh"),
-        }
     }
 }
 
@@ -391,7 +373,7 @@ mod tests {
     fn test_source_definition_local() {
         let source = SourceDefinition::local("test");
         assert_eq!(source.name, "test");
-        assert_eq!(source.source_type, SourceConnectionType::Local);
+        assert_eq!(source.source_type, SourceKind::Local);
         assert!(!source.is_remote());
     }
 
@@ -399,7 +381,7 @@ mod tests {
     fn test_source_definition_ssh() {
         let source = SourceDefinition::ssh("laptop", "user@laptop.local");
         assert_eq!(source.name, "laptop");
-        assert_eq!(source.source_type, SourceConnectionType::Ssh);
+        assert_eq!(source.source_type, SourceKind::Ssh);
         assert_eq!(source.host, Some("user@laptop.local".into()));
         assert!(source.is_remote());
     }
@@ -475,7 +457,7 @@ mod tests {
         let mut config = SourcesConfig::default();
         config.sources.push(SourceDefinition {
             name: "laptop".into(),
-            source_type: SourceConnectionType::Ssh,
+            source_type: SourceKind::Ssh,
             host: Some("user@laptop.local".into()),
             paths: vec!["~/.claude/projects".into()],
             sync_schedule: SyncSchedule::Daily,
@@ -505,12 +487,6 @@ mod tests {
         assert!(!linux.is_empty());
 
         assert!(get_preset_paths("unknown").is_err());
-    }
-
-    #[test]
-    fn test_connection_type_display() {
-        assert_eq!(SourceConnectionType::Local.to_string(), "local");
-        assert_eq!(SourceConnectionType::Ssh.to_string(), "ssh");
     }
 
     #[test]
