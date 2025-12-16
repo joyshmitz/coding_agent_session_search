@@ -7,10 +7,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 /// Helper to create a JSON-based OpenCode storage structure
-fn create_test_storage(
-    dir: &std::path::Path,
-    sessions: &[TestSession],
-) -> std::io::Result<()> {
+fn create_test_storage(dir: &std::path::Path, sessions: &[TestSession]) -> std::io::Result<()> {
     // Create directories
     fs::create_dir_all(dir.join("session"))?;
     fs::create_dir_all(dir.join("message"))?;
@@ -585,7 +582,7 @@ fn opencode_computes_started_ended_at() {
             project_id: "proj1".into(),
             title: Some("Time Test".into()),
             directory: None,
-            created: Some(500), // Session created at 500
+            created: Some(500),  // Session created at 500
             updated: Some(4000), // Session updated at 4000
             messages: vec![
                 TestMessage {
@@ -744,8 +741,5 @@ fn opencode_external_id_is_session_id() {
     let convs = connector.scan(&ctx).unwrap();
     assert_eq!(convs.len(), 1);
 
-    assert_eq!(
-        convs[0].external_id.as_deref(),
-        Some("external-id-test")
-    );
+    assert_eq!(convs[0].external_id.as_deref(), Some("external-id-test"));
 }
