@@ -397,6 +397,9 @@ pub enum Commands {
         /// Group by: hour, day, or none
         #[arg(long, value_enum, default_value_t = TimelineGrouping::Hour)]
         group_by: TimelineGrouping,
+        /// Filter by source: 'local', 'remote', 'all', or a specific source hostname
+        #[arg(long)]
+        source: Option<String>,
     },
 }
 
@@ -1736,6 +1739,7 @@ async fn execute_cli(
                     data_dir,
                     json,
                     group_by,
+                    source,
                 } => {
                     run_timeline(
                         since.as_deref(),
@@ -1746,6 +1750,7 @@ async fn execute_cli(
                         cli.db.clone(),
                         json,
                         group_by,
+                        source,
                     )?;
                 }
                 _ => {}
@@ -6439,10 +6444,15 @@ fn run_timeline(
     db_override: Option<PathBuf>,
     json: bool,
     group_by: TimelineGrouping,
+    source: Option<String>,
 ) -> CliResult<()> {
     use chrono::{Local, TimeZone, Utc};
+    use crate::sources::provenance::SourceFilter;
     use rusqlite::Connection;
     use std::collections::HashMap;
+
+    // Parse source filter (P3.2)
+    let source_filter = source.as_ref().map(|s| SourceFilter::parse(s));
 
     let data_root = data_dir.clone().unwrap_or_else(default_data_dir);
     let db_path = db_override.unwrap_or_else(|| data_root.join("agent_search.db"));
@@ -6482,7 +6492,7 @@ fn run_timeline(
 
     let mut sql = String::from(
         "SELECT c.id, a.slug as agent, c.title, c.started_at, c.ended_at, c.source_path,
-                COUNT(m.id) as message_count
+                COUNT(m.id) as message_count, c.source_id
          FROM conversations c
          JOIN agents a ON c.agent_id = a.id
          LEFT JOIN messages m ON m.conversation_id = c.id
@@ -6501,6 +6511,25 @@ fn run_timeline(
             params.push(Box::new(agent.clone()));
         }
         sql.push(')');
+    }
+
+    // Source filter (P3.2)
+    if let Some(ref filter) = source_filter {
+        match filter {
+            SourceFilter::All => {
+                // No filtering needed
+            }
+            SourceFilter::Local => {
+                sql.push_str(" AND c.source_id = 'local'");
+            }
+            SourceFilter::Remote => {
+                sql.push_str(" AND c.source_id != 'local'");
+            }
+            SourceFilter::SourceId(id) => {
+                sql.push_str(&format!(" AND c.source_id = ?{}", params.len() + 1));
+                params.push(Box::new(id.clone()));
+            }
+        }
     }
 
     sql.push_str(" GROUP BY c.id ORDER BY c.started_at DESC");
@@ -6525,6 +6554,7 @@ fn run_timeline(
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?, // source_id (P3.2)
             ))
         })
         .map_err(|e| CliError {
@@ -6536,7 +6566,7 @@ fn run_timeline(
         })?;
 
     #[allow(clippy::type_complexity)]
-    let mut sessions: Vec<(i64, String, Option<String>, i64, Option<i64>, String, i64)> =
+    let mut sessions: Vec<(i64, String, Option<String>, i64, Option<i64>, String, i64, String)> =
         Vec::new();
     for r in rows.flatten() {
         sessions.push(r);
@@ -6547,13 +6577,13 @@ fn run_timeline(
             TimelineGrouping::None => {
                 let items: Vec<serde_json::Value> = sessions
                     .iter()
-                    .map(|(id, agent, title, started, ended, path, msg_count)| {
+                    .map(|(id, agent, title, started, ended, path, msg_count, source_id)| {
                         let duration = ended.map(|e| e - started);
                         serde_json::json!({
                             "id": id, "agent": agent, "title": title,
                             "started_at": started, "ended_at": ended,
                             "duration_seconds": duration, "source_path": path,
-                            "message_count": msg_count,
+                            "message_count": msg_count, "source_id": source_id,
                         })
                     })
                     .collect();
@@ -6565,7 +6595,7 @@ fn run_timeline(
             }
             TimelineGrouping::Hour | TimelineGrouping::Day => {
                 let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-                for (id, agent, title, started, ended, path, msg_count) in &sessions {
+                for (id, agent, title, started, ended, path, msg_count, source_id) in &sessions {
                     let dt = Utc
                         .timestamp_opt(*started, 0)
                         .single()
@@ -6579,6 +6609,7 @@ fn run_timeline(
                         "id": id, "agent": agent, "title": title,
                         "started_at": started, "ended_at": ended,
                         "source_path": path, "message_count": msg_count,
+                        "source_id": source_id,
                     }));
                 }
                 serde_json::json!({
@@ -6616,7 +6647,7 @@ fn run_timeline(
         }
 
         let mut current_group = String::new();
-        for (_id, agent, title, started, ended, _path, msg_count) in &sessions {
+        for (_id, agent, title, started, ended, _path, msg_count, source_id) in &sessions {
             let dt = Utc
                 .timestamp_opt(*started, 0)
                 .single()
@@ -6655,13 +6686,21 @@ fn run_timeline(
                 _ => "⚫",
             };
 
+            // Source badge for remote sessions (P3.2)
+            let source_badge = if source_id != "local" {
+                format!(" [{}]", source_id)
+            } else {
+                String::new()
+            };
+
             println!(
-                "     {} {} {:>5} │ {:>3} msgs │ {}",
+                "     {} {} {:>5} │ {:>3} msgs │ {}{}",
                 dt.format("%H:%M"),
                 agent_icon,
                 duration.as_deref().unwrap_or(""),
                 msg_count,
-                title_preview
+                title_preview,
+                source_badge
             );
         }
 
