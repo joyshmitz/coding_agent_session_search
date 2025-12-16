@@ -6505,9 +6505,10 @@ fn run_timeline(
 
     let mut sql = String::from(
         "SELECT c.id, a.slug as agent, c.title, c.started_at, c.ended_at, c.source_path,
-                COUNT(m.id) as message_count, c.source_id
+                COUNT(m.id) as message_count, c.source_id, c.origin_host, s.kind as origin_kind
          FROM conversations c
          JOIN agents a ON c.agent_id = a.id
+         LEFT JOIN sources s ON c.source_id = s.id
          LEFT JOIN messages m ON m.conversation_id = c.id
          WHERE c.started_at >= ?1 AND c.started_at <= ?2",
     );
@@ -6560,14 +6561,16 @@ fn run_timeline(
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, String>(7)?, // source_id (P3.2)
+                row.get::<_, i64>(0)?,                    // id
+                row.get::<_, String>(1)?,                 // agent
+                row.get::<_, Option<String>>(2)?,         // title
+                row.get::<_, i64>(3)?,                    // started_at
+                row.get::<_, Option<i64>>(4)?,            // ended_at
+                row.get::<_, String>(5)?,                 // source_path
+                row.get::<_, i64>(6)?,                    // message_count
+                row.get::<_, String>(7)?,                 // source_id (P3.2)
+                row.get::<_, Option<String>>(8)?,         // origin_host (P3.5)
+                row.get::<_, Option<String>>(9)?,         // origin_kind (P3.5)
             ))
         })
         .map_err(|e| CliError {
@@ -6579,7 +6582,7 @@ fn run_timeline(
         })?;
 
     #[allow(clippy::type_complexity)]
-    let mut sessions: Vec<(i64, String, Option<String>, i64, Option<i64>, String, i64, String)> =
+    let mut sessions: Vec<(i64, String, Option<String>, i64, Option<i64>, String, i64, String, Option<String>, Option<String>)> =
         Vec::new();
     for r in rows.flatten() {
         sessions.push(r);
@@ -6590,13 +6593,19 @@ fn run_timeline(
             TimelineGrouping::None => {
                 let items: Vec<serde_json::Value> = sessions
                     .iter()
-                    .map(|(id, agent, title, started, ended, path, msg_count, source_id)| {
+                    .map(|(id, agent, title, started, ended, path, msg_count, source_id, origin_host, origin_kind)| {
                         let duration = ended.map(|e| e - started);
+                        // Use "local" as default origin_kind if not in DB (backward compat)
+                        let kind = origin_kind.as_deref().unwrap_or("local");
                         serde_json::json!({
                             "id": id, "agent": agent, "title": title,
                             "started_at": started, "ended_at": ended,
                             "duration_seconds": duration, "source_path": path,
-                            "message_count": msg_count, "source_id": source_id,
+                            "message_count": msg_count,
+                            // Provenance fields (P3.5)
+                            "source_id": source_id,
+                            "origin_kind": kind,
+                            "origin_host": origin_host,
                         })
                     })
                     .collect();
@@ -6608,7 +6617,7 @@ fn run_timeline(
             }
             TimelineGrouping::Hour | TimelineGrouping::Day => {
                 let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-                for (id, agent, title, started, ended, path, msg_count, source_id) in &sessions {
+                for (id, agent, title, started, ended, path, msg_count, source_id, origin_host, origin_kind) in &sessions {
                     let dt = Utc
                         .timestamp_opt(*started, 0)
                         .single()
@@ -6618,11 +6627,16 @@ fn run_timeline(
                         TimelineGrouping::Day => dt.format("%Y-%m-%d").to_string(),
                         _ => unreachable!(),
                     };
+                    // Use "local" as default origin_kind if not in DB (backward compat)
+                    let kind = origin_kind.as_deref().unwrap_or("local");
                     groups.entry(key).or_default().push(serde_json::json!({
                         "id": id, "agent": agent, "title": title,
                         "started_at": started, "ended_at": ended,
                         "source_path": path, "message_count": msg_count,
+                        // Provenance fields (P3.5)
                         "source_id": source_id,
+                        "origin_kind": kind,
+                        "origin_host": origin_host,
                     }));
                 }
                 serde_json::json!({
@@ -6660,7 +6674,7 @@ fn run_timeline(
         }
 
         let mut current_group = String::new();
-        for (_id, agent, title, started, ended, _path, msg_count, source_id) in &sessions {
+        for (_id, agent, title, started, ended, _path, msg_count, source_id, origin_host, _origin_kind) in &sessions {
             let dt = Utc
                 .timestamp_opt(*started, 0)
                 .single()
@@ -6699,9 +6713,11 @@ fn run_timeline(
                 _ => "⚫",
             };
 
-            // Source badge for remote sessions (P3.2)
+            // Source badge for remote sessions (P3.2, P3.5)
+            // Prefer origin_host if available, otherwise use source_id
             let source_badge = if source_id != "local" {
-                format!(" [{}]", source_id)
+                let label = origin_host.as_deref().unwrap_or(source_id.as_str());
+                format!(" [{}]", label)
             } else {
                 String::new()
             };
