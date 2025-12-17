@@ -21,6 +21,11 @@ impl AmpConnector {
     }
 
     fn cache_root() -> PathBuf {
+        // Check XDG_DATA_HOME first (important for testing and cross-platform consistency)
+        // Note: dirs::data_dir() on macOS ignores XDG_DATA_HOME
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            return PathBuf::from(xdg).join("amp");
+        }
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("amp")

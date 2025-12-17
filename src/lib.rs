@@ -8249,10 +8249,11 @@ fn run_mappings_test(source_name: &str, path: &str, agent: Option<&str>) -> CliR
             if !mapping.applies_to_agent(agent) {
                 continue;
             }
-            if path.starts_with(&mapping.from) {
-                if best_match.is_none() || mapping.from.len() > best_match.as_ref().unwrap().from.len() {
-                    best_match = Some(mapping);
-                }
+            if path.starts_with(&mapping.from)
+                && (best_match.is_none()
+                    || mapping.from.len() > best_match.as_ref().unwrap().from.len())
+            {
+                best_match = Some(mapping);
             }
         }
         matching_mapping = best_match;
