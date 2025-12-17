@@ -859,6 +859,20 @@ impl SqliteStorage {
         Ok(out)
     }
 
+    /// Get list of unique source IDs (for P4.4 TUI source filter menu).
+    /// Returns source IDs ordered by ID, excluding 'local' which is always present.
+    pub fn get_source_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT id FROM sources WHERE id != 'local' ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Create or update a source.
     pub fn upsert_source(&self, source: &Source) -> Result<()> {
         let now = Self::now_millis();

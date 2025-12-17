@@ -906,7 +906,7 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
                 shortcuts::FILTER_AGENT, shortcuts::FILTER_WORKSPACE, shortcuts::FILTER_DATE_FROM, shortcuts::FILTER_DATE_TO, shortcuts::CLEAR_FILTERS),
             format!("{} scope to active agent | {} clear scope | {} cycle time presets (24h/7d/30d/all)",
                 shortcuts::SCOPE_AGENT, shortcuts::SCOPE_WORKSPACE, shortcuts::CYCLE_TIME_PRESETS),
-            "F11 cycle source filter (all → local → remote)".to_string(),
+            "F11 cycle source filter (all → local → remote) | Shift+F11 source filter menu".to_string(),
             "Chips in search bar; Backspace removes last; Enter (query empty) edits last chip".to_string(),
         ],
     ));
@@ -2548,6 +2548,12 @@ pub fn run_tui(
     // Command palette + help strip + pills state
     let mut palette_state = PaletteState::new(palette::default_actions());
 
+    // Source filter menu state (P4.4)
+    let mut source_filter_menu_open = false;
+    let mut source_filter_menu_selection: usize = 0;
+    // Available source IDs discovered from index (populated on menu open)
+    let mut available_source_ids: Vec<String> = Vec::new();
+
     // Keep a short history of indexer percentages for sparkline rendering
     let mut progress_history: std::collections::VecDeque<u8> =
         std::collections::VecDeque::with_capacity(24);
@@ -3908,6 +3914,68 @@ pub fn run_tui(
                     f.render_widget(list, area);
                 }
 
+                // Source filter popup menu (P4.4)
+                if source_filter_menu_open {
+                    use crate::sources::provenance::SourceFilter;
+                    let area = centered_rect(40, 40, f.area());
+                    let block = Block::default()
+                        .title(Span::styled(
+                            " Source Filter ",
+                            Style::default()
+                                .fg(palette.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(palette.accent))
+                        .style(Style::default().bg(palette.surface));
+
+                    // Build menu items: All, Local, Remote, then discovered source IDs
+                    let menu_items: Vec<(&str, SourceFilter)> = vec![
+                        ("All sources", SourceFilter::All),
+                        ("Local only", SourceFilter::Local),
+                        ("Remote only", SourceFilter::Remote),
+                    ];
+
+                    let items: Vec<ListItem> = menu_items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (label, _))| {
+                            let style = if i == source_filter_menu_selection {
+                                Style::default()
+                                    .bg(palette.accent)
+                                    .fg(palette.bg)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(palette.fg)
+                            };
+                            ListItem::new(Line::from(vec![
+                                Span::styled(if i == source_filter_menu_selection { "→ " } else { "  " }, style),
+                                Span::styled(label.to_string(), style),
+                            ]))
+                        })
+                        .chain(available_source_ids.iter().enumerate().map(|(i, id)| {
+                            let idx = 3 + i;
+                            let style = if idx == source_filter_menu_selection {
+                                Style::default()
+                                    .bg(palette.accent)
+                                    .fg(palette.bg)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(palette.fg)
+                            };
+                            ListItem::new(Line::from(vec![
+                                Span::styled(if idx == source_filter_menu_selection { "→ " } else { "  " }, style),
+                                Span::styled(format!("📡 {}", id), style),
+                            ]))
+                        }))
+                        .collect();
+
+                    let list = List::new(items).block(block);
+                    f.render_widget(ratatui::widgets::Clear, area);
+                    f.render_widget(list, area);
+                }
+
                 if palette_state.open {
                     let area = centered_rect(70, 60, f.area());
                     palette::draw_palette(f, area, &palette_state, palette);
@@ -3930,8 +3998,8 @@ pub fn run_tui(
 
             // Handle mouse events (skip when modal is open)
             if let Event::Mouse(mouse) = event {
-                // Ignore mouse events when help, detail, or bulk modal is open
-                if show_help || show_detail_modal || show_bulk_modal {
+                // Ignore mouse events when help, detail, bulk, or source filter modal is open
+                if show_help || show_detail_modal || show_bulk_modal || source_filter_menu_open {
                     continue;
                 }
                 needs_draw = true;
@@ -4437,6 +4505,55 @@ pub fn run_tui(
                     }
                     _ => {}
                 }
+                continue;
+            }
+
+            // Source filter menu: handle keys when open (P4.4)
+            if source_filter_menu_open {
+                let total_items = 3 + available_source_ids.len();
+                match key.code {
+                    KeyCode::Esc => {
+                        source_filter_menu_open = false;
+                        status = "Source filter menu closed".to_string();
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        source_filter_menu_selection = source_filter_menu_selection.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        source_filter_menu_selection = (source_filter_menu_selection + 1).min(total_items.saturating_sub(1));
+                    }
+                    KeyCode::Enter => {
+                        use crate::sources::provenance::SourceFilter;
+                        source_filter_menu_open = false;
+                        // Apply selected filter
+                        filters.source_filter = match source_filter_menu_selection {
+                            0 => SourceFilter::All,
+                            1 => SourceFilter::Local,
+                            2 => SourceFilter::Remote,
+                            n => {
+                                // Individual source ID
+                                let idx = n - 3;
+                                if let Some(id) = available_source_ids.get(idx) {
+                                    SourceFilter::SourceId(id.clone())
+                                } else {
+                                    SourceFilter::All
+                                }
+                            }
+                        };
+                        status = format!(
+                            "Source: {}",
+                            match &filters.source_filter {
+                                SourceFilter::All => "all sources".to_string(),
+                                SourceFilter::Local => "local only".to_string(),
+                                SourceFilter::Remote => "remote only".to_string(),
+                                SourceFilter::SourceId(id) => format!("source '{}'", id),
+                            }
+                        );
+                        dirty_since = Some(Instant::now());
+                    }
+                    _ => {}
+                }
+                needs_draw = true;
                 continue;
             }
 
@@ -5310,6 +5427,21 @@ pub fn run_tui(
                                 MAX_VISIBLE_PANES,
                             );
                             status = format!("Density: {}", density_mode.label());
+                            needs_draw = true;
+                        }
+                        // Shift+F11: Open source filter popup menu (P4.4)
+                        KeyCode::F(11) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            source_filter_menu_open = !source_filter_menu_open;
+                            if source_filter_menu_open {
+                                source_filter_menu_selection = 0;
+                                // Discover available source IDs from database
+                                available_source_ids = if let Some(ref reader) = db_reader {
+                                    reader.get_source_ids().unwrap_or_default()
+                                } else {
+                                    Vec::new()
+                                };
+                                status = "Source filter menu (↑/↓ select, Enter apply, Esc close)".into();
+                            }
                             needs_draw = true;
                         }
                         // F11: Cycle through source filters (P4.3)
