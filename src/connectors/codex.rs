@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn default_creates_connector() {
-        let connector = CodexConnector::default();
+        let connector = CodexConnector;
         let _ = connector;
     }
 

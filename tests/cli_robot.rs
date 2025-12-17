@@ -3442,7 +3442,7 @@ fn introspect_all_path_options_documented() {
     // Check global path types
     let globals = json["global_flags"].as_array().expect("global_flags");
     for name in ["db", "trace-file"] {
-        let flag = globals.iter().find(|f| f["name"] == name).expect(&format!("{name} exists"));
+        let flag = globals.iter().find(|f| f["name"] == name).unwrap_or_else(|| panic!("{name} exists"));
         assert_eq!(
             flag["value_type"], "path",
             "global --{name} should be path type"

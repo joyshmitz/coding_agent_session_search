@@ -314,13 +314,13 @@ mod tests {
     #[test]
     fn new_creates_connector() {
         let connector = ClaudeCodeConnector::new();
-        assert!(std::mem::size_of_val(&connector) >= 0);
+        let _ = connector;
     }
 
     #[test]
     fn default_creates_connector() {
-        let connector = ClaudeCodeConnector::default();
-        assert!(std::mem::size_of_val(&connector) >= 0);
+        let connector = ClaudeCodeConnector;
+        let _ = connector;
     }
 
     #[test]
@@ -339,7 +339,7 @@ mod tests {
         let result = connector.detect();
         // On most CI/test systems, .claude/projects won't exist
         // Just verify detect() doesn't panic
-        assert!(result.detected || !result.detected);
+        let _ = result.detected;
     }
 
     // =========================================================================

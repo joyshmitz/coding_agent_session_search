@@ -352,6 +352,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     // =====================================================
@@ -366,7 +367,7 @@ mod tests {
 
     #[test]
     fn default_creates_connector() {
-        let connector = PiAgentConnector::default();
+        let connector = PiAgentConnector;
         let _ = connector;
     }
 
@@ -545,7 +546,7 @@ mod tests {
         storage
     }
 
-    fn write_session_file(storage: &PathBuf, name: &str, lines: &[&str]) {
+    fn write_session_file(storage: &Path, name: &str, lines: &[&str]) {
         let sessions = storage.join("sessions");
         fs::write(sessions.join(name), lines.join("\n")).unwrap();
     }
@@ -862,7 +863,7 @@ mod tests {
         let nested = storage.join("sessions").join("--Users-foo-project--");
         fs::create_dir_all(&nested).unwrap();
 
-        let lines = vec![
+        let lines = [
             r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Test"}}"#,
         ];
         fs::write(

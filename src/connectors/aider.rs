@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn default_creates_connector() {
-        let connector = AiderConnector::default();
+        let connector = AiderConnector;
         let _ = connector;
     }
 

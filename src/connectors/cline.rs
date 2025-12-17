@@ -224,6 +224,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     // =====================================================
@@ -238,7 +239,7 @@ mod tests {
 
     #[test]
     fn default_creates_connector() {
-        let connector = ClineConnector::default();
+        let connector = ClineConnector;
         let _ = connector;
     }
 
@@ -252,7 +253,7 @@ mod tests {
         storage
     }
 
-    fn create_task_dir(storage: &PathBuf, task_id: &str) -> PathBuf {
+    fn create_task_dir(storage: &Path, task_id: &str) -> PathBuf {
         let task_dir = storage.join(task_id);
         fs::create_dir_all(&task_dir).unwrap();
         task_dir

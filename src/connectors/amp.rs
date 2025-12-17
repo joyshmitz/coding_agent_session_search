@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn default_creates_connector() {
-        let connector = AmpConnector::default();
+        let connector = AmpConnector;
         let _ = connector;
     }
 
@@ -807,7 +807,7 @@ mod tests {
         let convs = connector.scan(&ctx).unwrap();
 
         // Should have at least 1 (deduplication happens by external_id)
-        assert!(convs.len() >= 1);
+        assert!(!convs.is_empty());
     }
 
     #[test]

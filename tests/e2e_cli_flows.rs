@@ -41,6 +41,7 @@ fn make_claude_session(root: &std::path::Path, project: &str, content: &str) {
     fs::write(file, sample).unwrap();
 }
 
+#[allow(deprecated)]
 fn base_cmd() -> Command {
     let mut cmd = Command::cargo_bin("cass").unwrap();
     cmd.env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1");
@@ -145,21 +146,19 @@ fn search_returns_hits_with_expected_fields() {
     let hits = json.get("hits").or_else(|| json.get("results"));
     assert!(hits.is_some(), "Should have hits/results. JSON: {}", json);
 
-    if let Some(hits_array) = hits.and_then(|h| h.as_array()) {
-        if !hits_array.is_empty() {
-            let first_hit = &hits_array[0];
-            // Verify expected fields exist
-            assert!(
-                first_hit.get("source_path").is_some()
-                    || first_hit.get("path").is_some(),
-                "Hit should have source_path. Hit: {}",
-                first_hit
-            );
-            assert!(
-                first_hit.get("agent").is_some(),
-                "Hit should have agent field"
-            );
-        }
+    if let Some(hits_array) = hits.and_then(|h| h.as_array()).filter(|a| !a.is_empty()) {
+        let first_hit = &hits_array[0];
+        // Verify expected fields exist
+        assert!(
+            first_hit.get("source_path").is_some()
+                || first_hit.get("path").is_some(),
+            "Hit should have source_path. Hit: {}",
+            first_hit
+        );
+        assert!(
+            first_hit.get("agent").is_some(),
+            "Hit should have agent field"
+        );
     }
 }
 

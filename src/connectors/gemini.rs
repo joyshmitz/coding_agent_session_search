@@ -360,14 +360,13 @@ mod tests {
     #[test]
     fn new_creates_connector() {
         let connector = GeminiConnector::new();
-        // Verify connector was created (unit struct has no fields to check)
-        assert!(std::mem::size_of_val(&connector) >= 0);
+        let _ = connector;
     }
 
     #[test]
     fn default_creates_connector() {
-        let connector = GeminiConnector::default();
-        assert!(std::mem::size_of_val(&connector) >= 0);
+        let connector = GeminiConnector;
+        let _ = connector;
     }
 
     // ==================== extract_path_from_position Tests ====================
@@ -1022,6 +1021,6 @@ mod tests {
         let result = connector.detect();
         // Result depends on whether ~/.gemini/tmp exists on the system
         // We just verify it returns a valid result
-        assert!(result.detected || !result.detected);
+        let _ = result.detected;
     }
 }

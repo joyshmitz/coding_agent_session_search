@@ -423,6 +423,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     // =====================================================
@@ -437,7 +438,7 @@ mod tests {
 
     #[test]
     fn default_creates_connector() {
-        let connector = OpenCodeConnector::default();
+        let connector = OpenCodeConnector;
         let _ = connector;
     }
 
@@ -648,7 +649,7 @@ mod tests {
         storage
     }
 
-    fn write_session(storage: &PathBuf, project_id: &str, session: &serde_json::Value) {
+    fn write_session(storage: &Path, project_id: &str, session: &serde_json::Value) {
         let session_id = session["id"].as_str().unwrap();
         let session_dir = storage.join("session").join(project_id);
         fs::create_dir_all(&session_dir).unwrap();
@@ -659,7 +660,7 @@ mod tests {
         .unwrap();
     }
 
-    fn write_message(storage: &PathBuf, session_id: &str, message: &serde_json::Value) {
+    fn write_message(storage: &Path, session_id: &str, message: &serde_json::Value) {
         let message_id = message["id"].as_str().unwrap();
         let message_dir = storage.join("message").join(session_id);
         fs::create_dir_all(&message_dir).unwrap();
@@ -670,7 +671,7 @@ mod tests {
         .unwrap();
     }
 
-    fn write_part(storage: &PathBuf, message_id: &str, part: &serde_json::Value) {
+    fn write_part(storage: &Path, message_id: &str, part: &serde_json::Value) {
         let part_id = part["id"].as_str().unwrap();
         let part_dir = storage.join("part").join(message_id);
         fs::create_dir_all(&part_dir).unwrap();

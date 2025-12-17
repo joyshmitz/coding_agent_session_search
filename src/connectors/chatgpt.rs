@@ -1173,7 +1173,8 @@ mod tests {
         // Just verify detect() doesn't panic and returns a valid result
         let result = connector.detect();
         // Result could be either found or not found depending on system
-        assert!(result.detected || !result.detected);
+        // Just verify detect() returned without panicking
+        let _ = result.detected;
     }
 
     // =========================================================================

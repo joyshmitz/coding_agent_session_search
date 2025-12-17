@@ -490,14 +490,13 @@ mod tests {
     #[test]
     fn new_creates_connector() {
         let connector = CursorConnector::new();
-        // Just verify it creates without error
-        assert!(std::mem::size_of_val(&connector) >= 0);
+        let _ = connector;
     }
 
     #[test]
     fn default_creates_connector() {
-        let connector = CursorConnector::default();
-        assert!(std::mem::size_of_val(&connector) >= 0);
+        let connector = CursorConnector;
+        let _ = connector;
     }
 
     // =========================================================================
@@ -973,7 +972,7 @@ mod tests {
         let result = connector.detect();
         // On most CI/test systems, Cursor won't be installed
         // Just verify detect() doesn't panic
-        assert!(result.detected || !result.detected);
+        let _ = result.detected;
     }
 
     // =========================================================================

@@ -8282,7 +8282,7 @@ mod tests {
         // Middle value (100) should be max character
         assert_eq!(result.chars().nth(2), Some('█'));
         // First and last (0) should be min character
-        assert_eq!(result.chars().nth(0), Some('▁'));
+        assert_eq!(result.chars().next(), Some('▁'));
         assert_eq!(result.chars().nth(4), Some('▁'));
     }
 
