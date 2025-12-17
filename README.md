@@ -1298,6 +1298,22 @@ cass
     - `Ctrl+Shift+R`: Trigger manual re-index (refresh search results).
     - `Ctrl+Shift+Del`: Reset TUI state (clear history, filters, layout).
 
+### 4. Multi-Machine Search (Optional)
+
+Aggregate sessions from your other machines into a unified index:
+
+```bash
+# Add a remote machine
+cass sources add user@laptop.local --preset macos-defaults
+
+# Sync sessions from all sources
+cass sources sync
+
+# Filter by source in TUI: F11 cycles, Shift+F11 opens menu
+```
+
+See [Remote Sources (Multi-Machine Search)](#-remote-sources-multi-machine-search) for full documentation.
+
 ---
 
 ## 🛠️ CLI Reference
@@ -1328,6 +1344,12 @@ cass export /path/to/session --format markdown -o out.md  # Export conversation
 cass expand /path/to/session -n 42 -C 5 --json            # Context around line
 cass timeline --today --json                               # Activity timeline
 
+# Remote Sources
+cass sources add user@host --preset macos-defaults  # Add machine
+cass sources sync                                    # Sync sessions
+cass sources doctor                                  # Check connectivity
+cass sources mappings list laptop                    # View path mappings
+
 # Utilities
 cass stats --json
 cass completions bash > ~/.bash_completion.d/cass
@@ -1350,6 +1372,7 @@ cass completions bash > ~/.bash_completion.d/cass
 | `export <path>` | Export conversation to markdown/HTML/JSON |
 | `expand <path> -n N` | Show messages around a specific line number |
 | `timeline` | Activity timeline with grouping by hour/day |
+| `sources` | Manage remote sources: add/list/remove/doctor/sync/mappings |
 
 ---
 
