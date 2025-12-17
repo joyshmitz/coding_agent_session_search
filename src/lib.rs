@@ -1609,8 +1609,7 @@ async fn execute_cli(
         | Commands::Stats { .. }
         | Commands::Diag { .. }
         | Commands::Status { .. }
-        | Commands::View { .. }
-        | Commands::Sources(..) => {
+        | Commands::View { .. } => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_writer(std::io::stderr)
@@ -7333,7 +7332,13 @@ fn run_sources_remove(name: &str, purge: bool, skip_confirm: bool) -> CliResult<
     // Handle purge
     if purge {
         // Find and remove synced data directory
-        if let Some(data_dir) = dirs::data_local_dir() {
+        // Respect XDG_DATA_HOME first (important for testing and Linux users)
+        let data_dir = std::env::var("XDG_DATA_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(dirs::data_local_dir);
+
+        if let Some(data_dir) = data_dir {
             let source_dir = data_dir.join("cass").join("remotes").join(name);
             if source_dir.exists() {
                 std::fs::remove_dir_all(&source_dir).map_err(|e| CliError {
@@ -7782,8 +7787,11 @@ fn run_sources_sync(
     }
 
     // Get data directory for sync engine and status
-    let data_dir = dirs::data_local_dir()
-        .map(|d| d.join("cass"))
+    // Respect XDG_DATA_HOME first (important for testing and Linux users)
+    let data_dir = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .map(|p| PathBuf::from(p).join("cass"))
+        .or_else(|| dirs::data_local_dir().map(|d| d.join("cass")))
         .ok_or_else(|| CliError {
             code: 9,
             kind: "config",
