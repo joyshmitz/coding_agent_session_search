@@ -548,6 +548,9 @@ pub struct SearchHit {
     pub source_path: String,
     pub agent: String,
     pub workspace: String,
+    /// Original workspace path before rewriting (P6.2)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_original: Option<String>,
     pub created_at: Option<i64>,
     /// Line number in the source file where the matched message starts (1-indexed)
     pub line_number: Option<usize>,
@@ -1812,6 +1815,12 @@ impl SearchClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            // workspace_original: pre-rewrite path (P6.2)
+            let workspace_original = doc
+                .get_first(fields.workspace_original)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             let created_at = doc.get_first(fields.created_at).and_then(|v| v.as_i64());
             let line_number = doc
                 .get_first(fields.msg_idx)
@@ -1841,6 +1850,7 @@ impl SearchClient {
                 source_path: source,
                 agent,
                 workspace,
+                workspace_original,
                 created_at,
                 line_number,
                 match_type: query_match_type,
@@ -1924,7 +1934,7 @@ impl SearchClient {
                 // idx is 0-indexed message index; convert to 1-indexed line number for JSONL files
                 let idx: Option<i64> = row.get(8).ok();
                 let line_number = idx.map(|i| (i + 1) as usize);
-                // SQLite FTS doesn't have provenance - use defaults (local)
+                // SQLite FTS doesn't have provenance or workspace_original - use defaults
                 Ok(SearchHit {
                     title,
                     snippet,
@@ -1933,6 +1943,7 @@ impl SearchClient {
                     source_path,
                     agent,
                     workspace,
+                    workspace_original: None,
                     created_at,
                     line_number,
                     match_type: query_match_type,
@@ -2391,6 +2402,7 @@ mod tests {
             source_path: "p".into(),
             agent: "a".into(),
             workspace: "w".into(),
+            workspace_original: None,
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
@@ -2418,6 +2430,7 @@ mod tests {
             source_path: "p".into(),
             agent: "a".into(),
             workspace: "w".into(),
+            workspace_original: None,
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
@@ -2971,6 +2984,7 @@ mod tests {
             source_path: "p".into(),
             agent: "a".into(),
             workspace: "w".into(),
+            workspace_original: None,
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
@@ -3023,6 +3037,7 @@ mod tests {
             source_path: "p".into(),
             agent: "agent1".into(),
             workspace: "w".into(),
+            workspace_original: None,
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
@@ -3102,6 +3117,7 @@ mod tests {
             source_path: "p".into(),
             agent: "a".into(),
             workspace: "w".into(),
+            workspace_original: None,
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
@@ -3162,6 +3178,7 @@ mod tests {
             source_path: "p".into(),
             agent: "a".into(),
             workspace: "w".into(),
+            workspace_original: None,
             created_at: None,
             line_number: None,
             match_type: MatchType::Exact,
@@ -3448,6 +3465,7 @@ mod tests {
                 source_path: "a.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3463,6 +3481,7 @@ mod tests {
                 source_path: "b.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3489,6 +3508,7 @@ mod tests {
                 source_path: "a.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3504,6 +3524,7 @@ mod tests {
                 source_path: "b.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3530,6 +3551,7 @@ mod tests {
                 source_path: "a.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3545,6 +3567,7 @@ mod tests {
                 source_path: "b.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3569,6 +3592,7 @@ mod tests {
                 source_path: "a.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3584,6 +3608,7 @@ mod tests {
                 source_path: "b.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3609,6 +3634,7 @@ mod tests {
                 source_path: "a.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3624,6 +3650,7 @@ mod tests {
                 source_path: "b.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3639,6 +3666,7 @@ mod tests {
                 source_path: "c.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(300),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3665,6 +3693,7 @@ mod tests {
                 source_path: "a.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
@@ -3680,6 +3709,7 @@ mod tests {
                 source_path: "b.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
+                workspace_original: None,
                 created_at: Some(200),
                 line_number: None,
                 match_type: MatchType::Exact,

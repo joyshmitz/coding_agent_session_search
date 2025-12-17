@@ -316,6 +316,7 @@ mod tests {
             source_path: "/path/to/file.jsonl".to_string(),
             agent: "claude_code".to_string(),
             workspace: "/projects/test".to_string(),
+            workspace_original: None,
             created_at: Some(1700000000000),
             line_number: Some(42),
             match_type: crate::search::query::MatchType::Exact,

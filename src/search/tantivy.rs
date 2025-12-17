@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 use crate::connectors::NormalizedConversation;
 use crate::sources::provenance::LOCAL_SOURCE_ID;
 
-const SCHEMA_VERSION: &str = "v5";
+const SCHEMA_VERSION: &str = "v6";
 
 /// Minimum time (ms) between merge operations
 const MERGE_COOLDOWN_MS: i64 = 300_000; // 5 minutes
@@ -48,12 +48,13 @@ impl MergeStatus {
 }
 
 // Bump this when schema/tokenizer changes. Used to trigger rebuilds.
-pub const SCHEMA_HASH: &str = "tantivy-schema-v5-provenance";
+pub const SCHEMA_HASH: &str = "tantivy-schema-v6-workspace-original";
 
 #[derive(Clone, Copy)]
 pub struct Fields {
     pub agent: Field,
     pub workspace: Field,
+    pub workspace_original: Field,
     pub source_path: Field,
     pub msg_idx: Field,
     pub created_at: Field,
@@ -275,6 +276,15 @@ impl TantivyIndex {
             if let Some(ws) = &conv.workspace {
                 d.add_text(self.fields.workspace, ws.to_string_lossy());
             }
+            // workspace_original from metadata.cass.workspace_original (P6.2)
+            if let Some(ws_orig) = conv
+                .metadata
+                .get("cass")
+                .and_then(|c| c.get("workspace_original"))
+                .and_then(|v| v.as_str())
+            {
+                d.add_text(self.fields.workspace_original, ws_orig);
+            }
             if let Some(ts) = msg.created_at.or(conv.started_at) {
                 d.add_i64(self.fields.created_at, ts);
             }
@@ -334,6 +344,8 @@ pub fn build_schema() -> Schema {
     // This ensures exact match filtering works correctly with TermQuery.
     schema_builder.add_text_field("agent", STRING | STORED);
     schema_builder.add_text_field("workspace", STRING | STORED);
+    // workspace_original stores the pre-rewrite path for audit/display (P6.2)
+    schema_builder.add_text_field("workspace_original", STORED);
     schema_builder.add_text_field("source_path", STORED);
     schema_builder.add_u64_field("msg_idx", INDEXED | STORED);
     schema_builder.add_i64_field("created_at", INDEXED | STORED | FAST);
@@ -358,6 +370,7 @@ pub fn fields_from_schema(schema: &Schema) -> Result<Fields> {
     Ok(Fields {
         agent: get("agent")?,
         workspace: get("workspace")?,
+        workspace_original: get("workspace_original")?,
         source_path: get("source_path")?,
         msg_idx: get("msg_idx")?,
         created_at: get("created_at")?,
@@ -655,6 +668,7 @@ mod tests {
         // Verify all required fields exist
         assert!(schema.get_field("agent").is_ok());
         assert!(schema.get_field("workspace").is_ok());
+        assert!(schema.get_field("workspace_original").is_ok());
         assert!(schema.get_field("source_path").is_ok());
         assert!(schema.get_field("msg_idx").is_ok());
         assert!(schema.get_field("created_at").is_ok());
@@ -677,6 +691,7 @@ mod tests {
         // Verify fields are valid (non-panicking access)
         let _ = fields.agent;
         let _ = fields.workspace;
+        let _ = fields.workspace_original;
         let _ = fields.source_path;
         let _ = fields.msg_idx;
         let _ = fields.created_at;

@@ -7070,6 +7070,7 @@ mod tests {
             source_path: path.into(),
             agent: agent.into(),
             workspace: String::new(),
+            workspace_original: None,
             created_at: None,
             line_number: None,
             match_type: crate::search::query::MatchType::default(),

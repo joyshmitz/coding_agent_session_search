@@ -23,6 +23,7 @@ fn exact_hits_rank_above_wildcards_at_equal_recency_and_score() {
         source_path: "p".into(),
         agent: "a".into(),
         workspace: "w".into(),
+        workspace_original: None,
         created_at: Some(max_created),
         line_number: None,
         match_type: MatchType::Exact,
@@ -74,6 +75,7 @@ fn recency_boost_can_outweigh_quality_when_far_newer() {
         source_path: "p1".into(),
         agent: "a".into(),
         workspace: "w".into(),
+        workspace_original: None,
         created_at: Some(1_000_000),
         line_number: None,
         match_type: MatchType::Exact,
@@ -90,6 +92,7 @@ fn recency_boost_can_outweigh_quality_when_far_newer() {
         source_path: "p2".into(),
         agent: "a".into(),
         workspace: "w".into(),
+        workspace_original: None,
         created_at: Some(2_000_000),
         line_number: None,
         match_type: MatchType::Suffix, // quality factor 0.8 vs 1.0
@@ -122,6 +125,7 @@ fn relevance_heavy_mode_prefers_quality_over_recency() {
         source_path: "p1".into(),
         agent: "a".into(),
         workspace: "w".into(),
+        workspace_original: None,
         created_at: Some(500_000), // Much older
         line_number: None,
         match_type: MatchType::Exact, // quality factor 1.0
@@ -138,6 +142,7 @@ fn relevance_heavy_mode_prefers_quality_over_recency() {
         source_path: "p2".into(),
         agent: "a".into(),
         workspace: "w".into(),
+        workspace_original: None,
         created_at: Some(max_created), // Most recent
         line_number: None,
         match_type: MatchType::Substring, // quality factor 0.7
@@ -171,6 +176,7 @@ fn match_quality_heavy_mode_balances_quality_and_recency() {
         source_path: "p".into(),
         agent: "a".into(),
         workspace: "w".into(),
+        workspace_original: None,
         created_at: Some(max_created),
         line_number: None,
         match_type: MatchType::Exact,
@@ -216,6 +222,7 @@ fn ranking_handles_missing_created_at() {
         source_path: "p1".into(),
         agent: "a".into(),
         workspace: "w".into(),
+        workspace_original: None,
         created_at: Some(max_created),
         line_number: None,
         match_type: MatchType::Prefix, // quality factor 0.9
@@ -232,6 +239,7 @@ fn ranking_handles_missing_created_at() {
         source_path: "p2".into(),
         agent: "a".into(),
         workspace: "w".into(),
+        workspace_original: None,
         created_at: None, // Missing date
         line_number: None,
         match_type: MatchType::Exact, // quality factor 1.0
@@ -266,6 +274,7 @@ fn ranking_handles_zero_max_created() {
         source_path: "p".into(),
         agent: "a".into(),
         workspace: "w".into(),
+        workspace_original: None,
         created_at: Some(1_000_000),
         line_number: None,
         match_type: MatchType::Exact,
@@ -298,6 +307,7 @@ fn all_ranking_modes_maintain_quality_ordering_at_equal_inputs() {
             source_path: "p".into(),
             agent: "a".into(),
             workspace: "w".into(),
+            workspace_original: None,
             created_at: Some(max_created),
             line_number: None,
             match_type: MatchType::Exact,
