@@ -3203,3 +3203,307 @@ fn introspect_has_response_schemas() {
         "response_schemas should not be empty"
     );
 }
+
+// =============================================================================
+// TST.9: Repeatable + Path/Integer Inference Tests
+// Tests for introspect correctly documenting repeatable options and type hints
+// =============================================================================
+
+/// Search command days parameter should be integer type
+#[test]
+fn introspect_search_days_integer_type() {
+    let json = fetch_introspect_json();
+    let search = find_command(&json, "search");
+    let days = find_arg(search, "days");
+
+    assert_eq!(
+        days["value_type"], "integer",
+        "search --days should be integer type"
+    );
+    assert_eq!(
+        days["arg_type"], "option",
+        "search --days should be an option"
+    );
+}
+
+/// View command line parameter should be integer type
+#[test]
+fn introspect_view_line_integer_type() {
+    let json = fetch_introspect_json();
+    let view = find_command(&json, "view");
+    let line = find_arg(view, "line");
+
+    assert_eq!(
+        line["value_type"], "integer",
+        "view -n/--line should be integer type"
+    );
+    assert_eq!(
+        line["short"], "n",
+        "view --line should have short option -n"
+    );
+}
+
+/// Expand command line parameter should be integer type
+#[test]
+fn introspect_expand_line_integer_type() {
+    let json = fetch_introspect_json();
+    let expand = find_command(&json, "expand");
+    let line = find_arg(expand, "line");
+
+    assert_eq!(
+        line["value_type"], "integer",
+        "expand -n/--line should be integer type"
+    );
+    assert_eq!(
+        line["short"], "n",
+        "expand --line should have short option -n"
+    );
+}
+
+/// Search command agent parameter should be repeatable
+#[test]
+fn introspect_search_agent_repeatable() {
+    let json = fetch_introspect_json();
+    let search = find_command(&json, "search");
+    let agent = find_arg(search, "agent");
+
+    assert_eq!(
+        agent["repeatable"], true,
+        "search --agent should be repeatable"
+    );
+}
+
+/// Search command workspace parameter should be repeatable
+#[test]
+fn introspect_search_workspace_repeatable() {
+    let json = fetch_introspect_json();
+    let search = find_command(&json, "search");
+    let workspace = find_arg(search, "workspace");
+
+    assert_eq!(
+        workspace["repeatable"], true,
+        "search --workspace should be repeatable"
+    );
+}
+
+/// Index command watch-once parameter should be repeatable path
+#[test]
+fn introspect_index_watch_once_repeatable_path() {
+    let json = fetch_introspect_json();
+    let index = find_command(&json, "index");
+    let watch_once = find_arg(index, "watch-once");
+
+    assert_eq!(
+        watch_once["repeatable"], true,
+        "index --watch-once should be repeatable"
+    );
+    assert_eq!(
+        watch_once["value_type"], "path",
+        "index --watch-once should be path type"
+    );
+}
+
+/// Search command aggregate parameter should be repeatable
+#[test]
+fn introspect_search_aggregate_repeatable() {
+    let json = fetch_introspect_json();
+    let search = find_command(&json, "search");
+    let aggregate = find_arg(search, "aggregate");
+
+    assert_eq!(
+        aggregate["repeatable"], true,
+        "search --aggregate should be repeatable"
+    );
+}
+
+/// Global db parameter should be path type
+#[test]
+fn introspect_global_db_path_type() {
+    let json = fetch_introspect_json();
+    let globals = json["global_flags"].as_array().expect("global_flags");
+
+    let db = globals
+        .iter()
+        .find(|f| f["name"] == "db")
+        .expect("db flag exists");
+
+    assert_eq!(
+        db["value_type"], "path",
+        "global --db should be path type"
+    );
+}
+
+/// Global trace-file parameter should be path type
+#[test]
+fn introspect_global_trace_file_path_type() {
+    let json = fetch_introspect_json();
+    let globals = json["global_flags"].as_array().expect("global_flags");
+
+    let trace_file = globals
+        .iter()
+        .find(|f| f["name"] == "trace-file")
+        .expect("trace-file flag exists");
+
+    assert_eq!(
+        trace_file["value_type"], "path",
+        "global --trace-file should be path type"
+    );
+}
+
+/// View command path positional should be path type
+#[test]
+fn introspect_view_path_positional_type() {
+    let json = fetch_introspect_json();
+    let view = find_command(&json, "view");
+    let path = find_arg(view, "path");
+
+    assert_eq!(
+        path["value_type"], "path",
+        "view path positional should be path type"
+    );
+    assert_eq!(
+        path["arg_type"], "positional",
+        "view path should be positional argument"
+    );
+}
+
+/// Expand command path positional should be path type
+#[test]
+fn introspect_expand_path_positional_type() {
+    let json = fetch_introspect_json();
+    let expand = find_command(&json, "expand");
+    let path = find_arg(expand, "path");
+
+    assert_eq!(
+        path["value_type"], "path",
+        "expand path positional should be path type"
+    );
+    assert_eq!(
+        path["arg_type"], "positional",
+        "expand path should be positional argument"
+    );
+}
+
+/// Search command data-dir parameter should be path type
+#[test]
+fn introspect_search_data_dir_path_type() {
+    let json = fetch_introspect_json();
+    let search = find_command(&json, "search");
+    let data_dir = find_arg(search, "data-dir");
+
+    assert_eq!(
+        data_dir["value_type"], "path",
+        "search --data-dir should be path type"
+    );
+}
+
+/// Context command limit parameter should be integer type
+#[test]
+fn introspect_context_limit_integer_type() {
+    let json = fetch_introspect_json();
+    let context = find_command(&json, "context");
+    let limit = find_arg(context, "limit");
+
+    assert_eq!(
+        limit["value_type"], "integer",
+        "context --limit should be integer type"
+    );
+}
+
+/// All repeatable options documented correctly across commands
+#[test]
+fn introspect_all_repeatable_options_documented() {
+    let json = fetch_introspect_json();
+
+    // Check search command repeatables
+    let search = find_command(&json, "search");
+    for name in ["agent", "workspace", "aggregate"] {
+        let arg = find_arg(search, name);
+        assert_eq!(
+            arg["repeatable"], true,
+            "search --{name} should be marked repeatable"
+        );
+    }
+
+    // Check index command repeatables
+    let index = find_command(&json, "index");
+    let watch_once = find_arg(index, "watch-once");
+    assert_eq!(
+        watch_once["repeatable"], true,
+        "index --watch-once should be marked repeatable"
+    );
+}
+
+/// All path-type options documented correctly across commands
+#[test]
+fn introspect_all_path_options_documented() {
+    let json = fetch_introspect_json();
+
+    // Check global path types
+    let globals = json["global_flags"].as_array().expect("global_flags");
+    for name in ["db", "trace-file"] {
+        let flag = globals.iter().find(|f| f["name"] == name).expect(&format!("{name} exists"));
+        assert_eq!(
+            flag["value_type"], "path",
+            "global --{name} should be path type"
+        );
+    }
+
+    // Check command path types
+    let search = find_command(&json, "search");
+    assert_eq!(
+        find_arg(search, "data-dir")["value_type"], "path",
+        "search --data-dir should be path type"
+    );
+
+    let view = find_command(&json, "view");
+    assert_eq!(
+        find_arg(view, "path")["value_type"], "path",
+        "view path should be path type"
+    );
+}
+
+/// All integer-type options documented correctly
+#[test]
+fn introspect_all_integer_options_documented() {
+    let json = fetch_introspect_json();
+
+    let search = find_command(&json, "search");
+    for name in ["limit", "offset", "days"] {
+        let arg = find_arg(search, name);
+        assert_eq!(
+            arg["value_type"], "integer",
+            "search --{name} should be integer type"
+        );
+    }
+
+    let view = find_command(&json, "view");
+    for name in ["line", "context"] {
+        let arg = find_arg(view, name);
+        assert_eq!(
+            arg["value_type"], "integer",
+            "view --{name} should be integer type"
+        );
+    }
+
+    let expand = find_command(&json, "expand");
+    for name in ["line", "context"] {
+        let arg = find_arg(expand, name);
+        assert_eq!(
+            arg["value_type"], "integer",
+            "expand --{name} should be integer type"
+        );
+    }
+
+    let status = find_command(&json, "status");
+    assert_eq!(
+        find_arg(status, "stale-threshold")["value_type"], "integer",
+        "status --stale-threshold should be integer type"
+    );
+
+    let health = find_command(&json, "health");
+    assert_eq!(
+        find_arg(health, "stale-threshold")["value_type"], "integer",
+        "health --stale-threshold should be integer type"
+    );
+}
