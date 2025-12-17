@@ -335,4 +335,274 @@ mod tests {
         assert!(!ctx.use_default_detection());
         assert_eq!(ctx.since_ts, Some(1000));
     }
+
+    // =========================================================================
+    // Timestamp parsing edge cases (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn parse_timestamp_i64_milliseconds() {
+        let val = serde_json::json!(1700000000000_i64);
+        assert_eq!(super::parse_timestamp(&val), Some(1700000000000));
+    }
+
+    #[test]
+    fn parse_timestamp_iso8601_with_fractional() {
+        let val = serde_json::json!("2025-11-12T18:31:32.217Z");
+        let result = super::parse_timestamp(&val);
+        assert!(result.is_some());
+        // Should be in milliseconds range for 2025
+        assert!(result.unwrap() > 1700000000000);
+    }
+
+    #[test]
+    fn parse_timestamp_iso8601_without_fractional() {
+        let val = serde_json::json!("2025-11-12T18:31:32Z");
+        let result = super::parse_timestamp(&val);
+        assert!(result.is_some());
+        assert!(result.unwrap() > 1700000000000);
+    }
+
+    #[test]
+    fn parse_timestamp_rfc3339_with_offset() {
+        let val = serde_json::json!("2025-11-12T18:31:32+00:00");
+        let result = super::parse_timestamp(&val);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn parse_timestamp_null_returns_none() {
+        let val = serde_json::json!(null);
+        assert_eq!(super::parse_timestamp(&val), None);
+    }
+
+    #[test]
+    fn parse_timestamp_invalid_string_returns_none() {
+        let val = serde_json::json!("not a timestamp");
+        assert_eq!(super::parse_timestamp(&val), None);
+    }
+
+    #[test]
+    fn parse_timestamp_empty_string_returns_none() {
+        let val = serde_json::json!("");
+        assert_eq!(super::parse_timestamp(&val), None);
+    }
+
+    #[test]
+    fn parse_timestamp_object_returns_none() {
+        let val = serde_json::json!({"timestamp": 1234});
+        assert_eq!(super::parse_timestamp(&val), None);
+    }
+
+    #[test]
+    fn parse_timestamp_negative_i64() {
+        // Negative timestamps (before 1970) should still work
+        let val = serde_json::json!(-1000_i64);
+        assert_eq!(super::parse_timestamp(&val), Some(-1000));
+    }
+
+    #[test]
+    fn parse_timestamp_zero() {
+        let val = serde_json::json!(0_i64);
+        assert_eq!(super::parse_timestamp(&val), Some(0));
+    }
+
+    // =========================================================================
+    // Content flattening edge cases (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn flatten_content_plain_string() {
+        let val = serde_json::json!("Hello world");
+        assert_eq!(super::flatten_content(&val), "Hello world");
+    }
+
+    #[test]
+    fn flatten_content_text_block_array() {
+        let val = serde_json::json!([
+            {"type": "text", "text": "Part 1"},
+            {"type": "text", "text": "Part 2"}
+        ]);
+        let result = super::flatten_content(&val);
+        assert!(result.contains("Part 1"));
+        assert!(result.contains("Part 2"));
+    }
+
+    #[test]
+    fn flatten_content_tool_use_block() {
+        let val = serde_json::json!([
+            {"type": "tool_use", "name": "Read", "input": {"path": "/test"}}
+        ]);
+        let result = super::flatten_content(&val);
+        assert!(result.contains("Read"));
+    }
+
+    #[test]
+    fn flatten_content_mixed_blocks() {
+        let val = serde_json::json!([
+            {"type": "text", "text": "I'll read the file"},
+            {"type": "tool_use", "name": "Read", "input": {"path": "/test"}}
+        ]);
+        let result = super::flatten_content(&val);
+        assert!(result.contains("I'll read the file"));
+        assert!(result.contains("Read"));
+    }
+
+    #[test]
+    fn flatten_content_input_text_block() {
+        let val = serde_json::json!([
+            {"type": "input_text", "text": "User input here"}
+        ]);
+        assert!(super::flatten_content(&val).contains("User input here"));
+    }
+
+    #[test]
+    fn flatten_content_null_returns_empty() {
+        let val = serde_json::json!(null);
+        assert!(super::flatten_content(&val).is_empty());
+    }
+
+    #[test]
+    fn flatten_content_empty_array() {
+        let val = serde_json::json!([]);
+        assert!(super::flatten_content(&val).is_empty());
+    }
+
+    #[test]
+    fn flatten_content_empty_string() {
+        let val = serde_json::json!("");
+        assert!(super::flatten_content(&val).is_empty());
+    }
+
+    #[test]
+    fn flatten_content_number_returns_empty() {
+        let val = serde_json::json!(42);
+        assert!(super::flatten_content(&val).is_empty());
+    }
+
+    #[test]
+    fn flatten_content_whitespace_only() {
+        let val = serde_json::json!("   \n\t  ");
+        assert_eq!(super::flatten_content(&val), "   \n\t  ");
+    }
+
+    // =========================================================================
+    // NormalizedMessage construction (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn normalized_message_default_fields() {
+        let msg = NormalizedMessage {
+            idx: 0,
+            role: "user".into(),
+            author: None,
+            created_at: None,
+            content: "test".into(),
+            extra: serde_json::json!({}),
+            snippets: vec![],
+        };
+        assert_eq!(msg.role, "user");
+        assert!(msg.author.is_none());
+        assert!(msg.created_at.is_none());
+    }
+
+    #[test]
+    fn normalized_message_with_all_fields() {
+        let msg = NormalizedMessage {
+            idx: 5,
+            role: "assistant".into(),
+            author: Some("claude".into()),
+            created_at: Some(1700000000000),
+            content: "Response text".into(),
+            extra: serde_json::json!({"model": "claude-3"}),
+            snippets: vec![NormalizedSnippet {
+                file_path: Some("test.rs".into()),
+                start_line: Some(10),
+                end_line: Some(20),
+                language: Some("rust".into()),
+                snippet_text: Some("fn test()".into()),
+            }],
+        };
+        assert_eq!(msg.idx, 5);
+        assert_eq!(msg.author, Some("claude".into()));
+        assert_eq!(msg.snippets.len(), 1);
+    }
+
+    // =========================================================================
+    // NormalizedConversation construction (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn normalized_conversation_minimal() {
+        let conv = NormalizedConversation {
+            agent_slug: "test_agent".into(),
+            external_id: None,
+            title: None,
+            workspace: None,
+            source_path: PathBuf::from("/test/session.jsonl"),
+            started_at: None,
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![],
+        };
+        assert_eq!(conv.agent_slug, "test_agent");
+        assert!(conv.messages.is_empty());
+    }
+
+    #[test]
+    fn normalized_conversation_with_messages() {
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: Some("session-123".into()),
+            title: Some("Test session".into()),
+            workspace: Some(PathBuf::from("/home/user/project")),
+            source_path: PathBuf::from("/data/session.jsonl"),
+            started_at: Some(1700000000000),
+            ended_at: Some(1700000060000),
+            metadata: serde_json::json!({"tokens": 500}),
+            messages: vec![
+                NormalizedMessage {
+                    idx: 0,
+                    role: "user".into(),
+                    author: None,
+                    created_at: Some(1700000000000),
+                    content: "Hello".into(),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                },
+                NormalizedMessage {
+                    idx: 1,
+                    role: "assistant".into(),
+                    author: None,
+                    created_at: Some(1700000010000),
+                    content: "Hi there".into(),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                },
+            ],
+        };
+        assert_eq!(conv.messages.len(), 2);
+        assert_eq!(conv.workspace, Some(PathBuf::from("/home/user/project")));
+    }
+
+    // =========================================================================
+    // DetectionResult (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn detection_result_not_found() {
+        let result = DetectionResult::not_found();
+        assert!(!result.detected);
+        assert!(result.evidence.is_empty());
+    }
+
+    #[test]
+    fn detection_result_found() {
+        let result = DetectionResult {
+            detected: true,
+            evidence: vec!["found ~/.codex".into(), "has sessions/".into()],
+        };
+        assert!(result.detected);
+        assert_eq!(result.evidence.len(), 2);
+    }
 }

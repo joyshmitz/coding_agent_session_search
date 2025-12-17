@@ -1136,3 +1136,432 @@ fn agent_kind_str(kind: AgentKind) -> String {
         AgentKind::Hybrid => "hybrid".into(),
     }
 }
+
+// =============================================================================
+// Tests (bead yln.4)
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // =========================================================================
+    // User data file protection tests (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn is_user_data_file_detects_bookmarks() {
+        assert!(is_user_data_file(Path::new("/data/bookmarks.db")));
+        assert!(is_user_data_file(Path::new("bookmarks.db")));
+    }
+
+    #[test]
+    fn is_user_data_file_detects_tui_state() {
+        assert!(is_user_data_file(Path::new("/data/tui_state.json")));
+    }
+
+    #[test]
+    fn is_user_data_file_detects_sources_toml() {
+        assert!(is_user_data_file(Path::new("/config/sources.toml")));
+    }
+
+    #[test]
+    fn is_user_data_file_detects_env() {
+        assert!(is_user_data_file(Path::new(".env")));
+    }
+
+    #[test]
+    fn is_user_data_file_rejects_other_files() {
+        assert!(!is_user_data_file(Path::new("index.db")));
+        assert!(!is_user_data_file(Path::new("conversations.db")));
+        assert!(!is_user_data_file(Path::new("random.txt")));
+    }
+
+    // =========================================================================
+    // Backup creation tests (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn create_backup_returns_none_for_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("nonexistent.db");
+        let result = create_backup(&db_path).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn create_backup_creates_timestamped_file() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        std::fs::write(&db_path, b"test data").unwrap();
+
+        let backup_path = create_backup(&db_path).unwrap();
+        assert!(backup_path.is_some());
+        let backup = backup_path.unwrap();
+        assert!(backup.exists());
+        assert!(backup.file_name().unwrap().to_str().unwrap().contains("backup"));
+    }
+
+    #[test]
+    fn create_backup_preserves_content() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let original_content = b"test database content 12345";
+        std::fs::write(&db_path, original_content).unwrap();
+
+        let backup_path = create_backup(&db_path).unwrap().unwrap();
+        let backup_content = std::fs::read(&backup_path).unwrap();
+        assert_eq!(backup_content, original_content);
+    }
+
+    // =========================================================================
+    // Backup cleanup tests (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn cleanup_old_backups_keeps_recent() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Create 5 backup files with different timestamps
+        for i in 0..5 {
+            let backup_name = format!("test.db.backup.{}", 1000 + i);
+            std::fs::write(dir.path().join(&backup_name), format!("backup {i}")).unwrap();
+        }
+
+        cleanup_old_backups(&db_path, 3).unwrap();
+
+        // Count remaining backup files
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_str().unwrap_or("").contains("backup"))
+            .collect();
+
+        assert!(backups.len() <= 3);
+    }
+
+    // =========================================================================
+    // Storage open/create tests (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn open_creates_new_database() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("new.db");
+        assert!(!db_path.exists());
+
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        assert!(db_path.exists());
+        drop(storage);
+    }
+
+    #[test]
+    fn open_readonly_fails_for_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("nonexistent.db");
+        let result = SqliteStorage::open_readonly(&db_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn open_readonly_succeeds_for_existing() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("existing.db");
+
+        // Create first
+        let _storage = SqliteStorage::open(&db_path).unwrap();
+        drop(_storage);
+
+        // Now open readonly
+        let storage = SqliteStorage::open_readonly(&db_path).unwrap();
+        assert!(storage.schema_version().is_ok());
+    }
+
+    // =========================================================================
+    // Schema version tests (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn schema_version_returns_current() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let version = storage.schema_version().unwrap();
+        assert!(version >= 5, "Schema version should be at least 5");
+    }
+
+    // =========================================================================
+    // Agent storage tests (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn ensure_agent_creates_new() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "test_agent".into(),
+            name: "Test Agent".into(),
+            version: Some("1.0".into()),
+            kind: AgentKind::Cli,
+        };
+
+        let id = storage.ensure_agent(&agent).unwrap();
+        assert!(id > 0);
+    }
+
+    #[test]
+    fn ensure_agent_returns_existing_id() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+
+        let id1 = storage.ensure_agent(&agent).unwrap();
+        let id2 = storage.ensure_agent(&agent).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn list_agents_returns_inserted() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "new_agent".into(),
+            name: "New Agent".into(),
+            version: None,
+            kind: AgentKind::VsCode,
+        };
+        storage.ensure_agent(&agent).unwrap();
+
+        let agents = storage.list_agents().unwrap();
+        assert!(agents.iter().any(|a| a.slug == "new_agent"));
+    }
+
+    // =========================================================================
+    // Workspace storage tests (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn ensure_workspace_creates_new() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let id = storage
+            .ensure_workspace(Path::new("/home/user/project"), Some("My Project"))
+            .unwrap();
+        assert!(id > 0);
+    }
+
+    #[test]
+    fn ensure_workspace_returns_existing() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let path = Path::new("/home/user/myproject");
+        let id1 = storage.ensure_workspace(path, None).unwrap();
+        let id2 = storage.ensure_workspace(path, None).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn list_workspaces_returns_inserted() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        storage
+            .ensure_workspace(Path::new("/test/workspace"), Some("Test WS"))
+            .unwrap();
+
+        let workspaces = storage.list_workspaces().unwrap();
+        assert!(workspaces.iter().any(|w| w.path.to_str() == Some("/test/workspace")));
+    }
+
+    // =========================================================================
+    // Source storage tests (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn upsert_source_creates_new() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let source = Source {
+            id: "test-laptop".into(),
+            kind: SourceKind::Ssh,
+            host_label: Some("test.local".into()),
+            machine_id: Some("test-machine-id".into()),
+            platform: None,
+            config_json: None,
+            created_at: Some(SqliteStorage::now_millis()),
+            updated_at: None,
+        };
+
+        storage.upsert_source(&source).unwrap();
+        let fetched = storage.get_source("test-laptop").unwrap();
+        assert!(fetched.is_some());
+        assert_eq!(fetched.unwrap().host_label, Some("test.local".into()));
+    }
+
+    #[test]
+    fn upsert_source_updates_existing() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let source1 = Source {
+            id: "my-source".into(),
+            kind: SourceKind::Ssh,
+            host_label: Some("Original Label".into()),
+            machine_id: None,
+            platform: None,
+            config_json: None,
+            created_at: Some(SqliteStorage::now_millis()),
+            updated_at: None,
+        };
+        storage.upsert_source(&source1).unwrap();
+
+        let source2 = Source {
+            id: "my-source".into(),
+            kind: SourceKind::Ssh,
+            host_label: Some("Updated Label".into()),
+            machine_id: None,
+            platform: Some("linux".into()),
+            config_json: None,
+            created_at: Some(SqliteStorage::now_millis()),
+            updated_at: Some(SqliteStorage::now_millis()),
+        };
+        storage.upsert_source(&source2).unwrap();
+
+        let fetched = storage.get_source("my-source").unwrap().unwrap();
+        assert_eq!(fetched.host_label, Some("Updated Label".into()));
+        assert!(fetched.platform.is_some());
+    }
+
+    #[test]
+    fn delete_source_removes_entry() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let source = Source {
+            id: "to-delete".into(),
+            kind: SourceKind::Local,
+            host_label: None,
+            machine_id: None,
+            platform: None,
+            config_json: None,
+            created_at: Some(SqliteStorage::now_millis()),
+            updated_at: None,
+        };
+        storage.upsert_source(&source).unwrap();
+
+        let deleted = storage.delete_source("to-delete", false).unwrap();
+        assert!(deleted);
+
+        let fetched = storage.get_source("to-delete").unwrap();
+        assert!(fetched.is_none());
+    }
+
+    #[test]
+    fn delete_source_cannot_delete_local() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let result = storage.delete_source(LOCAL_SOURCE_ID, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_sources_includes_local() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let sources = storage.list_sources().unwrap();
+        assert!(sources.iter().any(|s| s.id == LOCAL_SOURCE_ID));
+    }
+
+    #[test]
+    fn get_source_ids_excludes_local() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        // Add a non-local source
+        let source = Source {
+            id: "remote-1".into(),
+            kind: SourceKind::Ssh,
+            host_label: Some("server".into()),
+            machine_id: None,
+            platform: None,
+            config_json: None,
+            created_at: Some(SqliteStorage::now_millis()),
+            updated_at: None,
+        };
+        storage.upsert_source(&source).unwrap();
+
+        let ids = storage.get_source_ids().unwrap();
+        assert!(!ids.contains(&LOCAL_SOURCE_ID.to_string()));
+        assert!(ids.contains(&"remote-1".to_string()));
+    }
+
+    // =========================================================================
+    // Scan timestamp tests (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn get_last_scan_ts_returns_none_initially() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let ts = storage.get_last_scan_ts().unwrap();
+        assert!(ts.is_none());
+    }
+
+    #[test]
+    fn set_and_get_last_scan_ts() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut storage = SqliteStorage::open(&db_path).unwrap();
+
+        let expected_ts = 1700000000000_i64;
+        storage.set_last_scan_ts(expected_ts).unwrap();
+
+        let actual_ts = storage.get_last_scan_ts().unwrap();
+        assert_eq!(actual_ts, Some(expected_ts));
+    }
+
+    // =========================================================================
+    // now_millis utility test (bead yln.4)
+    // =========================================================================
+
+    #[test]
+    fn now_millis_returns_reasonable_value() {
+        let ts = SqliteStorage::now_millis();
+        // Should be after Jan 1, 2020 (approx 1577836800000)
+        assert!(ts > 1577836800000);
+        // Should be before Jan 1, 2100 (approx 4102444800000)
+        assert!(ts < 4102444800000);
+    }
+}
