@@ -18,7 +18,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: tests (unit + e2e)
         run: |
-          cargo test
+          cargo test -- --skip install_sh --skip install_ps1
           cargo test --test install_scripts -- --test-threads=1
           cargo test --test e2e_index_tui -- --test-threads=1
           cargo test --test e2e_install_easy -- --test-threads=1
