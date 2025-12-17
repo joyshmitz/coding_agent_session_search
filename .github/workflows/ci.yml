@@ -83,12 +83,14 @@ jobs:
         run: |
           cargo llvm-cov --all-features --workspace \
             --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-            --lcov --output-path lcov.info
+            --lcov --output-path lcov.info \
+            -- --skip install_sh --skip install_ps1
       - name: Generate coverage summary
         run: |
           cargo llvm-cov --all-features --workspace \
             --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-            --text > coverage-summary.txt
+            --text \
+            -- --skip install_sh --skip install_ps1 > coverage-summary.txt
           echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           tail -20 coverage-summary.txt >> $GITHUB_STEP_SUMMARY
