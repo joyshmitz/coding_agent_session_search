@@ -2840,3 +2840,366 @@ fn trace_includes_error_on_failure() {
     assert_ne!(exit_code, 0, "exit_code should be non-zero for failure");
     assert_eq!(json["contract_version"], "1");
 }
+
+// =============================================================================
+// TST.8: Global Flags & Defaults Coverage Tests
+// Tests verifying global flags propagate and introspect shows defaults
+// =============================================================================
+
+/// Introspect should include quiet and verbose global flags with proper types
+#[test]
+fn introspect_global_flags_quiet_verbose_documented() {
+    let json = fetch_introspect_json();
+    let globals = json["global_flags"].as_array().expect("global_flags array");
+
+    let mut found_quiet = false;
+    let mut found_verbose = false;
+
+    for flag in globals {
+        let name = flag["name"].as_str().unwrap_or_default();
+        match name {
+            "quiet" => {
+                found_quiet = true;
+                assert_eq!(
+                    flag["arg_type"], "flag",
+                    "quiet should be a flag type"
+                );
+                assert_eq!(
+                    flag["short"], "q",
+                    "quiet should have -q as short option"
+                );
+            }
+            "verbose" => {
+                found_verbose = true;
+                assert_eq!(
+                    flag["arg_type"], "flag",
+                    "verbose should be a flag type"
+                );
+                assert_eq!(
+                    flag["short"], "v",
+                    "verbose should have -v as short option"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    assert!(found_quiet, "quiet should be documented in global_flags");
+    assert!(found_verbose, "verbose should be documented in global_flags");
+}
+
+/// Introspect should include robot-help global flag
+#[test]
+fn introspect_global_flags_robot_help_documented() {
+    let json = fetch_introspect_json();
+    let globals = json["global_flags"].as_array().expect("global_flags array");
+
+    let found = globals.iter().any(|f| f["name"] == "robot-help");
+    assert!(found, "robot-help should be documented in global_flags");
+}
+
+/// Context argument should be documented in expand command with proper defaults
+#[test]
+fn introspect_expand_context_argument() {
+    let json = fetch_introspect_json();
+    let expand = find_command(&json, "expand");
+    let context = find_arg(expand, "context");
+
+    assert_eq!(
+        context["value_type"], "integer",
+        "context should be integer type"
+    );
+    // Expand context has default value of 3
+    assert_eq!(
+        context["default"], "3",
+        "expand --context should default to 3"
+    );
+}
+
+/// Context argument should be documented in view command with proper defaults
+#[test]
+fn introspect_view_context_argument() {
+    let json = fetch_introspect_json();
+    let view = find_command(&json, "view");
+    let context = find_arg(view, "context");
+
+    assert_eq!(
+        context["value_type"], "integer",
+        "context should be integer type"
+    );
+    // View context also has default of 5
+    assert_eq!(
+        context["default"], "5",
+        "context should default to 5"
+    );
+}
+
+/// All global flags mentioned in introspect should have required=false
+#[test]
+fn introspect_global_flags_all_optional() {
+    let json = fetch_introspect_json();
+    let globals = json["global_flags"].as_array().expect("global_flags array");
+
+    for flag in globals {
+        let name = flag["name"].as_str().unwrap_or("unknown");
+        assert_eq!(
+            flag["required"], false,
+            "global flag {name} should not be required"
+        );
+    }
+}
+
+/// Verify complete list of expected global flags exists
+#[test]
+fn introspect_global_flags_complete_list() {
+    let json = fetch_introspect_json();
+    let globals = json["global_flags"].as_array().expect("global_flags array");
+
+    let expected_flags = [
+        "db",
+        "robot-help",
+        "trace-file",
+        "quiet",
+        "verbose",
+        "color",
+        "progress",
+        "wrap",
+        "nowrap",
+    ];
+
+    let actual_names: HashSet<_> = globals
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+
+    for expected in expected_flags {
+        assert!(
+            actual_names.contains(expected),
+            "global flag '{expected}' should be documented in introspect"
+        );
+    }
+}
+
+/// Status command should have stale-threshold with proper default
+#[test]
+fn introspect_status_stale_threshold_default() {
+    let json = fetch_introspect_json();
+    let status = find_command(&json, "status");
+    let stale = find_arg(status, "stale-threshold");
+
+    assert_eq!(
+        stale["value_type"], "integer",
+        "stale-threshold should be integer type"
+    );
+    assert_eq!(
+        stale["default"], "1800",
+        "stale-threshold should default to 1800 (30 minutes)"
+    );
+}
+
+/// Health command should have stale-threshold with proper default
+#[test]
+fn introspect_health_stale_threshold_default() {
+    let json = fetch_introspect_json();
+    let health = find_command(&json, "health");
+    let stale = find_arg(health, "stale-threshold");
+
+    assert_eq!(
+        stale["value_type"], "integer",
+        "stale-threshold should be integer type"
+    );
+    // Health uses a shorter default (5 minutes) for quick checks
+    assert_eq!(
+        stale["default"], "300",
+        "health --stale-threshold should default to 300 (5 minutes)"
+    );
+}
+
+/// Global --quiet flag should suppress info-level logs
+#[test]
+fn global_quiet_flag_suppresses_info_logs() {
+    let mut cmd = base_cmd();
+    cmd.args(["--quiet", "capabilities", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // With --quiet, stderr should not have INFO-level messages
+    assert!(
+        !stderr.contains("INFO"),
+        "INFO logs should be suppressed with --quiet"
+    );
+}
+
+/// Global --verbose flag should be accepted without error
+#[test]
+fn global_verbose_flag_accepted() {
+    let mut cmd = base_cmd();
+    cmd.args(["--verbose", "capabilities", "--json"]);
+    cmd.assert().success();
+}
+
+/// Global flags can be placed before or after subcommand
+#[test]
+fn global_flags_work_before_subcommand() {
+    let mut cmd = base_cmd();
+    cmd.args(["--color=never", "capabilities", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should not contain ANSI escape codes
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "--color=never should disable ANSI codes"
+    );
+}
+
+/// Global --nowrap flag should be documented and accepted
+#[test]
+fn global_nowrap_flag_works() {
+    let mut cmd = base_cmd();
+    cmd.args(["--nowrap", "capabilities", "--json"]);
+    cmd.assert().success();
+}
+
+/// Global --wrap flag should accept integer value
+#[test]
+fn global_wrap_flag_accepts_integer() {
+    let mut cmd = base_cmd();
+    cmd.args(["--wrap", "80", "capabilities", "--json"]);
+    cmd.assert().success();
+}
+
+/// Search limit flag should have correct default in introspect
+#[test]
+fn introspect_search_limit_default() {
+    let json = fetch_introspect_json();
+    let search = find_command(&json, "search");
+    let limit = find_arg(search, "limit");
+
+    assert_eq!(limit["value_type"], "integer");
+    assert_eq!(
+        limit["default"], "10",
+        "search --limit should default to 10"
+    );
+}
+
+/// Search offset flag should have correct default in introspect
+#[test]
+fn introspect_search_offset_default() {
+    let json = fetch_introspect_json();
+    let search = find_command(&json, "search");
+    let offset = find_arg(search, "offset");
+
+    assert_eq!(offset["value_type"], "integer");
+    assert_eq!(
+        offset["default"], "0",
+        "search --offset should default to 0"
+    );
+}
+
+/// Progress flag should have enum values and default
+#[test]
+fn introspect_global_progress_enum_values() {
+    let json = fetch_introspect_json();
+    let globals = json["global_flags"].as_array().expect("global_flags");
+
+    let progress = globals
+        .iter()
+        .find(|f| f["name"] == "progress")
+        .expect("progress flag exists");
+
+    assert_eq!(progress["value_type"], "enum");
+    assert_eq!(progress["default"], "auto");
+
+    let enum_values: HashSet<_> = progress["enum_values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+
+    assert!(enum_values.contains("auto"));
+    assert!(enum_values.contains("bars"));
+    assert!(enum_values.contains("plain"));
+    assert!(enum_values.contains("none"));
+}
+
+/// Color flag should have enum values and default
+#[test]
+fn introspect_global_color_enum_values() {
+    let json = fetch_introspect_json();
+    let globals = json["global_flags"].as_array().expect("global_flags");
+
+    let color = globals
+        .iter()
+        .find(|f| f["name"] == "color")
+        .expect("color flag exists");
+
+    assert_eq!(color["value_type"], "enum");
+    assert_eq!(color["default"], "auto");
+
+    let enum_values: HashSet<_> = color["enum_values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+
+    assert!(enum_values.contains("auto"));
+    assert!(enum_values.contains("never"));
+    assert!(enum_values.contains("always"));
+}
+
+/// Dynamic schema builder should not introduce regressions - all commands present
+#[test]
+fn introspect_dynamic_schema_all_commands_present() {
+    let json = fetch_introspect_json();
+    let commands = json["commands"].as_array().expect("commands array");
+
+    let expected_commands = [
+        "tui",
+        "index",
+        "completions",
+        "search",
+        "status",
+        "diag",
+        "capabilities",
+        "introspect",
+        "robot-docs",
+        "api-version",
+        "view",
+        "expand",
+        "timeline",
+        "export",
+        "health",
+        "state",
+        "sources",
+    ];
+
+    let actual_names: HashSet<_> = commands
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+
+    for expected in expected_commands {
+        assert!(
+            actual_names.contains(expected),
+            "command '{expected}' should be present in introspect schema"
+        );
+    }
+}
+
+/// Dynamic schema builder should include response_schemas section
+#[test]
+fn introspect_has_response_schemas() {
+    let json = fetch_introspect_json();
+    let schemas = json["response_schemas"].as_object();
+    assert!(
+        schemas.is_some(),
+        "introspect should include response_schemas"
+    );
+    assert!(
+        !schemas.unwrap().is_empty(),
+        "response_schemas should not be empty"
+    );
+}
