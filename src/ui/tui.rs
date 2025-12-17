@@ -204,6 +204,9 @@ struct SavedViewPersisted {
     created_from: Option<i64>,
     created_to: Option<i64>,
     ranking: Option<String>,
+    /// Source filter: "all", "local", "remote", or a specific source_id
+    #[serde(default)]
+    source_filter: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -214,6 +217,7 @@ struct SavedView {
     created_from: Option<i64>,
     created_to: Option<i64>,
     ranking: RankingMode,
+    source_filter: crate::sources::provenance::SourceFilter,
 }
 
 #[derive(Clone, Debug)]
@@ -1846,6 +1850,8 @@ fn ranking_from_str(s: &str) -> RankingMode {
 use crate::ui::components::breadcrumbs::{self, BreadcrumbKind};
 
 fn chips_for_filters(filters: &SearchFilters, palette: ThemePalette) -> Vec<Span<'static>> {
+    use crate::sources::provenance::SourceFilter;
+
     let mut spans: Vec<Span<'static>> = Vec::new();
     if !filters.agents.is_empty() {
         spans.push(Span::styled(
@@ -1873,6 +1879,31 @@ fn chips_for_filters(filters: &SearchFilters, palette: ThemePalette) -> Vec<Span
             Style::default().fg(palette.accent_alt),
         ));
         spans.push(Span::raw(" ".to_string()));
+    }
+    // Source filter chip (P4.3)
+    match &filters.source_filter {
+        SourceFilter::All => {} // No chip for "all"
+        SourceFilter::Local => {
+            spans.push(Span::styled(
+                "[src:local]".to_string(),
+                Style::default().fg(palette.accent),
+            ));
+            spans.push(Span::raw(" ".to_string()));
+        }
+        SourceFilter::Remote => {
+            spans.push(Span::styled(
+                "[src:remote]".to_string(),
+                Style::default().fg(palette.accent_alt).add_modifier(Modifier::ITALIC),
+            ));
+            spans.push(Span::raw(" ".to_string()));
+        }
+        SourceFilter::SourceId(id) => {
+            spans.push(Span::styled(
+                format!("[src:{}]", id),
+                Style::default().fg(palette.accent_alt).add_modifier(Modifier::ITALIC),
+            ));
+            spans.push(Span::raw(" ".to_string()));
+        }
     }
     if filters.created_from.is_some() || filters.created_to.is_some() {
         let chip_text = format_time_chip(filters.created_from, filters.created_to);
@@ -1983,6 +2014,7 @@ fn save_view_slot(
         created_from: filters.created_from,
         created_to: filters.created_to,
         ranking,
+        source_filter: filters.source_filter.clone(),
     });
     saved_views.sort_by_key(|v| v.slot);
     format!("Saved view to slot {slot}")
@@ -1999,6 +2031,7 @@ fn load_view_slot(
         filters.workspaces = v.workspaces.clone();
         filters.created_from = v.created_from;
         filters.created_to = v.created_to;
+        filters.source_filter = v.source_filter.clone();
         *ranking = v.ranking;
         format!("Loaded view slot {slot}")
     })
@@ -2474,6 +2507,11 @@ pub fn run_tui(
                                 .ranking
                                 .as_deref()
                                 .map_or(RankingMode::Balanced, ranking_from_str),
+                            source_filter: sv
+                                .source_filter
+                                .as_ref()
+                                .map(|s| crate::sources::provenance::SourceFilter::parse(s))
+                                .unwrap_or_default(),
                         })
                     } else {
                         None
@@ -6375,6 +6413,11 @@ pub fn run_tui(
                         RankingMode::DateOldest => "oldest".into(),
                         RankingMode::Balanced => "balanced".into(),
                     }),
+                    source_filter: if v.source_filter.is_all() {
+                        None
+                    } else {
+                        Some(v.source_filter.to_string())
+                    },
                 })
                 .collect(),
         ),
@@ -6443,6 +6486,7 @@ mod tests {
                 created_from: Some(1),
                 created_to: Some(2),
                 ranking: Some("recent".into()),
+                source_filter: Some("remote".into()),
             }]),
             per_pane_limit: Some(12),
             ranking_mode: Some("balanced".into()),
@@ -6911,6 +6955,7 @@ mod tests {
                     created_from: Some(1000),
                     created_to: Some(2000),
                     ranking: Some("recent".into()),
+                    source_filter: Some("local".into()),
                 },
                 SavedViewPersisted {
                     slot: 5,
@@ -6919,6 +6964,7 @@ mod tests {
                     created_from: None,
                     created_to: Some(5000),
                     ranking: Some("balanced".into()),
+                    source_filter: None, // "all" default
                 },
             ]),
             ..Default::default()
