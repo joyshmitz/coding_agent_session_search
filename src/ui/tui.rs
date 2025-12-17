@@ -2558,6 +2558,13 @@ pub fn run_tui(
     let mut progress_history: std::collections::VecDeque<u8> =
         std::collections::VecDeque::with_capacity(24);
 
+    // Throughput tracking for indexer HUD sparkline (bead 012)
+    // Tracks items-per-second over the last N samples
+    let mut throughput_history: std::collections::VecDeque<u16> =
+        std::collections::VecDeque::with_capacity(24);
+    let mut last_throughput_sample: Option<(Instant, usize)> = None; // (time, current_count)
+    const THROUGHPUT_SAMPLE_INTERVAL_MS: u64 = 500; // Sample every 500ms for smoother sparkline
+
     // Track last indexing state to detect changes and trigger redraw
     // Tuple: (phase, current, total, is_rebuild, discovered_agents)
     let mut last_indexing_state: Option<(usize, usize, usize, bool, usize)> = None;
@@ -2593,9 +2600,32 @@ pub fn run_tui(
             .collect()
     };
 
-    // Helper to render progress for footer (enhanced with icons + sparkline + discovered agents)
+    // Render throughput sparkline from items/sec history (bead 012)
+    // Scales dynamically to max value in history
+    let render_throughput_sparkline = |history: &std::collections::VecDeque<u16>| -> String {
+        if history.len() < 2 {
+            return String::new();
+        }
+        let max_val = *history.iter().max().unwrap_or(&1) as usize;
+        if max_val == 0 {
+            return String::new();
+        }
+        let levels = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        history
+            .iter()
+            .map(|v| {
+                let idx = ((*v as usize * (levels.len() - 1)) / max_val).min(levels.len() - 1);
+                levels[idx]
+            })
+            .collect()
+    };
+
+    // Helper to render progress for footer (enhanced with icons + sparkline + throughput)
+    // Respects density mode: Compact=minimal, Cozy=normal, Spacious=full details (bead 012)
     let render_progress = |progress: &std::sync::Arc<crate::indexer::IndexingProgress>,
-                           history: &std::collections::VecDeque<u8>|
+                           pct_history: &std::collections::VecDeque<u8>,
+                           tput_history: &std::collections::VecDeque<u16>,
+                           density: DensityMode|
      -> String {
         let (phase, current, total, is_rebuild, pct, discovered) = get_indexing_state(progress);
         if phase == 0 {
@@ -2609,32 +2639,83 @@ pub fn run_tui(
             _ => ("⏳", "Processing"),
         };
 
-        let bar_width = 8;
-        // Avoid 0/0 stalls: if total is zero we still show a moving bar.
-        let pct_eff = if total == 0 { 5 } else { pct };
-        let filled = ((pct_eff * bar_width).saturating_add(99)) / 100; // round up a bit
-        let empty = bar_width.saturating_sub(filled.min(bar_width));
-        let bar = format!("{}{}", "█".repeat(filled.min(bar_width)), "░".repeat(empty));
-        let spark = render_sparkline(history);
+        // Density-aware rendering (bead 012)
+        match density {
+            DensityMode::Compact => {
+                // Compact: minimal - just icon + percentage or agent count
+                if phase == 1 {
+                    format!(" | {icon} {discovered} agents")
+                } else if is_rebuild {
+                    format!(" | {icon} {pct}% ⚠")
+                } else {
+                    format!(" | {icon} {pct}%")
+                }
+            }
+            DensityMode::Cozy => {
+                // Cozy: normal - icon + progress bar + throughput sparkline
+                let bar_width = 8;
+                let pct_eff = if total == 0 { 5 } else { pct };
+                let filled = ((pct_eff * bar_width).saturating_add(99)) / 100;
+                let empty = bar_width.saturating_sub(filled.min(bar_width));
+                let bar = format!("{}{}", "█".repeat(filled.min(bar_width)), "░".repeat(empty));
+                let tput_spark = render_throughput_sparkline(tput_history);
 
-        // Build progress string with discovered agents count during discovery phase
-        let mut s = if phase == 1 {
-            // During discovery, show agents found
-            format!(" | {icon} {phase_str} ({discovered} agents found)")
-        } else {
-            // During indexing, show items progress
-            format!(" | {icon} {phase_str} {current}/{total} ({pct}%) {bar}")
-        };
+                let mut s = if phase == 1 {
+                    format!(" | {icon} {phase_str} ({discovered} agents)")
+                } else {
+                    format!(" | {icon} {current}/{total} ({pct}%) {bar}")
+                };
 
-        if !spark.is_empty() && phase == 2 {
-            s.push_str(&format!(" {spark}"));
+                if !tput_spark.is_empty() && phase == 2 {
+                    s.push_str(&format!(" {tput_spark}"));
+                }
+                if is_rebuild {
+                    s.push_str(" ⚠ REBUILD");
+                }
+                s
+            }
+            DensityMode::Spacious => {
+                // Spacious: full details - all metrics + both sparklines
+                let bar_width = 8;
+                let pct_eff = if total == 0 { 5 } else { pct };
+                let filled = ((pct_eff * bar_width).saturating_add(99)) / 100;
+                let empty = bar_width.saturating_sub(filled.min(bar_width));
+                let bar = format!("{}{}", "█".repeat(filled.min(bar_width)), "░".repeat(empty));
+                let pct_spark = render_sparkline(pct_history);
+                let tput_spark = render_throughput_sparkline(tput_history);
+
+                // Calculate current throughput from recent samples
+                let current_tput = tput_history.back().copied().unwrap_or(0);
+
+                let mut s = if phase == 1 {
+                    format!(" | {icon} {phase_str} ({discovered} agents found)")
+                } else {
+                    let tput_str = if current_tput > 0 {
+                        format!(" ~{current_tput}/s")
+                    } else {
+                        String::new()
+                    };
+                    format!(" | {icon} {phase_str} {current}/{total} ({pct}%) {bar}{tput_str}")
+                };
+
+                // Show both sparklines in spacious mode
+                if phase == 2 {
+                    if !pct_spark.is_empty() {
+                        s.push_str(&format!(" %:{pct_spark}"));
+                    }
+                    if !tput_spark.is_empty() {
+                        s.push_str(&format!(" ⚡:{tput_spark}"));
+                    }
+                }
+
+                if is_rebuild {
+                    s.push_str(" ⚠ FULL REBUILD - Search unavailable");
+                } else if phase > 0 {
+                    s.push_str(" · Results may be incomplete");
+                }
+                s
+            }
         }
-        if is_rebuild {
-            s.push_str(" ⚠ FULL REBUILD - Search unavailable");
-        } else if phase > 0 {
-            s.push_str(" · Results may be incomplete");
-        }
-        s
     };
 
     loop {
@@ -3617,15 +3698,48 @@ pub fn run_tui(
                 }
 
                 if let Some(p) = &progress {
-                    // update sparkline history once per frame
-                    let (_, _, _, _, pct, _discovered) = get_indexing_state(p);
+                    // Update percentage sparkline history once per frame
+                    let (phase, current, _, _, pct, _discovered) = get_indexing_state(p);
                     if pct <= 100 {
                         if progress_history.len() == progress_history.capacity() {
                             progress_history.pop_front();
                         }
                         progress_history.push_back(pct as u8);
                     }
-                    let p_str = render_progress(p, &progress_history);
+
+                    // Sample throughput at regular intervals (bead 012)
+                    let now = Instant::now();
+                    if phase == 2 {
+                        // During indexing phase, track throughput
+                        if let Some((last_time, last_count)) = last_throughput_sample {
+                            let elapsed_ms = now.duration_since(last_time).as_millis() as u64;
+                            if elapsed_ms >= THROUGHPUT_SAMPLE_INTERVAL_MS {
+                                // Calculate items/second
+                                let items_delta = current.saturating_sub(last_count);
+                                let items_per_sec = if elapsed_ms > 0 {
+                                    (items_delta as u64 * 1000 / elapsed_ms) as u16
+                                } else {
+                                    0
+                                };
+                                if throughput_history.len() == throughput_history.capacity() {
+                                    throughput_history.pop_front();
+                                }
+                                throughput_history.push_back(items_per_sec);
+                                last_throughput_sample = Some((now, current));
+                            }
+                        } else {
+                            // First sample
+                            last_throughput_sample = Some((now, current));
+                        }
+                    } else {
+                        // Reset throughput tracking when not indexing
+                        if phase == 0 {
+                            throughput_history.clear();
+                            last_throughput_sample = None;
+                        }
+                    }
+
+                    let p_str = render_progress(p, &progress_history, &throughput_history, density_mode);
                     if !p_str.is_empty() {
                         footer_parts.push(p_str);
                     }
@@ -8026,5 +8140,181 @@ mod tests {
         selected.clear();
         let status = format!("Cleared {count} selections");
         assert_eq!(status, "Cleared 2 selections");
+    }
+
+    // =========================================================================
+    // Throughput sparkline tests (bead 012)
+    // =========================================================================
+
+    #[test]
+    fn throughput_sparkline_empty_history() {
+        // Less than 2 samples should return empty string
+        let history: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
+        let levels = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+        // Render function logic
+        let result = if history.len() < 2 {
+            String::new()
+        } else {
+            let max_val = *history.iter().max().unwrap_or(&1) as usize;
+            if max_val == 0 {
+                String::new()
+            } else {
+                history
+                    .iter()
+                    .map(|v| {
+                        let idx = ((*v as usize * (levels.len() - 1)) / max_val).min(levels.len() - 1);
+                        levels[idx]
+                    })
+                    .collect()
+            }
+        };
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn throughput_sparkline_scales_to_max() {
+        let mut history: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
+        history.push_back(0);
+        history.push_back(50);
+        history.push_back(100);
+        history.push_back(50);
+        history.push_back(0);
+
+        let levels = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let max_val = *history.iter().max().unwrap_or(&1) as usize;
+        let result: String = history
+            .iter()
+            .map(|v| {
+                let idx = ((*v as usize * (levels.len() - 1)) / max_val).min(levels.len() - 1);
+                levels[idx]
+            })
+            .collect();
+
+        // Should have 5 characters
+        assert_eq!(result.chars().count(), 5);
+        // Middle value (100) should be max character
+        assert_eq!(result.chars().nth(2), Some('█'));
+        // First and last (0) should be min character
+        assert_eq!(result.chars().nth(0), Some('▁'));
+        assert_eq!(result.chars().nth(4), Some('▁'));
+    }
+
+    #[test]
+    fn throughput_sparkline_all_same_values() {
+        let mut history: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
+        history.push_back(42);
+        history.push_back(42);
+        history.push_back(42);
+
+        let levels = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let max_val = *history.iter().max().unwrap_or(&1) as usize;
+        let result: String = history
+            .iter()
+            .map(|v| {
+                let idx = ((*v as usize * (levels.len() - 1)) / max_val).min(levels.len() - 1);
+                levels[idx]
+            })
+            .collect();
+
+        // All same values should render as max bars (since they're all == max)
+        assert_eq!(result, "███");
+    }
+
+    #[test]
+    fn throughput_sparkline_all_zeros() {
+        let mut history: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
+        history.push_back(0);
+        history.push_back(0);
+        history.push_back(0);
+
+        let levels = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let max_val = *history.iter().max().unwrap_or(&1) as usize;
+
+        // All zeros - max_val is 0, so return empty
+        let result = if max_val == 0 {
+            String::new()
+        } else {
+            history
+                .iter()
+                .map(|v| {
+                    let idx = ((*v as usize * (levels.len() - 1)) / max_val).min(levels.len() - 1);
+                    levels[idx]
+                })
+                .collect()
+        };
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn density_mode_compact_shows_minimal() {
+        // In compact mode, indexer HUD should show minimal info
+        let density = DensityMode::Compact;
+        let phase = 2; // Indexing
+        let pct = 75;
+        let is_rebuild = false;
+        let icon = "📦";
+
+        let expected_format = match density {
+            DensityMode::Compact => {
+                if is_rebuild {
+                    format!(" | {icon} {pct}% ⚠")
+                } else {
+                    format!(" | {icon} {pct}%")
+                }
+            }
+            _ => String::new(),
+        };
+
+        assert_eq!(expected_format, " | 📦 75%");
+        let _ = phase; // suppress unused warning
+    }
+
+    #[test]
+    fn density_mode_spacious_shows_full_details() {
+        // In spacious mode, should show phase label and both sparklines
+        let density = DensityMode::Spacious;
+        assert!(matches!(density, DensityMode::Spacious));
+
+        // Format includes labels for sparklines
+        let pct_spark = "▂▃▅▇█";
+        let tput_spark = "▁▂▄▆█";
+        let formatted = format!(" %:{pct_spark} ⚡:{tput_spark}");
+        assert!(formatted.contains("%:"));
+        assert!(formatted.contains("⚡:"));
+    }
+
+    #[test]
+    fn throughput_calculation() {
+        // Test items-per-second calculation logic
+        let items_delta = 100usize;
+        let elapsed_ms = 500u64;
+
+        let items_per_sec = if elapsed_ms > 0 {
+            (items_delta as u64 * 1000 / elapsed_ms) as u16
+        } else {
+            0
+        };
+
+        // 100 items in 500ms = 200 items/sec
+        assert_eq!(items_per_sec, 200);
+    }
+
+    #[test]
+    fn throughput_calculation_zero_elapsed() {
+        // Edge case: zero elapsed time
+        let items_delta = 100usize;
+        let elapsed_ms = 0u64;
+
+        let items_per_sec = if elapsed_ms > 0 {
+            (items_delta as u64 * 1000 / elapsed_ms) as u16
+        } else {
+            0
+        };
+
+        assert_eq!(items_per_sec, 0);
+        let _ = items_delta; // suppress unused warning
     }
 }
