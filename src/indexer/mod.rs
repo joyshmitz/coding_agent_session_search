@@ -462,14 +462,27 @@ pub fn build_scan_roots(storage: &SqliteStorage, data_dir: &Path) -> Vec<ScanRoo
                     });
 
                 // Parse workspace rewrites from config_json
+                // Format: array of {from, to, agents?} objects
                 let workspace_rewrites = source
                     .config_json
                     .as_ref()
                     .and_then(|cfg| cfg.get("path_mappings"))
-                    .and_then(|m| m.as_object())
-                    .map(|obj| {
-                        obj.iter()
-                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .and_then(|arr| arr.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                let from = item.get("from")?.as_str()?.to_string();
+                                let to = item.get("to")?.as_str()?.to_string();
+                                let agents = item.get("agents").and_then(|a| {
+                                    a.as_array().map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(String::from))
+                                            .collect()
+                                    })
+                                });
+                                Some(crate::sources::config::PathMapping { from, to, agents })
+                            })
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
@@ -516,6 +529,79 @@ fn inject_provenance(conv: &mut NormalizedConversation, origin: &Origin) {
                 }
             }),
         );
+    }
+}
+
+/// Apply workspace path rewriting to a conversation.
+///
+/// This rewrites workspace paths from remote formats to local equivalents
+/// at ingest time, ensuring that workspace filters work consistently
+/// across local and remote sources.
+///
+/// The original workspace path is preserved in metadata.cass.workspace_original
+/// for display/audit purposes.
+///
+/// Part of P6.2 - Apply path mappings at ingest time.
+pub fn apply_workspace_rewrite(
+    conv: &mut NormalizedConversation,
+    workspace_rewrites: &[crate::sources::config::PathMapping],
+) {
+    // Only apply if we have a workspace and rewrites
+    if workspace_rewrites.is_empty() {
+        return;
+    }
+
+    // Clone workspace upfront to avoid borrow issues
+    let original_workspace = match &conv.workspace {
+        Some(ws) => ws.to_string_lossy().to_string(),
+        None => return,
+    };
+
+    // Sort by prefix length descending for longest-prefix match
+    let mut mappings: Vec<_> = workspace_rewrites.iter().collect();
+    mappings.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+
+    // Try to apply a mapping
+    for mapping in mappings {
+        // Optionally filter by agent
+        if !mapping.applies_to_agent(Some(&conv.agent_slug)) {
+            continue;
+        }
+
+        if let Some(rewritten) = mapping.apply(&original_workspace) {
+            // Only proceed if the rewrite actually changed something
+            if rewritten != original_workspace {
+                // Store original in metadata
+                if !conv.metadata.is_object() {
+                    conv.metadata = serde_json::json!({});
+                }
+
+                if let Some(obj) = conv.metadata.as_object_mut() {
+                    // Get or create cass object
+                    let cass = obj
+                        .entry("cass".to_string())
+                        .or_insert_with(|| serde_json::json!({}));
+                    if let Some(cass_obj) = cass.as_object_mut() {
+                        cass_obj.insert(
+                            "workspace_original".to_string(),
+                            serde_json::Value::String(original_workspace.clone()),
+                        );
+                    }
+                }
+
+                // Update workspace to rewritten path
+                conv.workspace = Some(std::path::PathBuf::from(&rewritten));
+
+                tracing::debug!(
+                    original = %original_workspace,
+                    rewritten = %rewritten,
+                    agent = %conv.agent_slug,
+                    "workspace_rewritten"
+                );
+            }
+            // Stop after first match (longest prefix already matched)
+            return;
+        }
     }
 }
 
@@ -1387,5 +1473,167 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         // Should only have local root (remote skipped because mirror doesn't exist)
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].origin.source_id, "local");
+    }
+
+    #[test]
+    fn apply_workspace_rewrite_no_rewrites() {
+        let mut conv = norm_conv(None, vec![norm_msg(0, 1000)]);
+        conv.workspace = Some(PathBuf::from("/home/user/projects/app"));
+
+        apply_workspace_rewrite(&mut conv, &[]);
+
+        // Workspace unchanged when no rewrites
+        assert_eq!(
+            conv.workspace,
+            Some(PathBuf::from("/home/user/projects/app"))
+        );
+        // No workspace_original in metadata
+        assert!(conv
+            .metadata
+            .get("cass")
+            .and_then(|c| c.get("workspace_original"))
+            .is_none());
+    }
+
+    #[test]
+    fn apply_workspace_rewrite_no_workspace() {
+        let mut conv = norm_conv(None, vec![norm_msg(0, 1000)]);
+        conv.workspace = None;
+
+        let mappings = vec![crate::sources::config::PathMapping::new(
+            "/home/user",
+            "/Users/me",
+        )];
+
+        apply_workspace_rewrite(&mut conv, &mappings);
+
+        // Still None
+        assert!(conv.workspace.is_none());
+    }
+
+    #[test]
+    fn apply_workspace_rewrite_applies_mapping() {
+        let mut conv = norm_conv(None, vec![norm_msg(0, 1000)]);
+        conv.workspace = Some(PathBuf::from("/home/user/projects/app"));
+
+        let mappings = vec![crate::sources::config::PathMapping::new(
+            "/home/user",
+            "/Users/me",
+        )];
+
+        apply_workspace_rewrite(&mut conv, &mappings);
+
+        // Workspace rewritten
+        assert_eq!(
+            conv.workspace,
+            Some(PathBuf::from("/Users/me/projects/app"))
+        );
+
+        // Original stored in metadata
+        let workspace_original = conv
+            .metadata
+            .get("cass")
+            .and_then(|c| c.get("workspace_original"))
+            .and_then(|v| v.as_str());
+        assert_eq!(workspace_original, Some("/home/user/projects/app"));
+    }
+
+    #[test]
+    fn apply_workspace_rewrite_longest_prefix_match() {
+        let mut conv = norm_conv(None, vec![norm_msg(0, 1000)]);
+        conv.workspace = Some(PathBuf::from("/home/user/projects/special/app"));
+
+        let mappings = vec![
+            crate::sources::config::PathMapping::new("/home/user", "/Users/me"),
+            crate::sources::config::PathMapping::new(
+                "/home/user/projects/special",
+                "/Volumes/Special",
+            ),
+        ];
+
+        apply_workspace_rewrite(&mut conv, &mappings);
+
+        // Should use longer prefix match
+        assert_eq!(conv.workspace, Some(PathBuf::from("/Volumes/Special/app")));
+    }
+
+    #[test]
+    fn apply_workspace_rewrite_no_match() {
+        let mut conv = norm_conv(None, vec![norm_msg(0, 1000)]);
+        conv.workspace = Some(PathBuf::from("/opt/other/path"));
+
+        let mappings = vec![crate::sources::config::PathMapping::new(
+            "/home/user",
+            "/Users/me",
+        )];
+
+        apply_workspace_rewrite(&mut conv, &mappings);
+
+        // Workspace unchanged - no matching prefix
+        assert_eq!(conv.workspace, Some(PathBuf::from("/opt/other/path")));
+        // No workspace_original since nothing was rewritten
+        assert!(conv
+            .metadata
+            .get("cass")
+            .and_then(|c| c.get("workspace_original"))
+            .is_none());
+    }
+
+    #[test]
+    fn apply_workspace_rewrite_with_agent_filter() {
+        // Test with agent filter
+        let mut conv = norm_conv(None, vec![norm_msg(0, 1000)]);
+        conv.agent_slug = "claude-code".to_string();
+        conv.workspace = Some(PathBuf::from("/home/user/projects/app"));
+
+        let mappings = vec![
+            crate::sources::config::PathMapping::new("/home/user", "/Users/me"),
+            crate::sources::config::PathMapping::with_agents(
+                "/home/user/projects",
+                "/Volumes/Work",
+                vec!["cursor".to_string()], // Only for cursor, not claude-code
+            ),
+        ];
+
+        apply_workspace_rewrite(&mut conv, &mappings);
+
+        // Should NOT use cursor-specific mapping, falls back to general
+        assert_eq!(
+            conv.workspace,
+            Some(PathBuf::from("/Users/me/projects/app"))
+        );
+    }
+
+    #[test]
+    fn apply_workspace_rewrite_preserves_existing_metadata() {
+        let mut conv = norm_conv(None, vec![norm_msg(0, 1000)]);
+        conv.workspace = Some(PathBuf::from("/home/user/app"));
+        conv.metadata = serde_json::json!({
+            "cass": {
+                "origin": {
+                    "source_id": "laptop",
+                    "kind": "ssh",
+                    "host": "user@laptop.local"
+                }
+            }
+        });
+
+        let mappings = vec![crate::sources::config::PathMapping::new(
+            "/home/user",
+            "/Users/me",
+        )];
+
+        apply_workspace_rewrite(&mut conv, &mappings);
+
+        // Origin preserved
+        assert_eq!(
+            conv.metadata["cass"]["origin"]["source_id"].as_str(),
+            Some("laptop")
+        );
+        // workspace_original added
+        assert_eq!(
+            conv.metadata["cass"]["workspace_original"].as_str(),
+            Some("/home/user/app")
+        );
     }
 }

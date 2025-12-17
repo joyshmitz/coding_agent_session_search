@@ -1,6 +1,6 @@
 //! Connectors for agent histories.
 
-use crate::sources::config::Platform;
+use crate::sources::config::{PathMapping, Platform};
 use crate::sources::provenance::Origin;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -47,9 +47,10 @@ pub struct ScanRoot {
     /// Optional platform hint (affects path interpretation for workspace mapping).
     pub platform: Option<Platform>,
 
-    /// Optional path rewrite rules (src_prefix -> dst_prefix).
-    /// Used to map remote workspace paths to local equivalents for display.
-    pub workspace_rewrites: Vec<(String, String)>,
+    /// Optional path rewrite rules.
+    /// Used to map remote workspace paths to local equivalents.
+    /// Applied at ingest time so filters work across sources.
+    pub workspace_rewrites: Vec<PathMapping>,
 }
 
 impl ScanRoot {
@@ -75,8 +76,31 @@ impl ScanRoot {
 
     /// Add a workspace rewrite rule.
     pub fn with_rewrite(mut self, src_prefix: impl Into<String>, dst_prefix: impl Into<String>) -> Self {
-        self.workspace_rewrites.push((src_prefix.into(), dst_prefix.into()));
+        self.workspace_rewrites
+            .push(PathMapping::new(src_prefix, dst_prefix));
         self
+    }
+
+    /// Apply workspace rewriting rules to a path.
+    ///
+    /// Uses longest-prefix matching for correct handling of nested paths.
+    /// Optionally filters by agent name.
+    pub fn rewrite_workspace(&self, path: &str, agent: Option<&str>) -> String {
+        // Sort by prefix length descending for longest-prefix match
+        let mut mappings: Vec<_> = self
+            .workspace_rewrites
+            .iter()
+            .filter(|m| m.applies_to_agent(agent))
+            .collect();
+        mappings.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+
+        for mapping in mappings {
+            if let Some(rewritten) = mapping.apply(path) {
+                return rewritten;
+            }
+        }
+
+        path.to_string()
     }
 }
 
@@ -316,7 +340,53 @@ mod tests {
         let root = ScanRoot::local(PathBuf::from("/test"))
             .with_rewrite("/home/user", "/Users/local");
         assert_eq!(root.workspace_rewrites.len(), 1);
-        assert_eq!(root.workspace_rewrites[0], ("/home/user".to_string(), "/Users/local".to_string()));
+        assert_eq!(root.workspace_rewrites[0].from, "/home/user");
+        assert_eq!(root.workspace_rewrites[0].to, "/Users/local");
+    }
+
+    #[test]
+    fn scan_root_rewrite_workspace_applies_rules() {
+        let root = ScanRoot::local(PathBuf::from("/test"))
+            .with_rewrite("/home/user/projects", "/Users/me/projects")
+            .with_rewrite("/home/user", "/Users/me");
+
+        // Longest prefix match
+        assert_eq!(
+            root.rewrite_workspace("/home/user/projects/myapp", None),
+            "/Users/me/projects/myapp"
+        );
+
+        // Shorter prefix match
+        assert_eq!(
+            root.rewrite_workspace("/home/user/other", None),
+            "/Users/me/other"
+        );
+
+        // No match
+        assert_eq!(root.rewrite_workspace("/opt/data", None), "/opt/data");
+    }
+
+    #[test]
+    fn scan_root_rewrite_with_agent_filter() {
+        let mut root = ScanRoot::local(PathBuf::from("/test"));
+        root.workspace_rewrites.push(PathMapping::new("/home/user", "/Users/me"));
+        root.workspace_rewrites.push(PathMapping::with_agents(
+            "/home/user/projects",
+            "/Volumes/Work",
+            vec!["claude-code".into()],
+        ));
+
+        // With claude-code agent, uses agent-specific mapping
+        assert_eq!(
+            root.rewrite_workspace("/home/user/projects/app", Some("claude-code")),
+            "/Volumes/Work/app"
+        );
+
+        // With other agent, falls back to general mapping
+        assert_eq!(
+            root.rewrite_workspace("/home/user/projects/app", Some("cursor")),
+            "/Users/me/projects/app"
+        );
     }
 
     #[test]
