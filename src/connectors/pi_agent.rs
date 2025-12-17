@@ -346,3 +346,733 @@ impl Connector for PiAgentConnector {
         Ok(convs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // =====================================================
+    // Constructor Tests
+    // =====================================================
+
+    #[test]
+    fn new_creates_connector() {
+        let connector = PiAgentConnector::new();
+        let _ = connector;
+    }
+
+    #[test]
+    fn default_creates_connector() {
+        let connector = PiAgentConnector::default();
+        let _ = connector;
+    }
+
+    // =====================================================
+    // flatten_message_content() Tests
+    // =====================================================
+
+    #[test]
+    fn flatten_message_content_handles_string() {
+        let content = json!("Simple string content");
+        let result = PiAgentConnector::flatten_message_content(&content);
+        assert_eq!(result, "Simple string content");
+    }
+
+    #[test]
+    fn flatten_message_content_handles_text_blocks() {
+        let content = json!([
+            {"type": "text", "text": "First paragraph"},
+            {"type": "text", "text": "Second paragraph"}
+        ]);
+        let result = PiAgentConnector::flatten_message_content(&content);
+        assert!(result.contains("First paragraph"));
+        assert!(result.contains("Second paragraph"));
+    }
+
+    #[test]
+    fn flatten_message_content_handles_thinking() {
+        let content = json!([
+            {"type": "thinking", "thinking": "Let me analyze this..."}
+        ]);
+        let result = PiAgentConnector::flatten_message_content(&content);
+        assert!(result.contains("[Thinking]"));
+        assert!(result.contains("Let me analyze this..."));
+    }
+
+    #[test]
+    fn flatten_message_content_handles_tool_call() {
+        let content = json!([
+            {"type": "toolCall", "name": "read_file", "arguments": {"path": "/test.rs"}}
+        ]);
+        let result = PiAgentConnector::flatten_message_content(&content);
+        assert!(result.contains("[Tool: read_file]"));
+        assert!(result.contains("path=/test.rs"));
+    }
+
+    #[test]
+    fn flatten_message_content_handles_tool_call_without_args() {
+        let content = json!([
+            {"type": "toolCall", "name": "get_status", "arguments": {}}
+        ]);
+        let result = PiAgentConnector::flatten_message_content(&content);
+        assert_eq!(result, "[Tool: get_status]");
+    }
+
+    #[test]
+    fn flatten_message_content_skips_images() {
+        let content = json!([
+            {"type": "text", "text": "Here's an image:"},
+            {"type": "image", "url": "data:image/png;base64,..."},
+            {"type": "text", "text": "End of message"}
+        ]);
+        let result = PiAgentConnector::flatten_message_content(&content);
+        assert!(result.contains("Here's an image:"));
+        assert!(result.contains("End of message"));
+        assert!(!result.contains("data:image"));
+    }
+
+    #[test]
+    fn flatten_message_content_handles_mixed_types() {
+        let content = json!([
+            {"type": "text", "text": "Let me help:"},
+            {"type": "thinking", "thinking": "Analyzing..."},
+            {"type": "toolCall", "name": "bash", "arguments": {"command": "ls"}},
+            {"type": "text", "text": "Done!"}
+        ]);
+        let result = PiAgentConnector::flatten_message_content(&content);
+        assert!(result.contains("Let me help:"));
+        assert!(result.contains("[Thinking] Analyzing..."));
+        assert!(result.contains("[Tool: bash]"));
+        assert!(result.contains("Done!"));
+    }
+
+    #[test]
+    fn flatten_message_content_returns_empty_for_null() {
+        let content = json!(null);
+        let result = PiAgentConnector::flatten_message_content(&content);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn flatten_message_content_limits_tool_args_to_three() {
+        let content = json!([
+            {"type": "toolCall", "name": "multi_arg", "arguments": {
+                "a": "1", "b": "2", "c": "3", "d": "4", "e": "5"
+            }}
+        ]);
+        let result = PiAgentConnector::flatten_message_content(&content);
+        // Should contain at most 3 arguments
+        let arg_count = result.matches('=').count();
+        assert!(arg_count <= 3);
+    }
+
+    // =====================================================
+    // session_files() Tests
+    // =====================================================
+
+    #[test]
+    fn session_files_finds_valid_session_files() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // Valid session file format: <timestamp>_<uuid>.jsonl
+        fs::write(
+            sessions.join("2025-12-01T10-00-00_abc123.jsonl"),
+            "{}",
+        )
+        .unwrap();
+
+        let files = PiAgentConnector::session_files(dir.path());
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn session_files_ignores_non_jsonl_files() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        fs::write(sessions.join("2025-12-01_abc123.json"), "{}").unwrap();
+        fs::write(sessions.join("config.txt"), "{}").unwrap();
+
+        let files = PiAgentConnector::session_files(dir.path());
+        assert_eq!(files.len(), 0);
+    }
+
+    #[test]
+    fn session_files_ignores_files_without_underscore() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // Missing underscore between timestamp and uuid
+        fs::write(sessions.join("2025-12-01.jsonl"), "{}").unwrap();
+
+        let files = PiAgentConnector::session_files(dir.path());
+        assert_eq!(files.len(), 0);
+    }
+
+    #[test]
+    fn session_files_finds_nested_sessions() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("sessions").join("--Users-foo-project--");
+        fs::create_dir_all(&nested).unwrap();
+
+        fs::write(nested.join("2025-12-01T10-00-00_uuid1.jsonl"), "{}").unwrap();
+
+        let files = PiAgentConnector::session_files(dir.path());
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn session_files_returns_empty_when_no_sessions_dir() {
+        let dir = TempDir::new().unwrap();
+        let files = PiAgentConnector::session_files(dir.path());
+        assert_eq!(files.len(), 0);
+    }
+
+    // =====================================================
+    // Helper: Create Pi-Agent storage structure
+    // =====================================================
+
+    fn create_pi_agent_storage(dir: &TempDir) -> PathBuf {
+        let storage = dir.path().join("pi-agent");
+        fs::create_dir_all(storage.join("sessions")).unwrap();
+        storage
+    }
+
+    fn write_session_file(storage: &PathBuf, name: &str, lines: &[&str]) {
+        let sessions = storage.join("sessions");
+        fs::write(sessions.join(name), lines.join("\n")).unwrap();
+    }
+
+    // =====================================================
+    // scan() Tests - Session Header
+    // =====================================================
+
+    #[test]
+    fn scan_parses_session_header() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"session","id":"sess-001","timestamp":"2025-12-01T10:00:00Z","cwd":"/home/user/project","provider":"anthropic","modelId":"claude-3-opus"}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"user","content":"Hello Pi!"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].workspace,
+            Some(PathBuf::from("/home/user/project"))
+        );
+        assert_eq!(convs[0].metadata["provider"], "anthropic");
+        assert_eq!(convs[0].metadata["model_id"], "claude-3-opus");
+    }
+
+    // =====================================================
+    // scan() Tests - Messages
+    // =====================================================
+
+    #[test]
+    fn scan_parses_user_messages() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Hello Pi-Agent!"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert_eq!(convs[0].messages[0].content, "Hello Pi-Agent!");
+    }
+
+    #[test]
+    fn scan_parses_assistant_messages() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"assistant","content":"Hello! How can I help?","model":"claude-3-opus"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].role, "assistant");
+        assert_eq!(convs[0].messages[0].author, Some("claude-3-opus".to_string()));
+    }
+
+    #[test]
+    fn scan_normalizes_tool_result_role() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"toolResult","content":"Tool output here"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // toolResult should be normalized to "tool"
+        assert_eq!(convs[0].messages[0].role, "tool");
+    }
+
+    #[test]
+    fn scan_parses_array_content() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let content = json!([
+            {"type": "text", "text": "Part 1"},
+            {"type": "text", "text": "Part 2"}
+        ]);
+        let line = format!(
+            r#"{{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{{"role":"assistant","content":{}}}}}"#,
+            content
+        );
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &[&line]);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert!(convs[0].messages[0].content.contains("Part 1"));
+        assert!(convs[0].messages[0].content.contains("Part 2"));
+    }
+
+    #[test]
+    fn scan_skips_empty_content() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Valid"}}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assistant","content":""}}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:02Z","message":{"role":"assistant","content":"   "}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Only the valid message should be included
+        assert_eq!(convs[0].messages.len(), 1);
+    }
+
+    // =====================================================
+    // scan() Tests - Model Changes
+    // =====================================================
+
+    #[test]
+    fn scan_tracks_model_changes() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"session","id":"sess-001","provider":"openai","modelId":"gpt-4"}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Hello"}}"#,
+            r#"{"type":"model_change","provider":"anthropic","modelId":"claude-3-opus"}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assistant","content":"Hello!"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // After model_change, assistant should have new model as author
+        assert_eq!(
+            convs[0].messages[1].author,
+            Some("claude-3-opus".to_string())
+        );
+    }
+
+    // =====================================================
+    // scan() Tests - Skipped Entry Types
+    // =====================================================
+
+    #[test]
+    fn scan_skips_thinking_level_change() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Test"}}"#,
+            r#"{"type":"thinking_level_change","level":"high"}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Should still work, just skip the thinking_level_change
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+    }
+
+    // =====================================================
+    // Title Extraction Tests
+    // =====================================================
+
+    #[test]
+    fn scan_extracts_title_from_first_user_message() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"assistant","content":"I'm ready!"}}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"user","content":"This is the title"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("This is the title".to_string()));
+    }
+
+    #[test]
+    fn scan_truncates_long_titles() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let long_content = "x".repeat(200);
+        let line = format!(
+            r#"{{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{{"role":"user","content":"{}"}}}}"#,
+            long_content
+        );
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &[&line]);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title.as_ref().unwrap().len(), 100);
+    }
+
+    #[test]
+    fn scan_uses_first_line_for_multiline_title() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"First line\nSecond line\nThird line"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("First line".to_string()));
+    }
+
+    #[test]
+    fn scan_falls_back_to_first_message_for_title() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        // No user messages
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"assistant","content":"Assistant speaks first"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("Assistant speaks first".to_string()));
+    }
+
+    // =====================================================
+    // Timestamp Tests
+    // =====================================================
+
+    #[test]
+    fn scan_extracts_timestamps() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"session","timestamp":"2025-12-01T10:00:00Z"}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"user","content":"First"}}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T11:00:00Z","message":{"role":"assistant","content":"Last"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert!(convs[0].started_at.is_some());
+        assert!(convs[0].ended_at.is_some());
+        assert!(convs[0].messages[0].created_at.is_some());
+    }
+
+    // =====================================================
+    // Agent Slug and External ID Tests
+    // =====================================================
+
+    #[test]
+    fn scan_sets_agent_slug_to_pi_agent() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Test"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].agent_slug, "pi_agent");
+    }
+
+    #[test]
+    fn scan_uses_relative_path_as_external_id() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        let nested = storage.join("sessions").join("--Users-foo-project--");
+        fs::create_dir_all(&nested).unwrap();
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Test"}}"#,
+        ];
+        fs::write(
+            nested.join("2025-12-01T10-00-00_uuid1.jsonl"),
+            lines.join("\n"),
+        )
+        .unwrap();
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // External ID should include the path structure
+        assert!(convs[0].external_id.is_some());
+        let ext_id = convs[0].external_id.as_ref().unwrap();
+        assert!(ext_id.contains("Users-foo-project") || ext_id.contains("uuid1"));
+    }
+
+    // =====================================================
+    // Metadata Tests
+    // =====================================================
+
+    #[test]
+    fn scan_sets_metadata_source() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Test"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].metadata["source"], "pi_agent");
+    }
+
+    #[test]
+    fn scan_includes_session_id_in_metadata() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"session","id":"unique-session-id-123"}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Test"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].metadata["session_id"], "unique-session-id-123");
+    }
+
+    // =====================================================
+    // Edge Cases
+    // =====================================================
+
+    #[test]
+    fn scan_handles_empty_sessions_dir() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_skips_invalid_json_lines() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Valid"}}"#,
+            "not valid json at all",
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"user","content":"Also valid"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn scan_skips_empty_lines() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Message 1"}}"#,
+            "",
+            "   ",
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"user","content":"Message 2"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn scan_skips_sessions_without_messages() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        // Only session header, no messages
+        let lines = vec![
+            r#"{"type":"session","id":"empty-session"}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_handles_multiple_session_files() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines1 = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Session 1"}}"#,
+        ];
+        let lines2 = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T11:00:00Z","message":{"role":"user","content":"Session 2"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines1);
+        write_session_file(&storage, "2025-12-01T11-00-00_uuid2.jsonl", &lines2);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 2);
+    }
+
+    #[test]
+    fn scan_assigns_sequential_indices() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"First"}}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assistant","content":"Second"}}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:02Z","message":{"role":"user","content":"Third"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].idx, 0);
+        assert_eq!(convs[0].messages[1].idx, 1);
+        assert_eq!(convs[0].messages[2].idx, 2);
+    }
+
+    #[test]
+    fn scan_stores_source_path() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Test"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        let expected_path = storage.join("sessions").join("2025-12-01T10-00-00_uuid1.jsonl");
+        assert_eq!(convs[0].source_path, expected_path);
+    }
+
+    #[test]
+    fn scan_uses_fallback_model_from_session() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+
+        // Session sets model, assistant message doesn't override
+        let lines = vec![
+            r#"{"type":"session","modelId":"gpt-4-turbo"}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"assistant","content":"Hello!"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(
+            convs[0].messages[0].author,
+            Some("gpt-4-turbo".to_string())
+        );
+    }
+}
