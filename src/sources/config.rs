@@ -20,10 +20,20 @@
 //! host = "user@work.example.com"
 //! paths = ["~/.claude/projects"]
 //! sync_schedule = "daily"
+//!
+//! # Path mappings rewrite remote paths to local equivalents
+//! [[sources.path_mappings]]
+//! from = "/home/user/projects"
+//! to = "/Users/me/projects"
+//!
+//! # Agent-specific mappings only apply when viewing specific agent sessions
+//! [[sources.path_mappings]]
+//! from = "/opt/work"
+//! to = "/Volumes/Work"
+//! agents = ["claude-code"]
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -56,6 +66,67 @@ pub struct SourcesConfig {
     pub sources: Vec<SourceDefinition>,
 }
 
+/// A single path mapping rule for rewriting paths.
+///
+/// Path mappings transform paths from one location to another,
+/// useful for mapping remote paths to local equivalents.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PathMapping {
+    /// Remote path prefix to match.
+    pub from: String,
+    /// Local path prefix to replace with.
+    pub to: String,
+    /// Optional: only apply this mapping for specific agents.
+    /// If None, applies to all agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Vec<String>>,
+}
+
+impl PathMapping {
+    /// Create a new path mapping.
+    pub fn new(from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            agents: None,
+        }
+    }
+
+    /// Create a new path mapping with agent filter.
+    pub fn with_agents(
+        from: impl Into<String>,
+        to: impl Into<String>,
+        agents: Vec<String>,
+    ) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            agents: Some(agents),
+        }
+    }
+
+    /// Apply this mapping to a path if it matches.
+    ///
+    /// Returns `Some(rewritten_path)` if the path starts with `from` prefix,
+    /// `None` otherwise.
+    pub fn apply(&self, path: &str) -> Option<String> {
+        if path.starts_with(&self.from) {
+            Some(path.replacen(&self.from, &self.to, 1))
+        } else {
+            None
+        }
+    }
+
+    /// Check if this mapping applies to a given agent.
+    pub fn applies_to_agent(&self, agent: Option<&str>) -> bool {
+        match (&self.agents, agent) {
+            (None, _) => true, // No filter means applies to all
+            (Some(_), None) => true, // No agent specified means match all mappings
+            (Some(agents), Some(a)) => agents.iter().any(|allowed| allowed == a),
+        }
+    }
+}
+
 /// Definition of a single source (local or remote).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SourceDefinition {
@@ -85,7 +156,7 @@ pub struct SourceDefinition {
     /// Maps remote paths to local equivalents.
     /// Example: "/home/user/projects" -> "/Users/me/projects"
     #[serde(default)]
-    pub path_mappings: HashMap<String, String>,
+    pub path_mappings: Vec<PathMapping>,
 
     /// Platform hint for default paths (macos, linux).
     #[serde(default)]
@@ -139,15 +210,28 @@ impl SourceDefinition {
     }
 
     /// Apply path mapping to rewrite a workspace path.
-    /// Uses longest-prefix matching.
+    ///
+    /// Uses longest-prefix matching. If an agent is specified,
+    /// only mappings that apply to that agent are considered.
     pub fn rewrite_path(&self, path: &str) -> String {
-        // Sort by prefix length descending for longest-prefix match
-        let mut mappings: Vec<_> = self.path_mappings.iter().collect();
-        mappings.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        self.rewrite_path_for_agent(path, None)
+    }
 
-        for (from, to) in mappings {
-            if path.starts_with(from) {
-                return path.replacen(from, to, 1);
+    /// Apply path mapping for a specific agent.
+    ///
+    /// Uses longest-prefix matching, filtering by agent.
+    pub fn rewrite_path_for_agent(&self, path: &str, agent: Option<&str>) -> String {
+        // Sort by prefix length descending for longest-prefix match
+        let mut mappings: Vec<_> = self
+            .path_mappings
+            .iter()
+            .filter(|m| m.applies_to_agent(agent))
+            .collect();
+        mappings.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+
+        for mapping in mappings {
+            if let Some(rewritten) = mapping.apply(path) {
+                return rewritten;
             }
         }
 
@@ -405,14 +489,69 @@ mod tests {
     }
 
     #[test]
+    fn test_path_mapping_new() {
+        let mapping = PathMapping::new("/home/user", "/Users/me");
+        assert_eq!(mapping.from, "/home/user");
+        assert_eq!(mapping.to, "/Users/me");
+        assert!(mapping.agents.is_none());
+    }
+
+    #[test]
+    fn test_path_mapping_with_agents() {
+        let mapping = PathMapping::with_agents(
+            "/home/user",
+            "/Users/me",
+            vec!["claude-code".into(), "cursor".into()],
+        );
+        assert_eq!(mapping.from, "/home/user");
+        assert_eq!(mapping.to, "/Users/me");
+        assert_eq!(
+            mapping.agents,
+            Some(vec!["claude-code".into(), "cursor".into()])
+        );
+    }
+
+    #[test]
+    fn test_path_mapping_apply() {
+        let mapping = PathMapping::new("/home/user/projects", "/Users/me/projects");
+
+        // Matching prefix
+        assert_eq!(
+            mapping.apply("/home/user/projects/myapp"),
+            Some("/Users/me/projects/myapp".into())
+        );
+
+        // Non-matching prefix
+        assert_eq!(mapping.apply("/opt/data"), None);
+
+        // Partial match (not at start)
+        assert_eq!(mapping.apply("/data/home/user/projects"), None);
+    }
+
+    #[test]
+    fn test_path_mapping_applies_to_agent() {
+        // Mapping with no agent filter
+        let global = PathMapping::new("/home", "/Users");
+        assert!(global.applies_to_agent(None));
+        assert!(global.applies_to_agent(Some("claude-code")));
+        assert!(global.applies_to_agent(Some("any-agent")));
+
+        // Mapping with agent filter
+        let filtered = PathMapping::with_agents("/home", "/Users", vec!["claude-code".into()]);
+        assert!(filtered.applies_to_agent(None)); // No agent specified = match all
+        assert!(filtered.applies_to_agent(Some("claude-code")));
+        assert!(!filtered.applies_to_agent(Some("cursor"))); // Not in list
+    }
+
+    #[test]
     fn test_path_rewriting() {
         let mut source = SourceDefinition::local("test");
         source
             .path_mappings
-            .insert("/home/user/projects".into(), "/Users/me/projects".into());
+            .push(PathMapping::new("/home/user/projects", "/Users/me/projects"));
         source
             .path_mappings
-            .insert("/home/user".into(), "/Users/me".into());
+            .push(PathMapping::new("/home/user", "/Users/me"));
 
         // Longest prefix should match
         assert_eq!(
@@ -425,6 +564,45 @@ mod tests {
 
         // No match
         assert_eq!(source.rewrite_path("/opt/data"), "/opt/data");
+    }
+
+    #[test]
+    fn test_path_rewriting_with_agent_filter() {
+        let mut source = SourceDefinition::local("test");
+        // Global mapping
+        source
+            .path_mappings
+            .push(PathMapping::new("/home/user", "/Users/me"));
+        // Agent-specific mapping
+        source.path_mappings.push(PathMapping::with_agents(
+            "/home/user/projects",
+            "/Volumes/Work/projects",
+            vec!["claude-code".into()],
+        ));
+
+        // Without agent filter, both mappings apply (longest match wins)
+        assert_eq!(
+            source.rewrite_path_for_agent("/home/user/projects/app", None),
+            "/Volumes/Work/projects/app"
+        );
+
+        // With claude-code agent, use specific mapping
+        assert_eq!(
+            source.rewrite_path_for_agent("/home/user/projects/app", Some("claude-code")),
+            "/Volumes/Work/projects/app"
+        );
+
+        // With cursor agent, falls back to global mapping
+        assert_eq!(
+            source.rewrite_path_for_agent("/home/user/projects/app", Some("cursor")),
+            "/Users/me/projects/app"
+        );
+
+        // Non-matching path
+        assert_eq!(
+            source.rewrite_path_for_agent("/opt/data", Some("claude-code")),
+            "/opt/data"
+        );
     }
 
     #[test]
@@ -466,11 +644,7 @@ mod tests {
             host: Some("user@laptop.local".into()),
             paths: vec!["~/.claude/projects".into()],
             sync_schedule: SyncSchedule::Daily,
-            path_mappings: {
-                let mut m = HashMap::new();
-                m.insert("/home/user".into(), "/Users/me".into());
-                m
-            },
+            path_mappings: vec![PathMapping::new("/home/user", "/Users/me")],
             platform: Some(Platform::Linux),
         });
 
@@ -480,6 +654,41 @@ mod tests {
         assert_eq!(deserialized.sources.len(), 1);
         assert_eq!(deserialized.sources[0].name, "laptop");
         assert_eq!(deserialized.sources[0].sync_schedule, SyncSchedule::Daily);
+        assert_eq!(deserialized.sources[0].path_mappings.len(), 1);
+        assert_eq!(
+            deserialized.sources[0].path_mappings[0].from,
+            "/home/user"
+        );
+        assert_eq!(deserialized.sources[0].path_mappings[0].to, "/Users/me");
+    }
+
+    #[test]
+    fn test_path_mapping_serialization_with_agents() {
+        let mut config = SourcesConfig::default();
+        config.sources.push(SourceDefinition {
+            name: "remote".into(),
+            source_type: SourceKind::Ssh,
+            host: Some("user@server".into()),
+            paths: vec![],
+            sync_schedule: SyncSchedule::Manual,
+            path_mappings: vec![
+                PathMapping::new("/home/user", "/Users/me"),
+                PathMapping::with_agents("/opt/work", "/Volumes/Work", vec!["claude-code".into()]),
+            ],
+            platform: None,
+        });
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let deserialized: SourcesConfig = toml::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.sources[0].path_mappings.len(), 2);
+        // First mapping has no agents filter
+        assert!(deserialized.sources[0].path_mappings[0].agents.is_none());
+        // Second mapping has agents filter
+        assert_eq!(
+            deserialized.sources[0].path_mappings[1].agents,
+            Some(vec!["claude-code".into()])
+        );
     }
 
     #[test]

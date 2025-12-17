@@ -7035,8 +7035,17 @@ fn run_sources_list(verbose: bool, json: bool) -> CliResult<()> {
                 }
                 if !source.path_mappings.is_empty() {
                     println!("  Path Mappings:");
-                    for (from, to) in &source.path_mappings {
-                        println!("    {from} -> {to}");
+                    for mapping in &source.path_mappings {
+                        if let Some(agents) = &mapping.agents {
+                            println!(
+                                "    {} -> {} (agents: {})",
+                                mapping.from,
+                                mapping.to,
+                                agents.join(", ")
+                            );
+                        } else {
+                            println!("    {} -> {}", mapping.from, mapping.to);
+                        }
                     }
                 }
                 println!();
