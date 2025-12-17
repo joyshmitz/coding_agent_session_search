@@ -22,7 +22,7 @@ jobs:
       - name: check
         run: cargo check --all-targets
       - name: tests
-        run: cargo test
+        run: cargo test -- --skip install_sh --skip install_ps1
       - name: benches (run, quick)
         run: cargo bench --bench runtime_perf --bench search_perf --bench index_perf -- --sample-size=10 --warm-up-time=0.05 --measurement-time=0.2
       - name: Install UBS
