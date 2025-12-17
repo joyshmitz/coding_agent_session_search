@@ -417,3 +417,899 @@ fn assemble_content_from_parts(parts: &[PartInfo]) -> String {
 
     content_pieces.join("\n\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // =====================================================
+    // Constructor Tests
+    // =====================================================
+
+    #[test]
+    fn new_creates_connector() {
+        let connector = OpenCodeConnector::new();
+        let _ = connector;
+    }
+
+    #[test]
+    fn default_creates_connector() {
+        let connector = OpenCodeConnector::default();
+        let _ = connector;
+    }
+
+    // =====================================================
+    // looks_like_opencode_storage() Tests
+    // =====================================================
+
+    #[test]
+    fn looks_like_opencode_storage_with_opencode_in_path() {
+        let dir = TempDir::new().unwrap();
+        let opencode_path = dir.path().join("opencode").join("test");
+        fs::create_dir_all(&opencode_path).unwrap();
+        assert!(looks_like_opencode_storage(&opencode_path));
+    }
+
+    #[test]
+    fn looks_like_opencode_storage_with_session_dir() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("session")).unwrap();
+        assert!(looks_like_opencode_storage(dir.path()));
+    }
+
+    #[test]
+    fn looks_like_opencode_storage_with_message_dir() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("message")).unwrap();
+        assert!(looks_like_opencode_storage(dir.path()));
+    }
+
+    #[test]
+    fn looks_like_opencode_storage_with_part_dir() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("part")).unwrap();
+        assert!(looks_like_opencode_storage(dir.path()));
+    }
+
+    #[test]
+    fn looks_like_opencode_storage_returns_false_for_random_dir() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("random")).unwrap();
+        assert!(!looks_like_opencode_storage(dir.path()));
+    }
+
+    // =====================================================
+    // assemble_content_from_parts() Tests
+    // =====================================================
+
+    #[test]
+    fn assemble_content_from_text_parts() {
+        let parts = vec![
+            PartInfo {
+                id: Some("p1".into()),
+                message_id: Some("m1".into()),
+                part_type: Some("text".into()),
+                text: Some("Hello, world!".into()),
+                state: None,
+            },
+            PartInfo {
+                id: Some("p2".into()),
+                message_id: Some("m1".into()),
+                part_type: Some("text".into()),
+                text: Some("Second part".into()),
+                state: None,
+            },
+        ];
+        let content = assemble_content_from_parts(&parts);
+        assert!(content.contains("Hello, world!"));
+        assert!(content.contains("Second part"));
+    }
+
+    #[test]
+    fn assemble_content_from_tool_parts() {
+        let parts = vec![PartInfo {
+            id: Some("p1".into()),
+            message_id: Some("m1".into()),
+            part_type: Some("tool".into()),
+            text: None,
+            state: Some(ToolState {
+                output: Some("Tool executed successfully".into()),
+            }),
+        }];
+        let content = assemble_content_from_parts(&parts);
+        assert!(content.contains("[Tool Output]"));
+        assert!(content.contains("Tool executed successfully"));
+    }
+
+    #[test]
+    fn assemble_content_from_reasoning_parts() {
+        let parts = vec![PartInfo {
+            id: Some("p1".into()),
+            message_id: Some("m1".into()),
+            part_type: Some("reasoning".into()),
+            text: Some("Let me think about this...".into()),
+            state: None,
+        }];
+        let content = assemble_content_from_parts(&parts);
+        assert!(content.contains("[Reasoning]"));
+        assert!(content.contains("Let me think about this..."));
+    }
+
+    #[test]
+    fn assemble_content_from_patch_parts() {
+        let parts = vec![PartInfo {
+            id: Some("p1".into()),
+            message_id: Some("m1".into()),
+            part_type: Some("patch".into()),
+            text: Some("@@ -1,3 +1,4 @@".into()),
+            state: None,
+        }];
+        let content = assemble_content_from_parts(&parts);
+        assert!(content.contains("[Patch]"));
+        assert!(content.contains("@@ -1,3 +1,4 @@"));
+    }
+
+    #[test]
+    fn assemble_content_skips_empty_text() {
+        let parts = vec![
+            PartInfo {
+                id: Some("p1".into()),
+                message_id: Some("m1".into()),
+                part_type: Some("text".into()),
+                text: Some("".into()),
+                state: None,
+            },
+            PartInfo {
+                id: Some("p2".into()),
+                message_id: Some("m1".into()),
+                part_type: Some("text".into()),
+                text: Some("   ".into()),
+                state: None,
+            },
+            PartInfo {
+                id: Some("p3".into()),
+                message_id: Some("m1".into()),
+                part_type: Some("text".into()),
+                text: Some("Actual content".into()),
+                state: None,
+            },
+        ];
+        let content = assemble_content_from_parts(&parts);
+        assert_eq!(content, "Actual content");
+    }
+
+    #[test]
+    fn assemble_content_skips_unknown_part_types() {
+        let parts = vec![
+            PartInfo {
+                id: Some("p1".into()),
+                message_id: Some("m1".into()),
+                part_type: Some("step-start".into()),
+                text: Some("Starting...".into()),
+                state: None,
+            },
+            PartInfo {
+                id: Some("p2".into()),
+                message_id: Some("m1".into()),
+                part_type: Some("step-finish".into()),
+                text: Some("Done".into()),
+                state: None,
+            },
+        ];
+        let content = assemble_content_from_parts(&parts);
+        assert!(content.is_empty());
+    }
+
+    #[test]
+    fn assemble_content_mixed_parts() {
+        let parts = vec![
+            PartInfo {
+                id: Some("p1".into()),
+                message_id: Some("m1".into()),
+                part_type: Some("text".into()),
+                text: Some("Here's my analysis:".into()),
+                state: None,
+            },
+            PartInfo {
+                id: Some("p2".into()),
+                message_id: Some("m1".into()),
+                part_type: Some("reasoning".into()),
+                text: Some("Thinking...".into()),
+                state: None,
+            },
+            PartInfo {
+                id: Some("p3".into()),
+                message_id: Some("m1".into()),
+                part_type: Some("tool".into()),
+                text: None,
+                state: Some(ToolState {
+                    output: Some("Result: 42".into()),
+                }),
+            },
+        ];
+        let content = assemble_content_from_parts(&parts);
+        assert!(content.contains("Here's my analysis:"));
+        assert!(content.contains("[Reasoning]"));
+        assert!(content.contains("[Tool Output]"));
+    }
+
+    // =====================================================
+    // Helper: Create OpenCode storage structure
+    // =====================================================
+
+    fn create_opencode_storage(dir: &TempDir) -> PathBuf {
+        let storage = dir.path().join("opencode").join("storage");
+        fs::create_dir_all(storage.join("session")).unwrap();
+        fs::create_dir_all(storage.join("message")).unwrap();
+        fs::create_dir_all(storage.join("part")).unwrap();
+        storage
+    }
+
+    fn write_session(storage: &PathBuf, project_id: &str, session: &serde_json::Value) {
+        let session_id = session["id"].as_str().unwrap();
+        let session_dir = storage.join("session").join(project_id);
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join(format!("{session_id}.json")),
+            session.to_string(),
+        )
+        .unwrap();
+    }
+
+    fn write_message(storage: &PathBuf, session_id: &str, message: &serde_json::Value) {
+        let message_id = message["id"].as_str().unwrap();
+        let message_dir = storage.join("message").join(session_id);
+        fs::create_dir_all(&message_dir).unwrap();
+        fs::write(
+            message_dir.join(format!("{message_id}.json")),
+            message.to_string(),
+        )
+        .unwrap();
+    }
+
+    fn write_part(storage: &PathBuf, message_id: &str, part: &serde_json::Value) {
+        let part_id = part["id"].as_str().unwrap();
+        let part_dir = storage.join("part").join(message_id);
+        fs::create_dir_all(&part_dir).unwrap();
+        fs::write(part_dir.join(format!("{part_id}.json")), part.to_string()).unwrap();
+    }
+
+    // =====================================================
+    // scan() Tests
+    // =====================================================
+
+    #[test]
+    fn scan_parses_simple_conversation() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        // Create session
+        let session = json!({
+            "id": "sess-001",
+            "title": "Test Session",
+            "directory": "/home/user/project",
+            "projectID": "proj-001",
+            "time": {
+                "created": 1733000000,
+                "updated": 1733000100
+            }
+        });
+        write_session(&storage, "proj-001", &session);
+
+        // Create message
+        let message = json!({
+            "id": "msg-001",
+            "role": "user",
+            "sessionID": "sess-001",
+            "time": {
+                "created": 1733000000,
+                "completed": 1733000001
+            }
+        });
+        write_message(&storage, "sess-001", &message);
+
+        // Create part
+        let part = json!({
+            "id": "part-001",
+            "messageID": "msg-001",
+            "type": "text",
+            "text": "Hello, OpenCode!"
+        });
+        write_part(&storage, "msg-001", &part);
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].title, Some("Test Session".to_string()));
+        assert_eq!(
+            convs[0].workspace,
+            Some(PathBuf::from("/home/user/project"))
+        );
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert!(convs[0].messages[0].content.contains("Hello, OpenCode!"));
+    }
+
+    #[test]
+    fn scan_parses_multiple_messages() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-002",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+
+        // User message
+        let user_msg = json!({
+            "id": "msg-u1",
+            "role": "user",
+            "sessionID": "sess-002",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "sess-002", &user_msg);
+        write_part(
+            &storage,
+            "msg-u1",
+            &json!({
+                "id": "p1",
+                "messageID": "msg-u1",
+                "type": "text",
+                "text": "What is 2+2?"
+            }),
+        );
+
+        // Assistant message
+        let assistant_msg = json!({
+            "id": "msg-a1",
+            "role": "assistant",
+            "sessionID": "sess-002",
+            "modelID": "gpt-4",
+            "time": {"created": 1733000001}
+        });
+        write_message(&storage, "sess-002", &assistant_msg);
+        write_part(
+            &storage,
+            "msg-a1",
+            &json!({
+                "id": "p2",
+                "messageID": "msg-a1",
+                "type": "text",
+                "text": "2 + 2 = 4"
+            }),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert_eq!(convs[0].messages[1].role, "assistant");
+        assert_eq!(
+            convs[0].messages[1].author,
+            Some("gpt-4".to_string())
+        );
+    }
+
+    #[test]
+    fn scan_handles_empty_storage() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_skips_sessions_without_messages() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-empty",
+            "title": "Empty Session",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+        // Don't create any messages
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_extracts_title_from_first_message_if_no_session_title() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-no-title",
+            "projectID": "proj-001"
+            // No title field
+        });
+        write_session(&storage, "proj-001", &session);
+
+        let message = json!({
+            "id": "msg-001",
+            "role": "user",
+            "sessionID": "sess-no-title",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "sess-no-title", &message);
+        write_part(
+            &storage,
+            "msg-001",
+            &json!({
+                "id": "p1",
+                "messageID": "msg-001",
+                "type": "text",
+                "text": "This is the first line\nSecond line\nThird line"
+            }),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("This is the first line".to_string()));
+    }
+
+    #[test]
+    fn scan_sets_agent_slug_to_opencode() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-slug",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+
+        let message = json!({
+            "id": "msg-001",
+            "role": "user",
+            "sessionID": "sess-slug",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "sess-slug", &message);
+        write_part(
+            &storage,
+            "msg-001",
+            &json!({"id": "p1", "messageID": "msg-001", "type": "text", "text": "Test"}),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].agent_slug, "opencode");
+    }
+
+    #[test]
+    fn scan_sets_metadata_with_session_and_project_id() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-meta",
+            "projectID": "proj-meta-001"
+        });
+        write_session(&storage, "proj-meta-001", &session);
+
+        let message = json!({
+            "id": "msg-001",
+            "role": "user",
+            "sessionID": "sess-meta",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "sess-meta", &message);
+        write_part(
+            &storage,
+            "msg-001",
+            &json!({"id": "p1", "messageID": "msg-001", "type": "text", "text": "Test"}),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].metadata["session_id"], "sess-meta");
+        assert_eq!(convs[0].metadata["project_id"], "proj-meta-001");
+    }
+
+    #[test]
+    fn scan_sorts_messages_by_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-sort",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+
+        // Create messages out of order
+        let msg_later = json!({
+            "id": "msg-later",
+            "role": "assistant",
+            "sessionID": "sess-sort",
+            "time": {"created": 1733000100}
+        });
+        let msg_earlier = json!({
+            "id": "msg-earlier",
+            "role": "user",
+            "sessionID": "sess-sort",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "sess-sort", &msg_later);
+        write_message(&storage, "sess-sort", &msg_earlier);
+
+        write_part(
+            &storage,
+            "msg-later",
+            &json!({"id": "p1", "messageID": "msg-later", "type": "text", "text": "Later"}),
+        );
+        write_part(
+            &storage,
+            "msg-earlier",
+            &json!({"id": "p2", "messageID": "msg-earlier", "type": "text", "text": "Earlier"}),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages.len(), 2);
+        // Earlier message should be first due to sorting
+        assert!(convs[0].messages[0].content.contains("Earlier"));
+        assert!(convs[0].messages[1].content.contains("Later"));
+    }
+
+    #[test]
+    fn scan_assigns_sequential_indices() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-idx",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+
+        for i in 0..3 {
+            let msg = json!({
+                "id": format!("msg-{i}"),
+                "role": "user",
+                "sessionID": "sess-idx",
+                "time": {"created": 1733000000 + i}
+            });
+            write_message(&storage, "sess-idx", &msg);
+            write_part(
+                &storage,
+                &format!("msg-{i}"),
+                &json!({
+                    "id": format!("p{i}"),
+                    "messageID": format!("msg-{i}"),
+                    "type": "text",
+                    "text": format!("Message {i}")
+                }),
+            );
+        }
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].idx, 0);
+        assert_eq!(convs[0].messages[1].idx, 1);
+        assert_eq!(convs[0].messages[2].idx, 2);
+    }
+
+    #[test]
+    fn scan_handles_messages_without_parts() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-no-parts",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+
+        let message = json!({
+            "id": "msg-no-parts",
+            "role": "user",
+            "sessionID": "sess-no-parts",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "sess-no-parts", &message);
+        // Don't create any parts
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Session should be skipped because message has no content
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_deduplicates_sessions_by_id() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        // Create same session in two project directories
+        let session = json!({
+            "id": "sess-dupe",
+            "title": "Duplicate Session",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+        write_session(&storage, "proj-002", &session);
+
+        let message = json!({
+            "id": "msg-001",
+            "role": "user",
+            "sessionID": "sess-dupe",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "sess-dupe", &message);
+        write_part(
+            &storage,
+            "msg-001",
+            &json!({"id": "p1", "messageID": "msg-001", "type": "text", "text": "Test"}),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Should only have one conversation (deduplicated)
+        assert_eq!(convs.len(), 1);
+    }
+
+    #[test]
+    fn scan_uses_default_role_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-no-role",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+
+        // Message without role field
+        let message = json!({
+            "id": "msg-no-role",
+            "sessionID": "sess-no-role",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "sess-no-role", &message);
+        write_part(
+            &storage,
+            "msg-no-role",
+            &json!({"id": "p1", "messageID": "msg-no-role", "type": "text", "text": "Test"}),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Default role should be "assistant"
+        assert_eq!(convs[0].messages[0].role, "assistant");
+    }
+
+    #[test]
+    fn scan_handles_multiple_parts_per_message() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-multi-part",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+
+        let message = json!({
+            "id": "msg-multi",
+            "role": "assistant",
+            "sessionID": "sess-multi-part",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "sess-multi-part", &message);
+
+        // Multiple parts for one message
+        write_part(
+            &storage,
+            "msg-multi",
+            &json!({"id": "p1", "messageID": "msg-multi", "type": "text", "text": "First part"}),
+        );
+        write_part(
+            &storage,
+            "msg-multi",
+            &json!({"id": "p2", "messageID": "msg-multi", "type": "reasoning", "text": "Reasoning part"}),
+        );
+        write_part(
+            &storage,
+            "msg-multi",
+            &json!({"id": "p3", "messageID": "msg-multi", "type": "text", "text": "Third part"}),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        let content = &convs[0].messages[0].content;
+        assert!(content.contains("First part"));
+        assert!(content.contains("[Reasoning]"));
+        assert!(content.contains("Third part"));
+    }
+
+    #[test]
+    fn scan_extracts_timestamps() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-ts",
+            "projectID": "proj-001",
+            "time": {
+                "created": 1733000000,
+                "updated": 1733000200
+            }
+        });
+        write_session(&storage, "proj-001", &session);
+
+        let message = json!({
+            "id": "msg-ts",
+            "role": "user",
+            "sessionID": "sess-ts",
+            "time": {"created": 1733000050}
+        });
+        write_message(&storage, "sess-ts", &message);
+        write_part(
+            &storage,
+            "msg-ts",
+            &json!({"id": "p1", "messageID": "msg-ts", "type": "text", "text": "Test"}),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].started_at, Some(1733000000));
+        assert_eq!(convs[0].ended_at, Some(1733000200));
+        assert_eq!(convs[0].messages[0].created_at, Some(1733000050));
+    }
+
+    #[test]
+    fn scan_uses_external_id_from_session_id() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "unique-session-id-123",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+
+        let message = json!({
+            "id": "msg-001",
+            "role": "user",
+            "sessionID": "unique-session-id-123",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "unique-session-id-123", &message);
+        write_part(
+            &storage,
+            "msg-001",
+            &json!({"id": "p1", "messageID": "msg-001", "type": "text", "text": "Test"}),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(
+            convs[0].external_id,
+            Some("unique-session-id-123".to_string())
+        );
+    }
+
+    #[test]
+    fn scan_skips_invalid_session_json() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        // Create invalid session file
+        let session_dir = storage.join("session").join("proj-001");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join("invalid.json"), "not valid json").unwrap();
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_skips_invalid_message_json() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        let session = json!({
+            "id": "sess-invalid-msg",
+            "projectID": "proj-001"
+        });
+        write_session(&storage, "proj-001", &session);
+
+        // Create invalid message file
+        let msg_dir = storage.join("message").join("sess-invalid-msg");
+        fs::create_dir_all(&msg_dir).unwrap();
+        fs::write(msg_dir.join("bad.json"), "not valid json").unwrap();
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Should skip the session because no valid messages
+        assert_eq!(convs.len(), 0);
+    }
+
+    // =====================================================
+    // parse_session_file() Tests
+    // =====================================================
+
+    #[test]
+    fn parse_session_file_parses_complete_session() {
+        let dir = TempDir::new().unwrap();
+        let session = json!({
+            "id": "sess-parse",
+            "title": "Parse Test",
+            "directory": "/test/dir",
+            "projectID": "proj-parse",
+            "time": {
+                "created": 1733000000,
+                "updated": 1733000100
+            }
+        });
+        let path = dir.path().join("session.json");
+        fs::write(&path, session.to_string()).unwrap();
+
+        let result = parse_session_file(&path).unwrap();
+        assert_eq!(result.id, "sess-parse");
+        assert_eq!(result.title, Some("Parse Test".to_string()));
+        assert_eq!(result.directory, Some("/test/dir".to_string()));
+        assert_eq!(result.project_id, Some("proj-parse".to_string()));
+        assert!(result.time.is_some());
+    }
+
+    #[test]
+    fn parse_session_file_handles_minimal_session() {
+        let dir = TempDir::new().unwrap();
+        let session = json!({"id": "minimal"});
+        let path = dir.path().join("minimal.json");
+        fs::write(&path, session.to_string()).unwrap();
+
+        let result = parse_session_file(&path).unwrap();
+        assert_eq!(result.id, "minimal");
+        assert!(result.title.is_none());
+        assert!(result.directory.is_none());
+    }
+}
