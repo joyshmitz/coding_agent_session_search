@@ -2369,6 +2369,13 @@ pub fn run_tui(
     let db_path = default_db_path_for(&data_dir);
     let persisted = load_state(&state_path);
     let search_client = SearchClient::open(&index_path, Some(&db_path))?;
+
+    // UI metrics flag (bead 020) - emit privacy-safe local metrics when enabled
+    // Set CASS_UI_METRICS=1 to enable tracing of UI interactions
+    let ui_metrics_enabled = std::env::var("CASS_UI_METRICS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     // Open a read-only connection for the UI to fetch details efficiently.
     // If DB doesn't exist yet (first run), this will be None, which is fine as we can't view details anyway.
     let db_reader = crate::storage::sqlite::SqliteStorage::open_readonly(&db_path).ok();
@@ -2406,6 +2413,21 @@ pub fn run_tui(
         Some("spacious") => DensityMode::Spacious,
         _ => DensityMode::Cozy, // Default
     };
+
+    // UI metrics: log session start (bead 020)
+    if ui_metrics_enabled {
+        let animations_enabled = !std::env::var("CASS_DISABLE_ANIMATIONS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        tracing::info!(
+            target: "ui_metrics",
+            event = "session_start",
+            density_mode = %density_mode.label(),
+            animations_enabled,
+            "UI metrics session started"
+        );
+    }
+
     // Calculate initial pane limit based on terminal height and density,
     // or restore from persisted state if user previously adjusted it (bead 46t.1)
     let initial_height = terminal.size().map(|r| r.height).unwrap_or(24);
@@ -4316,6 +4338,15 @@ pub fn run_tui(
                     KeyCode::PageDown => palette_state.move_selection(5),
                     KeyCode::Enter => {
                         if let Some(item) = palette_state.filtered.get(palette_state.selected) {
+                            // UI metrics: log palette action (bead 020)
+                            if ui_metrics_enabled {
+                                tracing::info!(
+                                    target: "ui_metrics",
+                                    event = "palette_action",
+                                    action = item.label,
+                                    "Palette action executed"
+                                );
+                            }
                             match item.action {
                                 PaletteAction::ToggleTheme => {
                                     theme_dark = !theme_dark;
@@ -6095,8 +6126,19 @@ pub fn run_tui(
                     }
                     KeyCode::Enter => {
                         filters.agents.clear();
-                        if !input_buffer.trim().is_empty() {
-                            filters.agents.insert(input_buffer.trim().to_string());
+                        let filter_value = input_buffer.trim().to_string();
+                        if !filter_value.is_empty() {
+                            filters.agents.insert(filter_value.clone());
+                        }
+                        // UI metrics: log pill edit (bead 020)
+                        if ui_metrics_enabled {
+                            tracing::info!(
+                                target: "ui_metrics",
+                                event = "pill_edit",
+                                pill_type = "agent",
+                                has_value = !filter_value.is_empty(),
+                                "Agent filter applied"
+                            );
                         }
                         page = 0;
                         input_mode = InputMode::Query;
@@ -6429,7 +6471,19 @@ pub fn run_tui(
                         SPARSE_THRESHOLD,
                     ) {
                         Ok(search_result) => {
-                            last_search_ms = Some(search_started.elapsed().as_millis());
+                            let search_ms = search_started.elapsed().as_millis();
+                            last_search_ms = Some(search_ms);
+                            // UI metrics: log search latency (bead 020)
+                            if ui_metrics_enabled {
+                                tracing::info!(
+                                    target: "ui_metrics",
+                                    event = "search_complete",
+                                    latency_ms = search_ms,
+                                    hit_count = search_result.hits.len(),
+                                    wildcard_fallback = search_result.wildcard_fallback,
+                                    "Search completed"
+                                );
+                            }
                             let hits = search_result.hits;
                             cache_stats = if cache_debug {
                                 Some(search_result.cache_stats)
@@ -6485,6 +6539,15 @@ pub fn run_tui(
                                 // Start staggered reveal animation for fallback results (bead 013)
                                 if animations_enabled && !panes.is_empty() {
                                     reveal_anim_start = Some(Instant::now());
+                                } else if !animations_enabled && !panes.is_empty() && ui_metrics_enabled {
+                                    // UI metrics: log animation opt-out (bead 020)
+                                    tracing::debug!(
+                                        target: "ui_metrics",
+                                        event = "animation_skipped",
+                                        reason = "disabled",
+                                        pane_count = panes.len(),
+                                        "Reveal animation skipped (animations disabled)"
+                                    );
                                 }
                                 let total_hits: usize = panes.iter().map(|p| p.total_count).sum();
                                 if total_hits > 0 {
@@ -6638,6 +6701,27 @@ pub fn run_tui(
                 let (phase, current, total, is_rebuild, _pct, discovered) = get_indexing_state(p);
                 let current_state = (phase, current, total, is_rebuild, discovered);
                 if last_indexing_state.as_ref() != Some(&current_state) {
+                    // UI metrics: log HUD phase change (bead 020)
+                    if ui_metrics_enabled {
+                        let phase_label = match phase {
+                            0 => "idle",
+                            1 => "discovering",
+                            2 => "indexing",
+                            _ => "unknown",
+                        };
+                        let old_phase = last_indexing_state.map(|s| s.0).unwrap_or(0);
+                        if old_phase != phase {
+                            tracing::info!(
+                                target: "ui_metrics",
+                                event = "hud_phase_change",
+                                from_phase = old_phase,
+                                to_phase = phase,
+                                phase_label,
+                                is_rebuild,
+                                "Indexer HUD phase changed"
+                            );
+                        }
+                    }
                     last_indexing_state = Some(current_state);
                     needs_draw = true;
                 }
