@@ -5215,4 +5215,411 @@ mod tests {
         assert!(json["estimated_cost"].is_string());
         assert!(json["parsed"]["terms"].is_array());
     }
+
+    // =========================================================================
+    // Multi-filter combination tests (bead yln.2)
+    // =========================================================================
+
+    #[test]
+    fn search_multi_filter_agent_workspace_time() -> Result<()> {
+        // Test combining agent, workspace, and time range filters
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        // Create 4 conversations with different combinations
+        let convs = [
+            ("codex", "/ws/alpha", 100, "needle alpha codex"),
+            ("claude", "/ws/alpha", 200, "needle alpha claude"),
+            ("codex", "/ws/beta", 150, "needle beta codex"),
+            ("codex", "/ws/alpha", 300, "needle alpha codex late"),
+        ];
+
+        for (i, (agent, ws, ts, content)) in convs.iter().enumerate() {
+            let conv = NormalizedConversation {
+                agent_slug: (*agent).into(),
+                external_id: None,
+                title: Some(format!("conv-{i}")),
+                workspace: Some(std::path::PathBuf::from(*ws)),
+                source_path: dir.path().join(format!("{i}.jsonl")),
+                started_at: Some(*ts),
+                ended_at: None,
+                metadata: serde_json::json!({}),
+                messages: vec![NormalizedMessage {
+                    idx: 0,
+                    role: "user".into(),
+                    author: None,
+                    created_at: Some(*ts),
+                    content: (*content).into(),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                }],
+            };
+            index.add_conversation(&conv)?;
+        }
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // Filter: codex + alpha + time 50-250
+        let mut filters = SearchFilters::default();
+        filters.agents.insert("codex".into());
+        filters.workspaces.insert("/ws/alpha".into());
+        filters.created_from = Some(50);
+        filters.created_to = Some(250);
+
+        let hits = client.search("needle", filters, 10, 0)?;
+        assert_eq!(hits.len(), 1, "Should match only one conv (codex + alpha + ts=100)");
+        assert_eq!(hits[0].agent, "codex");
+        assert_eq!(hits[0].workspace, "/ws/alpha");
+        assert!(hits[0].content.contains("alpha codex"));
+        assert!(!hits[0].content.contains("late")); // Not the ts=300 one
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_multi_agent_filter() -> Result<()> {
+        // Test filtering by multiple agents
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        for agent in ["codex", "claude", "cline", "gemini"] {
+            let conv = NormalizedConversation {
+                agent_slug: agent.into(),
+                external_id: None,
+                title: Some(format!("{agent}-conv")),
+                workspace: Some(std::path::PathBuf::from("/ws")),
+                source_path: dir.path().join(format!("{agent}.jsonl")),
+                started_at: Some(100),
+                ended_at: None,
+                metadata: serde_json::json!({}),
+                messages: vec![NormalizedMessage {
+                    idx: 0,
+                    role: "user".into(),
+                    author: None,
+                    created_at: Some(100),
+                    content: format!("needle from {agent}"),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                }],
+            };
+            index.add_conversation(&conv)?;
+        }
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // Filter for codex and claude only
+        let mut filters = SearchFilters::default();
+        filters.agents.insert("codex".into());
+        filters.agents.insert("claude".into());
+
+        let hits = client.search("needle", filters, 10, 0)?;
+        assert_eq!(hits.len(), 2);
+        let agents: Vec<_> = hits.iter().map(|h| h.agent.as_str()).collect();
+        assert!(agents.contains(&"codex"));
+        assert!(agents.contains(&"claude"));
+        assert!(!agents.contains(&"cline"));
+        assert!(!agents.contains(&"gemini"));
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Cache metrics tests (bead yln.2)
+    // =========================================================================
+
+    #[test]
+    fn cache_metrics_incremented_on_operations() {
+        let client = SearchClient {
+            reader: None,
+            sqlite: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+        };
+
+        // Initial metrics should be zero
+        let (hits, miss, shortfall, reloads) = client.metrics.snapshot();
+        assert_eq!((hits, miss, shortfall, reloads), (0, 0, 0, 0));
+
+        // Simulate operations
+        client.metrics.inc_cache_hits();
+        client.metrics.inc_cache_hits();
+        client.metrics.inc_cache_miss();
+        client.metrics.inc_cache_shortfall();
+        client.metrics.inc_reload();
+
+        let (hits, miss, shortfall, reloads) = client.metrics.snapshot();
+        assert_eq!(hits, 2);
+        assert_eq!(miss, 1);
+        assert_eq!(shortfall, 1);
+        assert_eq!(reloads, 1);
+    }
+
+    #[test]
+    fn cache_shard_name_deterministic() {
+        // Verify that shard name generation is deterministic for same filters
+        let client = SearchClient {
+            reader: None,
+            sqlite: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+        };
+
+        let filters1 = SearchFilters::default();
+        let mut filters2 = SearchFilters::default();
+        filters2.agents.insert("codex".into());
+
+        // Same filters should always produce same shard name
+        let shard1_first = client.shard_name(&filters1);
+        let shard1_second = client.shard_name(&filters1);
+        assert_eq!(shard1_first, shard1_second, "Same filters should produce same shard name");
+
+        // Different filters produce different shard names
+        let shard2 = client.shard_name(&filters2);
+        assert_ne!(shard1_first, shard2, "Different filters should produce different shard names");
+
+        // Shard name is deterministic
+        assert_eq!(shard2, client.shard_name(&filters2));
+    }
+
+    // =========================================================================
+    // Wildcard fallback edge cases (bead yln.2)
+    // =========================================================================
+
+    #[test]
+    fn wildcard_fallback_respects_filter_constraints() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        // Create conversations that would match wildcard but not filter
+        let conv_match = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("match".into()),
+            workspace: Some(std::path::PathBuf::from("/target")),
+            source_path: dir.path().join("match.jsonl"),
+            started_at: Some(100),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(100),
+                content: "unique specific term here".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+            }],
+        };
+
+        let conv_other = NormalizedConversation {
+            agent_slug: "claude".into(),
+            external_id: None,
+            title: Some("other".into()),
+            workspace: Some(std::path::PathBuf::from("/other")),
+            source_path: dir.path().join("other.jsonl"),
+            started_at: Some(100),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(100),
+                content: "unique specific also here".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+            }],
+        };
+
+        index.add_conversation(&conv_match)?;
+        index.add_conversation(&conv_other)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // Search with filter that only matches conv_match
+        let mut filters = SearchFilters::default();
+        filters.agents.insert("codex".into());
+
+        let result = client.search_with_fallback("unique", filters.clone(), 10, 0, 100)?;
+        // Should only return the codex conversation, not claude
+        assert!(result.hits.iter().all(|h| h.agent == "codex"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn wildcard_fallback_short_query_triggers_prefix() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("test".into()),
+            workspace: None,
+            source_path: dir.path().join("test.jsonl"),
+            started_at: Some(100),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(100),
+                content: "authentication authorization oauth".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // Short prefix "auth" should match "authentication" and "authorization"
+        let result = client.search_with_fallback("auth", SearchFilters::default(), 10, 0, 100)?;
+        assert!(!result.hits.is_empty(), "Short prefix should match via prefix search");
+        assert!(result.hits[0].content.contains("auth"));
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Real fixture tests with metrics (bead yln.2)
+    // =========================================================================
+
+    #[test]
+    fn search_real_fixture_multiple_messages() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        // Create a realistic conversation with multiple messages
+        let conv = NormalizedConversation {
+            agent_slug: "claude_code".into(),
+            external_id: Some("conv-123".into()),
+            title: Some("Implementing authentication".into()),
+            workspace: Some(std::path::PathBuf::from("/home/user/project")),
+            source_path: dir.path().join("session-1.jsonl"),
+            started_at: Some(1700000000000),
+            ended_at: Some(1700000060000),
+            metadata: serde_json::json!({
+                "model": "claude-3-sonnet",
+                "tokens": 1500
+            }),
+            messages: vec![
+                NormalizedMessage {
+                    idx: 0,
+                    role: "user".into(),
+                    author: Some("developer".into()),
+                    created_at: Some(1700000000000),
+                    content: "Help me implement JWT authentication for my Express API".into(),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                },
+                NormalizedMessage {
+                    idx: 1,
+                    role: "assistant".into(),
+                    author: Some("claude".into()),
+                    created_at: Some(1700000010000),
+                    content: "I'll help you implement JWT authentication. First, let's install the required packages.".into(),
+                    extra: serde_json::json!({}),
+                    snippets: vec![NormalizedSnippet {
+                        file_path: Some("package.json".into()),
+                        start_line: Some(1),
+                        end_line: Some(5),
+                        language: Some("json".into()),
+                        snippet_text: Some(r#"{"dependencies":{"jsonwebtoken":"^9.0.0"}}"#.into()),
+                    }],
+                },
+                NormalizedMessage {
+                    idx: 2,
+                    role: "user".into(),
+                    author: Some("developer".into()),
+                    created_at: Some(1700000030000),
+                    content: "Can you also add refresh token support?".into(),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                },
+            ],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // Search for various terms that should match
+        let hits = client.search("JWT authentication", SearchFilters::default(), 10, 0)?;
+        assert!(!hits.is_empty(), "Should find JWT authentication");
+        assert!(hits.iter().any(|h| h.agent == "claude_code"));
+        assert!(hits.iter().any(|h| h.snippet.contains("JWT") || h.snippet.contains("authentication")));
+
+        // Search for assistant response content
+        let hits = client.search("required packages", SearchFilters::default(), 10, 0)?;
+        assert!(!hits.is_empty(), "Should find 'required packages' in assistant response");
+
+        // Search for user question about refresh tokens
+        let hits = client.search("refresh token", SearchFilters::default(), 10, 0)?;
+        assert!(!hits.is_empty(), "Should find refresh token");
+        assert!(hits.iter().any(|h| h.content.contains("refresh")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_deduplication_with_similar_content() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        // Create two conversations with very similar content
+        for i in 0..2 {
+            let conv = NormalizedConversation {
+                agent_slug: "codex".into(),
+                external_id: None,
+                title: Some(format!("similar-{i}")),
+                workspace: Some(std::path::PathBuf::from("/ws")),
+                source_path: dir.path().join(format!("similar-{i}.jsonl")),
+                started_at: Some(100 + i),
+                ended_at: None,
+                metadata: serde_json::json!({}),
+                messages: vec![NormalizedMessage {
+                    idx: 0,
+                    role: "user".into(),
+                    author: None,
+                    created_at: Some(100 + i),
+                    // Exactly the same content
+                    content: "implement the sorting algorithm".into(),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                }],
+            };
+            index.add_conversation(&conv)?;
+        }
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+        let result = client.search_with_fallback("sorting algorithm", SearchFilters::default(), 10, 0, 100)?;
+
+        // Both should be returned (different source_paths mean different conversations)
+        // but if they have exact same content from same source, dedup should apply
+        assert!(!result.hits.is_empty());
+
+        Ok(())
+    }
 }
