@@ -9,6 +9,8 @@ fn fixture(path: &str) -> PathBuf {
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore)]
 fn install_sh_succeeds_with_valid_checksum() {
+    // Clean up any stale lock from previous runs (CI race condition mitigation)
+    let _ = std::fs::remove_dir_all("/tmp/coding-agent-search-install.lock.d");
     let tar = fixture("tests/fixtures/install/coding-agent-search-vtest-linux-x86_64.tar.gz");
     let checksum = fs::read_to_string(
         "tests/fixtures/install/coding-agent-search-vtest-linux-x86_64.tar.gz.sha256",
@@ -41,6 +43,8 @@ fn install_sh_succeeds_with_valid_checksum() {
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore)]
 fn install_sh_fails_with_bad_checksum() {
+    // Clean up any stale lock from previous runs (CI race condition mitigation)
+    let _ = std::fs::remove_dir_all("/tmp/coding-agent-search-install.lock.d");
     let tar = fixture("tests/fixtures/install/coding-agent-search-vtest-linux-x86_64.tar.gz");
     let dest = tempfile::TempDir::new().unwrap();
 
