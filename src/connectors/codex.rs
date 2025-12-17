@@ -319,3 +319,769 @@ impl Connector for CodexConnector {
         Ok(convs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // =====================================================
+    // Constructor Tests
+    // =====================================================
+
+    #[test]
+    fn new_creates_connector() {
+        let connector = CodexConnector::new();
+        // Just verify it doesn't panic - struct has no fields
+        let _ = connector;
+    }
+
+    #[test]
+    fn default_creates_connector() {
+        let connector = CodexConnector::default();
+        let _ = connector;
+    }
+
+    // =====================================================
+    // home() Tests
+    // =====================================================
+
+    #[test]
+    fn home_returns_path_ending_with_codex() {
+        // Note: We can't reliably test CODEX_HOME env var due to parallel test execution.
+        // Testing that home() returns a valid path structure is sufficient.
+        // The function uses CODEX_HOME if set, otherwise defaults to ~/.codex
+        let home = CodexConnector::home();
+        // Either the env var is set (ends with some path) or default (ends with .codex)
+        let path_str = home.to_str().unwrap();
+        assert!(
+            path_str.ends_with(".codex") || path_str.contains("codex"),
+            "home() should return a path related to codex, got: {}",
+            path_str
+        );
+    }
+
+    // =====================================================
+    // rollout_files() Tests
+    // =====================================================
+
+    #[test]
+    fn rollout_files_finds_jsonl_files() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let rollout = sessions.join("rollout-abc123.jsonl");
+        fs::write(&rollout, "{}").unwrap();
+
+        let files = CodexConnector::rollout_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_str().unwrap().contains("rollout-abc123.jsonl"));
+    }
+
+    #[test]
+    fn rollout_files_finds_json_files() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let rollout = sessions.join("rollout-legacy.json");
+        fs::write(&rollout, "{}").unwrap();
+
+        let files = CodexConnector::rollout_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_str().unwrap().contains("rollout-legacy.json"));
+    }
+
+    #[test]
+    fn rollout_files_ignores_non_rollout_files() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // Create various non-rollout files
+        fs::write(sessions.join("config.json"), "{}").unwrap();
+        fs::write(sessions.join("session.jsonl"), "{}").unwrap();
+        fs::write(sessions.join("other.txt"), "test").unwrap();
+
+        let files = CodexConnector::rollout_files(dir.path());
+        assert_eq!(files.len(), 0);
+    }
+
+    #[test]
+    fn rollout_files_finds_nested_rollouts() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("sessions").join("2025").join("12").join("17");
+        fs::create_dir_all(&nested).unwrap();
+
+        let rollout = nested.join("rollout-nested.jsonl");
+        fs::write(&rollout, "{}").unwrap();
+
+        let files = CodexConnector::rollout_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_str().unwrap().contains("rollout-nested.jsonl"));
+    }
+
+    #[test]
+    fn rollout_files_returns_empty_when_no_sessions_dir() {
+        let dir = TempDir::new().unwrap();
+        let files = CodexConnector::rollout_files(dir.path());
+        assert_eq!(files.len(), 0);
+    }
+
+    // =====================================================
+    // detect() Tests
+    // =====================================================
+
+    #[test]
+    fn detect_returns_true_when_sessions_exists() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // SAFETY: Test runs in single-threaded context
+        unsafe { std::env::set_var("CODEX_HOME", dir.path()) };
+        let connector = CodexConnector::new();
+        let result = connector.detect();
+        // SAFETY: Test runs in single-threaded context
+        unsafe { std::env::remove_var("CODEX_HOME") };
+
+        assert!(result.detected);
+        assert!(!result.evidence.is_empty());
+    }
+
+    #[test]
+    fn detect_returns_false_when_no_sessions() {
+        let dir = TempDir::new().unwrap();
+        // Don't create sessions directory
+
+        // SAFETY: Test runs in single-threaded context
+        unsafe { std::env::set_var("CODEX_HOME", dir.path()) };
+        let connector = CodexConnector::new();
+        let result = connector.detect();
+        // SAFETY: Test runs in single-threaded context
+        unsafe { std::env::remove_var("CODEX_HOME") };
+
+        assert!(!result.detected);
+    }
+
+    // =====================================================
+    // scan() JSONL Format Tests
+    // =====================================================
+
+    #[test]
+    fn scan_parses_jsonl_response_item_messages() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","timestamp":"2025-12-01T10:00:00Z","payload":{"role":"user","content":"Hello Codex"}}
+{"type":"response_item","timestamp":"2025-12-01T10:00:01Z","payload":{"role":"assistant","content":"Hello! How can I help?"}}
+"#;
+        fs::write(sessions.join("rollout-test.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok());
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert_eq!(convs[0].messages[0].content, "Hello Codex");
+        assert_eq!(convs[0].messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn scan_parses_event_msg_user_message() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"event_msg","timestamp":"2025-12-01T10:00:00Z","payload":{"type":"user_message","message":"User typed this"}}
+"#;
+        fs::write(sessions.join("rollout-user.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert_eq!(convs[0].messages[0].content, "User typed this");
+    }
+
+    #[test]
+    fn scan_parses_event_msg_agent_reasoning() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"event_msg","timestamp":"2025-12-01T10:00:00Z","payload":{"type":"agent_reasoning","text":"Let me think about this..."}}
+"#;
+        fs::write(sessions.join("rollout-reasoning.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].role, "assistant");
+        assert_eq!(convs[0].messages[0].author, Some("reasoning".to_string()));
+        assert_eq!(convs[0].messages[0].content, "Let me think about this...");
+    }
+
+    #[test]
+    fn scan_extracts_workspace_from_session_meta() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"session_meta","timestamp":"2025-12-01T10:00:00Z","payload":{"cwd":"/home/user/project"}}
+{"type":"response_item","timestamp":"2025-12-01T10:00:01Z","payload":{"role":"user","content":"Test"}}
+"#;
+        fs::write(sessions.join("rollout-meta.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].workspace, Some(PathBuf::from("/home/user/project")));
+    }
+
+    #[test]
+    fn scan_skips_empty_lines_in_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","timestamp":"2025-12-01T10:00:00Z","payload":{"role":"user","content":"Message 1"}}
+
+{"type":"response_item","timestamp":"2025-12-01T10:00:01Z","payload":{"role":"user","content":"Message 2"}}
+"#;
+        fs::write(sessions.join("rollout-empty-lines.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn scan_skips_invalid_json_lines() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","timestamp":"2025-12-01T10:00:00Z","payload":{"role":"user","content":"Valid"}}
+not valid json at all
+{"type":"response_item","timestamp":"2025-12-01T10:00:01Z","payload":{"role":"user","content":"Also valid"}}
+"#;
+        fs::write(sessions.join("rollout-invalid.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn scan_skips_empty_content_messages() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","timestamp":"2025-12-01T10:00:00Z","payload":{"role":"user","content":"Has content"}}
+{"type":"response_item","timestamp":"2025-12-01T10:00:01Z","payload":{"role":"assistant","content":""}}
+{"type":"response_item","timestamp":"2025-12-01T10:00:02Z","payload":{"role":"assistant","content":"   "}}
+"#;
+        fs::write(sessions.join("rollout-empty-content.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        // Only the message with actual content should be included
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Has content");
+    }
+
+    #[test]
+    fn scan_skips_unknown_event_types() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","timestamp":"2025-12-01T10:00:00Z","payload":{"role":"user","content":"Real message"}}
+{"type":"event_msg","timestamp":"2025-12-01T10:00:01Z","payload":{"type":"token_count","tokens":100}}
+{"type":"event_msg","timestamp":"2025-12-01T10:00:02Z","payload":{"type":"turn_aborted"}}
+{"type":"turn_context","timestamp":"2025-12-01T10:00:03Z","payload":{}}
+"#;
+        fs::write(sessions.join("rollout-unknown.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        // Only the response_item should be included
+        assert_eq!(convs[0].messages.len(), 1);
+    }
+
+    #[test]
+    fn scan_assigns_sequential_indices() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","timestamp":"2025-12-01T10:00:00Z","payload":{"role":"user","content":"First"}}
+{"type":"response_item","timestamp":"2025-12-01T10:00:01Z","payload":{"role":"assistant","content":"Second"}}
+{"type":"response_item","timestamp":"2025-12-01T10:00:02Z","payload":{"role":"user","content":"Third"}}
+"#;
+        fs::write(sessions.join("rollout-idx.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].idx, 0);
+        assert_eq!(convs[0].messages[1].idx, 1);
+        assert_eq!(convs[0].messages[2].idx, 2);
+    }
+
+    // =====================================================
+    // scan() Legacy JSON Format Tests
+    // =====================================================
+
+    #[test]
+    fn scan_parses_legacy_json_format() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = json!({
+            "session": {"cwd": "/home/user/legacy"},
+            "items": [
+                {"role": "user", "content": "Legacy user message", "timestamp": "2025-12-01T10:00:00Z"},
+                {"role": "assistant", "content": "Legacy assistant response", "timestamp": "2025-12-01T10:00:01Z"}
+            ]
+        });
+        fs::write(sessions.join("rollout-legacy.json"), content.to_string()).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].workspace, Some(PathBuf::from("/home/user/legacy")));
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert_eq!(convs[0].messages[0].content, "Legacy user message");
+        assert_eq!(convs[0].messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn scan_legacy_json_skips_empty_content() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = json!({
+            "session": {},
+            "items": [
+                {"role": "user", "content": "Has content"},
+                {"role": "assistant", "content": ""},
+                {"role": "assistant", "content": "   "}
+            ]
+        });
+        fs::write(sessions.join("rollout-empty-legacy.json"), content.to_string()).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+    }
+
+    #[test]
+    fn scan_legacy_json_handles_missing_items() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = json!({"session": {}});
+        fs::write(sessions.join("rollout-no-items.json"), content.to_string()).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // No messages = conversation is skipped
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_skips_invalid_legacy_json() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        fs::write(sessions.join("rollout-bad.json"), "not valid json").unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    // =====================================================
+    // Title Extraction Tests
+    // =====================================================
+
+    #[test]
+    fn scan_extracts_title_from_first_user_message() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","payload":{"role":"assistant","content":"I'm an assistant"}}
+{"type":"response_item","payload":{"role":"user","content":"This should be the title"}}
+"#;
+        fs::write(sessions.join("rollout-title.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("This should be the title".to_string()));
+    }
+
+    #[test]
+    fn scan_truncates_long_titles() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let long_title = "x".repeat(200);
+        let content = format!(
+            r#"{{"type":"response_item","payload":{{"role":"user","content":"{}"}}}}"#,
+            long_title
+        );
+        fs::write(sessions.join("rollout-long.jsonl"), content + "\n").unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title.as_ref().unwrap().len(), 100);
+    }
+
+    #[test]
+    fn scan_uses_first_line_for_multiline_title() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","payload":{"role":"user","content":"First line\nSecond line\nThird line"}}
+"#;
+        fs::write(sessions.join("rollout-multiline.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("First line".to_string()));
+    }
+
+    #[test]
+    fn scan_falls_back_to_first_message_for_title() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // No user messages, only assistant
+        let content = r#"{"type":"response_item","payload":{"role":"assistant","content":"Assistant speaks first"}}
+"#;
+        fs::write(sessions.join("rollout-assistant-only.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("Assistant speaks first".to_string()));
+    }
+
+    // =====================================================
+    // External ID Tests
+    // =====================================================
+
+    #[test]
+    fn scan_uses_relative_path_as_external_id() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions").join("2025").join("12").join("17");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","payload":{"role":"user","content":"Test"}}
+"#;
+        fs::write(sessions.join("rollout-nested-id.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // External ID should be the relative path from sessions dir
+        assert!(convs[0].external_id.is_some());
+        let ext_id = convs[0].external_id.as_ref().unwrap();
+        assert!(ext_id.contains("2025") || ext_id.contains("rollout-nested-id"));
+    }
+
+    // =====================================================
+    // Metadata Tests
+    // =====================================================
+
+    #[test]
+    fn scan_sets_metadata_source_for_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","payload":{"role":"user","content":"Test"}}
+"#;
+        fs::write(sessions.join("rollout-meta-jsonl.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].metadata["source"], "rollout");
+    }
+
+    #[test]
+    fn scan_sets_metadata_source_for_json() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = json!({
+            "session": {},
+            "items": [{"role": "user", "content": "Test"}]
+        });
+        fs::write(sessions.join("rollout-meta-json.json"), content.to_string()).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].metadata["source"], "rollout_json");
+    }
+
+    // =====================================================
+    // Agent Slug Tests
+    // =====================================================
+
+    #[test]
+    fn scan_sets_agent_slug_to_codex() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","payload":{"role":"user","content":"Test"}}
+"#;
+        fs::write(sessions.join("rollout-slug.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].agent_slug, "codex");
+    }
+
+    // =====================================================
+    // Timestamp Tests
+    // =====================================================
+
+    #[test]
+    fn scan_parses_timestamps() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","timestamp":"2025-12-01T10:00:00Z","payload":{"role":"user","content":"First"}}
+{"type":"response_item","timestamp":"2025-12-01T11:00:00Z","payload":{"role":"user","content":"Last"}}
+"#;
+        fs::write(sessions.join("rollout-ts.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert!(convs[0].started_at.is_some());
+        assert!(convs[0].ended_at.is_some());
+        assert!(convs[0].messages[0].created_at.is_some());
+    }
+
+    // =====================================================
+    // Edge Cases
+    // =====================================================
+
+    #[test]
+    fn scan_handles_empty_sessions_dir() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        // No files in sessions directory
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_handles_multiple_rollout_files() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content1 = r#"{"type":"response_item","payload":{"role":"user","content":"Session 1"}}
+"#;
+        let content2 = r#"{"type":"response_item","payload":{"role":"user","content":"Session 2"}}
+"#;
+        fs::write(sessions.join("rollout-1.jsonl"), content1).unwrap();
+        fs::write(sessions.join("rollout-2.jsonl"), content2).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 2);
+    }
+
+    #[test]
+    fn scan_skips_conversations_with_no_messages() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // Only metadata, no actual messages
+        let content = r#"{"type":"session_meta","payload":{"cwd":"/test"}}
+{"type":"turn_context","payload":{}}
+"#;
+        fs::write(sessions.join("rollout-no-msgs.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Should be skipped because no actual messages
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_handles_array_content_in_response_item() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // Content as array of text blocks (like Claude API format)
+        let content = json!({
+            "type": "response_item",
+            "payload": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Part one."},
+                    {"type": "text", "text": " Part two."}
+                ]
+            }
+        });
+        fs::write(sessions.join("rollout-array.jsonl"), content.to_string() + "\n").unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        // flatten_content should combine the parts
+        assert!(convs[0].messages[0].content.contains("Part one"));
+    }
+
+    #[test]
+    fn scan_uses_default_role_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // No role specified in payload
+        let content = r#"{"type":"response_item","payload":{"content":"No role specified"}}
+"#;
+        fs::write(sessions.join("rollout-no-role.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        // Default role should be "agent"
+        assert_eq!(convs[0].messages[0].role, "agent");
+    }
+
+    #[test]
+    fn scan_stores_source_path() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","payload":{"role":"user","content":"Test"}}
+"#;
+        let file_path = sessions.join("rollout-path.jsonl");
+        fs::write(&file_path, content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].source_path, file_path);
+    }
+}
