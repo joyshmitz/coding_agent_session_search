@@ -122,6 +122,19 @@ Ingests history from all major local agents, normalizing them into a unified `Co
 - **Aider**: `~/.aider.chat.history.md` and per-project `.aider.chat.history.md` files (Markdown)
 - **Pi-Agent**: `~/.pi/agent/sessions` (Session JSONL with thinking content)
 
+#### Connector Details
+
+**Pi-Agent** parses JSONL session files with rich event structure:
+- **Location**: `~/.pi/agent/sessions/` (override with `PI_CODING_AGENT_DIR` env var)
+- **Format**: Typed events—`session_start`, `message`, `model_change`, `thinking_level_change`
+- **Features**: Extracts extended thinking content, flattens tool calls with arguments, tracks model changes
+- **Detection**: Scans for `*_*.jsonl` pattern in sessions directory
+
+**OpenCode** reads SQLite databases from workspace directories:
+- **Location**: `.opencode/` directories (scans recursively from home)
+- **Format**: SQLite database with sessions table
+- **Detection**: Finds directories named `.opencode` containing database files
+
 ### 🌐 Remote Sources (Multi-Machine Search)
 
 Search across agent sessions from multiple machines—your laptop, desktop, and remote servers—all from a single unified index. `cass` uses SSH/rsync to efficiently sync session data, tracking provenance so you know where each conversation originated.
