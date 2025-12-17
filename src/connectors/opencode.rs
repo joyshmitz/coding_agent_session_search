@@ -148,8 +148,7 @@ impl Connector for OpenCodeConnector {
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Determine the storage root
-        let storage_root = if ctx.data_dir.exists() && looks_like_opencode_storage(&ctx.data_dir)
-        {
+        let storage_root = if ctx.data_dir.exists() && looks_like_opencode_storage(&ctx.data_dir) {
             ctx.data_dir.clone()
         } else {
             match Self::storage_root() {
@@ -794,10 +793,7 @@ mod tests {
         assert_eq!(convs[0].messages.len(), 2);
         assert_eq!(convs[0].messages[0].role, "user");
         assert_eq!(convs[0].messages[1].role, "assistant");
-        assert_eq!(
-            convs[0].messages[1].author,
-            Some("gpt-4".to_string())
-        );
+        assert_eq!(convs[0].messages[1].author, Some("gpt-4".to_string()));
     }
 
     #[test]

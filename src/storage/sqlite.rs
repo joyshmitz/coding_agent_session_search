@@ -46,12 +46,7 @@ impl From<anyhow::Error> for MigrationError {
 const MAX_BACKUPS: usize = 3;
 
 /// Files that contain user-authored state and must NEVER be deleted during rebuild.
-const USER_DATA_FILES: &[&str] = &[
-    "bookmarks.db",
-    "tui_state.json",
-    "sources.toml",
-    ".env",
-];
+const USER_DATA_FILES: &[&str] = &["bookmarks.db", "tui_state.json", "sources.toml", ".env"];
 
 /// Check if a file is user-authored data that must be preserved during rebuild.
 pub fn is_user_data_file(path: &Path) -> bool {
@@ -93,10 +88,7 @@ pub fn cleanup_old_backups(db_path: &Path, keep_count: usize) -> Result<(), std:
         None => return Ok(()),
     };
 
-    let db_name = db_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("db");
+    let db_name = db_path.file_name().and_then(|n| n.to_str()).unwrap_or("db");
 
     let prefix = format!("{}.backup.", db_name);
 
@@ -862,9 +854,9 @@ impl SqliteStorage {
     /// Get list of unique source IDs (for P4.4 TUI source filter menu).
     /// Returns source IDs ordered by ID, excluding 'local' which is always present.
     pub fn get_source_ids(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT id FROM sources WHERE id != 'local' ORDER BY id",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT id FROM sources WHERE id != 'local' ORDER BY id")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         let mut out = Vec::new();
         for r in rows {
@@ -1200,7 +1192,14 @@ mod tests {
         assert!(backup_path.is_some());
         let backup = backup_path.unwrap();
         assert!(backup.exists());
-        assert!(backup.file_name().unwrap().to_str().unwrap().contains("backup"));
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("backup")
+        );
     }
 
     #[test]
@@ -1391,7 +1390,11 @@ mod tests {
             .unwrap();
 
         let workspaces = storage.list_workspaces().unwrap();
-        assert!(workspaces.iter().any(|w| w.path.to_str() == Some("/test/workspace")));
+        assert!(
+            workspaces
+                .iter()
+                .any(|w| w.path.to_str() == Some("/test/workspace"))
+        );
     }
 
     // =========================================================================

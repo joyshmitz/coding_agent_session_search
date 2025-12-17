@@ -2616,8 +2616,12 @@ fn introspect_matches_golden_contract_structure() {
     );
 
     // Check that global_flags array has expected structure
-    let actual_globals = actual["global_flags"].as_array().expect("global_flags array");
-    let expected_globals = expected["global_flags"].as_array().expect("expected global_flags");
+    let actual_globals = actual["global_flags"]
+        .as_array()
+        .expect("global_flags array");
+    let expected_globals = expected["global_flags"]
+        .as_array()
+        .expect("expected global_flags");
     assert_eq!(
         actual_globals.len(),
         expected_globals.len(),
@@ -2800,7 +2804,10 @@ fn trace_includes_contract_fields_on_success() {
 
     // Required contract fields
     assert_eq!(json["exit_code"], 0, "exit_code should be 0 for success");
-    assert_eq!(json["contract_version"], "1", "contract_version should be 1");
+    assert_eq!(
+        json["contract_version"], "1",
+        "contract_version should be 1"
+    );
     // Trace uses start_ts and end_ts for timestamps
     assert!(
         json["start_ts"].is_string() || json["end_ts"].is_string(),
@@ -2860,32 +2867,23 @@ fn introspect_global_flags_quiet_verbose_documented() {
         match name {
             "quiet" => {
                 found_quiet = true;
-                assert_eq!(
-                    flag["arg_type"], "flag",
-                    "quiet should be a flag type"
-                );
-                assert_eq!(
-                    flag["short"], "q",
-                    "quiet should have -q as short option"
-                );
+                assert_eq!(flag["arg_type"], "flag", "quiet should be a flag type");
+                assert_eq!(flag["short"], "q", "quiet should have -q as short option");
             }
             "verbose" => {
                 found_verbose = true;
-                assert_eq!(
-                    flag["arg_type"], "flag",
-                    "verbose should be a flag type"
-                );
-                assert_eq!(
-                    flag["short"], "v",
-                    "verbose should have -v as short option"
-                );
+                assert_eq!(flag["arg_type"], "flag", "verbose should be a flag type");
+                assert_eq!(flag["short"], "v", "verbose should have -v as short option");
             }
             _ => {}
         }
     }
 
     assert!(found_quiet, "quiet should be documented in global_flags");
-    assert!(found_verbose, "verbose should be documented in global_flags");
+    assert!(
+        found_verbose,
+        "verbose should be documented in global_flags"
+    );
 }
 
 /// Introspect should include robot-help global flag
@@ -2928,10 +2926,7 @@ fn introspect_view_context_argument() {
         "context should be integer type"
     );
     // View context also has default of 5
-    assert_eq!(
-        context["default"], "5",
-        "context should default to 5"
-    );
+    assert_eq!(context["default"], "5", "context should default to 5");
 }
 
 /// All global flags mentioned in introspect should have required=false
@@ -2967,10 +2962,7 @@ fn introspect_global_flags_complete_list() {
         "nowrap",
     ];
 
-    let actual_names: HashSet<_> = globals
-        .iter()
-        .filter_map(|f| f["name"].as_str())
-        .collect();
+    let actual_names: HashSet<_> = globals.iter().filter_map(|f| f["name"].as_str()).collect();
 
     for expected in expected_flags {
         assert!(
@@ -3176,10 +3168,7 @@ fn introspect_dynamic_schema_all_commands_present() {
         "sources",
     ];
 
-    let actual_names: HashSet<_> = commands
-        .iter()
-        .filter_map(|c| c["name"].as_str())
-        .collect();
+    let actual_names: HashSet<_> = commands.iter().filter_map(|c| c["name"].as_str()).collect();
 
     for expected in expected_commands {
         assert!(
@@ -3327,10 +3316,7 @@ fn introspect_global_db_path_type() {
         .find(|f| f["name"] == "db")
         .expect("db flag exists");
 
-    assert_eq!(
-        db["value_type"], "path",
-        "global --db should be path type"
-    );
+    assert_eq!(db["value_type"], "path", "global --db should be path type");
 }
 
 /// Global trace-file parameter should be path type
@@ -3442,7 +3428,10 @@ fn introspect_all_path_options_documented() {
     // Check global path types
     let globals = json["global_flags"].as_array().expect("global_flags");
     for name in ["db", "trace-file"] {
-        let flag = globals.iter().find(|f| f["name"] == name).unwrap_or_else(|| panic!("{name} exists"));
+        let flag = globals
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap_or_else(|| panic!("{name} exists"));
         assert_eq!(
             flag["value_type"], "path",
             "global --{name} should be path type"
@@ -3452,13 +3441,15 @@ fn introspect_all_path_options_documented() {
     // Check command path types
     let search = find_command(&json, "search");
     assert_eq!(
-        find_arg(search, "data-dir")["value_type"], "path",
+        find_arg(search, "data-dir")["value_type"],
+        "path",
         "search --data-dir should be path type"
     );
 
     let view = find_command(&json, "view");
     assert_eq!(
-        find_arg(view, "path")["value_type"], "path",
+        find_arg(view, "path")["value_type"],
+        "path",
         "view path should be path type"
     );
 }
@@ -3497,13 +3488,15 @@ fn introspect_all_integer_options_documented() {
 
     let status = find_command(&json, "status");
     assert_eq!(
-        find_arg(status, "stale-threshold")["value_type"], "integer",
+        find_arg(status, "stale-threshold")["value_type"],
+        "integer",
         "status --stale-threshold should be integer type"
     );
 
     let health = find_command(&json, "health");
     assert_eq!(
-        find_arg(health, "stale-threshold")["value_type"], "integer",
+        find_arg(health, "stale-threshold")["value_type"],
+        "integer",
         "health --stale-threshold should be integer type"
     );
 }

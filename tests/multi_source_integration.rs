@@ -93,7 +93,11 @@ fn norm_conv_with_provenance(
     }
 }
 
-fn norm_msg(idx: i64, created_at: i64, content: &str) -> coding_agent_search::connectors::NormalizedMessage {
+fn norm_msg(
+    idx: i64,
+    created_at: i64,
+    content: &str,
+) -> coding_agent_search::connectors::NormalizedMessage {
     coding_agent_search::connectors::NormalizedMessage {
         idx,
         role: "user".into(),
@@ -117,12 +121,17 @@ fn index_local_and_remote_sources_preserves_provenance() {
     let mut storage = SqliteStorage::open(&db_path).expect("open db");
 
     // Setup sources
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop.local"))
         .expect("remote source");
     storage
-        .upsert_source(&Source::remote("workstation", "dev@workstation.example.com"))
+        .upsert_source(&Source::remote(
+            "workstation",
+            "dev@workstation.example.com",
+        ))
         .expect("workstation source");
 
     let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
@@ -160,7 +169,11 @@ fn index_local_and_remote_sources_preserves_provenance() {
                     "laptop",
                     Some("user@laptop.local"),
                     now + 10000 + i * 1000,
-                    vec![msg(0, now + 10000 + i * 1000, &format!("Laptop message {}", i))],
+                    vec![msg(
+                        0,
+                        now + 10000 + i * 1000,
+                        &format!("Laptop message {}", i),
+                    )],
                 ),
             )
             .unwrap();
@@ -177,7 +190,11 @@ fn index_local_and_remote_sources_preserves_provenance() {
                     "workstation",
                     Some("dev@workstation.example.com"),
                     now + 20000 + i * 1000,
-                    vec![msg(0, now + 20000 + i * 1000, &format!("Workstation message {}", i))],
+                    vec![msg(
+                        0,
+                        now + 20000 + i * 1000,
+                        &format!("Workstation message {}", i),
+                    )],
                 ),
             )
             .unwrap();
@@ -231,7 +248,10 @@ fn index_local_and_remote_sources_preserves_provenance() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(workstation_count, 3, "should have 3 workstation conversations");
+    assert_eq!(
+        workstation_count, 3,
+        "should have 3 workstation conversations"
+    );
 
     // Verify origin_host is preserved for remote conversations
     let remote_with_host: Vec<(String, Option<String>)> = storage
@@ -263,7 +283,9 @@ fn persist_conversation_extracts_provenance_from_metadata() {
     let mut storage = SqliteStorage::open(&db_path).expect("open db");
 
     // Setup sources
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop.local"))
         .expect("remote source");
@@ -298,7 +320,9 @@ fn persist_conversation_extracts_provenance_from_metadata() {
     // Verify provenance was extracted correctly
     let results: Vec<(String, String, Option<String>)> = storage
         .raw()
-        .prepare("SELECT external_id, source_id, origin_host FROM conversations ORDER BY external_id")
+        .prepare(
+            "SELECT external_id, source_id, origin_host FROM conversations ORDER BY external_id",
+        )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .unwrap()
@@ -307,11 +331,17 @@ fn persist_conversation_extracts_provenance_from_metadata() {
 
     assert_eq!(results.len(), 2);
 
-    let local = results.iter().find(|(id, _, _)| id == "local-conv").unwrap();
+    let local = results
+        .iter()
+        .find(|(id, _, _)| id == "local-conv")
+        .unwrap();
     assert_eq!(local.1, "local");
     assert!(local.2.is_none());
 
-    let remote = results.iter().find(|(id, _, _)| id == "remote-conv").unwrap();
+    let remote = results
+        .iter()
+        .find(|(id, _, _)| id == "remote-conv")
+        .unwrap();
     assert_eq!(remote.1, "laptop");
     assert_eq!(remote.2.as_deref(), Some("user@laptop.local"));
 }
@@ -327,7 +357,9 @@ fn filter_conversations_local_only() {
     let db_path = tmp.path().join("filter_local.db");
     let mut storage = SqliteStorage::open(&db_path).expect("open db");
 
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("remote1", "host1.local"))
         .expect("remote1");
@@ -343,19 +375,59 @@ fn filter_conversations_local_only() {
     let now = 1700000000i64;
 
     // Insert mixed conversations
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c1", "local", None, now, vec![msg(0, now, "test local")])).unwrap();
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c2", "remote1", Some("host1.local"), now + 1000, vec![msg(0, now + 1000, "test remote1")])).unwrap();
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c3", "local", None, now + 2000, vec![msg(0, now + 2000, "test local 2")])).unwrap();
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c4", "remote2", Some("host2.local"), now + 3000, vec![msg(0, now + 3000, "test remote2")])).unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source("c1", "local", None, now, vec![msg(0, now, "test local")]),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source(
+                "c2",
+                "remote1",
+                Some("host1.local"),
+                now + 1000,
+                vec![msg(0, now + 1000, "test remote1")],
+            ),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source(
+                "c3",
+                "local",
+                None,
+                now + 2000,
+                vec![msg(0, now + 2000, "test local 2")],
+            ),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source(
+                "c4",
+                "remote2",
+                Some("host2.local"),
+                now + 3000,
+                vec![msg(0, now + 3000, "test remote2")],
+            ),
+        )
+        .unwrap();
 
     // Query local only
     let local_results: Vec<String> = storage
         .raw()
-        .prepare("SELECT external_id FROM conversations WHERE source_id = 'local' ORDER BY external_id")
+        .prepare(
+            "SELECT external_id FROM conversations WHERE source_id = 'local' ORDER BY external_id",
+        )
         .unwrap()
         .query_map([], |r| r.get(0))
         .unwrap()
@@ -374,7 +446,9 @@ fn filter_conversations_remote_only() {
     let db_path = tmp.path().join("filter_remote.db");
     let mut storage = SqliteStorage::open(&db_path).expect("open db");
 
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("remote1", "host1.local"))
         .expect("remote1");
@@ -390,19 +464,59 @@ fn filter_conversations_remote_only() {
     let now = 1700000000i64;
 
     // Insert mixed conversations
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c1", "local", None, now, vec![msg(0, now, "test local")])).unwrap();
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c2", "remote1", Some("host1.local"), now + 1000, vec![msg(0, now + 1000, "test remote1")])).unwrap();
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c3", "local", None, now + 2000, vec![msg(0, now + 2000, "test local 2")])).unwrap();
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c4", "remote2", Some("host2.local"), now + 3000, vec![msg(0, now + 3000, "test remote2")])).unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source("c1", "local", None, now, vec![msg(0, now, "test local")]),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source(
+                "c2",
+                "remote1",
+                Some("host1.local"),
+                now + 1000,
+                vec![msg(0, now + 1000, "test remote1")],
+            ),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source(
+                "c3",
+                "local",
+                None,
+                now + 2000,
+                vec![msg(0, now + 2000, "test local 2")],
+            ),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source(
+                "c4",
+                "remote2",
+                Some("host2.local"),
+                now + 3000,
+                vec![msg(0, now + 3000, "test remote2")],
+            ),
+        )
+        .unwrap();
 
     // Query remote only (source_id != 'local')
     let remote_results: Vec<String> = storage
         .raw()
-        .prepare("SELECT external_id FROM conversations WHERE source_id != 'local' ORDER BY external_id")
+        .prepare(
+            "SELECT external_id FROM conversations WHERE source_id != 'local' ORDER BY external_id",
+        )
         .unwrap()
         .query_map([], |r| r.get(0))
         .unwrap()
@@ -421,7 +535,9 @@ fn filter_conversations_specific_source() {
     let db_path = tmp.path().join("filter_specific.db");
     let mut storage = SqliteStorage::open(&db_path).expect("open db");
 
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop"))
         .expect("laptop");
@@ -437,19 +553,59 @@ fn filter_conversations_specific_source() {
     let now = 1700000000i64;
 
     // Insert conversations from different sources
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c1", "local", None, now, vec![msg(0, now, "local")])).unwrap();
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c2", "laptop", Some("user@laptop"), now + 1000, vec![msg(0, now + 1000, "laptop1")])).unwrap();
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c3", "server", Some("admin@server"), now + 2000, vec![msg(0, now + 2000, "server1")])).unwrap();
-    storage.insert_conversation_tree(agent_id, Some(ws_id),
-        &conv_with_source("c4", "laptop", Some("user@laptop"), now + 3000, vec![msg(0, now + 3000, "laptop2")])).unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source("c1", "local", None, now, vec![msg(0, now, "local")]),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source(
+                "c2",
+                "laptop",
+                Some("user@laptop"),
+                now + 1000,
+                vec![msg(0, now + 1000, "laptop1")],
+            ),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source(
+                "c3",
+                "server",
+                Some("admin@server"),
+                now + 2000,
+                vec![msg(0, now + 2000, "server1")],
+            ),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            Some(ws_id),
+            &conv_with_source(
+                "c4",
+                "laptop",
+                Some("user@laptop"),
+                now + 3000,
+                vec![msg(0, now + 3000, "laptop2")],
+            ),
+        )
+        .unwrap();
 
     // Query laptop only
     let laptop_results: Vec<String> = storage
         .raw()
-        .prepare("SELECT external_id FROM conversations WHERE source_id = 'laptop' ORDER BY external_id")
+        .prepare(
+            "SELECT external_id FROM conversations WHERE source_id = 'laptop' ORDER BY external_id",
+        )
         .unwrap()
         .query_map([], |r| r.get(0))
         .unwrap()
@@ -463,7 +619,9 @@ fn filter_conversations_specific_source() {
     // Query server only
     let server_results: Vec<String> = storage
         .raw()
-        .prepare("SELECT external_id FROM conversations WHERE source_id = 'server' ORDER BY external_id")
+        .prepare(
+            "SELECT external_id FROM conversations WHERE source_id = 'server' ORDER BY external_id",
+        )
         .unwrap()
         .query_map([], |r| r.get(0))
         .unwrap()
@@ -493,7 +651,9 @@ fn incremental_index_new_remote_source() {
     let mut t_index = TantivyIndex::open_or_create(&index_dir).expect("create index");
 
     // Setup sources
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
 
     let now = 1700000000i64;
 
@@ -594,7 +754,9 @@ fn incremental_append_to_remote_conversation() {
     std::fs::create_dir_all(&index_dir).unwrap();
     let mut t_index = TantivyIndex::open_or_create(&index_dir).expect("create index");
 
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop.local"))
         .expect("remote source");
@@ -674,7 +836,9 @@ fn stats_reflect_source_distribution() {
     let mut storage = SqliteStorage::open(&db_path).expect("open db");
 
     // Setup multiple sources
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop"))
         .expect("laptop");
@@ -691,19 +855,49 @@ fn stats_reflect_source_distribution() {
 
     // Insert conversations with distribution: 5 local, 3 laptop, 2 server
     for i in 0..5 {
-        storage.insert_conversation_tree(agent_id, Some(ws_id),
-            &conv_with_source(&format!("local-{}", i), "local", None, now + i * 1000,
-                vec![msg(0, now + i * 1000, &format!("local {}", i))])).unwrap();
+        storage
+            .insert_conversation_tree(
+                agent_id,
+                Some(ws_id),
+                &conv_with_source(
+                    &format!("local-{}", i),
+                    "local",
+                    None,
+                    now + i * 1000,
+                    vec![msg(0, now + i * 1000, &format!("local {}", i))],
+                ),
+            )
+            .unwrap();
     }
     for i in 0..3 {
-        storage.insert_conversation_tree(agent_id, Some(ws_id),
-            &conv_with_source(&format!("laptop-{}", i), "laptop", Some("user@laptop"), now + 10000 + i * 1000,
-                vec![msg(0, now + 10000 + i * 1000, &format!("laptop {}", i))])).unwrap();
+        storage
+            .insert_conversation_tree(
+                agent_id,
+                Some(ws_id),
+                &conv_with_source(
+                    &format!("laptop-{}", i),
+                    "laptop",
+                    Some("user@laptop"),
+                    now + 10000 + i * 1000,
+                    vec![msg(0, now + 10000 + i * 1000, &format!("laptop {}", i))],
+                ),
+            )
+            .unwrap();
     }
     for i in 0..2 {
-        storage.insert_conversation_tree(agent_id, Some(ws_id),
-            &conv_with_source(&format!("server-{}", i), "server", Some("admin@server"), now + 20000 + i * 1000,
-                vec![msg(0, now + 20000 + i * 1000, &format!("server {}", i))])).unwrap();
+        storage
+            .insert_conversation_tree(
+                agent_id,
+                Some(ws_id),
+                &conv_with_source(
+                    &format!("server-{}", i),
+                    "server",
+                    Some("admin@server"),
+                    now + 20000 + i * 1000,
+                    vec![msg(0, now + 20000 + i * 1000, &format!("server {}", i))],
+                ),
+            )
+            .unwrap();
     }
 
     // Query source distribution stats
@@ -759,7 +953,9 @@ fn source_kind_available_via_join() {
     let db_path = tmp.path().join("kind_join.db");
     let mut storage = SqliteStorage::open(&db_path).expect("open db");
 
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop"))
         .expect("laptop");
@@ -767,10 +963,26 @@ fn source_kind_available_via_join() {
     let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
 
     let now = 1700000000i64;
-    storage.insert_conversation_tree(agent_id, None,
-        &conv_with_source("c1", "local", None, now, vec![msg(0, now, "local")])).unwrap();
-    storage.insert_conversation_tree(agent_id, None,
-        &conv_with_source("c2", "laptop", Some("user@laptop"), now + 1000, vec![msg(0, now + 1000, "remote")])).unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            None,
+            &conv_with_source("c1", "local", None, now, vec![msg(0, now, "local")]),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            None,
+            &conv_with_source(
+                "c2",
+                "laptop",
+                Some("user@laptop"),
+                now + 1000,
+                vec![msg(0, now + 1000, "remote")],
+            ),
+        )
+        .unwrap();
 
     // Query with JOIN to get source kind
     let results: Vec<(String, String, String)> = storage
@@ -818,7 +1030,9 @@ fn resync_same_conversation_updates_not_duplicates() {
     std::fs::create_dir_all(&index_dir).unwrap();
     let mut t_index = TantivyIndex::open_or_create(&index_dir).expect("create index");
 
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop.local"))
         .expect("remote source");
@@ -843,7 +1057,10 @@ fn resync_same_conversation_updates_not_duplicates() {
         .raw()
         .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(count_after_first, 1, "should have 1 conversation after first sync");
+    assert_eq!(
+        count_after_first, 1,
+        "should have 1 conversation after first sync"
+    );
 
     // Second sync (same conversation, simulating re-sync with updated content)
     let conv_v2 = norm_conv_with_provenance(
@@ -884,7 +1101,9 @@ fn same_id_different_sources_are_distinct() {
     let db_path = tmp.path().join("collision.db");
     let mut storage = SqliteStorage::open(&db_path).expect("open db");
 
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop.local"))
         .expect("laptop source");
@@ -898,17 +1117,47 @@ fn same_id_different_sources_are_distinct() {
 
     // Same external_id "session-001" from three different sources
     // This could happen with sequential IDs or if different machines happen to generate same UUID
-    storage.insert_conversation_tree(agent_id, None,
-        &conv_with_source("session-001", "local", None, now,
-            vec![msg(0, now, "Local version of session")])).unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            None,
+            &conv_with_source(
+                "session-001",
+                "local",
+                None,
+                now,
+                vec![msg(0, now, "Local version of session")],
+            ),
+        )
+        .unwrap();
 
-    storage.insert_conversation_tree(agent_id, None,
-        &conv_with_source("session-001", "laptop", Some("user@laptop.local"), now + 1000,
-            vec![msg(0, now + 1000, "Laptop version of session")])).unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            None,
+            &conv_with_source(
+                "session-001",
+                "laptop",
+                Some("user@laptop.local"),
+                now + 1000,
+                vec![msg(0, now + 1000, "Laptop version of session")],
+            ),
+        )
+        .unwrap();
 
-    storage.insert_conversation_tree(agent_id, None,
-        &conv_with_source("session-001", "server", Some("admin@server.local"), now + 2000,
-            vec![msg(0, now + 2000, "Server version of session")])).unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            None,
+            &conv_with_source(
+                "session-001",
+                "server",
+                Some("admin@server.local"),
+                now + 2000,
+                vec![msg(0, now + 2000, "Server version of session")],
+            ),
+        )
+        .unwrap();
 
     // Should have THREE entries (distinguished by source_id)
     let total: i64 = storage
@@ -919,7 +1168,10 @@ fn same_id_different_sources_are_distinct() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(total, 3, "should have 3 conversations with same external_id");
+    assert_eq!(
+        total, 3,
+        "should have 3 conversations with same external_id"
+    );
 
     // Verify each source has one entry
     let by_source: Vec<(String, i64)> = storage
@@ -956,7 +1208,9 @@ fn dedup_within_source_not_across() {
     std::fs::create_dir_all(&index_dir).unwrap();
     let mut t_index = TantivyIndex::open_or_create(&index_dir).expect("create index");
 
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop.local"))
         .expect("remote source");
@@ -970,7 +1224,11 @@ fn dedup_within_source_not_across() {
             "laptop",
             Some("user@laptop.local"),
             now + i * 1000,
-            vec![norm_msg(0, now + i * 1000, &format!("Laptop message {}", i))],
+            vec![norm_msg(
+                0,
+                now + i * 1000,
+                &format!("Laptop message {}", i),
+            )],
         );
         persist::persist_conversation(&mut storage, &mut t_index, &conv).unwrap();
     }
@@ -989,7 +1247,11 @@ fn dedup_within_source_not_across() {
             "laptop",
             Some("user@laptop.local"),
             now + i * 1000,
-            vec![norm_msg(0, now + i * 1000, &format!("Laptop message {}", i))],
+            vec![norm_msg(
+                0,
+                now + i * 1000,
+                &format!("Laptop message {}", i),
+            )],
         );
         persist::persist_conversation(&mut storage, &mut t_index, &conv).unwrap();
     }
@@ -1013,7 +1275,9 @@ fn composite_key_unique_constraint() {
     let db_path = tmp.path().join("unique.db");
     let mut storage = SqliteStorage::open(&db_path).expect("open db");
 
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop.local"))
         .expect("remote source");
@@ -1023,14 +1287,34 @@ fn composite_key_unique_constraint() {
     let now = 1700000000i64;
 
     // Insert first conversation
-    storage.insert_conversation_tree(agent_id, None,
-        &conv_with_source("unique-test", "local", None, now,
-            vec![msg(0, now, "First message")])).unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            None,
+            &conv_with_source(
+                "unique-test",
+                "local",
+                None,
+                now,
+                vec![msg(0, now, "First message")],
+            ),
+        )
+        .unwrap();
 
     // Insert same external_id from different source - should succeed
-    storage.insert_conversation_tree(agent_id, None,
-        &conv_with_source("unique-test", "laptop", Some("user@laptop.local"), now + 1000,
-            vec![msg(0, now + 1000, "Laptop message")])).unwrap();
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            None,
+            &conv_with_source(
+                "unique-test",
+                "laptop",
+                Some("user@laptop.local"),
+                now + 1000,
+                vec![msg(0, now + 1000, "Laptop message")],
+            ),
+        )
+        .unwrap();
 
     // Verify both exist
     let count: i64 = storage
@@ -1041,7 +1325,10 @@ fn composite_key_unique_constraint() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(count, 2, "should have 2 conversations with same external_id from different sources");
+    assert_eq!(
+        count, 2,
+        "should have 2 conversations with same external_id from different sources"
+    );
 
     // Verify composite uniqueness via SQL
     let unique_pairs: Vec<(String, String, String)> = storage
@@ -1083,7 +1370,9 @@ fn update_conversation_preserves_metadata() {
     std::fs::create_dir_all(&index_dir).unwrap();
     let mut t_index = TantivyIndex::open_or_create(&index_dir).expect("create index");
 
-    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::local())
+        .expect("local source");
     storage
         .upsert_source(&Source::remote("laptop", "user@laptop.local"))
         .expect("remote source");
@@ -1113,7 +1402,11 @@ fn update_conversation_preserves_metadata() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(initial_ended_at, now + 100, "ended_at should be time of last message");
+    assert_eq!(
+        initial_ended_at,
+        now + 100,
+        "ended_at should be time of last message"
+    );
 
     // Update with new message
     let conv_v2 = norm_conv_with_provenance(

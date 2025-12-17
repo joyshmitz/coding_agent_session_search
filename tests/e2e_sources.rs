@@ -161,7 +161,10 @@ paths = ["~/.claude/projects"]
         serde_json::from_slice(&output.stdout).expect("valid JSON output");
 
     // Should have a sources array
-    assert!(json.get("sources").is_some(), "Expected 'sources' field in JSON");
+    assert!(
+        json.get("sources").is_some(),
+        "Expected 'sources' field in JSON"
+    );
     let sources = json["sources"].as_array().expect("sources should be array");
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0]["name"], "laptop");
@@ -209,7 +212,10 @@ fn sources_add_no_test() {
 
     // Verify config was written
     let config_content = read_sources_config(&config_dir);
-    assert!(config_content.contains("myserver"), "Source not in config file");
+    assert!(
+        config_content.contains("myserver"),
+        "Source not in config file"
+    );
     assert!(
         config_content.contains("user@myserver.local"),
         "Host not in config file"
@@ -249,7 +255,10 @@ fn sources_add_explicit_paths() {
     );
 
     let config_content = read_sources_config(&config_dir);
-    assert!(config_content.contains("devbox"), "Source name not in config");
+    assert!(
+        config_content.contains("devbox"),
+        "Source name not in config"
+    );
     assert!(
         config_content.contains(".claude/projects"),
         "Path 1 not in config"
@@ -925,15 +934,11 @@ fn sources_multiple_add_list() {
         .expect("sources list command");
 
     assert!(output.status.success());
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("valid JSON");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
     let sources = json["sources"].as_array().expect("sources array");
 
     assert_eq!(sources.len(), 2);
-    let names: Vec<&str> = sources
-        .iter()
-        .filter_map(|s| s["name"].as_str())
-        .collect();
+    let names: Vec<&str> = sources.iter().filter_map(|s| s["name"].as_str()).collect();
     assert!(names.contains(&"laptop"));
     assert!(names.contains(&"workstation"));
 }

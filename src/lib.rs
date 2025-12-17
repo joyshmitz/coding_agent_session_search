@@ -1755,8 +1755,19 @@ async fn execute_cli(
                         source,
                     )?;
                 }
-                Commands::Stats { data_dir, json, source, by_source } => {
-                    run_stats(&data_dir, cli.db.clone(), json, source.as_deref(), by_source)?;
+                Commands::Stats {
+                    data_dir,
+                    json,
+                    source,
+                    by_source,
+                } => {
+                    run_stats(
+                        &data_dir,
+                        cli.db.clone(),
+                        json,
+                        source.as_deref(),
+                        by_source,
+                    )?;
                 }
                 Commands::Diag {
                     data_dir,
@@ -3646,7 +3657,9 @@ fn run_stats(
         None | Some(SourceFilter::All) => (String::new(), None),
         Some(SourceFilter::Local) => (" WHERE c.source_id = 'local'".to_string(), None),
         Some(SourceFilter::Remote) => (" WHERE c.source_id != 'local'".to_string(), None),
-        Some(SourceFilter::SourceId(id)) => (" WHERE c.source_id = ?".to_string(), Some(id.clone())),
+        Some(SourceFilter::SourceId(id)) => {
+            (" WHERE c.source_id = ?".to_string(), Some(id.clone()))
+        }
     };
 
     // Get counts and statistics with source filter
@@ -3689,13 +3702,19 @@ fn run_stats(
         "SELECT a.slug, COUNT(*) FROM conversations c JOIN agents a ON c.agent_id = a.id{source_where} GROUP BY a.slug ORDER BY COUNT(*) DESC"
     );
     let agent_rows: Vec<(String, i64)> = if let Some(ref param) = source_param {
-        let mut stmt = conn.prepare(&agent_sql).map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
-        stmt.query_map([param], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-            .map_err(|e| CliError::unknown(format!("query: {e}")))?
-            .filter_map(std::result::Result::ok)
-            .collect()
+        let mut stmt = conn
+            .prepare(&agent_sql)
+            .map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
+        stmt.query_map([param], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })
+        .map_err(|e| CliError::unknown(format!("query: {e}")))?
+        .filter_map(std::result::Result::ok)
+        .collect()
     } else {
-        let mut stmt = conn.prepare(&agent_sql).map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
+        let mut stmt = conn
+            .prepare(&agent_sql)
+            .map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
         stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
             .map_err(|e| CliError::unknown(format!("query: {e}")))?
             .filter_map(std::result::Result::ok)
@@ -3707,13 +3726,19 @@ fn run_stats(
         "SELECT w.path, COUNT(*) FROM conversations c JOIN workspaces w ON c.workspace_id = w.id{source_where} GROUP BY w.path ORDER BY COUNT(*) DESC LIMIT 10"
     );
     let ws_rows: Vec<(String, i64)> = if let Some(ref param) = source_param {
-        let mut stmt = conn.prepare(&ws_sql).map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
-        stmt.query_map([param], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
-            .map_err(|e| CliError::unknown(format!("query: {e}")))?
-            .filter_map(std::result::Result::ok)
-            .collect()
+        let mut stmt = conn
+            .prepare(&ws_sql)
+            .map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
+        stmt.query_map([param], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })
+        .map_err(|e| CliError::unknown(format!("query: {e}")))?
+        .filter_map(std::result::Result::ok)
+        .collect()
     } else {
-        let mut stmt = conn.prepare(&ws_sql).map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
+        let mut stmt = conn
+            .prepare(&ws_sql)
+            .map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
         stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
             .map_err(|e| CliError::unknown(format!("query: {e}")))?
             .filter_map(std::result::Result::ok)
@@ -3734,17 +3759,25 @@ fn run_stats(
 
     // Get per-source breakdown if requested (P3.7)
     let source_rows: Vec<(String, i64, i64)> = if by_source {
-        let mut stmt = conn.prepare(
-            "SELECT c.source_id, COUNT(DISTINCT c.id) as convs, COUNT(m.id) as msgs
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.source_id, COUNT(DISTINCT c.id) as convs, COUNT(m.id) as msgs
              FROM conversations c
              LEFT JOIN messages m ON m.conversation_id = c.id
              GROUP BY c.source_id
-             ORDER BY convs DESC"
-        ).map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
-        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))
-            .map_err(|e| CliError::unknown(format!("query: {e}")))?
-            .filter_map(std::result::Result::ok)
-            .collect()
+             ORDER BY convs DESC",
+            )
+            .map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| CliError::unknown(format!("query: {e}")))?
+        .filter_map(std::result::Result::ok)
+        .collect()
     } else {
         Vec::new()
     };
@@ -3770,13 +3803,16 @@ fn run_stats(
         // Add by_source breakdown if requested (P3.7)
         if by_source && !source_rows.is_empty() {
             payload["by_source"] = serde_json::json!(
-                source_rows.iter().map(|(s, convs, msgs)| {
-                    serde_json::json!({
-                        "source_id": s,
-                        "conversations": convs,
-                        "messages": msgs
+                source_rows
+                    .iter()
+                    .map(|(s, convs, msgs)| {
+                        serde_json::json!({
+                            "source_id": s,
+                            "conversations": convs,
+                            "messages": msgs
+                        })
                     })
-                }).collect::<Vec<_>>()
+                    .collect::<Vec<_>>()
             );
         }
 
@@ -6691,8 +6727,8 @@ fn run_timeline(
     group_by: TimelineGrouping,
     source: Option<String>,
 ) -> CliResult<()> {
-    use chrono::{Local, TimeZone, Utc};
     use crate::sources::provenance::SourceFilter;
+    use chrono::{Local, TimeZone, Utc};
     use rusqlite::Connection;
     use std::collections::HashMap;
 
@@ -6793,16 +6829,16 @@ fn run_timeline(
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok((
-                row.get::<_, i64>(0)?,                    // id
-                row.get::<_, String>(1)?,                 // agent
-                row.get::<_, Option<String>>(2)?,         // title
-                row.get::<_, i64>(3)?,                    // started_at
-                row.get::<_, Option<i64>>(4)?,            // ended_at
-                row.get::<_, String>(5)?,                 // source_path
-                row.get::<_, i64>(6)?,                    // message_count
-                row.get::<_, String>(7)?,                 // source_id (P3.2)
-                row.get::<_, Option<String>>(8)?,         // origin_host (P3.5)
-                row.get::<_, Option<String>>(9)?,         // origin_kind (P3.5)
+                row.get::<_, i64>(0)?,            // id
+                row.get::<_, String>(1)?,         // agent
+                row.get::<_, Option<String>>(2)?, // title
+                row.get::<_, i64>(3)?,            // started_at
+                row.get::<_, Option<i64>>(4)?,    // ended_at
+                row.get::<_, String>(5)?,         // source_path
+                row.get::<_, i64>(6)?,            // message_count
+                row.get::<_, String>(7)?,         // source_id (P3.2)
+                row.get::<_, Option<String>>(8)?, // origin_host (P3.5)
+                row.get::<_, Option<String>>(9)?, // origin_kind (P3.5)
             ))
         })
         .map_err(|e| CliError {
@@ -6814,8 +6850,18 @@ fn run_timeline(
         })?;
 
     #[allow(clippy::type_complexity)]
-    let mut sessions: Vec<(i64, String, Option<String>, i64, Option<i64>, String, i64, String, Option<String>, Option<String>)> =
-        Vec::new();
+    let mut sessions: Vec<(
+        i64,
+        String,
+        Option<String>,
+        i64,
+        Option<i64>,
+        String,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+    )> = Vec::new();
     for r in rows.flatten() {
         sessions.push(r);
     }
@@ -6825,21 +6871,34 @@ fn run_timeline(
             TimelineGrouping::None => {
                 let items: Vec<serde_json::Value> = sessions
                     .iter()
-                    .map(|(id, agent, title, started, ended, path, msg_count, source_id, origin_host, origin_kind)| {
-                        let duration = ended.map(|e| e - started);
-                        // Use "local" as default origin_kind if not in DB (backward compat)
-                        let kind = origin_kind.as_deref().unwrap_or("local");
-                        serde_json::json!({
-                            "id": id, "agent": agent, "title": title,
-                            "started_at": started, "ended_at": ended,
-                            "duration_seconds": duration, "source_path": path,
-                            "message_count": msg_count,
-                            // Provenance fields (P3.5)
-                            "source_id": source_id,
-                            "origin_kind": kind,
-                            "origin_host": origin_host,
-                        })
-                    })
+                    .map(
+                        |(
+                            id,
+                            agent,
+                            title,
+                            started,
+                            ended,
+                            path,
+                            msg_count,
+                            source_id,
+                            origin_host,
+                            origin_kind,
+                        )| {
+                            let duration = ended.map(|e| e - started);
+                            // Use "local" as default origin_kind if not in DB (backward compat)
+                            let kind = origin_kind.as_deref().unwrap_or("local");
+                            serde_json::json!({
+                                "id": id, "agent": agent, "title": title,
+                                "started_at": started, "ended_at": ended,
+                                "duration_seconds": duration, "source_path": path,
+                                "message_count": msg_count,
+                                // Provenance fields (P3.5)
+                                "source_id": source_id,
+                                "origin_kind": kind,
+                                "origin_host": origin_host,
+                            })
+                        },
+                    )
                     .collect();
                 serde_json::json!({
                     "range": { "start": start_ts, "end": end_ts },
@@ -6849,7 +6908,19 @@ fn run_timeline(
             }
             TimelineGrouping::Hour | TimelineGrouping::Day => {
                 let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-                for (id, agent, title, started, ended, path, msg_count, source_id, origin_host, origin_kind) in &sessions {
+                for (
+                    id,
+                    agent,
+                    title,
+                    started,
+                    ended,
+                    path,
+                    msg_count,
+                    source_id,
+                    origin_host,
+                    origin_kind,
+                ) in &sessions
+                {
                     let dt = Utc
                         .timestamp_opt(*started, 0)
                         .single()
@@ -6906,7 +6977,19 @@ fn run_timeline(
         }
 
         let mut current_group = String::new();
-        for (_id, agent, title, started, ended, _path, msg_count, source_id, origin_host, _origin_kind) in &sessions {
+        for (
+            _id,
+            agent,
+            title,
+            started,
+            ended,
+            _path,
+            msg_count,
+            source_id,
+            origin_host,
+            _origin_kind,
+        ) in &sessions
+        {
             let dt = Utc
                 .timestamp_opt(*started, 0)
                 .single()
@@ -7102,10 +7185,7 @@ fn run_sources_list(verbose: bool, json: bool) -> CliResult<()> {
             }
         } else {
             // Table output
-            println!(
-                "  {:15} {:8} {:30} {:>5}",
-                "NAME", "TYPE", "HOST", "PATHS"
-            );
+            println!("  {:15} {:8} {:30} {:>5}", "NAME", "TYPE", "HOST", "PATHS");
             println!("  {}", "-".repeat(62));
             for source in &config.sources {
                 let host = source.host.as_deref().unwrap_or("-");
@@ -7139,7 +7219,7 @@ fn run_sources_add(
     paths_arg: Vec<String>,
     no_test: bool,
 ) -> CliResult<()> {
-    use crate::sources::config::{get_preset_paths, Platform, SourceDefinition, SourcesConfig};
+    use crate::sources::config::{Platform, SourceDefinition, SourcesConfig, get_preset_paths};
     use crate::sources::provenance::SourceKind;
 
     // Parse URL to extract host
@@ -7361,13 +7441,15 @@ fn run_sources_remove(name: &str, purge: bool, skip_confirm: bool) -> CliResult<
         std::io::Write::flush(&mut std::io::stdout()).ok();
 
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).map_err(|e| CliError {
-            code: 14,
-            kind: "io",
-            message: format!("Failed to read input: {e}"),
-            hint: None,
-            retryable: false,
-        })?;
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| CliError {
+                code: 14,
+                kind: "io",
+                message: format!("Failed to read input: {e}"),
+                hint: None,
+                retryable: false,
+            })?;
 
         let input = input.trim().to_lowercase();
         if input != "y" && input != "yes" {
@@ -7475,10 +7557,7 @@ fn run_sources_doctor(source_filter: Option<&str>, json_output: bool) -> CliResu
         return Err(CliError {
             code: 13,
             kind: "not_found",
-            message: format!(
-                "Source '{}' not found",
-                source_filter.unwrap_or("unknown")
-            ),
+            message: format!("Source '{}' not found", source_filter.unwrap_or("unknown")),
             hint: Some("Run 'cass sources list' to see configured sources".into()),
             retryable: false,
         });
@@ -7524,14 +7603,14 @@ fn run_sources_doctor(source_filter: Option<&str>, json_output: bool) -> CliResu
 
     // Output results
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&all_diagnostics).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&all_diagnostics).unwrap()
+        );
     } else {
         for diag in &all_diagnostics {
             println!();
-            println!(
-                "{}",
-                format!("Checking source: {}", diag.source_id).bold()
-            );
+            println!("{}", format!("Checking source: {}", diag.source_id).bold());
             println!();
 
             for check in &diag.checks {
@@ -7905,11 +7984,7 @@ fn run_sources_sync(
                         "error": e.to_string()
                     }));
                 } else {
-                    println!(
-                        "  {} {}",
-                        "Error:".red().bold(),
-                        e.to_string().red()
-                    );
+                    println!("  {} {}", "Error:".red().bold(), e.to_string().red());
                 }
                 continue;
             }
@@ -8082,7 +8157,10 @@ fn run_mappings_list(source_name: &str, json_output: bool) -> CliResult<()> {
             println!("  No path mappings configured.");
             println!();
             println!("Add mappings with:");
-            println!("  cass sources mappings add {} --from /remote/path --to /local/path", source_name);
+            println!(
+                "  cass sources mappings add {} --from /remote/path --to /local/path",
+                source_name
+            );
         } else {
             for (idx, mapping) in source.path_mappings.iter().enumerate() {
                 println!("  [{}] {} → {}", idx, mapping.from, mapping.to);
@@ -8114,13 +8192,15 @@ fn run_mappings_add(
         retryable: false,
     })?;
 
-    let source = config.find_source_mut(source_name).ok_or_else(|| CliError {
-        code: 12,
-        kind: "source",
-        message: format!("Source '{}' not found", source_name),
-        hint: Some("Use 'cass sources list' to see available sources".into()),
-        retryable: false,
-    })?;
+    let source = config
+        .find_source_mut(source_name)
+        .ok_or_else(|| CliError {
+            code: 12,
+            kind: "source",
+            message: format!("Source '{}' not found", source_name),
+            hint: Some("Use 'cass sources list' to see available sources".into()),
+            retryable: false,
+        })?;
 
     // Create the mapping
     let mapping = if let Some(agent_list) = agents {
@@ -8130,9 +8210,10 @@ fn run_mappings_add(
     };
 
     // Check for duplicates
-    let already_exists = source.path_mappings.iter().any(|m| {
-        m.from == mapping.from && m.to == mapping.to && m.agents == mapping.agents
-    });
+    let already_exists = source
+        .path_mappings
+        .iter()
+        .any(|m| m.from == mapping.from && m.to == mapping.to && m.agents == mapping.agents);
 
     if already_exists {
         return Err(CliError {
@@ -8178,13 +8259,15 @@ fn run_mappings_remove(source_name: &str, index: usize) -> CliResult<()> {
         retryable: false,
     })?;
 
-    let source = config.find_source_mut(source_name).ok_or_else(|| CliError {
-        code: 12,
-        kind: "source",
-        message: format!("Source '{}' not found", source_name),
-        hint: Some("Use 'cass sources list' to see available sources".into()),
-        retryable: false,
-    })?;
+    let source = config
+        .find_source_mut(source_name)
+        .ok_or_else(|| CliError {
+            code: 12,
+            kind: "source",
+            message: format!("Source '{}' not found", source_name),
+            hint: Some("Use 'cass sources list' to see available sources".into()),
+            retryable: false,
+        })?;
 
     if index >= source.path_mappings.len() {
         return Err(CliError {

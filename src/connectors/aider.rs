@@ -214,7 +214,12 @@ mod tests {
 
         let files = AiderConnector::find_chat_files(&[dir.path()]);
         assert_eq!(files.len(), 1);
-        assert!(files[0].to_str().unwrap().contains(".aider.chat.history.md"));
+        assert!(
+            files[0]
+                .to_str()
+                .unwrap()
+                .contains(".aider.chat.history.md")
+        );
     }
 
     #[test]
@@ -382,10 +387,7 @@ Second assistant response"#;
         let connector = AiderConnector::new();
         let conv = connector.parse_chat_history(&history_file).unwrap();
 
-        assert_eq!(
-            conv.external_id,
-            Some(".aider.chat.history.md".to_string())
-        );
+        assert_eq!(conv.external_id, Some(".aider.chat.history.md".to_string()));
     }
 
     #[test]

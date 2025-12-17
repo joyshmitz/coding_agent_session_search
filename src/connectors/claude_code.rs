@@ -409,7 +409,10 @@ mod tests {
         let ctx = ScanContext::local_default(claude_dir.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        assert_eq!(convs[0].messages[0].author, Some("claude-3-opus".to_string()));
+        assert_eq!(
+            convs[0].messages[0].author,
+            Some("claude-3-opus".to_string())
+        );
     }
 
     #[test]
@@ -967,9 +970,8 @@ mod tests {
         // Create two session files
         for i in 1..=3 {
             let session_file = claude_dir.join(format!("session{}.jsonl", i));
-            let content = format!(
-                r#"{{"type":"user","message":{{"role":"user","content":"Message {i}"}}}}"#
-            );
+            let content =
+                format!(r#"{{"type":"user","message":{{"role":"user","content":"Message {i}"}}}}"#);
             fs::write(&session_file, content).unwrap();
         }
 

@@ -1054,7 +1054,7 @@ fn migration_from_v3_creates_sources_table() {
 // -------------------------------------------------------------------------
 
 use coding_agent_search::storage::sqlite::{
-    MigrationError, CURRENT_SCHEMA_VERSION, cleanup_old_backups, create_backup, is_user_data_file,
+    CURRENT_SCHEMA_VERSION, MigrationError, cleanup_old_backups, create_backup, is_user_data_file,
 };
 
 #[test]
@@ -1122,7 +1122,10 @@ fn create_backup_returns_none_for_nonexistent_file() {
     let db_path = tmp.path().join("nonexistent.db");
 
     let backup = create_backup(&db_path).expect("create_backup");
-    assert!(backup.is_none(), "backup should be None for nonexistent file");
+    assert!(
+        backup.is_none(),
+        "backup should be None for nonexistent file"
+    );
 }
 
 #[test]
@@ -1304,7 +1307,10 @@ fn open_or_rebuild_triggers_rebuild_for_future_version() {
     let result = SqliteStorage::open_or_rebuild(&db_path);
 
     match result {
-        Err(MigrationError::RebuildRequired { reason, backup_path }) => {
+        Err(MigrationError::RebuildRequired {
+            reason,
+            backup_path,
+        }) => {
             assert!(
                 reason.contains("999"),
                 "reason should mention future version: {}",
@@ -1576,11 +1582,7 @@ fn timeline_source_filter_specific_source() {
         .map(|r| r.unwrap())
         .collect();
 
-    assert_eq!(
-        laptop_only.len(),
-        2,
-        "should return 2 laptop conversations"
-    );
+    assert_eq!(laptop_only.len(), 2, "should return 2 laptop conversations");
     assert!(laptop_only.contains(&"laptop-1".to_string()));
     assert!(laptop_only.contains(&"laptop-2".to_string()));
     assert!(
@@ -1673,7 +1675,12 @@ fn timeline_json_includes_origin_kind_field() {
         .insert_conversation_tree(
             agent_id,
             Some(ws_id),
-            &sample_conv_with_source("remote-conv", "laptop", now + 1000, vec![msg(0, now + 1000)]),
+            &sample_conv_with_source(
+                "remote-conv",
+                "laptop",
+                now + 1000,
+                vec![msg(0, now + 1000)],
+            ),
         )
         .unwrap();
 
@@ -1691,7 +1698,8 @@ fn timeline_json_includes_origin_kind_field() {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                row.get::<_, Option<String>>(2)?.unwrap_or_else(|| "local".into()),
+                row.get::<_, Option<String>>(2)?
+                    .unwrap_or_else(|| "local".into()),
             ))
         })
         .unwrap()
@@ -1701,8 +1709,14 @@ fn timeline_json_includes_origin_kind_field() {
     assert_eq!(results.len(), 2, "should have 2 conversations");
 
     // Find local and remote results
-    let local = results.iter().find(|(id, _, _)| id == "local").expect("local conv");
-    let remote = results.iter().find(|(id, _, _)| id == "laptop").expect("remote conv");
+    let local = results
+        .iter()
+        .find(|(id, _, _)| id == "local")
+        .expect("local conv");
+    let remote = results
+        .iter()
+        .find(|(id, _, _)| id == "laptop")
+        .expect("remote conv");
 
     // Verify origin_kind is correct
     assert_eq!(local.2, "local", "local source should have kind 'local'");
@@ -1751,9 +1765,7 @@ fn timeline_json_includes_origin_host_field() {
     // Query origin_host field
     let results: Vec<(String, Option<String>)> = storage
         .raw()
-        .prepare(
-            "SELECT c.source_id, c.origin_host FROM conversations c ORDER BY c.source_id",
-        )
+        .prepare("SELECT c.source_id, c.origin_host FROM conversations c ORDER BY c.source_id")
         .unwrap()
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
@@ -1762,8 +1774,14 @@ fn timeline_json_includes_origin_host_field() {
 
     assert_eq!(results.len(), 2, "should have 2 conversations");
 
-    let local = results.iter().find(|(id, _)| id == "local").expect("local conv");
-    let remote = results.iter().find(|(id, _)| id == "work").expect("remote conv");
+    let local = results
+        .iter()
+        .find(|(id, _)| id == "local")
+        .expect("local conv");
+    let remote = results
+        .iter()
+        .find(|(id, _)| id == "work")
+        .expect("remote conv");
 
     // Local should have null origin_host
     assert!(
@@ -1795,7 +1813,9 @@ fn timeline_json_grouped_output_includes_provenance() {
         .ensure_workspace(PathBuf::from("/workspace/demo").as_path(), Some("Demo"))
         .unwrap();
 
-    storage.upsert_source(&Source::local()).expect("upsert local");
+    storage
+        .upsert_source(&Source::local())
+        .expect("upsert local");
     storage
         .upsert_source(&Source::remote("server", "server.example.com"))
         .expect("upsert remote");

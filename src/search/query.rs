@@ -3720,7 +3720,11 @@ mod tests {
         ];
 
         let deduped = deduplicate_hits(hits);
-        assert_eq!(deduped.len(), 2, "same content from different sources should not dedupe");
+        assert_eq!(
+            deduped.len(),
+            2,
+            "same content from different sources should not dedupe"
+        );
         assert!(deduped.iter().any(|h| h.source_id == "local"));
         assert!(deduped.iter().any(|h| h.source_id == "work-laptop"));
     }
@@ -4616,7 +4620,10 @@ mod tests {
                 hit.source_id
             );
         }
-        assert!(!hits_id.is_empty(), "Should have found results for source_id=local");
+        assert!(
+            !hits_id.is_empty(),
+            "Should have found results for source_id=local"
+        );
 
         Ok(())
     }
@@ -5298,7 +5305,11 @@ mod tests {
         filters.created_to = Some(250);
 
         let hits = client.search("needle", filters, 10, 0)?;
-        assert_eq!(hits.len(), 1, "Should match only one conv (codex + alpha + ts=100)");
+        assert_eq!(
+            hits.len(),
+            1,
+            "Should match only one conv (codex + alpha + ts=100)"
+        );
         assert_eq!(hits[0].agent, "codex");
         assert_eq!(hits[0].workspace, "/ws/alpha");
         assert!(hits[0].content.contains("alpha codex"));
@@ -5417,11 +5428,17 @@ mod tests {
         // Same filters should always produce same shard name
         let shard1_first = client.shard_name(&filters1);
         let shard1_second = client.shard_name(&filters1);
-        assert_eq!(shard1_first, shard1_second, "Same filters should produce same shard name");
+        assert_eq!(
+            shard1_first, shard1_second,
+            "Same filters should produce same shard name"
+        );
 
         // Different filters produce different shard names
         let shard2 = client.shard_name(&filters2);
-        assert_ne!(shard1_first, shard2, "Different filters should produce different shard names");
+        assert_ne!(
+            shard1_first, shard2,
+            "Different filters should produce different shard names"
+        );
 
         // Shard name is deterministic
         assert_eq!(shard2, client.shard_name(&filters2));
@@ -5525,7 +5542,10 @@ mod tests {
 
         // Short prefix "auth" should match "authentication" and "authorization"
         let result = client.search_with_fallback("auth", SearchFilters::default(), 10, 0, 100)?;
-        assert!(!result.hits.is_empty(), "Short prefix should match via prefix search");
+        assert!(
+            !result.hits.is_empty(),
+            "Short prefix should match via prefix search"
+        );
         assert!(result.hits[0].content.contains("auth"));
 
         Ok(())
@@ -5598,11 +5618,17 @@ mod tests {
         let hits = client.search("JWT authentication", SearchFilters::default(), 10, 0)?;
         assert!(!hits.is_empty(), "Should find JWT authentication");
         assert!(hits.iter().any(|h| h.agent == "claude_code"));
-        assert!(hits.iter().any(|h| h.snippet.contains("JWT") || h.snippet.contains("authentication")));
+        assert!(
+            hits.iter()
+                .any(|h| h.snippet.contains("JWT") || h.snippet.contains("authentication"))
+        );
 
         // Search for assistant response content
         let hits = client.search("required packages", SearchFilters::default(), 10, 0)?;
-        assert!(!hits.is_empty(), "Should find 'required packages' in assistant response");
+        assert!(
+            !hits.is_empty(),
+            "Should find 'required packages' in assistant response"
+        );
 
         // Search for user question about refresh tokens
         let hits = client.search("refresh token", SearchFilters::default(), 10, 0)?;
@@ -5644,7 +5670,13 @@ mod tests {
         index.commit()?;
 
         let client = SearchClient::open(dir.path(), None)?.expect("index present");
-        let result = client.search_with_fallback("sorting algorithm", SearchFilters::default(), 10, 0, 100)?;
+        let result = client.search_with_fallback(
+            "sorting algorithm",
+            SearchFilters::default(),
+            10,
+            0,
+            100,
+        )?;
 
         // Both should be returned (different source_paths mean different conversations)
         // but if they have exact same content from same source, dedup should apply

@@ -845,14 +845,14 @@ impl ThemePalette {
             bg: Color::Rgb(40, 42, 54),            // Background
             fg: Color::Rgb(248, 248, 242),         // Foreground
             surface: Color::Rgb(68, 71, 90),       // Current Line
-            hint: Color::Rgb(155, 165, 200),        // Lightened from Dracula comment for WCAG AA-large on surface
-            border: Color::Rgb(68, 71, 90),        // Current Line
-            user: Color::Rgb(80, 250, 123),        // Green
-            agent: Color::Rgb(189, 147, 249),      // Purple
-            tool: Color::Rgb(255, 184, 108),       // Orange
-            system: Color::Rgb(241, 250, 140),     // Yellow
-            stripe_even: Color::Rgb(40, 42, 54),   // Background
-            stripe_odd: Color::Rgb(48, 50, 64),    // Slightly lighter
+            hint: Color::Rgb(155, 165, 200), // Lightened from Dracula comment for WCAG AA-large on surface
+            border: Color::Rgb(68, 71, 90),  // Current Line
+            user: Color::Rgb(80, 250, 123),  // Green
+            agent: Color::Rgb(189, 147, 249), // Purple
+            tool: Color::Rgb(255, 184, 108), // Orange
+            system: Color::Rgb(241, 250, 140), // Yellow
+            stripe_even: Color::Rgb(40, 42, 54), // Background
+            stripe_odd: Color::Rgb(48, 50, 64), // Slightly lighter
         }
     }
 
@@ -866,7 +866,7 @@ impl ThemePalette {
             bg: Color::Rgb(46, 52, 64),        // Nord0 (polar night)
             fg: Color::Rgb(236, 239, 244),     // Nord6 (snow storm)
             surface: Color::Rgb(59, 66, 82),   // Nord1
-            hint: Color::Rgb(145, 155, 180),    // Lightened from Nord3 for WCAG AA-large on surface
+            hint: Color::Rgb(145, 155, 180),   // Lightened from Nord3 for WCAG AA-large on surface
             border: Color::Rgb(67, 76, 94),    // Nord2
             user: Color::Rgb(163, 190, 140),   // Nord14 (aurora green)
             agent: Color::Rgb(136, 192, 208),  // Nord8 (frost cyan)

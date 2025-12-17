@@ -120,7 +120,7 @@ impl PathMapping {
     /// Check if this mapping applies to a given agent.
     pub fn applies_to_agent(&self, agent: Option<&str>) -> bool {
         match (&self.agents, agent) {
-            (None, _) => true, // No filter means applies to all
+            (None, _) => true,       // No filter means applies to all
             (Some(_), None) => true, // No agent specified means match all mappings
             (Some(agents), Some(a)) => agents.iter().any(|allowed| allowed == a),
         }
@@ -546,9 +546,10 @@ mod tests {
     #[test]
     fn test_path_rewriting() {
         let mut source = SourceDefinition::local("test");
-        source
-            .path_mappings
-            .push(PathMapping::new("/home/user/projects", "/Users/me/projects"));
+        source.path_mappings.push(PathMapping::new(
+            "/home/user/projects",
+            "/Users/me/projects",
+        ));
         source
             .path_mappings
             .push(PathMapping::new("/home/user", "/Users/me"));
@@ -655,10 +656,7 @@ mod tests {
         assert_eq!(deserialized.sources[0].name, "laptop");
         assert_eq!(deserialized.sources[0].sync_schedule, SyncSchedule::Daily);
         assert_eq!(deserialized.sources[0].path_mappings.len(), 1);
-        assert_eq!(
-            deserialized.sources[0].path_mappings[0].from,
-            "/home/user"
-        );
+        assert_eq!(deserialized.sources[0].path_mappings[0].from, "/home/user");
         assert_eq!(deserialized.sources[0].path_mappings[0].to, "/Users/me");
     }
 

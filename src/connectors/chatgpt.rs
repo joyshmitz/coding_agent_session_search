@@ -655,7 +655,12 @@ mod tests {
 
         let result = connector.decrypt_file(&data);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No encryption key"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No encryption key")
+        );
     }
 
     #[test]
@@ -681,7 +686,12 @@ mod tests {
 
         let result = connector.decrypt_file(&data);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Decryption failed"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Decryption failed")
+        );
     }
 
     // =========================================================================

@@ -413,7 +413,12 @@ mod tests {
     #[test]
     fn rollout_files_finds_nested_rollouts() {
         let dir = TempDir::new().unwrap();
-        let nested = dir.path().join("sessions").join("2025").join("12").join("17");
+        let nested = dir
+            .path()
+            .join("sessions")
+            .join("2025")
+            .join("12")
+            .join("17");
         fs::create_dir_all(&nested).unwrap();
 
         let rollout = nested.join("rollout-nested.jsonl");
@@ -556,7 +561,10 @@ mod tests {
         let convs = connector.scan(&ctx).unwrap();
 
         assert_eq!(convs.len(), 1);
-        assert_eq!(convs[0].workspace, Some(PathBuf::from("/home/user/project")));
+        assert_eq!(
+            convs[0].workspace,
+            Some(PathBuf::from("/home/user/project"))
+        );
     }
 
     #[test]
@@ -716,7 +724,11 @@ not valid json at all
                 {"role": "assistant", "content": "   "}
             ]
         });
-        fs::write(sessions.join("rollout-empty-legacy.json"), content.to_string()).unwrap();
+        fs::write(
+            sessions.join("rollout-empty-legacy.json"),
+            content.to_string(),
+        )
+        .unwrap();
 
         let connector = CodexConnector::new();
         let ctx = ScanContext::local_default(codex_dir.clone(), None);
@@ -849,7 +861,11 @@ not valid json at all
     fn scan_uses_relative_path_as_external_id() {
         let dir = TempDir::new().unwrap();
         let codex_dir = dir.path().join(".codex");
-        let sessions = codex_dir.join("sessions").join("2025").join("12").join("17");
+        let sessions = codex_dir
+            .join("sessions")
+            .join("2025")
+            .join("12")
+            .join("17");
         fs::create_dir_all(&sessions).unwrap();
 
         let content = r#"{"type":"response_item","payload":{"role":"user","content":"Test"}}
@@ -1034,7 +1050,11 @@ not valid json at all
                 ]
             }
         });
-        fs::write(sessions.join("rollout-array.jsonl"), content.to_string() + "\n").unwrap();
+        fs::write(
+            sessions.join("rollout-array.jsonl"),
+            content.to_string() + "\n",
+        )
+        .unwrap();
 
         let connector = CodexConnector::new();
         let ctx = ScanContext::local_default(codex_dir.clone(), None);

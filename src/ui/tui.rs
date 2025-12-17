@@ -1894,14 +1894,18 @@ fn chips_for_filters(filters: &SearchFilters, palette: ThemePalette) -> Vec<Span
         SourceFilter::Remote => {
             spans.push(Span::styled(
                 "[src:remote]".to_string(),
-                Style::default().fg(palette.accent_alt).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(palette.accent_alt)
+                    .add_modifier(Modifier::ITALIC),
             ));
             spans.push(Span::raw(" ".to_string()));
         }
         SourceFilter::SourceId(id) => {
             spans.push(Span::styled(
                 format!("[src:{}]", id),
-                Style::default().fg(palette.accent_alt).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(palette.accent_alt)
+                    .add_modifier(Modifier::ITALIC),
             ));
             spans.push(Span::raw(" ".to_string()));
         }
@@ -3151,7 +3155,8 @@ pub fn run_tui(
                                 }
                                 // P4.1: Source badge for remote sessions
                                 if hit.source_id != "local" {
-                                    let source_label = hit.origin_host.as_deref().unwrap_or(&hit.source_id);
+                                    let source_label =
+                                        hit.origin_host.as_deref().unwrap_or(&hit.source_id);
                                     location_spans.push(Span::styled(
                                         format!(" [{}]", source_label),
                                         Style::default()
@@ -3761,7 +3766,8 @@ pub fn run_tui(
                         }
                     }
 
-                    let p_str = render_progress(p, &progress_history, &throughput_history, density_mode);
+                    let p_str =
+                        render_progress(p, &progress_history, &throughput_history, density_mode);
                     if !p_str.is_empty() {
                         footer_parts.push(p_str);
                     }
@@ -4086,7 +4092,14 @@ pub fn run_tui(
                                 Style::default().fg(palette.fg)
                             };
                             ListItem::new(Line::from(vec![
-                                Span::styled(if i == source_filter_menu_selection { "→ " } else { "  " }, style),
+                                Span::styled(
+                                    if i == source_filter_menu_selection {
+                                        "→ "
+                                    } else {
+                                        "  "
+                                    },
+                                    style,
+                                ),
                                 Span::styled(label.to_string(), style),
                             ]))
                         })
@@ -4101,7 +4114,14 @@ pub fn run_tui(
                                 Style::default().fg(palette.fg)
                             };
                             ListItem::new(Line::from(vec![
-                                Span::styled(if idx == source_filter_menu_selection { "→ " } else { "  " }, style),
+                                Span::styled(
+                                    if idx == source_filter_menu_selection {
+                                        "→ "
+                                    } else {
+                                        "  "
+                                    },
+                                    style,
+                                ),
                                 Span::styled(format!("📡 {}", id), style),
                             ]))
                         }))
@@ -4662,10 +4682,12 @@ pub fn run_tui(
                         status = "Source filter menu closed".to_string();
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        source_filter_menu_selection = source_filter_menu_selection.saturating_sub(1);
+                        source_filter_menu_selection =
+                            source_filter_menu_selection.saturating_sub(1);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        source_filter_menu_selection = (source_filter_menu_selection + 1).min(total_items.saturating_sub(1));
+                        source_filter_menu_selection =
+                            (source_filter_menu_selection + 1).min(total_items.saturating_sub(1));
                     }
                     KeyCode::Enter => {
                         use crate::sources::provenance::SourceFilter;
@@ -5585,7 +5607,8 @@ pub fn run_tui(
                                 } else {
                                     Vec::new()
                                 };
-                                status = "Source filter menu (↑/↓ select, Enter apply, Esc close)".into();
+                                status = "Source filter menu (↑/↓ select, Enter apply, Esc close)"
+                                    .into();
                             }
                             needs_draw = true;
                         }
@@ -6539,7 +6562,10 @@ pub fn run_tui(
                                 // Start staggered reveal animation for fallback results (bead 013)
                                 if animations_enabled && !panes.is_empty() {
                                     reveal_anim_start = Some(Instant::now());
-                                } else if !animations_enabled && !panes.is_empty() && ui_metrics_enabled {
+                                } else if !animations_enabled
+                                    && !panes.is_empty()
+                                    && ui_metrics_enabled
+                                {
                                     // UI metrics: log animation opt-out (bead 020)
                                     tracing::debug!(
                                         target: "ui_metrics",
@@ -8248,7 +8274,8 @@ mod tests {
                 history
                     .iter()
                     .map(|v| {
-                        let idx = ((*v as usize * (levels.len() - 1)) / max_val).min(levels.len() - 1);
+                        let idx =
+                            ((*v as usize * (levels.len() - 1)) / max_val).min(levels.len() - 1);
                         levels[idx]
                     })
                     .collect()

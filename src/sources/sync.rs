@@ -322,8 +322,8 @@ impl SyncEngine {
 
         let mut cmd = Command::new("rsync");
         cmd.args([
-            "-avz",     // Archive, verbose, compress
-            "--stats",  // Show transfer stats for parsing
+            "-avz",      // Archive, verbose, compress
+            "--stats",   // Show transfer stats for parsing
             "--partial", // Keep partial transfers for resume
             "--timeout",
             &self.transfer_timeout.to_string(),
@@ -528,9 +528,8 @@ impl SyncStatus {
         let path = Self::status_path(data_dir);
         if path.exists() {
             let content = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&content).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-            })
+            serde_json::from_str(&content)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         } else {
             Ok(Self::default())
         }
@@ -600,7 +599,10 @@ mod tests {
 
     #[test]
     fn test_path_to_safe_dirname() {
-        assert_eq!(path_to_safe_dirname("~/.claude/projects"), ".claude_projects");
+        assert_eq!(
+            path_to_safe_dirname("~/.claude/projects"),
+            ".claude_projects"
+        );
         assert_eq!(path_to_safe_dirname("/home/user/data"), "home_user_data");
         assert_eq!(path_to_safe_dirname("~/"), "root"); // Empty after trimming becomes "root"
         assert_eq!(path_to_safe_dirname(""), "root");
@@ -682,10 +684,7 @@ Total transferred file size: 1,234 bytes
     fn test_sync_engine_mirror_dir() {
         let engine = SyncEngine::new(Path::new("/data/cass"));
         let mirror = engine.mirror_dir("laptop");
-        assert_eq!(
-            mirror,
-            PathBuf::from("/data/cass/remotes/laptop/mirror")
-        );
+        assert_eq!(mirror, PathBuf::from("/data/cass/remotes/laptop/mirror"));
     }
 
     #[test]

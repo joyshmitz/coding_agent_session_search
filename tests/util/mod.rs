@@ -540,7 +540,11 @@ impl MultiSourceConversationBuilder {
         }
     }
 
-    pub fn remote(agent_slug: impl Into<String>, source_id: impl Into<String>, host: impl Into<String>) -> Self {
+    pub fn remote(
+        agent_slug: impl Into<String>,
+        source_id: impl Into<String>,
+        host: impl Into<String>,
+    ) -> Self {
         let sid = source_id.into();
         Self {
             inner: ConversationFixtureBuilder::new(agent_slug),
@@ -621,7 +625,10 @@ pub mod multi_source_fixtures {
             .base_ts(1_702_299_600_000) // 2025-12-11T14:00:00Z
             .messages(3)
             .with_content(0, "Add rate limiting to the API endpoints")
-            .with_content(1, "I'll implement rate limiting using a token bucket algorithm.")
+            .with_content(
+                1,
+                "I'll implement rate limiting using a token bucket algorithm.",
+            )
     }
 
     /// Remote laptop session on myapp project (same workspace, different path).

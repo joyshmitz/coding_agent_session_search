@@ -451,15 +451,16 @@ pub fn build_scan_roots(storage: &SqliteStorage, data_dir: &Path) -> Vec<ScanRoo
                 };
 
                 // Parse platform from source
-                let platform = source
-                    .platform
-                    .as_deref()
-                    .and_then(|p| match p.to_lowercase().as_str() {
-                        "macos" => Some(Platform::Macos),
-                        "linux" => Some(Platform::Linux),
-                        "windows" => Some(Platform::Windows),
-                        _ => None,
-                    });
+                let platform =
+                    source
+                        .platform
+                        .as_deref()
+                        .and_then(|p| match p.to_lowercase().as_str() {
+                            "macos" => Some(Platform::Macos),
+                            "linux" => Some(Platform::Linux),
+                            "windows" => Some(Platform::Windows),
+                            _ => None,
+                        });
 
                 // Parse workspace rewrites from config_json
                 // Format: array of {from, to, agents?} objects
@@ -1337,7 +1338,10 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
 
         let cass = conv.metadata.get("cass").expect("cass field should exist");
         let origin_obj = cass.get("origin").expect("origin should exist");
-        assert_eq!(origin_obj.get("source_id").unwrap().as_str(), Some("laptop"));
+        assert_eq!(
+            origin_obj.get("source_id").unwrap().as_str(),
+            Some("laptop")
+        );
         assert_eq!(origin_obj.get("kind").unwrap().as_str(), Some("ssh"));
         assert_eq!(
             origin_obj.get("host").unwrap().as_str(),
@@ -1493,11 +1497,12 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             Some(PathBuf::from("/home/user/projects/app"))
         );
         // No workspace_original in metadata
-        assert!(conv
-            .metadata
-            .get("cass")
-            .and_then(|c| c.get("workspace_original"))
-            .is_none());
+        assert!(
+            conv.metadata
+                .get("cass")
+                .and_then(|c| c.get("workspace_original"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1577,11 +1582,12 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         // Workspace unchanged - no matching prefix
         assert_eq!(conv.workspace, Some(PathBuf::from("/opt/other/path")));
         // No workspace_original since nothing was rewritten
-        assert!(conv
-            .metadata
-            .get("cass")
-            .and_then(|c| c.get("workspace_original"))
-            .is_none());
+        assert!(
+            conv.metadata
+                .get("cass")
+                .and_then(|c| c.get("workspace_original"))
+                .is_none()
+        );
     }
 
     #[test]

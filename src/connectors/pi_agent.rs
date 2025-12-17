@@ -481,11 +481,7 @@ mod tests {
         fs::create_dir_all(&sessions).unwrap();
 
         // Valid session file format: <timestamp>_<uuid>.jsonl
-        fs::write(
-            sessions.join("2025-12-01T10-00-00_abc123.jsonl"),
-            "{}",
-        )
-        .unwrap();
+        fs::write(sessions.join("2025-12-01T10-00-00_abc123.jsonl"), "{}").unwrap();
 
         let files = PiAgentConnector::session_files(dir.path());
         assert_eq!(files.len(), 1);
@@ -618,7 +614,10 @@ mod tests {
         let convs = connector.scan(&ctx).unwrap();
 
         assert_eq!(convs[0].messages[0].role, "assistant");
-        assert_eq!(convs[0].messages[0].author, Some("claude-3-opus".to_string()));
+        assert_eq!(
+            convs[0].messages[0].author,
+            Some("claude-3-opus".to_string())
+        );
     }
 
     #[test]
@@ -983,9 +982,7 @@ mod tests {
         let storage = create_pi_agent_storage(&dir);
 
         // Only session header, no messages
-        let lines = vec![
-            r#"{"type":"session","id":"empty-session"}"#,
-        ];
+        let lines = vec![r#"{"type":"session","id":"empty-session"}"#];
         write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
 
         let connector = PiAgentConnector::new();
@@ -1051,7 +1048,9 @@ mod tests {
         let ctx = ScanContext::local_default(storage.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        let expected_path = storage.join("sessions").join("2025-12-01T10-00-00_uuid1.jsonl");
+        let expected_path = storage
+            .join("sessions")
+            .join("2025-12-01T10-00-00_uuid1.jsonl");
         assert_eq!(convs[0].source_path, expected_path);
     }
 
@@ -1071,9 +1070,6 @@ mod tests {
         let ctx = ScanContext::local_default(storage.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        assert_eq!(
-            convs[0].messages[0].author,
-            Some("gpt-4-turbo".to_string())
-        );
+        assert_eq!(convs[0].messages[0].author, Some("gpt-4-turbo".to_string()));
     }
 }

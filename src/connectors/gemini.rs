@@ -524,7 +524,9 @@ mod tests {
             role: "user".into(),
             author: None,
             created_at: None,
-            content: "Working directory: /tmp/wrong\n# AGENTS.md instructions for /data/projects/right".into(),
+            content:
+                "Working directory: /tmp/wrong\n# AGENTS.md instructions for /data/projects/right"
+                    .into(),
             extra: serde_json::Value::Null,
             snippets: vec![],
         }];
@@ -747,7 +749,8 @@ mod tests {
         let chats_dir = hash_dir.join("chats");
         fs::create_dir_all(&chats_dir).unwrap();
 
-        let session_json = r#"{"sessionId": "s1", "messages": [{"type": "user", "content": "Hi"}]}"#;
+        let session_json =
+            r#"{"sessionId": "s1", "messages": [{"type": "user", "content": "Hi"}]}"#;
         fs::write(chats_dir.join("session-1.json"), session_json).unwrap();
 
         let connector = GeminiConnector::new();
@@ -776,7 +779,10 @@ mod tests {
         let convs = connector.scan(&ctx).unwrap();
 
         assert_eq!(
-            convs[0].metadata.get("project_hash").and_then(|v| v.as_str()),
+            convs[0]
+                .metadata
+                .get("project_hash")
+                .and_then(|v| v.as_str()),
             Some("myproject123")
         );
     }
@@ -925,7 +931,8 @@ mod tests {
         fs::create_dir_all(&chats_dir).unwrap();
 
         // No workspace info in content
-        let session_json = r#"{"sessionId": "s1", "messages": [{"type": "user", "content": "Hi"}]}"#;
+        let session_json =
+            r#"{"sessionId": "s1", "messages": [{"type": "user", "content": "Hi"}]}"#;
         fs::write(chats_dir.join("session-1.json"), session_json).unwrap();
 
         let connector = GeminiConnector::new();
@@ -933,7 +940,13 @@ mod tests {
         let convs = connector.scan(&ctx).unwrap();
 
         // Falls back to hash directory
-        assert!(convs[0].workspace.as_ref().unwrap().ends_with("project_hash"));
+        assert!(
+            convs[0]
+                .workspace
+                .as_ref()
+                .unwrap()
+                .ends_with("project_hash")
+        );
     }
 
     #[test]

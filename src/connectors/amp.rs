@@ -376,13 +376,19 @@ mod tests {
     #[test]
     fn infer_workspace_from_repo_key() {
         let val = json!({"repo": "/home/user/repo"});
-        assert_eq!(infer_workspace(&val), Some(PathBuf::from("/home/user/repo")));
+        assert_eq!(
+            infer_workspace(&val),
+            Some(PathBuf::from("/home/user/repo"))
+        );
     }
 
     #[test]
     fn infer_workspace_from_root_key() {
         let val = json!({"root": "/home/user/root"});
-        assert_eq!(infer_workspace(&val), Some(PathBuf::from("/home/user/root")));
+        assert_eq!(
+            infer_workspace(&val),
+            Some(PathBuf::from("/home/user/root"))
+        );
     }
 
     #[test]
@@ -842,10 +848,7 @@ mod tests {
         let ctx = ScanContext::local_default(amp_dir.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        assert_eq!(
-            convs[0].workspace,
-            Some(PathBuf::from("/msg/workspace"))
-        );
+        assert_eq!(convs[0].workspace, Some(PathBuf::from("/msg/workspace")));
     }
 
     #[test]

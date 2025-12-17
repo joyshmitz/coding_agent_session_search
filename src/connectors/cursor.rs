@@ -617,7 +617,11 @@ mod tests {
             });
 
             let msg = CursorConnector::parse_bubble(&bubble, 0).unwrap();
-            assert_eq!(msg.role, expected_role, "Failed for input role: {}", input_role);
+            assert_eq!(
+                msg.role, expected_role,
+                "Failed for input role: {}",
+                input_role
+            );
         }
     }
 

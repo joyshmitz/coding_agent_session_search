@@ -716,7 +716,11 @@ mod tests {
         let task_history_dir = storage.join("taskHistory.json");
         fs::create_dir_all(&task_history_dir).unwrap();
         let messages = json!([{"role": "user", "content": "Test"}]);
-        fs::write(task_history_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+        fs::write(
+            task_history_dir.join("ui_messages.json"),
+            messages.to_string(),
+        )
+        .unwrap();
 
         let connector = ClineConnector::new();
         let ctx = ScanContext::local_default(storage.clone(), None);

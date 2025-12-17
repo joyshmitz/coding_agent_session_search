@@ -75,7 +75,11 @@ impl ScanRoot {
     }
 
     /// Add a workspace rewrite rule.
-    pub fn with_rewrite(mut self, src_prefix: impl Into<String>, dst_prefix: impl Into<String>) -> Self {
+    pub fn with_rewrite(
+        mut self,
+        src_prefix: impl Into<String>,
+        dst_prefix: impl Into<String>,
+    ) -> Self {
         self.workspace_rewrites
             .push(PathMapping::new(src_prefix, dst_prefix));
         self
@@ -337,8 +341,8 @@ mod tests {
 
     #[test]
     fn scan_root_with_rewrite_adds_rule() {
-        let root = ScanRoot::local(PathBuf::from("/test"))
-            .with_rewrite("/home/user", "/Users/local");
+        let root =
+            ScanRoot::local(PathBuf::from("/test")).with_rewrite("/home/user", "/Users/local");
         assert_eq!(root.workspace_rewrites.len(), 1);
         assert_eq!(root.workspace_rewrites[0].from, "/home/user");
         assert_eq!(root.workspace_rewrites[0].to, "/Users/local");
@@ -369,7 +373,8 @@ mod tests {
     #[test]
     fn scan_root_rewrite_with_agent_filter() {
         let mut root = ScanRoot::local(PathBuf::from("/test"));
-        root.workspace_rewrites.push(PathMapping::new("/home/user", "/Users/me"));
+        root.workspace_rewrites
+            .push(PathMapping::new("/home/user", "/Users/me"));
         root.workspace_rewrites.push(PathMapping::with_agents(
             "/home/user/projects",
             "/Volumes/Work",

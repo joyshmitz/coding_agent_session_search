@@ -93,7 +93,10 @@ fn search_with_trace_file_creates_trace() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "Search with trace-file should succeed");
+    assert!(
+        output.status.success(),
+        "Search with trace-file should succeed"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Main output should be valid JSON
@@ -132,7 +135,14 @@ fn search_returns_hits_with_expected_fields() {
     let (tmp, data_dir) = setup_indexed_env();
 
     let output = base_cmd()
-        .args(["search", "authentication", "--robot", "--limit", "5", "--data-dir"])
+        .args([
+            "search",
+            "authentication",
+            "--robot",
+            "--limit",
+            "5",
+            "--data-dir",
+        ])
         .arg(&data_dir)
         .env("HOME", tmp.path())
         .output()
@@ -150,8 +160,7 @@ fn search_returns_hits_with_expected_fields() {
         let first_hit = &hits_array[0];
         // Verify expected fields exist
         assert!(
-            first_hit.get("source_path").is_some()
-                || first_hit.get("path").is_some(),
+            first_hit.get("source_path").is_some() || first_hit.get("path").is_some(),
             "Hit should have source_path. Hit: {}",
             first_hit
         );
@@ -169,7 +178,9 @@ fn search_returns_hits_with_expected_fields() {
 #[test]
 fn view_command_returns_session_detail() {
     let (tmp, data_dir) = setup_indexed_env();
-    let codex_session = tmp.path().join(".codex/sessions/2024/12/01/rollout-test.jsonl");
+    let codex_session = tmp
+        .path()
+        .join(".codex/sessions/2024/12/01/rollout-test.jsonl");
 
     // View the session
     let output = base_cmd()
@@ -200,19 +211,13 @@ fn view_command_returns_session_detail() {
 #[test]
 fn expand_command_with_context() {
     let (tmp, data_dir) = setup_indexed_env();
-    let codex_session = tmp.path().join(".codex/sessions/2024/12/01/rollout-test.jsonl");
+    let codex_session = tmp
+        .path()
+        .join(".codex/sessions/2024/12/01/rollout-test.jsonl");
 
     // Expand with context
     let output = base_cmd()
-        .args([
-            "expand",
-            "--robot",
-            "-n",
-            "1",
-            "-C",
-            "2",
-            "--data-dir",
-        ])
+        .args(["expand", "--robot", "-n", "1", "-C", "2", "--data-dir"])
         .arg(&data_dir)
         .arg(&codex_session)
         .env("HOME", tmp.path())
@@ -265,7 +270,10 @@ fn search_filter_by_agent() {
     let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
 
     // All hits should be from codex
-    if let Some(hits) = json.get("hits").or_else(|| json.get("results")).and_then(|h| h.as_array())
+    if let Some(hits) = json
+        .get("hits")
+        .or_else(|| json.get("results"))
+        .and_then(|h| h.as_array())
     {
         for hit in hits {
             let agent = hit.get("agent").and_then(|a| a.as_str()).unwrap_or("");
@@ -330,7 +338,10 @@ fn search_combined_filters() {
 
     let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     // Check limit is respected
-    if let Some(hits) = json.get("hits").or_else(|| json.get("results")).and_then(|h| h.as_array())
+    if let Some(hits) = json
+        .get("hits")
+        .or_else(|| json.get("results"))
+        .and_then(|h| h.as_array())
     {
         assert!(hits.len() <= 10, "Should respect limit=10");
     }
@@ -343,12 +354,7 @@ fn search_with_workspace_filter() {
 
     // Search with workspace filter
     let output = base_cmd()
-        .args([
-            "search",
-            "database",
-            "--robot",
-            "--workspace",
-        ])
+        .args(["search", "database", "--robot", "--workspace"])
         .arg(&workspace)
         .arg("--data-dir")
         .arg(&data_dir)
@@ -458,8 +464,8 @@ fn robot_mode_json_output_only() {
 
     // stdout should be pure JSON (or empty)
     if !stdout.trim().is_empty() {
-        let _: Value = serde_json::from_str(stdout.trim())
-            .expect("Robot mode stdout should be valid JSON");
+        let _: Value =
+            serde_json::from_str(stdout.trim()).expect("Robot mode stdout should be valid JSON");
     }
 }
 
