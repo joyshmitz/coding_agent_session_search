@@ -654,6 +654,7 @@ fn reindex_paths(
             ConnectorKind::Aider => Box::new(AiderConnector::new()),
             ConnectorKind::Cursor => Box::new(CursorConnector::new()),
             ConnectorKind::ChatGpt => Box::new(ChatGptConnector::new()),
+            ConnectorKind::PiAgent => Box::new(PiAgentConnector::new()),
         };
         let detect = conn.detect();
         if !detect.detected {
@@ -728,6 +729,7 @@ enum ConnectorKind {
     Aider,
     Cursor,
     ChatGpt,
+    PiAgent,
 }
 
 fn state_path(data_dir: &Path) -> PathBuf {
@@ -785,6 +787,8 @@ fn classify_paths(paths: Vec<PathBuf>) -> Vec<(ConnectorKind, Option<i64>)> {
                     Some(ConnectorKind::Cursor)
                 } else if s.contains("com.openai.chat") || s.contains("conversations-") {
                     Some(ConnectorKind::ChatGpt)
+                } else if s.contains(".pi/agent") || s.contains("/pi/agent/sessions") {
+                    Some(ConnectorKind::PiAgent)
                 } else {
                     None
                 };
