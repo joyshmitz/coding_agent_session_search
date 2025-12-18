@@ -157,7 +157,7 @@ cass sources doctor
 
 #### Configuration File
 
-Sources are configured in `~/.config/cass/sources.toml`:
+Sources are configured in the platform config directory (Linux: `~/.config/cass/sources.toml`, macOS: `~/Library/Application Support/cass/sources.toml`):
 
 ```toml
 [[sources]]
