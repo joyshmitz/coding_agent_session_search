@@ -310,6 +310,19 @@ impl SourceFilter {
     pub fn is_all(&self) -> bool {
         matches!(self, Self::All)
     }
+
+    /// Cycle to the next filter in sequence (for F11 hotkey).
+    ///
+    /// Cycle order: All → Local → Remote → All
+    /// SourceId variants reset to All.
+    pub fn cycle(&self) -> Self {
+        match self {
+            Self::All => Self::Local,
+            Self::Local => Self::Remote,
+            Self::Remote => Self::All,
+            Self::SourceId(_) => Self::All,
+        }
+    }
 }
 
 impl std::fmt::Display for SourceFilter {
@@ -532,5 +545,81 @@ mod tests {
     #[test]
     fn test_source_filter_default() {
         assert_eq!(SourceFilter::default(), SourceFilter::All);
+    }
+
+    // =================================================================
+    // F11 Source Filter Cycle Tests (P4.3 TUI behavior)
+    // =================================================================
+
+    #[test]
+    fn test_source_filter_cycle_all_to_local() {
+        // F11 press from All should go to Local
+        let filter = SourceFilter::All;
+        assert_eq!(filter.cycle(), SourceFilter::Local);
+    }
+
+    #[test]
+    fn test_source_filter_cycle_local_to_remote() {
+        // F11 press from Local should go to Remote
+        let filter = SourceFilter::Local;
+        assert_eq!(filter.cycle(), SourceFilter::Remote);
+    }
+
+    #[test]
+    fn test_source_filter_cycle_remote_to_all() {
+        // F11 press from Remote should go back to All
+        let filter = SourceFilter::Remote;
+        assert_eq!(filter.cycle(), SourceFilter::All);
+    }
+
+    #[test]
+    fn test_source_filter_cycle_specific_to_all() {
+        // F11 press from a specific source should reset to All
+        let filter = SourceFilter::SourceId("laptop".to_string());
+        assert_eq!(filter.cycle(), SourceFilter::All);
+    }
+
+    #[test]
+    fn test_source_filter_full_cycle() {
+        // Complete F11 cycle: All → Local → Remote → All
+        let filter = SourceFilter::All;
+        let after_one = filter.cycle();
+        let after_two = after_one.cycle();
+        let after_three = after_two.cycle();
+
+        assert_eq!(after_one, SourceFilter::Local);
+        assert_eq!(after_two, SourceFilter::Remote);
+        assert_eq!(after_three, SourceFilter::All);
+    }
+
+    #[test]
+    fn test_source_filter_cycle_is_idempotent_for_specific() {
+        // Multiple cycles from SourceId should always go to All first
+        let filter = SourceFilter::SourceId("work-laptop".to_string());
+        let cycled = filter.cycle();
+        assert_eq!(cycled, SourceFilter::All);
+
+        // Then continue normal cycle
+        assert_eq!(cycled.cycle(), SourceFilter::Local);
+    }
+
+    #[test]
+    fn test_source_filter_cycle_preserves_type_invariants() {
+        // Cycling should never produce a SourceId variant
+        let filters = [
+            SourceFilter::All,
+            SourceFilter::Local,
+            SourceFilter::Remote,
+            SourceFilter::SourceId("test".to_string()),
+        ];
+
+        for filter in filters {
+            let cycled = filter.cycle();
+            assert!(
+                !matches!(cycled, SourceFilter::SourceId(_)),
+                "Cycle should never produce SourceId variant, got {:?}",
+                cycled
+            );
+        }
     }
 }

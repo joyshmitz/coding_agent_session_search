@@ -5625,12 +5625,7 @@ pub fn run_tui(
                         // F11: Cycle through source filters (P4.3)
                         KeyCode::F(11) => {
                             use crate::sources::provenance::SourceFilter;
-                            filters.source_filter = match &filters.source_filter {
-                                SourceFilter::All => SourceFilter::Local,
-                                SourceFilter::Local => SourceFilter::Remote,
-                                SourceFilter::Remote => SourceFilter::All,
-                                SourceFilter::SourceId(_) => SourceFilter::All,
-                            };
+                            filters.source_filter = filters.source_filter.cycle();
                             status = format!(
                                 "Source: {}",
                                 match &filters.source_filter {
