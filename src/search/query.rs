@@ -1427,9 +1427,12 @@ impl SearchClient {
         // Fallback: SQLite FTS (slower, but strictly consistent with DB)
         // Skip SQLite fallback when the query contains leading/trailing wildcards that
         // FTS5 cannot parse (e.g., "*handler" or "*foo*"), to avoid "unknown special query" errors.
+        // Also skip SQLite fallback when source filtering is applied, since the FTS table
+        // doesn't have a source_id column (P3.1 limitation).
         let query_has_wildcards = sanitized.contains('*');
+        let has_source_filter = !matches!(filters.source_filter, SourceFilter::All);
         if let Some(conn) = &self.sqlite {
-            if query_has_wildcards {
+            if query_has_wildcards || has_source_filter {
                 return Ok(Vec::new());
             }
             tracing::info!(
