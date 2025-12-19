@@ -49,6 +49,8 @@ strsim = "0.11.1"
 once_cell = "*"
 syntect = "*"
 itertools = "*"
+crc32fast = "*"
+unicode-normalization = "*"
 
 # Crypto for ChatGPT encrypted conversations
 aes-gcm = "0.10"
