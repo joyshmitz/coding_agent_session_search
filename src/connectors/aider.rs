@@ -129,6 +129,7 @@ impl Connector for AiderConnector {
             return DetectionResult {
                 detected: true,
                 evidence: vec![format!("found {}", cwd_history.display())],
+                root_paths: vec![cwd],
             };
         }
 
@@ -139,6 +140,7 @@ impl Connector for AiderConnector {
                 return DetectionResult {
                     detected: true,
                     evidence: vec![format!("found {}", override_history.display())],
+                    root_paths: vec![override_path],
                 };
             }
             // Even if file not found, user explicitly set the env var
@@ -148,13 +150,11 @@ impl Connector for AiderConnector {
                     "CASS_AIDER_DATA_ROOT set to {}",
                     override_path.display()
                 )],
+                root_paths: vec![override_path],
             };
         }
 
-        DetectionResult {
-            detected: false,
-            evidence: vec![],
-        }
+        DetectionResult::not_found()
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {

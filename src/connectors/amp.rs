@@ -52,9 +52,13 @@ impl AmpConnector {
 
 impl Connector for AmpConnector {
     fn detect(&self) -> DetectionResult {
-        let evidence: Vec<String> = Self::candidate_roots()
+        let existing_roots: Vec<PathBuf> = Self::candidate_roots()
             .into_iter()
             .filter(|r| r.exists())
+            .collect();
+
+        let evidence: Vec<String> = existing_roots
+            .iter()
             .map(|r| format!("found {}", r.display()))
             .collect();
 
@@ -64,6 +68,7 @@ impl Connector for AmpConnector {
             DetectionResult {
                 detected: true,
                 evidence,
+                root_paths: existing_roots,
             }
         }
     }

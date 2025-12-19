@@ -138,6 +138,7 @@ impl Connector for PiAgentConnector {
             DetectionResult {
                 detected: true,
                 evidence: vec![format!("found {}", home.display())],
+                root_paths: vec![home],
             }
         } else {
             DetectionResult::not_found()

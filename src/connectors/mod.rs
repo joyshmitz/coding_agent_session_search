@@ -21,6 +21,7 @@ pub mod pi_agent;
 pub struct DetectionResult {
     pub detected: bool,
     pub evidence: Vec<String>,
+    pub root_paths: Vec<PathBuf>,
 }
 
 impl DetectionResult {
@@ -28,6 +29,7 @@ impl DetectionResult {
         Self {
             detected: false,
             evidence: Vec::new(),
+            root_paths: Vec::new(),
         }
     }
 }
@@ -676,6 +678,7 @@ mod tests {
         let result = DetectionResult {
             detected: true,
             evidence: vec!["found ~/.codex".into(), "has sessions/".into()],
+            root_paths: vec![],
         };
         assert!(result.detected);
         assert_eq!(result.evidence.len(), 2);

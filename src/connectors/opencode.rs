@@ -140,6 +140,7 @@ impl Connector for OpenCodeConnector {
             DetectionResult {
                 detected: true,
                 evidence: vec![format!("found {}", storage.display())],
+                root_paths: vec![storage],
             }
         } else {
             DetectionResult::not_found()

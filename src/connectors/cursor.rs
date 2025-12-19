@@ -400,6 +400,7 @@ impl Connector for CursorConnector {
                         format!("found Cursor at {}", base.display()),
                         format!("found {} database file(s)", dbs.len()),
                     ],
+                    root_paths: vec![base],
                 };
             }
         }

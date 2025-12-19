@@ -35,6 +35,7 @@ impl Connector for ClaudeCodeConnector {
             DetectionResult {
                 detected: true,
                 evidence: vec![format!("found {}", root.display())],
+                root_paths: vec![root],
             }
         } else {
             DetectionResult::not_found()
@@ -76,8 +77,7 @@ impl Connector for ClaudeCodeConnector {
             if file_count <= 3 {
                 tracing::debug!(path = %entry.path().display(), "claude_code found file");
             }
-            let content = fs::read_to_string(entry.path())
-                .with_context(|| format!("read {}", entry.path().display()))?;
+
             let mut messages = Vec::new();
             let mut started_at = None;
             let mut ended_at = None;
@@ -85,13 +85,22 @@ impl Connector for ClaudeCodeConnector {
             let mut workspace: Option<PathBuf> = None;
             let mut session_id: Option<String> = None;
             let mut git_branch: Option<String> = None;
+            let mut content_string = String::new();
 
             if ext == Some("jsonl") {
-                for line in content.lines() {
+                let file = std::fs::File::open(entry.path())
+                    .with_context(|| format!("open {}", entry.path().display()))?;
+                let reader = std::io::BufReader::new(file);
+                
+                for line_res in std::io::BufRead::lines(reader) {
+                    let line = match line_res {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
                     if line.trim().is_empty() {
                         continue;
                     }
-                    let val: Value = match serde_json::from_str(line) {
+                    let val: Value = match serde_json::from_str(&line) {
                         Ok(v) => v,
                         Err(_) => continue, // Skip malformed lines
                     };
@@ -173,8 +182,10 @@ impl Connector for ClaudeCodeConnector {
                     msg.idx = i as i64;
                 }
             } else {
+                content_string = fs::read_to_string(entry.path())
+                    .with_context(|| format!("read {}", entry.path().display()))?;
                 // JSON or Claude format files
-                let val: Value = match serde_json::from_str(&content) {
+                let val: Value = match serde_json::from_str(&content_string) {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::debug!(path = %entry.path().display(), error = %e, "claude_code skipping malformed JSON");
@@ -260,7 +271,7 @@ impl Connector for ClaudeCodeConnector {
                             .map(String::from)
                     })
             } else {
-                serde_json::from_str::<Value>(&content)
+                serde_json::from_str::<Value>(&content_string)
                     .ok()
                     .and_then(|v| {
                         v.get("title")

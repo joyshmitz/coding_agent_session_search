@@ -56,6 +56,7 @@ impl Connector for CodexConnector {
             DetectionResult {
                 detected: true,
                 evidence: vec![format!("found {}", home.display())],
+                root_paths: vec![home],
             }
         } else {
             DetectionResult::not_found()
@@ -98,9 +99,6 @@ impl Connector for CodexConnector {
                         .and_then(|s| s.to_str())
                         .map(std::string::ToString::to_string)
                 });
-            let content = fs::read_to_string(&file)
-                .with_context(|| format!("read rollout {}", file.display()))?;
-
             let ext = file.extension().and_then(|e| e.to_str());
             let mut messages = Vec::new();
             let mut started_at = None;
@@ -108,12 +106,20 @@ impl Connector for CodexConnector {
             let mut session_cwd: Option<PathBuf> = None;
 
             if ext == Some("jsonl") {
+                let f = std::fs::File::open(&file)
+                    .with_context(|| format!("open rollout {}", file.display()))?;
+                let reader = std::io::BufReader::new(f);
+
                 // Modern envelope format: each line has {type, timestamp, payload}
-                for line in content.lines() {
+                for line_res in std::io::BufRead::lines(reader) {
+                    let line = match line_res {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
                     if line.trim().is_empty() {
                         continue;
                     }
-                    let val: Value = match serde_json::from_str(line) {
+                    let val: Value = match serde_json::from_str(&line) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
@@ -225,6 +231,8 @@ impl Connector for CodexConnector {
                     msg.idx = i as i64;
                 }
             } else if ext == Some("json") {
+                let content = fs::read_to_string(&file)
+                    .with_context(|| format!("read rollout {}", file.display()))?;
                 // Legacy format: single JSON object with {session, items}
                 let val: Value = match serde_json::from_str(&content) {
                     Ok(v) => v,
@@ -326,6 +334,7 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use tempfile::TempDir;
+    use serial_test::serial;
 
     // =====================================================
     // Constructor Tests
@@ -349,6 +358,7 @@ mod tests {
     // =====================================================
 
     #[test]
+    #[serial]
     fn home_returns_path_ending_with_codex() {
         // Note: We can't reliably test CODEX_HOME env var due to parallel test execution.
         // Testing that home() returns a valid path structure is sufficient.
@@ -441,6 +451,7 @@ mod tests {
     // =====================================================
 
     #[test]
+    #[serial]
     fn detect_returns_true_when_sessions_exists() {
         let dir = TempDir::new().unwrap();
         let sessions = dir.path().join("sessions");
@@ -458,6 +469,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detect_returns_false_when_no_sessions() {
         let dir = TempDir::new().unwrap();
         // Don't create sessions directory

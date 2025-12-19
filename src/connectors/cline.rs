@@ -37,6 +37,7 @@ impl Connector for ClineConnector {
             DetectionResult {
                 detected: true,
                 evidence: vec![format!("found {}", root.display())],
+                root_paths: vec![root],
             }
         } else {
             DetectionResult::not_found()

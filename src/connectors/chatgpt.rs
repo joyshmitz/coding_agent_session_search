@@ -450,6 +450,7 @@ impl Connector for ChatGptConnector {
                 return DetectionResult {
                     detected: true,
                     evidence,
+                    root_paths: vec![base],
                 };
             }
         }
