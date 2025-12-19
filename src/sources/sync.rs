@@ -325,6 +325,7 @@ impl SyncEngine {
             "-avz",      // Archive, verbose, compress
             "--stats",   // Show transfer stats for parsing
             "--partial", // Keep partial transfers for resume
+            "--protect-args", // Preserve spaces/special chars in remote paths
             "--timeout",
             &self.transfer_timeout.to_string(),
             "-e",

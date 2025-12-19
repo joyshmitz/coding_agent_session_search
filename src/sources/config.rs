@@ -34,7 +34,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 use super::provenance::SourceKind;
@@ -202,6 +202,12 @@ impl SourceDefinition {
             ));
         }
 
+        if has_dot_components(Path::new(&self.name)) {
+            return Err(ConfigError::Validation(
+                "Source name cannot be '.' or '..'".into(),
+            ));
+        }
+
         if self.is_remote() && self.host.is_none() {
             return Err(ConfigError::Validation("SSH sources require a host".into()));
         }
@@ -237,6 +243,11 @@ impl SourceDefinition {
 
         path.to_string()
     }
+}
+
+fn has_dot_components(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
 }
 
 /// Sync schedule for remote sources.
@@ -478,6 +489,15 @@ mod tests {
     #[test]
     fn test_source_validation_empty_name() {
         let source = SourceDefinition::default();
+        assert!(source.validate().is_err());
+    }
+
+    #[test]
+    fn test_source_validation_dot_names() {
+        let source = SourceDefinition::local(".");
+        assert!(source.validate().is_err());
+
+        let source = SourceDefinition::local("..");
         assert!(source.validate().is_err());
     }
 
