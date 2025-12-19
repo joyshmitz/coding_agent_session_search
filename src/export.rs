@@ -90,6 +90,37 @@ pub fn export_results(hits: &[SearchHit], format: ExportFormat, options: &Export
     }
 }
 
+/// Escape special Markdown characters to prevent formatting issues or injection.
+fn escape_markdown(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('*', "\\*")
+        .replace('_', "\\_")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('<', "\\<")
+        .replace('>', "\\>")
+        .replace('`', "\\`")
+}
+
+/// Determine the appropriate code block delimiter (e.g., ``` or ````) based on content.
+fn get_code_block_delimiter(content: &str) -> String {
+    let mut max_backticks = 0;
+    let mut current = 0;
+    for c in content.chars() {
+        if c == '`' {
+            current += 1;
+        } else {
+            max_backticks = max_backticks.max(current);
+            current = 0;
+        }
+    }
+    max_backticks = max_backticks.max(current);
+    
+    let needed = (max_backticks + 1).max(3);
+    "`".repeat(needed)
+}
+
 /// Export to Markdown format
 fn export_markdown(hits: &[SearchHit], options: &ExportOptions) -> String {
     let mut output = String::new();
@@ -98,7 +129,7 @@ fn export_markdown(hits: &[SearchHit], options: &ExportOptions) -> String {
     output.push_str("# Search Results\n\n");
 
     if let Some(query) = &options.query {
-        output.push_str(&format!("**Query:** `{query}`\n\n"));
+        output.push_str(&format!("**Query:** `{}`\n\n", query.replace('`', "")));
     }
 
     output.push_str(&format!(
@@ -111,13 +142,14 @@ fn export_markdown(hits: &[SearchHit], options: &ExportOptions) -> String {
 
     // Results
     for (i, hit) in hits.iter().enumerate() {
-        output.push_str(&format!("## {}. {}\n\n", i + 1, hit.title));
+        let safe_title = escape_markdown(&hit.title);
+        output.push_str(&format!("## {}. {}\n\n", i + 1, safe_title));
 
         // Metadata table
         output.push_str("| Field | Value |\n");
         output.push_str("|-------|-------|\n");
-        output.push_str(&format!("| Agent | {} |\n", hit.agent));
-        output.push_str(&format!("| Workspace | `{}` |\n", hit.workspace));
+        output.push_str(&format!("| Agent | {} |\n", escape_markdown(&hit.agent)));
+        output.push_str(&format!("| Workspace | `{}` |\n", hit.workspace.replace('`', "")));
 
         if options.include_score {
             output.push_str(&format!("| Score | {:.2} |\n", hit.score));
@@ -139,7 +171,7 @@ fn export_markdown(hits: &[SearchHit], options: &ExportOptions) -> String {
             } else {
                 hit.source_path.clone()
             };
-            output.push_str(&format!("| Source | `{path_display}` |\n"));
+            output.push_str(&format!("| Source | `{}` |\n", path_display.replace('`', "")));
 
             if let Some(line) = hit.line_number {
                 output.push_str(&format!("| Line | {line} |\n"));
@@ -151,22 +183,24 @@ fn export_markdown(hits: &[SearchHit], options: &ExportOptions) -> String {
         // Snippet
         output.push_str("### Snippet\n\n");
         let snippet = truncate_text(&hit.snippet, options.max_snippet_len);
-        output.push_str("```\n");
+        let delim = get_code_block_delimiter(&snippet);
+        output.push_str(&format!("{}\n", delim));
         output.push_str(&snippet);
         if !snippet.ends_with('\n') {
             output.push('\n');
         }
-        output.push_str("```\n\n");
+        output.push_str(&format!("{}\n\n", delim));
 
         // Full content (optional)
         if options.include_content && !hit.content.is_empty() {
             output.push_str("<details>\n<summary>Full Content</summary>\n\n");
-            output.push_str("```\n");
+            let content_delim = get_code_block_delimiter(&hit.content);
+            output.push_str(&format!("{}\n", content_delim));
             output.push_str(&hit.content);
             if !hit.content.ends_with('\n') {
                 output.push('\n');
             }
-            output.push_str("```\n\n");
+            output.push_str(&format!("{}\n\n", content_delim));
             output.push_str("</details>\n\n");
         }
 
@@ -356,7 +390,8 @@ mod tests {
 
         assert!(output.contains("# Search Results"));
         assert!(output.contains("Test Result"));
-        assert!(output.contains("claude_code"));
+        // underscores are escaped in markdown
+        assert!(output.contains("claude\\_code"));
         assert!(output.contains("```"));
     }
 
@@ -379,5 +414,24 @@ mod tests {
         assert!(output.contains("SEARCH RESULTS"));
         assert!(output.contains("[1] Test Result"));
         assert!(output.contains("Agent: claude_code"));
+    }
+
+    #[test]
+    fn test_export_markdown_escapes_special_chars() {
+        let mut hit = sample_hit();
+        hit.title = "[Link](javascript:alert(1))".to_string();
+        hit.agent = "agent|pipe".to_string();
+        hit.content = "Contains ``` backticks".to_string();
+        
+        let options = ExportOptions {
+            include_content: true,
+            ..ExportOptions::default()
+        };
+        let output = export_markdown(&[hit], &options);
+        
+        assert!(output.contains("\\[Link\\](javascript:alert(1))"));
+        assert!(output.contains("agent\\|pipe"));
+        // Should use 4 backticks because content has 3
+        assert!(output.contains("````\nContains ``` backticks"));
     }
 }
