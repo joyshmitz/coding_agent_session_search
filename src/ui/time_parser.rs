@@ -1,4 +1,4 @@
-use chrono::{Duration, Local, NaiveDate, TimeZone, Utc};
+use chrono::{Duration, Local, LocalResult, NaiveDate, TimeZone, Utc};
 
 /// Parses human-readable time input into a UTC timestamp (milliseconds).
 ///
@@ -38,19 +38,11 @@ pub fn parse_time_input(input: &str) -> Option<i64> {
         "now" => return Some(now_ms),
         "today" => {
             let today = Local::now().date_naive();
-            let dt = today.and_hms_opt(0, 0, 0)?;
-            return Local
-                .from_local_datetime(&dt)
-                .single()
-                .map(|dt| dt.with_timezone(&Utc).timestamp_millis());
+            return local_midnight_to_utc(today);
         }
         "yesterday" => {
             let yesterday = Local::now().date_naive() - Duration::days(1);
-            let dt = yesterday.and_hms_opt(0, 0, 0)?;
-            return Local
-                .from_local_datetime(&dt)
-                .single()
-                .map(|dt| dt.with_timezone(&Utc).timestamp_millis());
+            return local_midnight_to_utc(yesterday);
         }
         _ => {}
     }
@@ -64,22 +56,14 @@ pub fn parse_time_input(input: &str) -> Option<i64> {
     if let Ok(date) = NaiveDate::parse_from_str(&input, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(&input, "%Y/%m/%d"))
     {
-        let dt = date.and_hms_opt(0, 0, 0)?;
-        return Local
-            .from_local_datetime(&dt)
-            .single()
-            .map(|dt| dt.with_timezone(&Utc).timestamp_millis());
+        return local_midnight_to_utc(date);
     }
 
     // US Formats: MM/DD/YYYY or MM-DD-YYYY
     if let Ok(date) = NaiveDate::parse_from_str(&input, "%m/%d/%Y")
         .or_else(|_| NaiveDate::parse_from_str(&input, "%m-%d-%Y"))
     {
-        let dt = date.and_hms_opt(0, 0, 0)?;
-        return Local
-            .from_local_datetime(&dt)
-            .single()
-            .map(|dt| dt.with_timezone(&Utc).timestamp_millis());
+        return local_midnight_to_utc(date);
     }
     // Numeric fallback (ms or seconds)
     if let Ok(n) = input.parse::<i64>() {
@@ -91,6 +75,19 @@ pub fn parse_time_input(input: &str) -> Option<i64> {
     }
 
     None
+}
+
+fn local_midnight_to_utc(date: NaiveDate) -> Option<i64> {
+    let dt = date.and_hms_opt(0, 0, 0)?;
+    let local = match Local.from_local_datetime(&dt) {
+        LocalResult::Single(value) => value,
+        LocalResult::Ambiguous(earliest, _) => earliest,
+        LocalResult::None => {
+            // Fall back to treating the naive datetime as UTC for DST gaps.
+            return Some(Utc.from_utc_datetime(&dt).timestamp_millis());
+        }
+    };
+    Some(local.with_timezone(&Utc).timestamp_millis())
 }
 
 #[cfg(test)]
