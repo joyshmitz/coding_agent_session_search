@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, RangeQuery, RegexQuery, TermQuery};
+use tantivy::query::{
+    AllQuery, BooleanQuery, Occur, PhraseQuery, Query, RangeQuery, RegexQuery, TermQuery,
+};
 use tantivy::schema::{IndexRecordOption, Term, Value};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::{Index, IndexReader, Searcher, TantivyDocument};
@@ -159,22 +161,32 @@ impl QueryExplanation {
         for token in &tokens {
             match token {
                 QueryToken::Term(t) => {
-                    let pattern = WildcardPattern::parse(t);
-                    let pattern_str = match &pattern {
-                        WildcardPattern::Exact(_) => "exact",
-                        WildcardPattern::Prefix(_) => "prefix (*)",
-                        WildcardPattern::Suffix(_) => "suffix (*)",
-                        WildcardPattern::Substring(_) => "substring (*)",
-                    };
-                    parsed.terms.push(ParsedTerm {
-                        text: t.clone(),
-                        pattern: pattern_str.to_string(),
-                        negated: next_negated,
-                    });
+                    let parts = normalize_term_parts(t);
+                    if parts.is_empty() {
+                        next_negated = false;
+                        continue;
+                    }
+                    for part in parts {
+                        let pattern = WildcardPattern::parse(&part);
+                        let pattern_str = match &pattern {
+                            WildcardPattern::Exact(_) => "exact",
+                            WildcardPattern::Prefix(_) => "prefix (*)",
+                            WildcardPattern::Suffix(_) => "suffix (*)",
+                            WildcardPattern::Substring(_) => "substring (*)",
+                        };
+                        parsed.terms.push(ParsedTerm {
+                            text: part,
+                            pattern: pattern_str.to_string(),
+                            negated: next_negated,
+                        });
+                    }
                     next_negated = false;
                 }
                 QueryToken::Phrase(p) => {
-                    parsed.phrases.push(p.clone());
+                    let parts = normalize_phrase_terms(p);
+                    if !parts.is_empty() {
+                        parsed.phrases.push(parts.join(" "));
+                    }
                     next_negated = false;
                 }
                 QueryToken::And => {
@@ -1029,6 +1041,71 @@ fn parse_boolean_query(query: &str) -> Vec<QueryToken> {
     tokens
 }
 
+/// Normalize a term into tokenizer-aligned parts.
+/// Splits on punctuation to match SimpleTokenizer behavior, preserving `*` for wildcards.
+fn normalize_term_parts(raw: &str) -> Vec<String> {
+    sanitize_query(raw)
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Normalize phrase text into tokenizer-aligned terms (lowercased, no wildcards).
+fn normalize_phrase_terms(raw: &str) -> Vec<String> {
+    sanitize_query(raw)
+        .split_whitespace()
+        .map(|s| s.trim_matches('*').to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Build a compound query that requires all term parts to match (implicit AND).
+fn build_compound_term_query(
+    parts: &[String],
+    fields: &crate::search::tantivy::Fields,
+) -> Option<Box<dyn Query>> {
+    let mut subqueries: Vec<Box<dyn Query>> = Vec::new();
+    for part in parts {
+        let pattern = WildcardPattern::parse(part);
+        let term_shoulds = build_term_query_clauses(&pattern, fields);
+        if !term_shoulds.is_empty() {
+            subqueries.push(Box::new(BooleanQuery::new(term_shoulds)));
+        }
+    }
+
+    match subqueries.len() {
+        0 => None,
+        1 => subqueries.pop(),
+        _ => {
+            let musts = subqueries.into_iter().map(|q| (Occur::Must, q)).collect();
+            Some(Box::new(BooleanQuery::new(musts)))
+        }
+    }
+}
+
+/// Build a phrase query (exact order) across title/content fields.
+fn build_phrase_query(
+    terms: &[String],
+    fields: &crate::search::tantivy::Fields,
+) -> Option<Box<dyn Query>> {
+    if terms.is_empty() {
+        return None;
+    }
+    if terms.len() == 1 {
+        return build_compound_term_query(terms, fields);
+    }
+
+    let mut shoulds: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    for field in [fields.title, fields.content] {
+        let phrase_terms = terms
+            .iter()
+            .map(|t| Term::from_field_text(field, t))
+            .collect::<Vec<_>>();
+        shoulds.push((Occur::Should, Box::new(PhraseQuery::new(phrase_terms))));
+    }
+    Some(Box::new(BooleanQuery::new(shoulds)))
+}
+
 /// Check if a query string contains boolean operators
 fn has_boolean_operators(query: &str) -> bool {
     let tokens = parse_boolean_query(query);
@@ -1082,12 +1159,12 @@ fn build_boolean_query_clauses(
                 next_occur = Occur::MustNot;
             }
             QueryToken::Term(term) => {
-                let pattern = WildcardPattern::parse(term);
-                let term_shoulds = build_term_query_clauses(&pattern, fields);
-                if term_shoulds.is_empty() {
+                let parts = normalize_term_parts(term);
+                let term_query = build_compound_term_query(&parts, fields);
+                if term_query.is_none() {
                     continue;
                 }
-                let term_query: Box<dyn Query> = Box::new(BooleanQuery::new(term_shoulds));
+                let term_query = term_query.unwrap();
 
                 if in_or_sequence || next_occur == Occur::Should {
                     // Add to OR group
@@ -1105,24 +1182,12 @@ fn build_boolean_query_clauses(
                 next_occur = Occur::Must; // Reset for next term
             }
             QueryToken::Phrase(phrase) => {
-                // For phrases, search all words as MUST within the phrase
-                let words: Vec<&str> = phrase.split_whitespace().collect();
-                if words.is_empty() {
+                let terms = normalize_phrase_terms(phrase);
+                let phrase_query = build_phrase_query(&terms, fields);
+                if phrase_query.is_none() {
                     continue;
                 }
-                let mut phrase_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-                for word in words {
-                    let pattern = WildcardPattern::parse(word);
-                    let term_shoulds = build_term_query_clauses(&pattern, fields);
-                    if !term_shoulds.is_empty() {
-                        phrase_clauses
-                            .push((Occur::Must, Box::new(BooleanQuery::new(term_shoulds))));
-                    }
-                }
-                if phrase_clauses.is_empty() {
-                    continue;
-                }
-                let phrase_query: Box<dyn Query> = Box::new(BooleanQuery::new(phrase_clauses));
+                let phrase_query = phrase_query.unwrap();
 
                 if in_or_sequence {
                     if pending_or_group.is_empty()
@@ -1154,13 +1219,8 @@ fn build_boolean_query_clauses(
 /// Determine the dominant match type from a query string.
 /// Returns the "loosest" pattern used (Substring > Suffix > Prefix > Exact).
 fn dominant_match_type(query: &str) -> MatchType {
-    let terms: Vec<&str> = query.split_whitespace().collect();
-    if terms.is_empty() {
-        return MatchType::Exact;
-    }
-
     let mut worst = MatchType::Exact;
-    for term in terms {
+    for term in query.split_whitespace() {
         let pattern = WildcardPattern::parse(term);
         let mt = pattern.to_match_type();
         // Lower quality factor = "looser" match = dominant
@@ -1967,49 +2027,50 @@ impl SearchClient {
 
 #[derive(Default, Clone)]
 struct Metrics {
-    cache_hits: Arc<Mutex<u64>>,
-    cache_miss: Arc<Mutex<u64>>,
-    cache_shortfall: Arc<Mutex<u64>>,
-    reloads: Arc<Mutex<u64>>,
-    reload_ms_total: Arc<Mutex<u128>>,
+    cache_hits: Arc<AtomicU64>,
+    cache_miss: Arc<AtomicU64>,
+    cache_shortfall: Arc<AtomicU64>,
+    reloads: Arc<AtomicU64>,
+    reload_ms_total: Arc<AtomicU64>,
 }
 
 impl Metrics {
     fn inc_cache_hits(&self) {
-        *self.cache_hits.lock().unwrap() += 1;
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
     }
     fn inc_cache_miss(&self) {
-        *self.cache_miss.lock().unwrap() += 1;
+        self.cache_miss.fetch_add(1, Ordering::Relaxed);
     }
     fn inc_cache_shortfall(&self) {
-        *self.cache_shortfall.lock().unwrap() += 1;
+        self.cache_shortfall.fetch_add(1, Ordering::Relaxed);
     }
     fn inc_reload(&self) {
-        *self.reloads.lock().unwrap() += 1;
+        self.reloads.fetch_add(1, Ordering::Relaxed);
     }
     fn record_reload(&self, duration: Duration) {
         self.inc_reload();
-        *self.reload_ms_total.lock().unwrap() += duration.as_millis();
+        self.reload_ms_total
+            .fetch_add(duration.as_millis() as u64, Ordering::Relaxed);
     }
 
     fn snapshot_all(&self) -> (u64, u64, u64, u64, u128) {
         (
-            *self.cache_hits.lock().unwrap(),
-            *self.cache_miss.lock().unwrap(),
-            *self.cache_shortfall.lock().unwrap(),
-            *self.reloads.lock().unwrap(),
-            *self.reload_ms_total.lock().unwrap(),
+            self.cache_hits.load(Ordering::Relaxed),
+            self.cache_miss.load(Ordering::Relaxed),
+            self.cache_shortfall.load(Ordering::Relaxed),
+            self.reloads.load(Ordering::Relaxed),
+            self.reload_ms_total.load(Ordering::Relaxed) as u128,
         )
     }
 
     #[cfg(test)]
-    fn snapshot(&self) -> (u64, u64, u64, u64) {
-        (
-            *self.cache_hits.lock().unwrap(),
-            *self.cache_miss.lock().unwrap(),
-            *self.cache_shortfall.lock().unwrap(),
-            *self.reloads.lock().unwrap(),
-        )
+    #[allow(dead_code)]
+    fn reset(&self) {
+        self.cache_hits.store(0, Ordering::Relaxed);
+        self.cache_miss.store(0, Ordering::Relaxed);
+        self.cache_shortfall.store(0, Ordering::Relaxed);
+        self.reloads.store(0, Ordering::Relaxed);
+        self.reload_ms_total.store(0, Ordering::Relaxed);
     }
 }
 
@@ -2450,7 +2511,8 @@ mod tests {
         metrics.inc_cache_miss();
         metrics.inc_cache_shortfall();
         metrics.inc_reload();
-        assert_eq!(metrics.snapshot(), (1, 1, 1, 1));
+        let (hits, miss, shortfall, reloads, _) = metrics.snapshot_all();
+        assert_eq!((hits, miss, shortfall, reloads), (1, 1, 1, 1));
     }
 
     #[test]
@@ -5059,7 +5121,7 @@ mod tests {
     }
 
     #[test]
-    fn search_phrase_query_matches_all_words() -> Result<()> {
+    fn search_phrase_query_matches_exact_sequence() -> Result<()> {
         let dir = TempDir::new()?;
         let mut index = TantivyIndex::open_or_create(dir.path())?;
 
@@ -5111,10 +5173,48 @@ mod tests {
         let hits = client.search("quick brown", SearchFilters::default(), 10, 0)?;
         assert_eq!(hits.len(), 2);
 
-        // "\"quick brown\"" phrase requires all words to be present (AND), not positional
+        // "\"quick brown\"" should match exact order only
         let hits = client.search("\"quick brown\"", SearchFilters::default(), 10, 0)?;
-        // Both docs have "quick" and "brown", so both should match
-        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].content.contains("quick brown"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_punctuation_splits_into_terms() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("doc".into()),
+            workspace: None,
+            source_path: dir.path().join("3.jsonl"),
+            started_at: Some(1),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(1),
+                content: "foo bar baz".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        let hits = client.search("foo.bar", SearchFilters::default(), 10, 0)?;
+        assert_eq!(hits.len(), 1);
+
+        let hits = client.search("foo-bar", SearchFilters::default(), 10, 0)?;
+        assert_eq!(hits.len(), 1);
 
         Ok(())
     }
@@ -5390,7 +5490,7 @@ mod tests {
         };
 
         // Initial metrics should be zero
-        let (hits, miss, shortfall, reloads) = client.metrics.snapshot();
+        let (hits, miss, shortfall, reloads, _) = client.metrics.snapshot_all();
         assert_eq!((hits, miss, shortfall, reloads), (0, 0, 0, 0));
 
         // Simulate operations
@@ -5400,7 +5500,7 @@ mod tests {
         client.metrics.inc_cache_shortfall();
         client.metrics.inc_reload();
 
-        let (hits, miss, shortfall, reloads) = client.metrics.snapshot();
+        let (hits, miss, shortfall, reloads, _) = client.metrics.snapshot_all();
         assert_eq!(hits, 2);
         assert_eq!(miss, 1);
         assert_eq!(shortfall, 1);

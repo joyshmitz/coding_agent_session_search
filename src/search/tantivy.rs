@@ -309,16 +309,30 @@ fn generate_edge_ngrams(text: &str) -> String {
     let mut ngrams = String::with_capacity(text.len() * 2);
     // Split by non-alphanumeric characters to identify words
     for word in text.split(|c: char| !c.is_alphanumeric()) {
-        let chars: Vec<char> = word.chars().collect();
-        if chars.len() < 2 {
+        // Collect byte indices of characters, plus the total length
+        // We only need up to 21 indices (to support max ngram length of 20)
+        let indices: Vec<usize> = word
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(word.len()))
+            .take(22) // Take 21 chars + end index
+            .collect();
+
+        // Need at least 3 indices (start, char 2, end/char 3) for length 2 ngram
+        // indices[0] is always 0.
+        // indices[1] is start of char 1.
+        // indices[2] is start of char 2 (or len).
+        // &word[..indices[2]] gives first 2 chars.
+        if indices.len() < 3 {
             continue;
         }
+
         // Generate edge ngrams of length 2..=20 (or word length)
-        for len in 2..=chars.len().min(20) {
+        for &end_idx in &indices[2..] {
             if !ngrams.is_empty() {
                 ngrams.push(' ');
             }
-            ngrams.extend(chars[0..len].iter());
+            ngrams.push_str(&word[..end_idx]);
         }
     }
     ngrams
