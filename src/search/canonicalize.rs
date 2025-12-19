@@ -210,13 +210,53 @@ fn strip_markdown_line(line: &str) -> String {
     // Remove blockquote prefix
     result = result.trim_start_matches('>').trim_start().to_string();
 
-    // Remove list markers
-    result = result
-        .trim_start_matches(|c: char| c == '-' || c == '+' || c.is_ascii_digit() || c == '.')
-        .trim_start()
-        .to_string();
+    // Remove list markers (only actual markdown list syntax, not arbitrary numbers)
+    result = strip_list_marker(&result);
 
     result
+}
+
+/// Strip markdown list markers from the start of a line.
+///
+/// Only strips actual list marker patterns:
+/// - Unordered: "- ", "+ ", "* " (already handled by * removal above, but - and + need space)
+/// - Ordered: "1. ", "2. ", "10. ", etc. (digit(s) followed by dot and space)
+///
+/// Does NOT strip arbitrary leading digits (e.g., "3.14159" stays intact).
+fn strip_list_marker(line: &str) -> String {
+    let trimmed = line.trim_start();
+
+    // Check for unordered list markers: "- " or "+ "
+    if let Some(rest) = trimmed.strip_prefix("- ") {
+        return rest.to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("+ ") {
+        return rest.to_string();
+    }
+
+    // Check for ordered list markers: digits followed by ". "
+    // e.g., "1. item", "10. item", "123. item"
+    let mut chars = trimmed.chars().peekable();
+    let mut digit_count = 0;
+
+    // Count leading digits
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            digit_count += 1;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+
+    // Must have at least one digit, followed by ". " (dot then space)
+    if digit_count > 0 && chars.next() == Some('.') && chars.peek() == Some(&' ') {
+        chars.next(); // consume the space
+        return chars.collect();
+    }
+
+    // Not a list marker, return original
+    line.to_string()
 }
 
 /// Strip markdown links: [text](url) → text
@@ -578,5 +618,41 @@ See [docs](http://docs.rs) for more.
         // Link text preserved, URL removed
         assert!(canonical.contains("docs"));
         assert!(!canonical.contains("http://docs.rs"));
+    }
+
+    #[test]
+    fn test_list_markers_stripped() {
+        // Ordered list markers should be stripped
+        let text = "1. First item\n2. Second item\n10. Tenth item";
+        let canonical = canonicalize_for_embedding(text);
+
+        assert!(canonical.contains("First item"));
+        assert!(canonical.contains("Second item"));
+        assert!(canonical.contains("Tenth item"));
+        // The "1. " prefix should be gone
+        assert!(!canonical.contains("1. "));
+    }
+
+    #[test]
+    fn test_numbers_not_list_markers_preserved() {
+        // Numbers that aren't list markers should be preserved
+        let text = "3.14159 is pi";
+        let canonical = canonicalize_for_embedding(text);
+
+        // The number should be intact, not treated as a list marker
+        assert!(canonical.contains("3.14159"));
+        assert!(canonical.contains("is pi"));
+    }
+
+    #[test]
+    fn test_unordered_list_markers_stripped() {
+        let text = "- First item\n+ Second item";
+        let canonical = canonicalize_for_embedding(text);
+
+        assert!(canonical.contains("First item"));
+        assert!(canonical.contains("Second item"));
+        // The "- " and "+ " prefixes should be gone
+        assert!(!canonical.starts_with('-'));
+        assert!(!canonical.contains("\n-"));
     }
 }

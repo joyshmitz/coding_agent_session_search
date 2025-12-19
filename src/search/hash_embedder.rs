@@ -165,16 +165,8 @@ impl Embedder for HashEmbedder {
     }
 
     fn embed_batch(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
-        // Check all inputs first (all-or-nothing)
-        for text in texts {
-            if text.is_empty() {
-                return Err(EmbedderError::InvalidInput(
-                    "empty text in batch".to_string(),
-                ));
-            }
-        }
-
-        Ok(texts.iter().map(|t| self.embed(t).unwrap()).collect())
+        // Use the trait's default implementation which properly propagates errors
+        texts.iter().map(|t| self.embed(t)).collect()
     }
 
     fn dimension(&self) -> usize {
