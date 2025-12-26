@@ -233,6 +233,10 @@ pub enum Commands {
         /// Filter by source: 'local', 'remote', 'all', or a specific source hostname
         #[arg(long)]
         source: Option<String>,
+        /// Filter to sessions from file (one path per line). Use '-' for stdin.
+        /// Enables chained searches: `cass search "query1" --robot-format sessions | cass search "query2" --sessions-from -`
+        #[arg(long)]
+        sessions_from: Option<String>,
     },
     /// Show statistics about indexed data
     Stats {
@@ -566,6 +570,8 @@ pub enum RobotFormat {
     Jsonl,
     /// Compact single-line JSON (no pretty printing)
     Compact,
+    /// Session paths only: one source_path per line (for chained searches)
+    Sessions,
 }
 
 /// Human-readable display format for CLI output (non-JSON)
@@ -1718,6 +1724,7 @@ async fn execute_cli(
                     timeout,
                     highlight,
                     source,
+                    sessions_from,
                 } => {
                     run_cli_search(
                         &query,
@@ -1753,6 +1760,7 @@ async fn execute_cli(
                         timeout,
                         highlight,
                         source,
+                        sessions_from,
                     )?;
                 }
                 Commands::Stats {
@@ -2675,6 +2683,7 @@ fn run_cli_search(
     timeout_ms: Option<u64>,
     highlight: bool,
     source: Option<String>,
+    sessions_from: Option<String>,
 ) -> CliResult<()> {
     use crate::search::query::{QueryExplanation, SearchClient, SearchFilters};
     use crate::search::tantivy::index_dir;
@@ -2726,6 +2735,18 @@ fn run_cli_search(
     // Apply source filter (P3.1)
     if let Some(ref source_str) = source {
         filters.source_filter = SourceFilter::parse(source_str);
+    }
+
+    // Apply session paths filter (for chained searches)
+    if let Some(ref sessions_from_arg) = sessions_from {
+        let session_paths = read_session_paths(sessions_from_arg).map_err(|e| CliError {
+            code: 2,
+            kind: "sessions-from",
+            message: format!("failed to read session paths: {e}"),
+            hint: Some("Provide a file path or '-' for stdin".to_string()),
+            retryable: false,
+        })?;
+        filters.session_paths = session_paths;
     }
 
     // Apply cursor overrides (base64-encoded JSON { "offset": usize, "limit": usize })
@@ -3609,6 +3630,19 @@ fn output_robot_results(
                 retryable: false,
             })?;
             println!("{out}");
+        }
+        RobotFormat::Sessions => {
+            // Output unique session paths only, one per line
+            // This format is designed for chained searches via --sessions-from
+            use std::collections::BTreeSet;
+            let paths: BTreeSet<&str> = result
+                .hits
+                .iter()
+                .map(|hit| hit.source_path.as_str())
+                .collect();
+            for path in paths {
+                println!("{}", path);
+            }
         }
     }
 
@@ -6072,6 +6106,28 @@ pub fn default_data_dir() -> PathBuf {
         .map(|p| p.data_dir().to_path_buf())
         .or_else(|| dirs::home_dir().map(|h| h.join(".coding-agent-search")))
         .unwrap_or_else(|| PathBuf::from("./data"))
+}
+
+/// Read session paths from a file or stdin (when path is "-").
+/// Returns a HashSet of session paths for filtering.
+fn read_session_paths(source: &str) -> Result<std::collections::HashSet<String>, std::io::Error> {
+    use std::collections::HashSet;
+    use std::io::{BufRead, BufReader};
+
+    let reader: Box<dyn BufRead> = if source == "-" {
+        Box::new(BufReader::new(std::io::stdin()))
+    } else {
+        Box::new(BufReader::new(std::fs::File::open(source)?))
+    };
+
+    let paths: HashSet<String> = reader
+        .lines()
+        .map_while(Result::ok)
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+
+    Ok(paths)
 }
 
 const OWNER: &str = "Dicklesworthstone";

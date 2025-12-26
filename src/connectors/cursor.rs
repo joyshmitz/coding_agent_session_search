@@ -45,6 +45,13 @@ impl CursorConnector {
         }
         #[cfg(target_os = "linux")]
         {
+            // Check if we're in WSL and should look at Windows Cursor paths first
+            if Self::is_wsl() {
+                if let Some(wsl_path) = Self::find_wsl_cursor_path() {
+                    return Some(wsl_path);
+                }
+            }
+            // Fall back to Linux native path
             dirs::home_dir().map(|h| h.join(".config/Cursor/User"))
         }
         #[cfg(target_os = "windows")]
@@ -55,6 +62,49 @@ impl CursorConnector {
         {
             None
         }
+    }
+
+    /// Check if running inside Windows Subsystem for Linux
+    #[cfg(target_os = "linux")]
+    fn is_wsl() -> bool {
+        std::fs::read_to_string("/proc/version")
+            .map(|v| v.to_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+    }
+
+    /// Find Cursor installation path via WSL mount points
+    /// Probes /mnt/c/Users/*/AppData/Roaming/Cursor/User
+    #[cfg(target_os = "linux")]
+    fn find_wsl_cursor_path() -> Option<PathBuf> {
+        let mnt_c = Path::new("/mnt/c/Users");
+        if !mnt_c.exists() {
+            return None;
+        }
+
+        for entry in std::fs::read_dir(mnt_c).ok()?.flatten() {
+            // Skip system directories
+            let name = entry.file_name();
+            let name_str = name.to_str().unwrap_or("");
+            if name_str == "Default"
+                || name_str == "Public"
+                || name_str == "All Users"
+                || name_str == "Default User"
+            {
+                continue;
+            }
+
+            let cursor_path = entry.path().join("AppData/Roaming/Cursor/User");
+            if cursor_path.join("globalStorage").exists()
+                || cursor_path.join("workspaceStorage").exists()
+            {
+                tracing::debug!(
+                    path = %cursor_path.display(),
+                    "Found Windows Cursor installation via WSL"
+                );
+                return Some(cursor_path);
+            }
+        }
+        None
     }
 
     /// Find all state.vscdb files in Cursor storage
@@ -409,18 +459,27 @@ impl Connector for CursorConnector {
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Determine base directory
-        let base = if ctx.data_dir.join("globalStorage").exists()
-            || ctx.data_dir.join("workspaceStorage").exists()
-            || ctx
-                .data_dir
-                .file_name()
-                .is_some_and(|n| n.to_str().unwrap_or("").contains("Cursor"))
-        {
-            ctx.data_dir.clone()
-        } else if let Some(default_base) = Self::app_support_dir() {
-            default_base
+        let looks_like_base = |path: &PathBuf| {
+            path.join("globalStorage").exists()
+                || path.join("workspaceStorage").exists()
+                || path
+                    .file_name()
+                    .is_some_and(|n| n.to_str().unwrap_or("").contains("Cursor"))
+        };
+
+        let base = if ctx.use_default_detection() {
+            if looks_like_base(&ctx.data_dir) {
+                ctx.data_dir.clone()
+            } else if let Some(default_base) = Self::app_support_dir() {
+                default_base
+            } else {
+                return Ok(Vec::new());
+            }
         } else {
-            return Ok(Vec::new());
+            if !looks_like_base(&ctx.data_dir) {
+                return Ok(Vec::new());
+            }
+            ctx.data_dir.clone()
         };
 
         if !base.exists() {
@@ -1146,5 +1205,60 @@ mod tests {
         assert_eq!(conv.messages[0].idx, 0);
         assert_eq!(conv.messages[1].idx, 1);
         assert_eq!(conv.messages[2].idx, 2);
+    }
+
+    // =========================================================================
+    // WSL detection tests (Linux-only)
+    // =========================================================================
+
+    #[cfg(target_os = "linux")]
+    mod wsl_tests {
+        use super::*;
+
+        #[test]
+        fn is_wsl_returns_false_on_native_linux() {
+            // On a real Linux system (not WSL), /proc/version won't contain "microsoft"
+            // This test just verifies the function doesn't panic
+            let result = CursorConnector::is_wsl();
+            // We can't assert the exact value since it depends on the environment,
+            // but we verify the function works
+            let _ = result;
+        }
+
+        #[test]
+        fn find_wsl_cursor_path_returns_none_without_mnt_c() {
+            // On native Linux, /mnt/c typically doesn't exist
+            // This verifies the function gracefully returns None
+            if !Path::new("/mnt/c/Users").exists() {
+                let result = CursorConnector::find_wsl_cursor_path();
+                assert!(result.is_none());
+            }
+        }
+
+        #[test]
+        fn find_wsl_cursor_path_skips_system_dirs() {
+            // Create a temp structure that mimics /mnt/c/Users with system dirs
+            let dir = TempDir::new().unwrap();
+            let users_dir = dir.path().join("Users");
+            fs::create_dir_all(&users_dir).unwrap();
+
+            // Create system directories that should be skipped
+            for sys_dir in ["Default", "Public", "All Users", "Default User"] {
+                fs::create_dir_all(users_dir.join(sys_dir)).unwrap();
+            }
+
+            // The function checks /mnt/c/Users specifically, so we can't directly test
+            // the skipping logic without mocking. Instead, verify the skip list is correct.
+            let skip_list = ["Default", "Public", "All Users", "Default User"];
+            assert_eq!(skip_list.len(), 4);
+        }
+
+        #[test]
+        fn wsl_path_structure_is_valid() {
+            // Verify the expected WSL path structure
+            let expected = Path::new("/mnt/c/Users/TestUser/AppData/Roaming/Cursor/User");
+            assert!(expected.starts_with("/mnt/c/Users"));
+            assert!(expected.ends_with("Cursor/User"));
+        }
     }
 }

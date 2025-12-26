@@ -40,6 +40,9 @@ pub struct SearchFilters {
     /// Filter by conversation source (local, remote, or specific source ID)
     #[serde(skip_serializing_if = "SourceFilter::is_all")]
     pub source_filter: SourceFilter,
+    /// Filter to specific session source paths (for chained searches)
+    #[serde(skip_serializing_if = "HashSet::is_empty")]
+    pub session_paths: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
@@ -1685,6 +1688,10 @@ impl SearchClient {
             )?;
             if !hits.is_empty() {
                 let mut deduped = deduplicate_hits(hits);
+                // Apply session_paths filter (post-search since source_path is not indexed)
+                if !filters.session_paths.is_empty() {
+                    deduped.retain(|h| filters.session_paths.contains(&h.source_path));
+                }
                 deduped.truncate(limit);
                 self.put_cache(&sanitized, &filters, &deduped);
                 return Ok(deduped);
@@ -1716,6 +1723,10 @@ impl SearchClient {
             );
             let hits = self.search_sqlite(conn, &sanitized, filters.clone(), limit * 3, offset)?;
             let mut deduped = deduplicate_hits(hits);
+            // Apply session_paths filter (post-search since source_path is not indexed)
+            if !filters.session_paths.is_empty() {
+                deduped.retain(|h| filters.session_paths.contains(&h.source_path));
+            }
             deduped.truncate(limit);
             self.put_cache(&sanitized, &filters, &deduped);
             return Ok(deduped);
@@ -2257,6 +2268,9 @@ impl SearchClient {
                 ));
             }
         }
+
+        // NOTE: session_paths filtering is applied post-search since source_path
+        // is STORED but not indexed. See apply_session_paths_filter().
 
         let q: Box<dyn Query> = if clauses.is_empty() {
             Box::new(AllQuery)
@@ -6243,6 +6257,113 @@ mod tests {
         // Both should be returned (different source_paths mean different conversations)
         // but if they have exact same content from same source, dedup should apply
         assert!(!result.hits.is_empty());
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Session paths filter tests (chained searches)
+    // =========================================================================
+
+    #[test]
+    fn search_session_paths_filter() -> Result<()> {
+        // Test filtering by specific session source paths (for chained searches)
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        // Create 3 conversations with different source paths
+        let paths = [
+            dir.path().join("session-a.jsonl"),
+            dir.path().join("session-b.jsonl"),
+            dir.path().join("session-c.jsonl"),
+        ];
+
+        for (i, path) in paths.iter().enumerate() {
+            let conv = NormalizedConversation {
+                agent_slug: "claude".into(),
+                external_id: None,
+                title: Some(format!("session-{}", i)),
+                workspace: Some(std::path::PathBuf::from("/ws")),
+                source_path: path.clone(),
+                started_at: Some(100 + i as i64),
+                ended_at: None,
+                metadata: serde_json::json!({}),
+                messages: vec![NormalizedMessage {
+                    idx: 0,
+                    role: "user".into(),
+                    author: None,
+                    created_at: Some(100 + i as i64),
+                    content: format!("needle content for session {}", i),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                }],
+            };
+            index.add_conversation(&conv)?;
+        }
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // First, search without filter - should get all 3
+        let hits_all = client.search("needle", SearchFilters::default(), 10, 0)?;
+        assert_eq!(hits_all.len(), 3, "Should find all 3 sessions");
+
+        // Now filter to only sessions A and C
+        let mut filters = SearchFilters::default();
+        filters.session_paths.insert(paths[0].to_string_lossy().to_string());
+        filters.session_paths.insert(paths[2].to_string_lossy().to_string());
+
+        let hits_filtered = client.search("needle", filters, 10, 0)?;
+        assert_eq!(hits_filtered.len(), 2, "Should find only 2 sessions (A and C)");
+
+        // Verify the correct sessions are returned
+        let filtered_paths: HashSet<&str> = hits_filtered
+            .iter()
+            .map(|h| h.source_path.as_str())
+            .collect();
+        assert!(filtered_paths.contains(paths[0].to_string_lossy().as_ref()));
+        assert!(filtered_paths.contains(paths[2].to_string_lossy().as_ref()));
+        assert!(!filtered_paths.contains(paths[1].to_string_lossy().as_ref()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_session_paths_empty_filter_returns_all() -> Result<()> {
+        // Empty session_paths filter should not restrict results
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        let conv = NormalizedConversation {
+            agent_slug: "claude".into(),
+            external_id: None,
+            title: Some("test".into()),
+            workspace: Some(std::path::PathBuf::from("/ws")),
+            source_path: dir.path().join("test.jsonl"),
+            started_at: Some(100),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(100),
+                content: "needle content".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // Empty session_paths should not filter
+        let filters = SearchFilters::default();
+        assert!(filters.session_paths.is_empty());
+
+        let hits = client.search("needle", filters, 10, 0)?;
+        assert_eq!(hits.len(), 1);
 
         Ok(())
     }
