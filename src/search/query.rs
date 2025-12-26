@@ -1826,7 +1826,12 @@ impl SearchClient {
             results = results.into_iter().skip(offset).collect();
         }
 
-        self.hydrate_semantic_hits(&results)
+        let mut hits = self.hydrate_semantic_hits(&results)?;
+        // Apply session_paths filter (not supported at SemanticFilter level)
+        if !filters.session_paths.is_empty() {
+            hits.retain(|h| filters.session_paths.contains(&h.source_path));
+        }
+        Ok(hits)
     }
 
     fn hydrate_semantic_hits(&self, results: &[VectorSearchResult]) -> Result<Vec<SearchHit>> {
@@ -2761,6 +2766,16 @@ fn filters_fingerprint(filters: &SearchFilters) -> String {
     }
     if let Some(t) = filters.created_to {
         parts.push(format!("to:{t}"));
+    }
+    // Include source_filter in cache key (P3.1)
+    if !matches!(filters.source_filter, crate::sources::provenance::SourceFilter::All) {
+        parts.push(format!("src:{:?}", filters.source_filter));
+    }
+    // Include session_paths in cache key (for chained searches)
+    if !filters.session_paths.is_empty() {
+        let mut v: Vec<_> = filters.session_paths.iter().cloned().collect();
+        v.sort();
+        parts.push(format!("sp:{v:?}"));
     }
     parts.join("|")
 }
