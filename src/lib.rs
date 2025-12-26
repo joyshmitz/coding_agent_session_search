@@ -7007,7 +7007,8 @@ fn run_timeline(
             }
 
             let duration = ended.map(|e| {
-                let mins = (e - started) / 60;
+                // Timestamps are in milliseconds, divide by 60_000 to get minutes
+                let mins = (e - started) / 60_000;
                 if mins < 60 {
                     format!("{}m", mins)
                 } else {
