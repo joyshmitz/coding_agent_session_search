@@ -20,3 +20,6 @@ tests/fixtures/search_demo_data/watch_state.json
 
 # Temporary scratch files
 temp_*.rs
+
+# bv (beads viewer) local config and caches
+.bv/
