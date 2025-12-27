@@ -17,8 +17,9 @@ use crate::connectors::{
     pi_agent::PiAgentConnector,
 };
 use crate::search::tantivy::{TantivyIndex, index_dir};
-use crate::sources::config::Platform;
-use crate::sources::provenance::Origin;
+use crate::sources::config::{Platform, SourcesConfig};
+use crate::sources::provenance::{Origin, Source};
+use crate::sources::sync::path_to_safe_dirname;
 use crate::storage::sqlite::SqliteStorage;
 
 #[derive(Debug, Clone)]
@@ -117,6 +118,16 @@ pub fn run_index(
     // Record scan start time before scanning
     let scan_start_ts = SqliteStorage::now_millis();
 
+    // Keep sources table in sync with sources.toml for provenance integrity.
+    sync_sources_config_to_db(&storage);
+
+    let scan_roots = build_scan_roots(&storage, &opts.data_dir);
+    let remote_roots: Vec<ScanRoot> = scan_roots
+        .iter()
+        .filter(|r| r.origin.is_remote())
+        .cloned()
+        .collect();
+
     // First pass: Scan all to get counts if we have progress tracker
     // Use parallel iteration for faster agent discovery
     if let Some(p) = &opts.progress {
@@ -143,46 +154,82 @@ pub fn run_index(
         .filter_map(|(name, factory)| {
             let conn = factory();
             let detect = conn.detect();
-            if !detect.detected {
+            let was_detected = detect.detected;
+            let mut convs = Vec::new();
+
+            if detect.detected {
+                // Update discovered agents count immediately when detected
+                // This gives fast UI feedback during the discovery phase
+                if let Some(p) = progress_ref {
+                    p.discovered_agents.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut names) = p.discovered_agent_names.lock() {
+                        names.push(name.to_string());
+                    }
+                }
+
+                let ctx = crate::connectors::ScanContext::local_default(data_dir.clone(), since_ts);
+                match conn.scan(&ctx) {
+                    Ok(mut local_convs) => {
+                        let local_origin = Origin::local();
+                        for conv in &mut local_convs {
+                            inject_provenance(conv, &local_origin);
+                        }
+                        convs.extend(local_convs);
+                    }
+                    Err(e) => {
+                        // Note: agent was counted as discovered but scan failed
+                        // This is acceptable as detection succeeded (agent exists)
+                        tracing::warn!("scan failed for {}: {}", name, e);
+                    }
+                }
+            }
+
+            if !remote_roots.is_empty() {
+                for root in &remote_roots {
+                    let ctx = crate::connectors::ScanContext::with_roots(
+                        root.path.clone(),
+                        vec![root.clone()],
+                        None,
+                    );
+                    match conn.scan(&ctx) {
+                        Ok(mut remote_convs) => {
+                            for conv in &mut remote_convs {
+                                inject_provenance(conv, &root.origin);
+                                apply_workspace_rewrite(conv, &root.workspace_rewrites);
+                            }
+                            convs.extend(remote_convs);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                connector = name,
+                                root = %root.path.display(),
+                                "remote scan failed: {e}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            if convs.is_empty() {
                 return None;
             }
 
-            // Update discovered agents count immediately when detected
-            // This gives fast UI feedback during the discovery phase
-            if let Some(p) = progress_ref {
+            if !was_detected && let Some(p) = progress_ref {
                 p.discovered_agents.fetch_add(1, Ordering::Relaxed);
                 if let Ok(mut names) = p.discovered_agent_names.lock() {
                     names.push(name.to_string());
                 }
             }
 
-            let ctx = crate::connectors::ScanContext::local_default(data_dir.clone(), since_ts);
-
-            match conn.scan(&ctx) {
-                Ok(mut convs) => {
-                    // Inject local provenance into all conversations from local scan (P2.2)
-                    let local_origin = Origin::local();
-                    for conv in &mut convs {
-                        inject_provenance(conv, &local_origin);
-                    }
-
-                    if let Some(p) = progress_ref {
-                        p.total.fetch_add(convs.len(), Ordering::Relaxed);
-                    }
-                    tracing::info!(
-                        connector = name,
-                        conversations = convs.len(),
-                        "parallel_scan_complete"
-                    );
-                    Some((name, convs))
-                }
-                Err(e) => {
-                    // Note: agent was counted as discovered but scan failed
-                    // This is acceptable as detection succeeded (agent exists)
-                    tracing::warn!("scan failed for {}: {}", name, e);
-                    None
-                }
+            if let Some(p) = progress_ref {
+                p.total.fetch_add(convs.len(), Ordering::Relaxed);
             }
+            tracing::info!(
+                connector = name,
+                conversations = convs.len(),
+                "parallel_scan_complete"
+            );
+            Some((name, convs))
         })
         .collect();
 
@@ -233,7 +280,8 @@ pub fn run_index(
                         let _ = save_watch_state(&opts_clone.data_dir, &g);
                     }
                     // For rebuild, trigger reindex on all active roots
-                    let all_root_paths: Vec<PathBuf> = roots.iter().map(|(_, p)| p.clone()).collect();
+                    let all_root_paths: Vec<PathBuf> =
+                        roots.iter().map(|(_, p)| p.clone()).collect();
                     let _ = reindex_paths(
                         &opts_clone,
                         all_root_paths,
@@ -297,7 +345,7 @@ pub fn get_connector_factories() -> Vec<(&'static str, fn() -> Box<dyn Connector
 fn detect_watch_roots() -> Vec<(ConnectorKind, PathBuf)> {
     let factories = get_connector_factories();
     let mut roots = Vec::new();
-    
+
     for (name, factory) in factories {
         if let Some(kind) = ConnectorKind::from_slug(name) {
             let conn = factory();
@@ -491,7 +539,7 @@ fn reindex_paths(
                 .map(|v| v.saturating_sub(1))
         };
         let ctx = crate::connectors::ScanContext::local_default(opts.data_dir.clone(), since_ts);
-        
+
         // SCAN PHASE: IO-heavy, no locks held
         let mut convs = conn.scan(&ctx)?;
 
@@ -580,7 +628,10 @@ fn save_watch_state(data_dir: &Path, state: &HashMap<ConnectorKind, i64>) -> Res
     Ok(())
 }
 
-fn classify_paths(paths: Vec<PathBuf>, roots: &[(ConnectorKind, PathBuf)]) -> Vec<(ConnectorKind, Option<i64>)> {
+fn classify_paths(
+    paths: Vec<PathBuf>,
+    roots: &[(ConnectorKind, PathBuf)],
+) -> Vec<(ConnectorKind, Option<i64>)> {
     let mut map: HashMap<ConnectorKind, Option<i64>> = HashMap::new();
     for p in paths {
         if let Ok(meta) = std::fs::metadata(&p)
@@ -588,15 +639,13 @@ fn classify_paths(paths: Vec<PathBuf>, roots: &[(ConnectorKind, PathBuf)]) -> Ve
             && let Ok(dur) = time.duration_since(std::time::UNIX_EPOCH)
         {
             let ts = Some(dur.as_millis() as i64);
-            
+
             // Check against known roots (dynamic classification)
-            let kind = roots.iter().find_map(|(k, root)| {
-                if p.starts_with(root) {
-                    Some(*k)
-                } else {
-                    None
-                }
-            });
+            let kind = roots.iter().find_map(
+                |(k, root)| {
+                    if p.starts_with(root) { Some(*k) } else { None }
+                },
+            );
 
             if let Some(kind) = kind {
                 let entry = map.entry(kind).or_insert(None);
@@ -609,6 +658,51 @@ fn classify_paths(paths: Vec<PathBuf>, roots: &[(ConnectorKind, PathBuf)]) -> Ve
         }
     }
     map.into_iter().collect()
+}
+
+fn sync_sources_config_to_db(storage: &SqliteStorage) {
+    if std::env::var("CASS_IGNORE_SOURCES_CONFIG").is_ok() {
+        return;
+    }
+    let config = match SourcesConfig::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::debug!("sources config load failed: {e}");
+            return;
+        }
+    };
+
+    for source in config.remote_sources() {
+        let platform = source.platform.map(|p| match p {
+            Platform::Macos => "macos".to_string(),
+            Platform::Linux => "linux".to_string(),
+            Platform::Windows => "windows".to_string(),
+        });
+
+        let config_json = serde_json::json!({
+            "paths": source.paths.clone(),
+            "path_mappings": source.path_mappings.clone(),
+            "sync_schedule": source.sync_schedule,
+        });
+
+        let record = Source {
+            id: source.name.clone(),
+            kind: source.source_type,
+            host_label: source.host.clone(),
+            machine_id: None,
+            platform,
+            config_json: Some(config_json),
+            created_at: None,
+            updated_at: None,
+        };
+
+        if let Err(e) = storage.upsert_source(&record) {
+            tracing::warn!(
+                source_id = %record.id,
+                "failed to upsert source into db: {e}"
+            );
+        }
+    }
 }
 
 /// Build a list of scan roots for multi-root indexing.
@@ -627,11 +721,129 @@ pub fn build_scan_roots(storage: &SqliteStorage, data_dir: &Path) -> Vec<ScanRoo
     // For explicit multi-root support, we add the local root.
     roots.push(ScanRoot::local(data_dir.to_path_buf()));
 
-    // Add remote mirror roots from registered sources
+    if std::env::var("CASS_IGNORE_SOURCES_CONFIG").is_err()
+        && let Ok(config) = SourcesConfig::load()
+    {
+        let remotes: Vec<_> = config.remote_sources().collect();
+        if !remotes.is_empty() {
+            for source in remotes {
+                let origin = Origin {
+                    source_id: source.name.clone(),
+                    kind: source.source_type,
+                    host: source.host.clone(),
+                };
+                let platform = source.platform;
+                let workspace_rewrites = source.path_mappings.clone();
+
+                for path in &source.paths {
+                    let expanded_path = if path.starts_with("~/") {
+                        path.to_string()
+                    } else if path.starts_with('~') {
+                        path.replacen('~', "~/", 1)
+                    } else {
+                        path.to_string()
+                    };
+                    let safe_name = path_to_safe_dirname(&expanded_path);
+                    let mirror_path = data_dir
+                        .join("remotes")
+                        .join(&source.name)
+                        .join("mirror")
+                        .join(&safe_name);
+                    if !mirror_path.exists() {
+                        continue;
+                    }
+
+                    let mut scan_root = ScanRoot::remote(mirror_path, origin.clone(), platform);
+                    scan_root.workspace_rewrites = workspace_rewrites.clone();
+                    roots.push(scan_root);
+                }
+            }
+            return roots;
+        }
+    }
+
+    // Fallback: remote mirror roots from registered sources
     if let Ok(sources) = storage.list_sources() {
         for source in sources {
             // Skip local source - already handled above
             if !source.kind.is_remote() {
+                continue;
+            }
+
+            // Parse platform from source
+            let platform =
+                source
+                    .platform
+                    .as_deref()
+                    .and_then(|p| match p.to_lowercase().as_str() {
+                        "macos" => Some(Platform::Macos),
+                        "linux" => Some(Platform::Linux),
+                        "windows" => Some(Platform::Windows),
+                        _ => None,
+                    });
+
+            // Parse workspace rewrites from config_json
+            // Format: array of {from, to, agents?} objects
+            let workspace_rewrites = source
+                .config_json
+                .as_ref()
+                .and_then(|cfg| cfg.get("path_mappings"))
+                .and_then(|arr| arr.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            let from = item.get("from")?.as_str()?.to_string();
+                            let to = item.get("to")?.as_str()?.to_string();
+                            let agents = item.get("agents").and_then(|a| {
+                                a.as_array().map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect()
+                                })
+                            });
+                            Some(crate::sources::config::PathMapping { from, to, agents })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            if let Some(paths) = source
+                .config_json
+                .as_ref()
+                .and_then(|cfg| cfg.get("paths"))
+                .and_then(|arr| arr.as_array())
+            {
+                for path_val in paths {
+                    let Some(path) = path_val.as_str() else {
+                        continue;
+                    };
+                    let expanded_path = if path.starts_with("~/") {
+                        path.to_string()
+                    } else if path.starts_with('~') {
+                        path.replacen('~', "~/", 1)
+                    } else {
+                        path.to_string()
+                    };
+                    let safe_name = path_to_safe_dirname(&expanded_path);
+                    let mirror_path = data_dir
+                        .join("remotes")
+                        .join(&source.id)
+                        .join("mirror")
+                        .join(&safe_name);
+                    if !mirror_path.exists() {
+                        continue;
+                    }
+
+                    let origin = Origin {
+                        source_id: source.id.clone(),
+                        kind: source.kind,
+                        host: source.host_label.clone(),
+                    };
+                    let mut scan_root = ScanRoot::remote(mirror_path, origin, platform);
+                    scan_root.workspace_rewrites = workspace_rewrites.clone();
+                    roots.push(scan_root);
+                }
                 continue;
             }
 
@@ -644,56 +856,10 @@ pub fn build_scan_roots(storage: &SqliteStorage, data_dir: &Path) -> Vec<ScanRoo
                     kind: source.kind,
                     host: source.host_label.clone(),
                 };
-
-                // Parse platform from source
-                let platform =
-                    source
-                        .platform
-                        .as_deref()
-                        .and_then(|p| match p.to_lowercase().as_str() {
-                            "macos" => Some(Platform::Macos),
-                            "linux" => Some(Platform::Linux),
-                            "windows" => Some(Platform::Windows),
-                            _ => None,
-                        });
-
-                // Parse workspace rewrites from config_json
-                // Format: array of {from, to, agents?} objects
-                let workspace_rewrites = source
-                    .config_json
-                    .as_ref()
-                    .and_then(|cfg| cfg.get("path_mappings"))
-                    .and_then(|arr| arr.as_array())
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| {
-                                let from = item.get("from")?.as_str()?.to_string();
-                                let to = item.get("to")?.as_str()?.to_string();
-                                let agents = item.get("agents").and_then(|a| {
-                                    a.as_array().map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str().map(String::from))
-                                            .collect()
-                                    })
-                                });
-                                Some(crate::sources::config::PathMapping { from, to, agents })
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-
                 let mut scan_root = ScanRoot::remote(mirror_path, origin, platform);
                 scan_root.workspace_rewrites = workspace_rewrites;
 
                 roots.push(scan_root);
-
-                tracing::debug!(
-                    source_id = %source.id,
-                    kind = ?source.kind,
-                    host = ?source.host_label,
-                    "added_remote_scan_root"
-                );
             }
         }
     }
@@ -941,6 +1107,37 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                // SAFETY: test helper restores prior process env for isolation.
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
+            } else {
+                // SAFETY: test helper restores prior process env for isolation.
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn ignore_sources_config() -> EnvGuard {
+        let key = "CASS_IGNORE_SOURCES_CONFIG";
+        let previous = std::env::var(key).ok();
+        // SAFETY: test helper toggles a process-local env var for isolation.
+        unsafe {
+            std::env::set_var(key, "1");
+        }
+        EnvGuard { key, previous }
+    }
+
     fn norm_msg(idx: i64, created_at: i64) -> NormalizedMessage {
         NormalizedMessage {
             idx,
@@ -1099,7 +1296,11 @@ mod tests {
             (ConnectorKind::Claude, tmp.path().join("project")),
             (ConnectorKind::Aider, tmp.path().join("repo")),
             (ConnectorKind::Cursor, tmp.path().join("Cursor/User")),
-            (ConnectorKind::ChatGpt, tmp.path().join("Library/Application Support/com.openai.chat")),
+            (
+                ConnectorKind::ChatGpt,
+                tmp.path()
+                    .join("Library/Application Support/com.openai.chat"),
+            ),
         ];
 
         let paths = vec![codex.clone(), claude.clone(), aider, cursor, chatgpt];
@@ -1401,7 +1602,9 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
     }
 
     #[test]
+    #[serial]
     fn build_scan_roots_creates_local_root() {
+        let _guard = ignore_sources_config();
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
@@ -1418,7 +1621,9 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
     }
 
     #[test]
+    #[serial]
     fn build_scan_roots_includes_remote_mirror_if_exists() {
+        let _guard = ignore_sources_config();
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
@@ -1463,7 +1668,9 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
     }
 
     #[test]
+    #[serial]
     fn build_scan_roots_skips_nonexistent_mirror() {
+        let _guard = ignore_sources_config();
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();

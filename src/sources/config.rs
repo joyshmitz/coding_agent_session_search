@@ -432,7 +432,12 @@ pub fn get_preset_paths(preset: &str) -> Result<Vec<String>, ConfigError> {
         "macos-defaults" | "macos" => Ok(vec![
             "~/.claude/projects".into(),
             "~/.codex/sessions".into(),
-            "~/Library/Application Support/Cursor/User/globalStorage/rooveterinaryinc.roo-cline/settings".into(),
+            "~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev".into(),
+            "~/Library/Application Support/Code/User/globalStorage/rooveterinaryinc.roo-cline"
+                .into(),
+            "~/Library/Application Support/Cursor/User/globalStorage/saoudrizwan.claude-dev".into(),
+            "~/Library/Application Support/Cursor/User/globalStorage/rooveterinaryinc.roo-cline"
+                .into(),
             "~/Library/Application Support/com.openai.chat".into(),
             "~/.gemini/tmp".into(),
             "~/.pi/agent/sessions".into(),
@@ -444,7 +449,10 @@ pub fn get_preset_paths(preset: &str) -> Result<Vec<String>, ConfigError> {
         "linux-defaults" | "linux" => Ok(vec![
             "~/.claude/projects".into(),
             "~/.codex/sessions".into(),
-            "~/.config/Cursor/User/globalStorage/rooveterinaryinc.roo-cline/settings".into(),
+            "~/.config/Code/User/globalStorage/saoudrizwan.claude-dev".into(),
+            "~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline".into(),
+            "~/.config/Cursor/User/globalStorage/saoudrizwan.claude-dev".into(),
+            "~/.config/Cursor/User/globalStorage/rooveterinaryinc.roo-cline".into(),
             "~/.gemini/tmp".into(),
             "~/.pi/agent/sessions".into(),
             "~/.local/share/opencode".into(),

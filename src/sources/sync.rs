@@ -322,9 +322,9 @@ impl SyncEngine {
 
         let mut cmd = Command::new("rsync");
         cmd.args([
-            "-avz",      // Archive, verbose, compress
-            "--stats",   // Show transfer stats for parsing
-            "--partial", // Keep partial transfers for resume
+            "-avz",           // Archive, verbose, compress
+            "--stats",        // Show transfer stats for parsing
+            "--partial",      // Keep partial transfers for resume
             "--protect-args", // Preserve spaces/special chars in remote paths
             "--timeout",
             &self.transfer_timeout.to_string(),
@@ -438,7 +438,7 @@ impl SyncEngine {
 /// Convert a remote path to a safe directory name.
 ///
 /// Replaces path separators and special characters with underscores.
-fn path_to_safe_dirname(path: &str) -> String {
+pub fn path_to_safe_dirname(path: &str) -> String {
     let cleaned = path
         .trim_start_matches('~')
         .trim_start_matches('/')

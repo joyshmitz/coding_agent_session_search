@@ -950,10 +950,7 @@ fn filter_by_source_all_explicit() {
         .and_then(|h| h.as_array())
         .expect("hits array");
 
-    assert!(
-        !hits.is_empty(),
-        "Should find sessions with --source all"
-    );
+    assert!(!hits.is_empty(), "Should find sessions with --source all");
 }
 
 /// Test: search --source remote returns empty when no remote data indexed
@@ -1115,13 +1112,7 @@ fn timeline_source_local() {
         .success();
 
     let output = cargo_bin_cmd!("cass")
-        .args([
-            "timeline",
-            "--source",
-            "local",
-            "--json",
-            "--data-dir",
-        ])
+        .args(["timeline", "--source", "local", "--json", "--data-dir"])
         .arg(&data_dir)
         .env("HOME", home)
         .env("CODEX_HOME", &codex_home)
@@ -1167,13 +1158,7 @@ fn timeline_source_remote_empty() {
         .success();
 
     let output = cargo_bin_cmd!("cass")
-        .args([
-            "timeline",
-            "--source",
-            "remote",
-            "--json",
-            "--data-dir",
-        ])
+        .args(["timeline", "--source", "remote", "--json", "--data-dir"])
         .arg(&data_dir)
         .env("HOME", home)
         .env("CODEX_HOME", &codex_home)
@@ -1224,13 +1209,7 @@ fn timeline_source_specific() {
 
     // Query with specific source name
     let output = cargo_bin_cmd!("cass")
-        .args([
-            "timeline",
-            "--source",
-            "local",
-            "--json",
-            "--data-dir",
-        ])
+        .args(["timeline", "--source", "local", "--json", "--data-dir"])
         .arg(&data_dir)
         .env("HOME", home)
         .env("CODEX_HOME", &codex_home)

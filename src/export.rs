@@ -116,7 +116,7 @@ fn get_code_block_delimiter(content: &str) -> String {
         }
     }
     max_backticks = max_backticks.max(current);
-    
+
     let needed = (max_backticks + 1).max(3);
     "`".repeat(needed)
 }
@@ -149,7 +149,10 @@ fn export_markdown(hits: &[SearchHit], options: &ExportOptions) -> String {
         output.push_str("| Field | Value |\n");
         output.push_str("|-------|-------|\n");
         output.push_str(&format!("| Agent | {} |\n", escape_markdown(&hit.agent)));
-        output.push_str(&format!("| Workspace | `{}` |\n", hit.workspace.replace('`', "")));
+        output.push_str(&format!(
+            "| Workspace | `{}` |\n",
+            hit.workspace.replace('`', "")
+        ));
 
         if options.include_score {
             output.push_str(&format!("| Score | {:.2} |\n", hit.score));
@@ -171,7 +174,10 @@ fn export_markdown(hits: &[SearchHit], options: &ExportOptions) -> String {
             } else {
                 hit.source_path.clone()
             };
-            output.push_str(&format!("| Source | `{}` |\n", path_display.replace('`', "")));
+            output.push_str(&format!(
+                "| Source | `{}` |\n",
+                path_display.replace('`', "")
+            ));
 
             if let Some(line) = hit.line_number {
                 output.push_str(&format!("| Line | {line} |\n"));
@@ -422,13 +428,13 @@ mod tests {
         hit.title = "[Link](javascript:alert(1))".to_string();
         hit.agent = "agent|pipe".to_string();
         hit.content = "Contains ``` backticks".to_string();
-        
+
         let options = ExportOptions {
             include_content: true,
             ..ExportOptions::default()
         };
         let output = export_markdown(&[hit], &options);
-        
+
         assert!(output.contains("\\[Link\\](javascript:alert(1))"));
         assert!(output.contains("agent\\|pipe"));
         // Should use 4 backticks because content has 3
