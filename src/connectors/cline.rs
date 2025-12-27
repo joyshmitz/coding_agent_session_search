@@ -20,36 +20,62 @@ impl ClineConnector {
         Self
     }
 
-    fn storage_root() -> PathBuf {
-        let base = dirs::home_dir().unwrap_or_default();
-        let linux = base.join(".config/Code/User/globalStorage/saoudrizwan.claude-dev");
-        if linux.exists() {
-            return linux;
-        }
-        base.join("Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev")
-    }
-}
+    fn candidate_roots() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        let Some(base) = dirs::home_dir() else {
+            return roots;
+        };
 
-impl Connector for ClineConnector {
-    fn detect(&self) -> DetectionResult {
-        let root = Self::storage_root();
-        if root.exists() {
-            DetectionResult {
-                detected: true,
-                evidence: vec![format!("found {}", root.display())],
-                root_paths: vec![root],
+        let code_roots = [
+            base.join(".config/Code/User/globalStorage"),
+            base.join("Library/Application Support/Code/User/globalStorage"),
+            base.join("AppData/Roaming/Code/User/globalStorage"),
+        ];
+        let cursor_roots = [
+            base.join(".config/Cursor/User/globalStorage"),
+            base.join("Library/Application Support/Cursor/User/globalStorage"),
+            base.join("AppData/Roaming/Cursor/User/globalStorage"),
+        ];
+        let extensions = ["saoudrizwan.claude-dev", "rooveterinaryinc.roo-cline"];
+
+        for root in code_roots.iter().chain(cursor_roots.iter()) {
+            for ext in &extensions {
+                roots.push(root.join(ext));
             }
+        }
+
+        roots
+    }
+
+    fn storage_roots() -> Vec<PathBuf> {
+        Self::candidate_roots()
+            .into_iter()
+            .filter(|r| r.exists())
+            .collect()
+    }
+
+    fn normalize_root_path(path: &std::path::Path) -> PathBuf {
+        if path
+            .file_name()
+            .is_some_and(|n| n == "settings" || n == "settings.json")
+        {
+            path.parent().unwrap_or(path).to_path_buf()
         } else {
-            DetectionResult::not_found()
+            path.to_path_buf()
         }
     }
 
-    fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
-        let root = if ctx
-            .data_dir
+    fn looks_like_storage(path: &std::path::Path) -> bool {
+        if path
             .file_name()
-            .is_some_and(|n| n.to_str().unwrap_or("").contains("claude-dev"))
-            || fs::read_dir(&ctx.data_dir)
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains("claude-dev") || n.contains("roo-cline"))
+        {
+            return true;
+        }
+
+        if path.is_dir() {
+            return fs::read_dir(path)
                 .map(|mut d| {
                     d.any(|e| {
                         e.ok().is_some_and(|e| {
@@ -60,160 +86,198 @@ impl Connector for ClineConnector {
                         })
                     })
                 })
-                .unwrap_or(false)
-        {
-            ctx.data_dir.clone()
+                .unwrap_or(false);
+        }
+
+        false
+    }
+}
+
+impl Connector for ClineConnector {
+    fn detect(&self) -> DetectionResult {
+        let roots = Self::storage_roots();
+        if !roots.is_empty() {
+            DetectionResult {
+                detected: true,
+                evidence: roots
+                    .iter()
+                    .map(|r| format!("found {}", r.display()))
+                    .collect(),
+                root_paths: roots,
+            }
         } else {
-            Self::storage_root()
+            DetectionResult::not_found()
+        }
+    }
+
+    fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
+        let override_root = Self::normalize_root_path(&ctx.data_dir);
+        let roots = if ctx.use_default_detection() {
+            if Self::looks_like_storage(&override_root) {
+                vec![override_root]
+            } else {
+                Self::storage_roots()
+            }
+        } else if Self::looks_like_storage(&override_root) {
+            vec![override_root]
+        } else {
+            return Ok(Vec::new());
         };
-        if !root.exists() {
+
+        if roots.is_empty() {
             return Ok(Vec::new());
         }
 
         let mut convs = Vec::new();
-        for entry in fs::read_dir(&root)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let task_id = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .map(std::string::ToString::to_string);
-            if task_id.as_deref() == Some("taskHistory.json") {
+        for root in roots {
+            if !root.exists() {
                 continue;
             }
 
-            let meta_path = path.join("task_metadata.json");
-            let ui_messages_path = path.join("ui_messages.json");
-            let api_messages_path = path.join("api_conversation_history.json");
-
-            // Prefer UI messages as they are user-facing. Fallback to API history.
-            let source_file = if ui_messages_path.exists() {
-                Some(ui_messages_path)
-            } else if api_messages_path.exists() {
-                Some(api_messages_path)
-            } else {
-                None
-            };
-
-            let Some(file) = source_file else {
-                continue;
-            };
-
-            // Skip files not modified since last scan (incremental indexing)
-            if !crate::connectors::file_modified_since(&file, ctx.since_ts) {
-                continue;
-            }
-
-            let data =
-                fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
-            let val: Value = match serde_json::from_str(&data) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::debug!(path = %file.display(), error = %e, "cline skipping malformed JSON");
+            for entry in fs::read_dir(&root)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_dir() {
                     continue;
                 }
-            };
+                let task_id = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(std::string::ToString::to_string);
+                if task_id.as_deref() == Some("taskHistory.json") {
+                    continue;
+                }
 
-            let mut messages = Vec::new();
-            if let Some(arr) = val.as_array() {
-                for item in arr {
-                    // Use parse_timestamp to handle both i64 milliseconds and ISO-8601 strings
-                    let created = item
-                        .get("timestamp")
-                        .or_else(|| item.get("created_at"))
-                        .or_else(|| item.get("ts"))
-                        .and_then(crate::connectors::parse_timestamp);
+                let meta_path = path.join("task_metadata.json");
+                let ui_messages_path = path.join("ui_messages.json");
+                let api_messages_path = path.join("api_conversation_history.json");
 
-                    // NOTE: Do NOT filter individual messages by timestamp here!
-                    // The file-level check in file_modified_since() is sufficient.
-                    // Filtering messages would cause older messages to be lost when
-                    // the file is re-indexed after new messages are added.
+                // Prefer UI messages as they are user-facing. Fallback to API history.
+                let source_file = if ui_messages_path.exists() {
+                    Some(ui_messages_path)
+                } else if api_messages_path.exists() {
+                    Some(api_messages_path)
+                } else {
+                    None
+                };
 
-                    let role = item
-                        .get("role")
-                        .or_else(|| item.get("type"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("agent");
+                let Some(file) = source_file else {
+                    continue;
+                };
 
-                    let content = item
-                        .get("content")
-                        .or_else(|| item.get("text"))
-                        .or_else(|| item.get("message"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                // Skip files not modified since last scan (incremental indexing)
+                if !crate::connectors::file_modified_since(&file, ctx.since_ts) {
+                    continue;
+                }
 
-                    if content.trim().is_empty() {
+                let data = fs::read_to_string(&file)
+                    .with_context(|| format!("read {}", file.display()))?;
+                let val: Value = match serde_json::from_str(&data) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!(path = %file.display(), error = %e, "cline skipping malformed JSON");
                         continue;
                     }
+                };
 
-                    messages.push(NormalizedMessage {
-                        idx: 0, // set later
-                        role: role.to_string(),
-                        author: None,
-                        created_at: created,
-                        content: content.to_string(),
-                        extra: item.clone(),
-                        snippets: Vec::new(),
-                    });
+                let mut messages = Vec::new();
+                if let Some(arr) = val.as_array() {
+                    for item in arr {
+                        // Use parse_timestamp to handle both i64 milliseconds and ISO-8601 strings
+                        let created = item
+                            .get("timestamp")
+                            .or_else(|| item.get("created_at"))
+                            .or_else(|| item.get("ts"))
+                            .and_then(crate::connectors::parse_timestamp);
+
+                        // NOTE: Do NOT filter individual messages by timestamp here!
+                        // The file-level check in file_modified_since() is sufficient.
+                        // Filtering messages would cause older messages to be lost when
+                        // the file is re-indexed after new messages are added.
+
+                        let role = item
+                            .get("role")
+                            .or_else(|| item.get("type"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("agent");
+
+                        let content = item
+                            .get("content")
+                            .or_else(|| item.get("text"))
+                            .or_else(|| item.get("message"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        if content.trim().is_empty() {
+                            continue;
+                        }
+
+                        messages.push(NormalizedMessage {
+                            idx: 0, // set later
+                            role: role.to_string(),
+                            author: None,
+                            created_at: created,
+                            content: content.to_string(),
+                            extra: item.clone(),
+                            snippets: Vec::new(),
+                        });
+                    }
                 }
+
+                if messages.is_empty() {
+                    continue;
+                }
+
+                // Sort by timestamp to ensure correct ordering
+                messages.sort_by_key(|m| m.created_at.unwrap_or(0));
+
+                // Re-index
+                for (i, msg) in messages.iter_mut().enumerate() {
+                    msg.idx = i as i64;
+                }
+
+                let mut title = None;
+                let mut workspace = None;
+
+                if meta_path.exists()
+                    && let Ok(s) = fs::read_to_string(&meta_path)
+                    && let Ok(v) = serde_json::from_str::<Value>(&s)
+                {
+                    title = v
+                        .get("title")
+                        .and_then(|t| t.as_str())
+                        .map(std::string::ToString::to_string);
+                    // Try to find workspace path
+                    // Cline doesn't standardize this in metadata, but sometimes it's there or in state.
+                    // We check common keys.
+                    workspace = v
+                        .get("rootPath")
+                        .or_else(|| v.get("cwd"))
+                        .or_else(|| v.get("workspace"))
+                        .and_then(|s| s.as_str())
+                        .map(PathBuf::from);
+                }
+
+                // Fallback title from first message
+                if title.is_none() {
+                    title = messages
+                        .first()
+                        .and_then(|m| m.content.lines().next())
+                        .map(|s| s.chars().take(100).collect());
+                }
+
+                convs.push(NormalizedConversation {
+                    agent_slug: "cline".to_string(),
+                    external_id: task_id,
+                    title,
+                    workspace,
+                    source_path: path.clone(),
+                    started_at: messages.first().and_then(|m| m.created_at),
+                    ended_at: messages.last().and_then(|m| m.created_at),
+                    metadata: serde_json::json!({"source": "cline"}),
+                    messages,
+                });
             }
-
-            if messages.is_empty() {
-                continue;
-            }
-
-            // Sort by timestamp to ensure correct ordering
-            messages.sort_by_key(|m| m.created_at.unwrap_or(0));
-
-            // Re-index
-            for (i, msg) in messages.iter_mut().enumerate() {
-                msg.idx = i as i64;
-            }
-
-            let mut title = None;
-            let mut workspace = None;
-
-            if meta_path.exists()
-                && let Ok(s) = fs::read_to_string(&meta_path)
-                && let Ok(v) = serde_json::from_str::<Value>(&s)
-            {
-                title = v
-                    .get("title")
-                    .and_then(|t| t.as_str())
-                    .map(std::string::ToString::to_string);
-                // Try to find workspace path
-                // Cline doesn't standardize this in metadata, but sometimes it's there or in state.
-                // We check common keys.
-                workspace = v
-                    .get("rootPath")
-                    .or_else(|| v.get("cwd"))
-                    .or_else(|| v.get("workspace"))
-                    .and_then(|s| s.as_str())
-                    .map(PathBuf::from);
-            }
-
-            // Fallback title from first message
-            if title.is_none() {
-                title = messages
-                    .first()
-                    .and_then(|m| m.content.lines().next())
-                    .map(|s| s.chars().take(100).collect());
-            }
-
-            convs.push(NormalizedConversation {
-                agent_slug: "cline".to_string(),
-                external_id: task_id,
-                title,
-                workspace,
-                source_path: path.clone(),
-                started_at: messages.first().and_then(|m| m.created_at),
-                ended_at: messages.last().and_then(|m| m.created_at),
-                metadata: serde_json::json!({"source": "cline"}),
-                messages,
-            });
         }
 
         Ok(convs)
