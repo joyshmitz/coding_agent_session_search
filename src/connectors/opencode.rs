@@ -149,13 +149,19 @@ impl Connector for OpenCodeConnector {
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Determine the storage root
-        let storage_root = if ctx.data_dir.exists() && looks_like_opencode_storage(&ctx.data_dir) {
+        let storage_root = if ctx.use_default_detection() {
+            if ctx.data_dir.exists() && looks_like_opencode_storage(&ctx.data_dir) {
+                ctx.data_dir.clone()
+            } else {
+                match Self::storage_root() {
+                    Some(root) => root,
+                    None => return Ok(Vec::new()),
+                }
+            }
+        } else if ctx.data_dir.exists() && looks_like_opencode_storage(&ctx.data_dir) {
             ctx.data_dir.clone()
         } else {
-            match Self::storage_root() {
-                Some(root) => root,
-                None => return Ok(Vec::new()),
-            }
+            return Ok(Vec::new());
         };
 
         let session_dir = storage_root.join("session");

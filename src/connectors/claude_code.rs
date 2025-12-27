@@ -45,16 +45,27 @@ impl Connector for ClaudeCodeConnector {
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Use data_root only if it looks like a Claude projects directory (for testing)
         // Otherwise use the default projects_root
-        let root = if ctx.data_dir.join("projects").exists()
-            || ctx
-                .data_dir
-                .file_name()
-                .is_some_and(|n| n.to_str().unwrap_or("").contains("claude"))
-        {
-            ctx.data_dir.clone()
-        } else {
-            Self::projects_root()
+        let looks_like_root = |path: &PathBuf| {
+            path.join("projects").exists()
+                || path
+                    .file_name()
+                    .is_some_and(|n| n.to_str().unwrap_or("").contains("claude"))
         };
+        let mut root = if ctx.use_default_detection() {
+            if looks_like_root(&ctx.data_dir) {
+                ctx.data_dir.clone()
+            } else {
+                Self::projects_root()
+            }
+        } else {
+            ctx.data_dir.clone()
+        };
+        if root.is_file() {
+            root = root.parent().unwrap_or(&root).to_path_buf();
+        }
+        if !ctx.use_default_detection() && !looks_like_root(&root) {
+            return Ok(Vec::new());
+        }
         if !root.exists() {
             return Ok(Vec::new());
         }
@@ -91,7 +102,7 @@ impl Connector for ClaudeCodeConnector {
                 let file = std::fs::File::open(entry.path())
                     .with_context(|| format!("open {}", entry.path().display()))?;
                 let reader = std::io::BufReader::new(file);
-                
+
                 for line_res in std::io::BufRead::lines(reader) {
                     let line = match line_res {
                         Ok(l) => l,

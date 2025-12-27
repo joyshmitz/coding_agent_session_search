@@ -185,19 +185,27 @@ impl Connector for GeminiConnector {
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Use data_root only if it looks like a Gemini directory (for testing)
         // Otherwise use the default root
-        let root = if ctx
-            .data_dir
-            .file_name()
-            .is_some_and(|n| n.to_str().unwrap_or("").contains("gemini"))
-            || ctx.data_dir.join("chats").exists()
-            || fs::read_dir(&ctx.data_dir)
-                .map(|mut d| d.any(|e| e.ok().is_some_and(|e| e.path().join("chats").exists())))
-                .unwrap_or(false)
-        {
-            ctx.data_dir.clone()
-        } else {
-            Self::root()
+        let looks_like_root = |path: &PathBuf| {
+            path.file_name()
+                .is_some_and(|n| n.to_str().unwrap_or("").contains("gemini"))
+                || path.join("chats").exists()
+                || fs::read_dir(path)
+                    .map(|mut d| d.any(|e| e.ok().is_some_and(|e| e.path().join("chats").exists())))
+                    .unwrap_or(false)
         };
+        let root = if ctx.use_default_detection() {
+            if looks_like_root(&ctx.data_dir) {
+                ctx.data_dir.clone()
+            } else {
+                Self::root()
+            }
+        } else {
+            ctx.data_dir.clone()
+        };
+
+        if !ctx.use_default_detection() && !looks_like_root(&root) {
+            return Ok(Vec::new());
+        }
 
         if !root.exists() {
             return Ok(Vec::new());

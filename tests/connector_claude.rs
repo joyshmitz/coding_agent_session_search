@@ -774,7 +774,11 @@ fn connector_handles_unreadable_files() {
             // Either succeeds with readable files only, or returns error gracefully
             if let Ok(convs) = result {
                 // Should have at least the readable file
-                assert!(convs.iter().any(|c| c.messages.iter().any(|m| m.content.contains("Readable"))));
+                assert!(
+                    convs
+                        .iter()
+                        .any(|c| c.messages.iter().any(|m| m.content.contains("Readable")))
+                );
             }
         }
     }
@@ -816,7 +820,9 @@ fn connector_handles_long_file_paths() {
 #[test]
 fn connector_handles_special_chars_in_paths() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj with spaces");
+    let projects = dir
+        .path()
+        .join("mock-claude/projects/test-proj with spaces");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
     let sample = r#"{"type":"user","message":{"role":"user","content":"Spaces in path"},"timestamp":"2025-11-12T18:31:18.000Z"}

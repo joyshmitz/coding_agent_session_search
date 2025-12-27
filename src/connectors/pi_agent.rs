@@ -44,10 +44,19 @@ impl PiAgentConnector {
         )
     }
 
+    fn sessions_dir(home: &Path) -> PathBuf {
+        let sessions = home.join("sessions");
+        if sessions.exists() {
+            sessions
+        } else {
+            home.to_path_buf()
+        }
+    }
+
     /// Find all session JSONL files under the sessions directory.
     fn session_files(root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
-        let sessions = root.join("sessions");
+        let sessions = Self::sessions_dir(root);
         if !sessions.exists() {
             return out;
         }
@@ -154,11 +163,28 @@ impl Connector for PiAgentConnector {
                 s.contains(".pi/agent") || s.ends_with("/pi-agent") || s.ends_with("\\pi-agent")
             })
             .unwrap_or(false);
-        let home = if is_pi_agent_dir {
-            ctx.data_dir.clone()
-        } else {
-            Self::home()
+        let looks_like_root = |path: &PathBuf| {
+            path.join("sessions").exists()
+                || path
+                    .file_name()
+                    .is_some_and(|n| n.to_str().unwrap_or("").contains("pi"))
         };
+
+        let mut home = if ctx.use_default_detection() {
+            if is_pi_agent_dir {
+                ctx.data_dir.clone()
+            } else {
+                Self::home()
+            }
+        } else {
+            if !looks_like_root(&ctx.data_dir) {
+                return Ok(Vec::new());
+            }
+            ctx.data_dir.clone()
+        };
+        if home.is_file() {
+            home = home.parent().unwrap_or(&home).to_path_buf();
+        }
 
         let files = Self::session_files(&home);
         let mut convs = Vec::new();
@@ -173,7 +199,7 @@ impl Connector for PiAgentConnector {
 
             // Use the parent directory name + filename as external_id
             // e.g., "--Users-foo-project--/2024-01-15T10-30-00_uuid.jsonl"
-            let sessions_dir = home.join("sessions");
+            let sessions_dir = Self::sessions_dir(&home);
             let external_id = source_path
                 .strip_prefix(&sessions_dir)
                 .ok()

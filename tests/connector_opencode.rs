@@ -912,7 +912,14 @@ fn opencode_handles_unicode_content() {
     // Title should preserve Unicode
     assert!(c.title.as_ref().unwrap().contains("你好"));
     // Workspace path should preserve Unicode
-    assert!(c.workspace.as_ref().unwrap().to_str().unwrap().contains("用户"));
+    assert!(
+        c.workspace
+            .as_ref()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("用户")
+    );
     // Messages should preserve Unicode
     assert!(c.messages[0].content.contains("世界"));
     assert!(c.messages[0].content.contains("🚀"));
@@ -930,12 +937,23 @@ fn opencode_handles_very_long_session() {
     for i in 0..200 {
         messages.push(TestMessage {
             id: format!("msg{}", i),
-            role: if i % 2 == 0 { "user".into() } else { "assistant".into() },
-            model_id: if i % 2 == 1 { Some("claude-3".into()) } else { None },
+            role: if i % 2 == 0 {
+                "user".into()
+            } else {
+                "assistant".into()
+            },
+            model_id: if i % 2 == 1 {
+                Some("claude-3".into())
+            } else {
+                None
+            },
             created: Some(1000 + i as i64),
             parts: vec![TestPart {
                 part_type: "text".into(),
-                text: Some(format!("Message number {} with some content to make it realistic", i)),
+                text: Some(format!(
+                    "Message number {} with some content to make it realistic",
+                    i
+                )),
                 state: None,
             }],
         });
@@ -1029,7 +1047,12 @@ fn opencode_handles_empty_message_parts() {
 
     // Should have at least the valid message
     assert!(!convs[0].messages.is_empty());
-    assert!(convs[0].messages.iter().any(|m| m.content.contains("Valid message")));
+    assert!(
+        convs[0]
+            .messages
+            .iter()
+            .any(|m| m.content.contains("Valid message"))
+    );
 }
 
 #[test]
@@ -1143,5 +1166,9 @@ fn opencode_handles_deeply_nested_project_dirs() {
 
     let c = &convs[0];
     assert_eq!(c.title, Some("Nested Project Session".to_string()));
-    assert!(c.messages[0].content.contains("Content from nested project"));
+    assert!(
+        c.messages[0]
+            .content
+            .contains("Content from nested project")
+    );
 }

@@ -834,7 +834,9 @@ fn pi_agent_connector_handles_unicode_content() {
     assert!(c.messages[4].content.contains("ภาษาไทย"));
 
     // Title should handle Unicode
-    assert!(c.title.as_ref().unwrap().contains("你好") || c.title.as_ref().unwrap().contains("Hello"));
+    assert!(
+        c.title.as_ref().unwrap().contains("你好") || c.title.as_ref().unwrap().contains("Hello")
+    );
 }
 
 #[test]
