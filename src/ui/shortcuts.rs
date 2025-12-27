@@ -9,6 +9,7 @@ pub const FILTER_DATE_TO: &str = "F6";
 pub const CONTEXT_WINDOW: &str = "F7";
 pub const EDITOR: &str = "F8";
 pub const MATCH_MODE: &str = "F9";
+pub const SEARCH_MODE: &str = "Alt+S";
 pub const QUIT: &str = "Esc/F10";
 pub const CLEAR_FILTERS: &str = "Ctrl+Del";
 pub const RESET_STATE: &str = "Ctrl+Shift+Del";

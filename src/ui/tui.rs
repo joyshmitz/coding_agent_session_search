@@ -19,6 +19,7 @@ use ratatui::widgets::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::io;
+use std::path::Path;
 use std::process::Command as StdCommand;
 use std::time::{Duration, Instant};
 use syntect::easy::HighlightLines;
@@ -27,7 +28,10 @@ use syntect::parsing::SyntaxSet;
 
 use crate::default_data_dir;
 use crate::model::types::MessageRole;
-use crate::search::query::{CacheStats, QuerySuggestion, SearchClient, SearchFilters, SearchHit};
+use crate::search::model_manager::{SemanticAvailability, load_semantic_context};
+use crate::search::query::{
+    CacheStats, QuerySuggestion, SearchClient, SearchFilters, SearchHit, SearchMode,
+};
 use crate::search::tantivy::index_dir;
 use crate::ui::components::help_strip;
 use crate::ui::components::palette::{self, PaletteAction, PaletteState};
@@ -189,6 +193,7 @@ impl DensityMode {
 #[derive(Serialize, Deserialize, Default)]
 struct TuiStatePersisted {
     match_mode: Option<String>,
+    search_mode: Option<String>,
     context_window: Option<String>,
     /// Display density: "compact", "cozy", or "spacious".
     density_mode: Option<String>,
@@ -935,6 +940,10 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
         "Modes",
         &[
             format!(
+                "{} search mode: Lexical → Semantic → Hybrid",
+                shortcuts::SEARCH_MODE
+            ),
+            format!(
                 "{} match mode: prefix (default) ⇄ standard",
                 shortcuts::MATCH_MODE
             ),
@@ -955,12 +964,12 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
                 "{} cycles S/M/L/XL context window",
                 shortcuts::CONTEXT_WINDOW
             ),
-            "Space: peek XL for current hit, tap again to restore".to_string(),
+            "Ctrl+Space: peek XL for current hit, tap again to restore".to_string(),
         ],
     ));
     lines.extend(add_section(
         "Density",
-        &["Shift+=/+ increase pane items; - decrease (min 4, max 50)".to_string()],
+        &["Shift+=/+ increase pane items; Alt+- decrease (min 4, max 50)".to_string()],
     ));
     lines.extend(add_section(
         "Navigation",
@@ -978,7 +987,7 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
             ),
             "Ctrl+Enter queue item; Ctrl+O open all queued".to_string(),
             format!("{} toggles focus (Results ⇄ Detail)", shortcuts::TAB_FOCUS),
-            "[ / ] cycle detail tabs (Messages/Snippets/Raw)".to_string(),
+            "[ / ] cycle detail tabs (when results showing)".to_string(),
         ],
     ));
     lines.extend(add_section(
@@ -1854,7 +1863,7 @@ fn syntax_highlight_line(
 }
 
 fn state_path_for(data_dir: &std::path::Path) -> std::path::PathBuf {
-    // Persist lightweight, non-secret UI preferences (match mode, context window).
+    // Persist lightweight, non-secret UI preferences (search/match mode, context window).
     data_dir.join("tui_state.json")
 }
 
@@ -1866,6 +1875,76 @@ fn ranking_from_str(s: &str) -> RankingMode {
         "newest" => RankingMode::DateNewest,
         "oldest" => RankingMode::DateOldest,
         _ => RankingMode::Balanced,
+    }
+}
+
+fn search_mode_from_str(s: &str) -> SearchMode {
+    match s {
+        "semantic" => SearchMode::Semantic,
+        "hybrid" => SearchMode::Hybrid,
+        _ => SearchMode::Lexical,
+    }
+}
+
+fn search_mode_label(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Lexical => "Lexical",
+        SearchMode::Semantic => "Semantic",
+        SearchMode::Hybrid => "Hybrid",
+    }
+}
+
+fn search_mode_token(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Lexical => "LEX",
+        SearchMode::Semantic => "SEM",
+        SearchMode::Hybrid => "HYB",
+    }
+}
+
+fn initialize_semantic_context(
+    client: &SearchClient,
+    data_dir: &Path,
+    db_path: &Path,
+) -> SemanticAvailability {
+    let setup = load_semantic_context(data_dir, db_path);
+    let mut availability = setup.availability;
+
+    if let Some(context) = setup.context {
+        if let Err(err) = client.set_semantic_context(
+            context.embedder,
+            context.index,
+            context.filter_maps,
+            context.roles,
+        ) {
+            availability = SemanticAvailability::LoadFailed {
+                context: format!("set context: {err}"),
+            };
+        }
+    } else {
+        let _ = client.clear_semantic_context();
+    }
+
+    availability
+}
+
+fn semantic_unavailable_message(availability: &SemanticAvailability) -> String {
+    match availability {
+        SemanticAvailability::ModelMissing { missing_files, .. } => {
+            if missing_files.is_empty() {
+                "model files missing".to_string()
+            } else {
+                format!("missing {}", missing_files.join(", "))
+            }
+        }
+        SemanticAvailability::IndexMissing { index_path } => {
+            format!("index missing at {}", index_path.display())
+        }
+        SemanticAvailability::DatabaseUnavailable { error, .. } => {
+            format!("db unavailable ({error})")
+        }
+        SemanticAvailability::LoadFailed { context } => context.clone(),
+        SemanticAvailability::Ready { .. } => "ready".to_string(),
     }
 }
 
@@ -2313,7 +2392,7 @@ fn footer_shortcuts(max_width: usize) -> String {
         "Enter open",
         "/ query",
         "[ ] tabs",
-        "Space peek",
+        "C-spc peek",
         "m select",
         "y copy",
         "F3 agent",
@@ -2394,6 +2473,13 @@ pub fn run_tui(
     let db_path = default_db_path_for(&data_dir);
     let persisted = load_state(&state_path);
     let search_client = SearchClient::open(&index_path, Some(&db_path))?;
+    let mut semantic_availability = if let Some(client) = &search_client {
+        initialize_semantic_context(client, &data_dir, &db_path)
+    } else {
+        SemanticAvailability::LoadFailed {
+            context: "index/db not ready".to_string(),
+        }
+    };
 
     // UI metrics flag (bead 020) - emit privacy-safe local metrics when enabled
     // Set CASS_UI_METRICS=1 to enable tracing of UI interactions
@@ -2535,6 +2621,17 @@ pub fn run_tui(
         Some("standard") => MatchMode::Standard,
         _ => MatchMode::Prefix,
     };
+    let mut search_mode = match persisted.search_mode.as_deref() {
+        Some(mode) => search_mode_from_str(mode),
+        None => SearchMode::Lexical,
+    };
+    if matches!(search_mode, SearchMode::Semantic | SearchMode::Hybrid)
+        && !semantic_availability.is_ready()
+    {
+        let reason = semantic_unavailable_message(&semantic_availability);
+        status = format!("Semantic unavailable: {reason}. Using lexical search.");
+        search_mode = SearchMode::Lexical;
+    }
     let mut ranking_mode = persisted
         .ranking_mode
         .as_deref()
@@ -3816,8 +3913,9 @@ pub fn run_tui(
                     }
                 }
 
+                footer_parts.push(format!("mode:{}", search_mode_token(search_mode)));
                 if matches!(match_mode, MatchMode::Standard) {
-                    footer_parts.push("mode:standard".to_string());
+                    footer_parts.push("match:standard".to_string());
                 }
                 match ranking_mode {
                     RankingMode::RecentHeavy => footer_parts.push("rank:recent".to_string()),
@@ -5100,6 +5198,34 @@ pub fn run_tui(
                 continue;
             }
 
+            // Cycle search mode (Alt+S)
+            if matches!(key.code, KeyCode::Char('s' | 'S'))
+                && key.modifiers.contains(KeyModifiers::ALT)
+            {
+                search_mode = search_mode.next();
+                if matches!(search_mode, SearchMode::Semantic | SearchMode::Hybrid) {
+                    if let Some(client) = &search_client
+                        && !semantic_availability.is_ready()
+                    {
+                        semantic_availability =
+                            initialize_semantic_context(client, &data_dir, &db_path);
+                    }
+                    if !semantic_availability.is_ready() {
+                        let reason = semantic_unavailable_message(&semantic_availability);
+                        status = format!("Semantic unavailable: {reason}. Staying in lexical.");
+                        search_mode = SearchMode::Lexical;
+                    } else if matches!(search_mode, SearchMode::Hybrid) {
+                        status = "Search mode: Hybrid (RRF fusion)".to_string();
+                    } else {
+                        status = format!("Search mode: {}", search_mode_label(search_mode));
+                    }
+                } else {
+                    status = format!("Search mode: {}", search_mode_label(search_mode));
+                }
+                dirty_since = Some(Instant::now());
+                continue;
+            }
+
             match input_mode {
                 InputMode::Query => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -5694,6 +5820,7 @@ pub fn run_tui(
                             let removed = std::fs::remove_file(&state_path).is_ok();
                             // Restore runtime defaults
                             match_mode = MatchMode::Prefix;
+                            search_mode = SearchMode::Lexical;
                             context_window = ContextWindow::Medium;
                             density_mode = DensityMode::Cozy;
                             let height = terminal.size().map(|r| r.height).unwrap_or(24);
@@ -5780,23 +5907,28 @@ pub fn run_tui(
                                 FocusRegion::Detail => "Focus: Detail".to_string(),
                             };
                         }
-                        KeyCode::Char(']') => {
-                            detail_tab = match detail_tab {
-                                DetailTab::Messages => DetailTab::Snippets,
-                                DetailTab::Snippets => DetailTab::Raw,
-                                DetailTab::Raw => DetailTab::Messages,
-                            };
-                            detail_scroll = 0;
-                        }
-                        KeyCode::Char('[') => {
-                            detail_tab = match detail_tab {
-                                DetailTab::Messages => DetailTab::Raw,
-                                DetailTab::Snippets => DetailTab::Messages,
-                                DetailTab::Raw => DetailTab::Snippets,
-                            };
-                            detail_scroll = 0;
-                        }
                         KeyCode::Char(c) => {
+                            // Detail tab switching - only when results are showing
+                            if !panes.is_empty() && active_hit(&panes, active_pane).is_some() {
+                                if c == ']' {
+                                    detail_tab = match detail_tab {
+                                        DetailTab::Messages => DetailTab::Snippets,
+                                        DetailTab::Snippets => DetailTab::Raw,
+                                        DetailTab::Raw => DetailTab::Messages,
+                                    };
+                                    detail_scroll = 0;
+                                    continue;
+                                }
+                                if c == '[' {
+                                    detail_tab = match detail_tab {
+                                        DetailTab::Messages => DetailTab::Raw,
+                                        DetailTab::Snippets => DetailTab::Messages,
+                                        DetailTab::Raw => DetailTab::Snippets,
+                                    };
+                                    detail_scroll = 0;
+                                    continue;
+                                }
+                            }
                             // Detail pane local find/navigation
                             if matches!(focus_region, FocusRegion::Detail) {
                                 if c == '/' {
@@ -5875,6 +6007,7 @@ pub fn run_tui(
                             }
 
                             if key.modifiers.contains(KeyModifiers::ALT) {
+                                // Alt+digit (1-9) for quick pane switching
                                 if ('1'..='9').contains(&c) {
                                     let target = c.to_digit(10).unwrap_or(1) as usize - 1;
                                     if target < panes.len() {
@@ -5884,8 +6017,33 @@ pub fn run_tui(
                                         cached_detail = None;
                                         detail_scroll = 0;
                                     }
+                                    continue;
                                 }
-                                continue;
+                                // Alt+- decreases pane size
+                                if c == '-' && !panes.is_empty() {
+                                    per_pane_limit = per_pane_limit.saturating_sub(2).max(4);
+                                    status = format!("Pane size: {per_pane_limit} items");
+                                    let prev_agent = active_hit(&panes, active_pane)
+                                        .map(|h| h.agent.clone())
+                                        .or_else(|| {
+                                            panes.get(active_pane).map(|p| p.agent.clone())
+                                        });
+                                    let prev_path = active_hit(&panes, active_pane)
+                                        .map(|h| h.source_path.clone());
+                                    panes = rebuild_panes_with_filter(
+                                        &results,
+                                        pane_filter.as_deref(),
+                                        per_pane_limit,
+                                        &mut active_pane,
+                                        &mut pane_scroll_offset,
+                                        prev_agent,
+                                        prev_path,
+                                        MAX_VISIBLE_PANES,
+                                    );
+                                    dirty_since = Some(Instant::now());
+                                    continue;
+                                }
+                                // Other Alt+key combinations fall through to vim nav below
                             }
                             if key.modifiers.contains(KeyModifiers::SHIFT) && matches!(c, '+' | '=')
                             {
@@ -5909,35 +6067,12 @@ pub fn run_tui(
                                 dirty_since = Some(Instant::now());
                                 continue;
                             }
-                            // Only resize panes with `-` when there are actual panes showing
-                            // Otherwise, allow `-` to be typed in the search query
-                            if key.modifiers.is_empty() && c == '-' && !panes.is_empty() {
-                                per_pane_limit = per_pane_limit.saturating_sub(2).max(4);
-                                status = format!("Pane size: {per_pane_limit} items");
-                                let prev_agent = active_hit(&panes, active_pane)
-                                    .map(|h| h.agent.clone())
-                                    .or_else(|| panes.get(active_pane).map(|p| p.agent.clone()));
-                                let prev_path =
-                                    active_hit(&panes, active_pane).map(|h| h.source_path.clone());
-                                panes = rebuild_panes_with_filter(
-                                    &results,
-                                    pane_filter.as_deref(),
-                                    per_pane_limit,
-                                    &mut active_pane,
-                                    &mut pane_scroll_offset,
-                                    prev_agent,
-                                    prev_path,
-                                    MAX_VISIBLE_PANES,
-                                );
-                                dirty_since = Some(Instant::now());
-                                continue;
-                            }
-                            if key.modifiers.is_empty()
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
                                 && c == ' '
                                 && !panes.is_empty()
                                 && active_hit(&panes, active_pane).is_some()
                             {
-                                // Space acts as a momentary zoom: swap to XL context, tap again to restore.
+                                // Ctrl+Space acts as a momentary zoom: swap to XL context, tap again to restore.
                                 if let Some(saved) = peek_window_saved.take() {
                                     context_window = saved;
                                     status = format!(
@@ -5949,7 +6084,8 @@ pub fn run_tui(
                                 } else {
                                     peek_window_saved = Some(context_window);
                                     context_window = ContextWindow::XLarge;
-                                    status = "Peek: XL context (Space to toggle back)".to_string();
+                                    status =
+                                        "Peek: XL context (Ctrl+Space to toggle back)".to_string();
                                     peek_badge_until =
                                         Some(Instant::now() + Duration::from_millis(600));
                                 }
@@ -6515,17 +6651,84 @@ pub fn run_tui(
                         .map(|h| h.agent.clone())
                         .or_else(|| panes.get(active_pane).map(|p| p.agent.clone()));
                     let prev_path = active_hit(&panes, active_pane).map(|h| h.source_path.clone());
-                    let q = apply_match_mode(&query, match_mode);
+                    let lexical_query = apply_match_mode(&query, match_mode);
+                    let semantic_query = query.clone();
                     // Use search_with_fallback for implicit wildcard expansion on sparse results
                     const SPARSE_THRESHOLD: usize = 3;
                     let search_started = Instant::now();
-                    match client.search_with_fallback(
-                        &q,
-                        filters.clone(),
-                        page_size,
-                        page * page_size,
-                        SPARSE_THRESHOLD,
-                    ) {
+                    let use_semantic =
+                        matches!(search_mode, SearchMode::Semantic | SearchMode::Hybrid)
+                            && semantic_availability.is_ready();
+                    if matches!(search_mode, SearchMode::Semantic | SearchMode::Hybrid)
+                        && !semantic_availability.is_ready()
+                    {
+                        let reason = semantic_unavailable_message(&semantic_availability);
+                        status = format!("Semantic unavailable: {reason}. Using lexical.");
+                    }
+                    let search_result = match search_mode {
+                        SearchMode::Hybrid if use_semantic => {
+                            match client.search_hybrid(
+                                &lexical_query,
+                                &semantic_query,
+                                filters.clone(),
+                                page_size,
+                                page * page_size,
+                                SPARSE_THRESHOLD,
+                            ) {
+                                Ok(result) => Ok(result),
+                                Err(err) => {
+                                    semantic_availability = SemanticAvailability::LoadFailed {
+                                        context: format!("hybrid search: {err}"),
+                                    };
+                                    status = format!("Hybrid search failed: {err}. Using lexical.");
+                                    client.search_with_fallback(
+                                        &lexical_query,
+                                        filters.clone(),
+                                        page_size,
+                                        page * page_size,
+                                        SPARSE_THRESHOLD,
+                                    )
+                                }
+                            }
+                        }
+                        SearchMode::Semantic if use_semantic => {
+                            match client.search_semantic(
+                                &semantic_query,
+                                filters.clone(),
+                                page_size,
+                                page * page_size,
+                            ) {
+                                Ok(hits) => Ok(crate::search::query::SearchResult {
+                                    hits,
+                                    wildcard_fallback: false,
+                                    cache_stats: CacheStats::default(),
+                                    suggestions: Vec::new(),
+                                }),
+                                Err(err) => {
+                                    semantic_availability = SemanticAvailability::LoadFailed {
+                                        context: format!("semantic search: {err}"),
+                                    };
+                                    status =
+                                        format!("Semantic search failed: {err}. Using lexical.");
+                                    client.search_with_fallback(
+                                        &lexical_query,
+                                        filters.clone(),
+                                        page_size,
+                                        page * page_size,
+                                        SPARSE_THRESHOLD,
+                                    )
+                                }
+                            }
+                        }
+                        _ => client.search_with_fallback(
+                            &lexical_query,
+                            filters.clone(),
+                            page_size,
+                            page * page_size,
+                            SPARSE_THRESHOLD,
+                        ),
+                    };
+                    match search_result {
                         Ok(search_result) => {
                             let search_ms = search_started.elapsed().as_millis();
                             last_search_ms = Some(search_ms);
@@ -6554,7 +6757,7 @@ pub fn run_tui(
                             // showing recent conversations per agent
                             let use_recent_fallback = hits.is_empty()
                                 && page == 0
-                                && !q.trim().is_empty()
+                                && !query.trim().is_empty()
                                 && pane_filter.is_none();
 
                             if hits.is_empty() && page > 0 {
@@ -6612,14 +6815,14 @@ pub fn run_tui(
                                 if total_hits > 0 {
                                     status = format!(
                                         "No matches for \"{}\". Showing {} recent across {} agents.",
-                                        q.chars().take(20).collect::<String>(),
+                                        query.chars().take(20).collect::<String>(),
                                         total_hits,
                                         panes.len()
                                     );
                                 } else {
                                     status = format!(
                                         "No matches for \"{}\".",
-                                        q.chars().take(30).collect::<String>()
+                                        query.chars().take(30).collect::<String>()
                                     );
                                 }
                                 needs_draw = true;
@@ -6798,6 +7001,11 @@ pub fn run_tui(
             MatchMode::Standard => "standard".into(),
             MatchMode::Prefix => "prefix".into(),
         }),
+        search_mode: Some(match search_mode {
+            SearchMode::Lexical => "lexical".into(),
+            SearchMode::Semantic => "semantic".into(),
+            SearchMode::Hybrid => "hybrid".into(),
+        }),
         context_window: Some(context_window.label().into()),
         density_mode: Some(density_mode.label().into()),
         // Mark that user has seen (or had opportunity to see) the help overlay
@@ -6885,6 +7093,7 @@ mod tests {
 
         let state = TuiStatePersisted {
             match_mode: Some("prefix".into()),
+            search_mode: Some("hybrid".into()),
             context_window: Some("XL".into()),
             density_mode: Some("cozy".into()),
             has_seen_help: Some(true),
@@ -6906,6 +7115,7 @@ mod tests {
 
         let loaded = load_state(&path);
         assert_eq!(loaded.match_mode.as_deref(), Some("prefix"));
+        assert_eq!(loaded.search_mode.as_deref(), Some("hybrid"));
         assert_eq!(loaded.context_window.as_deref(), Some("XL"));
         assert_eq!(loaded.has_seen_help, Some(true));
         assert_eq!(
@@ -7451,6 +7661,7 @@ mod tests {
         // load_state should return defaults without crashing
         let loaded = load_state(&path);
         assert!(loaded.match_mode.is_none());
+        assert!(loaded.search_mode.is_none());
         assert!(loaded.context_window.is_none());
         assert!(loaded.density_mode.is_none());
         assert!(loaded.has_seen_help.is_none());
@@ -7469,6 +7680,7 @@ mod tests {
         // load_state should return defaults for non-existent file
         let loaded = load_state(&path);
         assert!(loaded.match_mode.is_none());
+        assert!(loaded.search_mode.is_none());
         assert!(loaded.context_window.is_none());
         assert!(loaded.query_history.is_none());
     }
@@ -7486,6 +7698,7 @@ mod tests {
         assert_eq!(loaded.match_mode.as_deref(), Some("prefix"));
         assert_eq!(loaded.has_seen_help, Some(true));
         // Missing fields should be None (defaults)
+        assert!(loaded.search_mode.is_none());
         assert!(loaded.context_window.is_none());
         assert!(loaded.density_mode.is_none());
         assert!(loaded.query_history.is_none());

@@ -90,15 +90,7 @@ fn help_modal_mentions_all_agents() {
 
     // All 10 supported connectors should be mentioned
     let agents = [
-        "Claude",
-        "Codex",
-        "Gemini",
-        "Cline",
-        "OpenCode",
-        "Amp",
-        "Cursor",
-        "ChatGPT",
-        "Aider",
+        "Claude", "Codex", "Gemini", "Cline", "OpenCode", "Amp", "Cursor", "ChatGPT", "Aider",
         "Pi-Agent",
     ];
 
@@ -140,7 +132,9 @@ fn help_modal_sections_order() {
     let search_pos = content.find("\nSearch\n").or(content.find("Search\n"));
     let filters_pos = content.find("\nFilters\n").or(content.find("Filters\n"));
     let sources_pos = content.find("Sources (Multi-Machine)");
-    let navigation_pos = content.find("\nNavigation\n").or(content.find("Navigation\n"));
+    let navigation_pos = content
+        .find("\nNavigation\n")
+        .or(content.find("Navigation\n"));
     let actions_pos = content.find("\nActions\n").or(content.find("Actions\n"));
 
     // Welcome should come first
@@ -152,29 +146,23 @@ fn help_modal_sections_order() {
     assert!(search_pos.is_some(), "Help should have Search section");
     assert!(filters_pos.is_some(), "Help should have Filters section");
     assert!(sources_pos.is_some(), "Help should have Sources section");
-    assert!(navigation_pos.is_some(), "Help should have Navigation section");
+    assert!(
+        navigation_pos.is_some(),
+        "Help should have Navigation section"
+    );
     assert!(actions_pos.is_some(), "Help should have Actions section");
 
     // Verify logical ordering: Welcome → Data Locations → Search → Filters → Sources
     if let (Some(w), Some(d)) = (welcome_pos, data_locations_pos) {
-        assert!(
-            w < d,
-            "Welcome should come before Data Locations"
-        );
+        assert!(w < d, "Welcome should come before Data Locations");
     }
 
     if let (Some(s), Some(f)) = (search_pos, filters_pos) {
-        assert!(
-            s < f,
-            "Search should come before Filters"
-        );
+        assert!(s < f, "Search should come before Filters");
     }
 
     if let (Some(f), Some(src)) = (filters_pos, sources_pos) {
-        assert!(
-            f < src,
-            "Filters should come before Sources"
-        );
+        assert!(f < src, "Filters should come before Sources");
     }
 }
 
@@ -221,18 +209,9 @@ fn help_modal_has_keyboard_shortcuts() {
         content.contains("F1") || content.contains("?"),
         "Help should mention help shortcut"
     );
-    assert!(
-        content.contains("Esc"),
-        "Help should mention Esc key"
-    );
-    assert!(
-        content.contains("Enter"),
-        "Help should mention Enter key"
-    );
-    assert!(
-        content.contains("Tab"),
-        "Help should mention Tab key"
-    );
+    assert!(content.contains("Esc"), "Help should mention Esc key");
+    assert!(content.contains("Enter"), "Help should mention Enter key");
+    assert!(content.contains("Tab"), "Help should mention Tab key");
 }
 
 #[test]
