@@ -2,7 +2,7 @@ use super::{Connector, DetectionResult, NormalizedConversation, NormalizedMessag
 use anyhow::Result;
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub struct AiderConnector;
@@ -158,7 +158,58 @@ impl Connector for AiderConnector {
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
-        let files = Self::find_chat_files(std::slice::from_ref(&ctx.data_dir.as_path()));
+        let mut roots: Vec<PathBuf> = Vec::new();
+
+        let mut add_root = |root: PathBuf| {
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        };
+
+        let data_root = if ctx
+            .data_dir
+            .file_name()
+            .is_some_and(|n| n == ".aider.chat.history.md")
+        {
+            ctx.data_dir
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| ctx.data_dir.clone())
+        } else {
+            ctx.data_dir.clone()
+        };
+
+        if ctx.use_default_detection() {
+            // Check for override env var first
+            if let Some(override_root) = std::env::var_os("CASS_AIDER_DATA_ROOT") {
+                add_root(PathBuf::from(override_root));
+            } else if data_root.exists() && data_root.is_dir() {
+                // Use data_root for recursive search (will find history files in subdirs)
+                add_root(data_root);
+            } else {
+                // Only fall back to CWD/home when data_root doesn't exist
+                if let Ok(cwd) = std::env::current_dir() {
+                    add_root(cwd);
+                }
+                if let Some(home) = dirs::home_dir()
+                    && home.join(".aider.chat.history.md").exists()
+                {
+                    add_root(home);
+                }
+            }
+        } else if data_root.exists() && data_root.is_dir() {
+            // Explicit root provided - use it for recursive search
+            add_root(data_root);
+        } else {
+            return Ok(Vec::new());
+        }
+
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let root_refs: Vec<&Path> = roots.iter().map(|r| r.as_path()).collect();
+        let files = Self::find_chat_files(&root_refs);
 
         let mut conversations = Vec::new();
         for path in files {
