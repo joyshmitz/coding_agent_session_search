@@ -77,7 +77,7 @@ jobs:
 
       - name: Build release binary (cross-compiled)
         if: matrix.use_cross == true
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} --features openssl/vendored
 
       - name: Create tarball (Unix)
         if: runner.os != 'Windows'

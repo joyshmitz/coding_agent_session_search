@@ -1,6 +1,6 @@
 [package]
 name = "coding-agent-search"
-version = "0.1.43"
+version = "0.1.44"
 edition = "2024"
 authors = ["Jeffrey Emanuel"]
 description = "Unified TUI search over local coding agent histories"
@@ -58,6 +58,9 @@ fastembed = { version = "*", default-features = false, features = ["ort-download
 # Crypto for ChatGPT encrypted conversations
 aes-gcm = "0.10"
 ring = "0.17"
+
+# Vendored OpenSSL for cross-compilation (needed by fastembed -> ort -> ureq -> native-tls)
+openssl = { version = "*", features = ["vendored"], optional = true }
 
 # macOS keychain access (optional, for ChatGPT decryption)
 [target.'cfg(target_os = "macos")'.dependencies]
