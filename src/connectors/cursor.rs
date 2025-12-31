@@ -46,10 +46,8 @@ impl CursorConnector {
         #[cfg(target_os = "linux")]
         {
             // Check if we're in WSL and should look at Windows Cursor paths first
-            if Self::is_wsl() {
-                if let Some(wsl_path) = Self::find_wsl_cursor_path() {
-                    return Some(wsl_path);
-                }
+            if Self::is_wsl() && let Some(wsl_path) = Self::find_wsl_cursor_path() {
+                return Some(wsl_path);
             }
             // Fall back to Linux native path
             dirs::home_dir().map(|h| h.join(".config/Cursor/User"))
