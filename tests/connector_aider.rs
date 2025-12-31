@@ -859,9 +859,11 @@ fn aider_message_snippets_empty() {
 #[test]
 fn aider_nonexistent_directory() {
     let conn = AiderConnector::new();
+    let nonexistent = PathBuf::from("/nonexistent/path/that/does/not/exist");
     let ctx = ScanContext {
-        data_dir: PathBuf::from("/nonexistent/path/that/does/not/exist"),
-        scan_roots: Vec::new(),
+        data_dir: nonexistent.clone(),
+        // Provide explicit scan_roots to disable default detection fallback to CWD/home
+        scan_roots: vec![nonexistent],
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
