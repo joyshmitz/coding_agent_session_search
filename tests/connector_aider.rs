@@ -1,5 +1,5 @@
 use coding_agent_search::connectors::aider::AiderConnector;
-use coding_agent_search::connectors::{Connector, ScanContext};
+use coding_agent_search::connectors::{Connector, ScanContext, ScanRoot};
 use serial_test::serial;
 use std::fs;
 use std::path::PathBuf;
@@ -863,7 +863,7 @@ fn aider_nonexistent_directory() {
     let ctx = ScanContext {
         data_dir: nonexistent.clone(),
         // Provide explicit scan_roots to disable default detection fallback to CWD/home
-        scan_roots: vec![nonexistent],
+        scan_roots: vec![ScanRoot::local(nonexistent)],
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
