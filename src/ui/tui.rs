@@ -4420,6 +4420,12 @@ pub fn run_tui(
                 continue;
             };
 
+            // Skip non-press events (fixes Windows double-keystroke issue)
+            // On Windows, crossterm fires both Press and Release events
+            if key.kind != crossterm::event::KeyEventKind::Press {
+                continue;
+            }
+
             needs_draw = true;
 
             // Global quit override
