@@ -1,8 +1,0 @@
-# Cross-compilation configuration for ARM64 Linux
-# Using vendored OpenSSL (compiled from source) to avoid cross-linking issues
-
-[target.aarch64-unknown-linux-gnu]
-# Install perl (required for OpenSSL build scripts) and ensure build tools are present
-pre-build = [
-    "apt-get update && apt-get install -y perl make"
-]
