@@ -112,10 +112,10 @@ impl Connector for AmpConnector {
                 if !is_amp_log_file(path) {
                     continue;
                 }
-                // Skip files not modified since last scan (incremental indexing)
-                if !crate::connectors::file_modified_since(path, ctx.since_ts) {
-                    continue;
-                }
+                // NOTE: We intentionally skip the file_modified_since() check for Amp.
+                // Amp does not update file mtime when new messages are added to a thread,
+                // so mtime-based incremental indexing would miss new messages.
+                // This means Amp files are always re-read, but correctness is preserved.
                 let text = match std::fs::read_to_string(path) {
                     Ok(t) => t,
                     Err(_) => continue,
@@ -210,22 +210,23 @@ fn extract_messages(val: &Value, _since_ts: Option<i64>) -> Option<Vec<Normalize
             .and_then(|v| v.as_str())
             .unwrap_or("agent")
             .to_string();
-        let content = m
-            .get("content")
-            .or_else(|| m.get("text"))
-            .or_else(|| m.get("body"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+
+        // Handle content as either string or array of content blocks
+        let content = extract_content_value(m.get("content"))
+            .or_else(|| extract_content_value(m.get("text")))
+            .or_else(|| extract_content_value(m.get("body")))
+            .unwrap_or_default();
 
         if content.trim().is_empty() {
             continue;
         }
 
         // Use parse_timestamp to handle both i64 milliseconds and ISO-8601 strings
+        // Also check sentAt which Amp uses
         let created_at = m
             .get("created_at")
             .or_else(|| m.get("createdAt"))
+            .or_else(|| m.get("sentAt"))
             .or_else(|| m.get("timestamp"))
             .or_else(|| m.get("ts"))
             .and_then(crate::connectors::parse_timestamp);
@@ -257,6 +258,18 @@ fn extract_messages(val: &Value, _since_ts: Option<i64>) -> Option<Vec<Normalize
     }
 
     if out.is_empty() { None } else { Some(out) }
+}
+
+/// Extract text content from a value that may be a string or an array of content blocks.
+/// Uses the shared flatten_content helper for consistent handling across all connectors.
+fn extract_content_value(val: Option<&Value>) -> Option<String> {
+    let val = val?;
+    let result = crate::connectors::flatten_content(val);
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 fn infer_workspace(val: &Value) -> Option<PathBuf> {
@@ -673,6 +686,49 @@ mod tests {
     fn extract_messages_returns_none_for_missing() {
         let val = json!({"title": "No messages"});
         assert!(extract_messages(&val, None).is_none());
+    }
+
+    #[test]
+    fn extract_messages_handles_content_array() {
+        // Amp can store content as an array of content blocks
+        let val = json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Part one."},
+                    {"type": "text", "text": "Part two."}
+                ]
+            }]
+        });
+        let msgs = extract_messages(&val, None).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content.contains("Part one"));
+        assert!(msgs[0].content.contains("Part two"));
+    }
+
+    #[test]
+    fn extract_messages_handles_string_array_content() {
+        // Content as array of plain strings
+        let val = json!({
+            "messages": [{
+                "role": "user",
+                "content": ["Hello", "World"]
+            }]
+        });
+        let msgs = extract_messages(&val, None).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content.contains("Hello"));
+        assert!(msgs[0].content.contains("World"));
+    }
+
+    #[test]
+    fn extract_messages_parses_sent_at() {
+        // Amp uses sentAt for message timestamps
+        let val = json!({
+            "messages": [{"role": "user", "content": "Test", "sentAt": 1733000005}]
+        });
+        let msgs = extract_messages(&val, None).unwrap();
+        assert_eq!(msgs[0].created_at, Some(1733000005));
     }
 
     // =====================================================

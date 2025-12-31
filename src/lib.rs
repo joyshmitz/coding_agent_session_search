@@ -6699,49 +6699,37 @@ fn run_expand(path: &Path, line: usize, context: usize, json: bool) -> CliResult
 }
 
 fn extract_text_content(msg: &serde_json::Value) -> String {
+    // Use the well-tested flatten_content helper from connectors module
+    // It handles: direct strings, {"type": "text"}, {"type": "input_text"},
+    // blocks with "text" but no "type", and tool_use blocks
+    fn try_flatten(content: &serde_json::Value) -> Option<String> {
+        let result = crate::connectors::flatten_content(content);
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
     // Try direct content first (standard format)
-    if let Some(content) = msg.get("content") {
-        if let Some(text) = content.as_str() {
-            return text.to_string();
-        }
-        if let Some(arr) = content.as_array() {
-            let mut result = String::new();
-            for block in arr {
-                if block.get("type").and_then(|t| t.as_str()) == Some("text")
-                    && let Some(text) = block.get("text").and_then(|t| t.as_str())
-                {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(text);
-                }
-            }
-            if !result.is_empty() {
-                return result;
-            }
-        }
+    if let Some(content) = msg.get("content")
+        && let Some(text) = try_flatten(content)
+    {
+        return text;
     }
     // Try nested message.content (Claude Code format)
     if let Some(inner) = msg.get("message")
         && let Some(content) = inner.get("content")
+        && let Some(text) = try_flatten(content)
     {
-        if let Some(text) = content.as_str() {
-            return text.to_string();
-        }
-        if let Some(arr) = content.as_array() {
-            let mut result = String::new();
-            for block in arr {
-                if block.get("type").and_then(|t| t.as_str()) == Some("text")
-                    && let Some(text) = block.get("text").and_then(|t| t.as_str())
-                {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(text);
-                }
-            }
-            return result;
-        }
+        return text;
+    }
+    // Try nested payload.content (Codex format: {"type": "response_item", "payload": {"content": ...}})
+    if let Some(payload) = msg.get("payload")
+        && let Some(content) = payload.get("content")
+        && let Some(text) = try_flatten(content)
+    {
+        return text;
     }
     String::new()
 }
@@ -6755,6 +6743,12 @@ fn extract_role(msg: &serde_json::Value) -> String {
     // Try nested message.role (Claude Code format)
     if let Some(inner) = msg.get("message")
         && let Some(role) = inner.get("role").and_then(|r| r.as_str())
+    {
+        return role.to_string();
+    }
+    // Try nested payload.role (Codex format: {"type": "response_item", "payload": {"role": "user", ...}})
+    if let Some(payload) = msg.get("payload")
+        && let Some(role) = payload.get("role").and_then(|r| r.as_str())
     {
         return role.to_string();
     }

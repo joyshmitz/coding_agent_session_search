@@ -268,6 +268,11 @@ pub fn flatten_content(val: &serde_json::Value) -> String {
         let parts: Vec<String> = arr
             .iter()
             .filter_map(|item| {
+                // Handle plain strings in array (e.g., ["Hello", "World"])
+                if let Some(text) = item.as_str() {
+                    return Some(text.to_string());
+                }
+
                 let item_type = item.get("type").and_then(|v| v.as_str());
 
                 // Standard text block: {"type": "text", "text": "..."}
@@ -543,6 +548,15 @@ mod tests {
     fn flatten_content_empty_array() {
         let val = serde_json::json!([]);
         assert!(super::flatten_content(&val).is_empty());
+    }
+
+    #[test]
+    fn flatten_content_plain_string_array() {
+        // Handle arrays of plain strings (e.g., ["Hello", "World"])
+        let val = serde_json::json!(["Hello", "World"]);
+        let result = super::flatten_content(&val);
+        assert!(result.contains("Hello"));
+        assert!(result.contains("World"));
     }
 
     #[test]
