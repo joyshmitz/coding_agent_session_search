@@ -67,6 +67,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install host OpenSSL (for cross build deps)
+        if: matrix.use_cross == true
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
       - name: Install cross (for ARM64 Linux)
         if: matrix.use_cross == true
         run: cargo install cross --git https://github.com/cross-rs/cross
