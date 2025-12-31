@@ -1,6 +1,6 @@
 [package]
 name = "coding-agent-search"
-version = "0.1.37"
+version = "0.1.38"
 edition = "2024"
 authors = ["Jeffrey Emanuel"]
 description = "Unified TUI search over local coding agent histories"
@@ -41,7 +41,7 @@ crossterm = "*"
 dirs = "*"
 walkdir = "*"
 glob = "*"
-base64 = "*"
+base64 = "0.22"
 chrono = "*"
 semver = "*"
 tracing-appender = "*"

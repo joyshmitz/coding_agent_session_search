@@ -38,6 +38,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
 };
 use anyhow::{Context, Result};
+use base64::Engine;
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -79,7 +80,7 @@ impl ChatGptConnector {
         // Try environment variable first (base64-encoded)
         if let Ok(key_b64) = std::env::var("CHATGPT_ENCRYPTION_KEY") {
             if let Ok(key_bytes) =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, key_b64.trim())
+                base64::prelude::BASE64_STANDARD.decode(key_b64.trim())
             {
                 if key_bytes.len() == KEY_SIZE {
                     let mut key = [0u8; KEY_SIZE];

@@ -10,8 +10,7 @@ pub mod ui;
 pub mod update_check;
 
 use anyhow::Result;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::{prelude::*, Engine};
 use chrono::Utc;
 use clap::{Arg, ArgAction, Command, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use indexer::IndexOptions;
@@ -2753,7 +2752,7 @@ fn run_cli_search(
     let mut limit_val = *limit;
     let mut offset_val = *offset;
     if let Some(ref cursor_str) = cursor {
-        let decoded = BASE64.decode(cursor_str).map_err(|e| CliError {
+        let decoded = BASE64_STANDARD.decode(cursor_str).map_err(|e| CliError {
             code: 2,
             kind: "cursor-decode",
             message: format!("invalid cursor: {e}"),
@@ -2945,7 +2944,7 @@ fn run_cli_search(
             "limit": limit_val,
         })
         .to_string();
-        Some(BASE64.encode(payload))
+        Some(BASE64_STANDARD.encode(payload))
     } else {
         None
     };
