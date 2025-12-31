@@ -394,8 +394,22 @@ fn capabilities_matches_golden_contract() {
         output.stderr.is_empty(),
         "capabilities should not log to stderr"
     );
-    let actual: Value = serde_json::from_slice(&output.stdout).expect("valid capabilities json");
-    let expected = read_fixture("capabilities.json");
+    let mut actual: Value =
+        serde_json::from_slice(&output.stdout).expect("valid capabilities json");
+    let mut expected = read_fixture("capabilities.json");
+
+    // Verify crate_version matches Cargo.toml (dynamic, not from fixture)
+    let cargo_version = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        actual["crate_version"].as_str().unwrap(),
+        cargo_version,
+        "crate_version should match Cargo.toml version"
+    );
+
+    // Remove crate_version from both for contract comparison (version changes are expected)
+    actual.as_object_mut().unwrap().remove("crate_version");
+    expected.as_object_mut().unwrap().remove("crate_version");
+
     assert_eq!(actual, expected, "capabilities contract drifted");
 }
 
