@@ -299,12 +299,17 @@ impl CursorConnector {
             })
             .or_else(|| model_name.map(|m| format!("Cursor chat with {}", m)));
 
+        // source_path must be unique per conversation for proper lookup in the TUI.
+        // Since multiple conversations live in the same database file, we append
+        // the composer_id to create a unique synthetic path for each conversation.
+        let unique_source_path = db_path.join(&composer_id);
+
         Some(NormalizedConversation {
             agent_slug: "cursor".to_string(),
             external_id: Some(composer_id),
             title,
-            workspace: None, // Could try to extract from db_path
-            source_path: db_path.to_path_buf(),
+            workspace: None, // TODO: could extract from workspaceStorage path
+            source_path: unique_source_path,
             started_at: created_at,
             ended_at: messages.last().and_then(|m| m.created_at).or(created_at),
             metadata: serde_json::json!({
@@ -423,12 +428,15 @@ impl CursorConnector {
                 .collect()
         });
 
+        // source_path must be unique per conversation for proper lookup in the TUI.
+        let unique_source_path = db_path.join(&id);
+
         Some(NormalizedConversation {
             agent_slug: "cursor".to_string(),
             external_id: Some(id),
             title,
             workspace: None,
-            source_path: db_path.to_path_buf(),
+            source_path: unique_source_path,
             started_at,
             ended_at,
             metadata: serde_json::json!({"source": "cursor_aichat"}),
