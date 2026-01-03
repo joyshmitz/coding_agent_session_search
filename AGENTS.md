@@ -405,7 +405,12 @@ Returns in <50ms:
 | 0 | Success | N/A |
 | 1 | Health check failed | Yes—run `cass index --full` |
 | 2 | Usage/parsing error | No—fix syntax |
-| 3 | Missing index | Yes—run `cass index` first |
+| 3 | Index/DB missing | Yes—run `cass index --full` |
+| 4 | Network error | Yes—check connectivity |
+| 5 | Data corruption | Yes—run `cass index --full --force-rebuild` |
+| 6 | Incompatible version | No—update cass |
+| 7 | Lock/busy | Yes—retry later |
+| 8 | Partial result | Yes—increase timeout |
 | 9 | Unknown error | Maybe |
 
 ---
