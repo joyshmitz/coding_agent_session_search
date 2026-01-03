@@ -885,7 +885,7 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
             "  tui_state.json - UI preferences | watch_state.json - Watch timestamps".to_string(),
             "  remotes/ - Synced session data from remote sources".to_string(),
             "Config: ~/.config/cass/sources.toml (remote sources)".to_string(),
-            "Agents: Claude, Codex, Gemini, Cline, OpenCode, Amp, Cursor, ChatGPT, Aider, Pi-Agent"
+            "Agents: Claude, Codex, Gemini, Cline, OpenCode, Amp, Cursor, ChatGPT, Aider, Pi-Agent, Factory"
                 .to_string(),
         ],
     ));

@@ -88,10 +88,10 @@ fn help_modal_mentions_f11_shortcut() {
 fn help_modal_mentions_all_agents() {
     let content = help_lines_to_string(ThemePalette::dark());
 
-    // All 10 supported connectors should be mentioned
+    // All 11 supported connectors should be mentioned
     let agents = [
         "Claude", "Codex", "Gemini", "Cline", "OpenCode", "Amp", "Cursor", "ChatGPT", "Aider",
-        "Pi-Agent",
+        "Pi-Agent", "Factory",
     ];
 
     for agent in agents {

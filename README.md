@@ -6,7 +6,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 **Unified, high-performance TUI to index and search your local coding agent history.**
-Aggregates sessions from Codex, Claude Code, Gemini CLI, Cline, OpenCode, Amp, Cursor, ChatGPT, Aider, and Pi-Agent into a single, searchable timeline.
+Aggregates sessions from Codex, Claude Code, Gemini CLI, Cline, OpenCode, Amp, Cursor, ChatGPT, Aider, Pi-Agent, and Factory (Droid) into a single, searchable timeline.
 
 <div align="center">
 
@@ -132,6 +132,7 @@ Ingests history from all major local agents, normalizing them into a unified `Co
 - **ChatGPT**: `~/Library/Application Support/com.openai.chat` (v1 unencrypted JSON; v2/v3 encrypted—see Environment)
 - **Aider**: `~/.aider.chat.history.md` and per-project `.aider.chat.history.md` files (Markdown)
 - **Pi-Agent**: `~/.pi/agent/sessions` (Session JSONL with thinking content)
+- **Factory (Droid)**: `~/.factory/sessions` (JSONL files organized by workspace slug)
 
 #### Connector Details
 
@@ -382,12 +383,15 @@ Errors are structured, actionable, and include recovery hints:
 | Code | Meaning | Typical action |
 |------|---------|----------------|
 | 0 | Success | Parse stdout |
+| 1 | Health check failed | Run `cass index --full` |
 | 2 | Usage error | Fix syntax (hint provided) |
-| 3 | Index missing | Run `cass index --full` |
-| 4 | Not found | Try different query/path |
-| 5 | Idempotency mismatch | Retry with new key |
+| 3 | Index/DB missing | Run `cass index --full` |
+| 4 | Network error | Check connectivity |
+| 5 | Data corruption | Run `cass index --full --force-rebuild` |
+| 6 | Incompatible version | Update cass |
+| 7 | Lock/busy | Retry later |
+| 8 | Partial result | Increase `--timeout` or reduce scope |
 | 9 | Unknown error | Check `retryable` flag |
-| 10 | Timeout exceeded | Increase `--timeout` or reduce scope |
 
 The `retryable` field tells agents whether a retry might succeed (e.g., transient I/O) vs. guaranteed failure (e.g., invalid path).
 
@@ -1041,6 +1045,7 @@ classDiagram
  Connector <|-- ChatGptConnector
  Connector <|-- AiderConnector
  Connector <|-- PiAgentConnector
+ Connector <|-- FactoryConnector
 
  CodexConnector ..> NormalizedConversation : emits
  ClineConnector ..> NormalizedConversation : emits
@@ -1052,6 +1057,7 @@ classDiagram
  ChatGptConnector ..> NormalizedConversation : emits
  AiderConnector ..> NormalizedConversation : emits
  PiAgentConnector ..> NormalizedConversation : emits
+ FactoryConnector ..> NormalizedConversation : emits
 ```
 
 - **Polymorphic Scanning**: The indexer runs connector factories in parallel via rayon, creating fresh `Box<dyn Connector>` instances that are unaware of each other's underlying file formats (JSONL, SQLite, specialized JSON).
@@ -1090,6 +1096,7 @@ flowchart LR
  A8[ChatGPT]:::pastel
  A9[Aider]:::pastel
  A10[Pi-Agent]:::pastel
+ A11[Factory]:::pastel
  end
 
  subgraph Remote["Remote Sources"]
@@ -1122,6 +1129,7 @@ flowchart LR
  A8 --> C1
  A9 --> C1
  A10 --> C1
+ A11 --> C1
  R1 --> R2
  R2 --> R3
  R3 --> C1
@@ -1750,7 +1758,7 @@ let pending_batches: Vec<_> = connector_factories
 ```
 
 **Why This Matters**:
-- 9 connectors × ~100ms average scan time = 900ms sequential
+- 11 connectors × ~100ms average scan time = 1100ms sequential
 - With 4 cores: ~250ms parallel (3.6x speedup)
 - Atomic counters provide lock-free progress updates to UI
 
@@ -1933,7 +1941,8 @@ pub struct DetectionResult {
 }
 
 pub struct ScanContext {
-    pub data_root: PathBuf,        // Base data directory
+    pub data_dir: PathBuf,         // Primary data directory (cass internal state)
+    pub scan_roots: Vec<ScanRoot>, // Scan roots for agent logs (empty = use default detection)
     pub since_ts: Option<i64>,     // Only scan files modified after this timestamp
 }
 ```
@@ -1960,10 +1969,33 @@ impl Connector for MyAgentConnector {
     }
 
     fn scan(&self, ctx: &ScanContext) -> anyhow::Result<Vec<NormalizedConversation>> {
+        // Determine scan root - check if data_dir looks like our storage (for testing)
+        // or fall back to default detection
+        let looks_like_storage = |p: &PathBuf| {
+            p.to_str().map(|s| s.contains("my-agent")).unwrap_or(false)
+        };
+
+        let root = if ctx.use_default_detection() {
+            if looks_like_storage(&ctx.data_dir) && ctx.data_dir.exists() {
+                ctx.data_dir.clone()
+            } else {
+                // Fall back to default location
+                match dirs::home_dir().map(|h| h.join(".my-agent/sessions")) {
+                    Some(r) if r.exists() => r,
+                    _ => return Ok(Vec::new()),
+                }
+            }
+        } else {
+            // Explicit scan_roots provided
+            ctx.scan_roots.first()
+                .map(|sr| sr.path.clone())
+                .unwrap_or_else(|| ctx.data_dir.clone())
+        };
+
         let mut conversations = Vec::new();
 
         // Find session files
-        for entry in walkdir::WalkDir::new(&ctx.data_root) {
+        for entry in walkdir::WalkDir::new(&root) {
             let entry = entry?;
             if !entry.path().extension().map(|e| e == "json").unwrap_or(false) {
                 continue;
