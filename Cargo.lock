@@ -511,6 +511,7 @@ dependencies = [
  "criterion",
  "crossbeam-channel",
  "crossterm",
+ "dialoguer",
  "directories",
  "dirs",
  "dotenvy",
@@ -905,6 +906,18 @@ checksum = "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c"
 dependencies = [
  "derive_builder_core",
  "syn",
+]
+
+[[package]]
+name = "dialoguer"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25f104b501bf2364e78d0d3974cbc774f738f5865306ed128e1e0d7499c0ad96"
+dependencies = [
+ "console 0.16.1",
+ "shell-words",
+ "tempfile",
+ "zeroize",
 ]
 
 [[package]]

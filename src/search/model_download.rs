@@ -488,12 +488,20 @@ impl ModelDownloader {
             });
         }
 
+        // Check if server honored Range request
+        // 206 = Partial Content (resume works), 200 = Full file (server ignored Range)
+        let actually_resuming = existing_size > 0 && status == 206;
+        if existing_size > 0 && status == 200 {
+            // Server doesn't support Range, reset byte counter and start fresh
+            bytes_downloaded.fetch_sub(existing_size, Ordering::SeqCst);
+        }
+
         // Open file in append or create mode
         let mut file = fs::OpenOptions::new()
             .create(true)
-            .append(existing_size > 0)
+            .append(actually_resuming)
             .write(true)
-            .truncate(existing_size == 0)
+            .truncate(!actually_resuming)
             .open(path)?;
 
         let file_name = path
