@@ -625,6 +625,28 @@ impl SqliteStorage {
         })
     }
 
+    /// Insert multiple conversations in a single transaction for better performance.
+    /// Returns InsertOutcome for each conversation in the same order as input.
+    pub fn insert_conversations_batched(
+        &mut self,
+        conversations: &[(i64, Option<i64>, &Conversation)],
+    ) -> Result<Vec<InsertOutcome>> {
+        if conversations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut outcomes = Vec::with_capacity(conversations.len());
+
+        for &(agent_id, workspace_id, conv) in conversations {
+            let outcome = insert_conversation_in_tx(&tx, agent_id, workspace_id, conv)?;
+            outcomes.push(outcome);
+        }
+
+        tx.commit()?;
+        Ok(outcomes)
+    }
+
     pub fn list_agents(&self) -> Result<Vec<Agent>> {
         let mut stmt = self
             .conn
@@ -1087,7 +1109,7 @@ fn insert_fts_message(
     msg: &Message,
     conv: &Conversation,
 ) -> Result<()> {
-    let _ = tx.execute(
+    if let Err(e) = tx.execute(
         "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
          VALUES(?,?,?,?,?,?,?)",
         params![
@@ -1102,9 +1124,83 @@ fn insert_fts_message(
             msg.created_at.or(conv.started_at),
             message_id
         ],
-    );
-    // FTS mirror is best-effort; skip errors (Tantivy remains source of truth).
+    ) {
+        // FTS mirror is best-effort; Tantivy remains source of truth.
+        // Log at debug level to help diagnose systematic issues without noise.
+        tracing::debug!(
+            message_id,
+            agent = %conv.agent_slug,
+            error = %e,
+            "fts_insert_skipped"
+        );
+    }
     Ok(())
+}
+
+/// Insert or update a single conversation within an existing transaction.
+/// Used by insert_conversations_batched to process multiple conversations efficiently.
+fn insert_conversation_in_tx(
+    tx: &Transaction<'_>,
+    agent_id: i64,
+    workspace_id: Option<i64>,
+    conv: &Conversation,
+) -> Result<InsertOutcome> {
+    // Check for existing conversation with same (source_id, agent_id, external_id)
+    if let Some(ext) = &conv.external_id {
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM conversations WHERE source_id = ? AND agent_id = ? AND external_id = ?",
+                params![&conv.source_id, agent_id, ext],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(conversation_id) = existing {
+            // Append messages to existing conversation
+            let max_idx: Option<i64> = tx.query_row(
+                "SELECT MAX(idx) FROM messages WHERE conversation_id = ?",
+                params![conversation_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )?;
+            let cutoff = max_idx.unwrap_or(-1);
+
+            let mut inserted_indices = Vec::new();
+            for msg in &conv.messages {
+                if msg.idx <= cutoff {
+                    continue;
+                }
+                let msg_id = insert_message(tx, conversation_id, msg)?;
+                insert_snippets(tx, msg_id, &msg.snippets)?;
+                insert_fts_message(tx, msg_id, msg, conv)?;
+                inserted_indices.push(msg.idx);
+            }
+
+            if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
+                tx.execute(
+                    "UPDATE conversations SET ended_at = MAX(IFNULL(ended_at, 0), ?) WHERE id = ?",
+                    params![last_ts, conversation_id],
+                )?;
+            }
+
+            return Ok(InsertOutcome {
+                conversation_id,
+                inserted_indices,
+            });
+        }
+    }
+
+    // Insert new conversation
+    let conv_id = insert_conversation(tx, agent_id, workspace_id, conv)?;
+    for msg in &conv.messages {
+        let msg_id = insert_message(tx, conv_id, msg)?;
+        insert_snippets(tx, msg_id, &msg.snippets)?;
+        insert_fts_message(tx, msg_id, msg, conv)?;
+    }
+
+    Ok(InsertOutcome {
+        conversation_id: conv_id,
+        inserted_indices: conv.messages.iter().map(|m| m.idx).collect(),
+    })
 }
 
 fn path_to_string<P: AsRef<Path>>(p: P) -> String {
