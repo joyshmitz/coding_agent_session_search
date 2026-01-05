@@ -778,4 +778,151 @@ Total transferred file size: 1,234 bytes
         assert_eq!(SyncMethod::Rsync.to_string(), "rsync");
         assert_eq!(SyncMethod::Sftp.to_string(), "sftp");
     }
+
+    #[test]
+    fn test_expand_tilde_with_home() {
+        // No tilde - returns unchanged
+        assert_eq!(
+            SyncEngine::expand_tilde_with_home("/home/user/projects", Some("/home/user")),
+            "/home/user/projects"
+        );
+
+        // Tilde with home provided
+        assert_eq!(
+            SyncEngine::expand_tilde_with_home("~/.claude/projects", Some("/home/user")),
+            "/home/user/.claude/projects"
+        );
+
+        // Just tilde
+        assert_eq!(
+            SyncEngine::expand_tilde_with_home("~", Some("/home/user")),
+            "/home/user"
+        );
+
+        // Tilde without home - returns unchanged
+        assert_eq!(
+            SyncEngine::expand_tilde_with_home("~/.claude/projects", None),
+            "~/.claude/projects"
+        );
+
+        // ~otheruser/path case - not expanded
+        assert_eq!(
+            SyncEngine::expand_tilde_with_home("~otheruser/projects", Some("/home/user")),
+            "~otheruser/projects"
+        );
+    }
+
+    #[test]
+    fn test_sync_report_failed() {
+        let report = SyncReport::failed("test-source", SyncError::NoHost);
+        assert_eq!(report.source_name, "test-source");
+        assert!(!report.all_succeeded);
+        assert_eq!(report.path_results.len(), 1);
+        assert!(!report.path_results[0].success);
+        assert!(report.path_results[0].error.is_some());
+    }
+
+    #[test]
+    fn test_sync_result_default() {
+        let result = SyncResult::default();
+        assert!(matches!(result, SyncResult::Skipped));
+    }
+
+    #[test]
+    fn test_source_sync_info_default() {
+        let info = SourceSyncInfo::default();
+        assert!(info.last_sync.is_none());
+        assert_eq!(info.files_synced, 0);
+        assert_eq!(info.bytes_transferred, 0);
+        assert_eq!(info.duration_ms, 0);
+    }
+
+    #[test]
+    fn test_sync_status_update() {
+        let mut status = SyncStatus::default();
+
+        let mut report = SyncReport::new("laptop", SyncMethod::Rsync);
+        report.add_path_result(PathSyncResult {
+            files_transferred: 10,
+            bytes_transferred: 1000,
+            success: true,
+            ..Default::default()
+        });
+        report.total_duration_ms = 500;
+
+        status.update("laptop", &report);
+
+        let info = status.get("laptop").unwrap();
+        assert!(info.last_sync.is_some());
+        assert!(matches!(info.last_result, SyncResult::Success));
+        assert_eq!(info.files_synced, 10);
+        assert_eq!(info.bytes_transferred, 1000);
+        assert_eq!(info.duration_ms, 500);
+    }
+
+    #[test]
+    fn test_sync_status_partial_failure() {
+        let mut status = SyncStatus::default();
+
+        let mut report = SyncReport::new("server", SyncMethod::Rsync);
+        report.add_path_result(PathSyncResult {
+            success: true,
+            files_transferred: 5,
+            ..Default::default()
+        });
+        report.add_path_result(PathSyncResult {
+            success: false,
+            error: Some("Connection refused".into()),
+            ..Default::default()
+        });
+
+        status.update("server", &report);
+
+        let info = status.get("server").unwrap();
+        assert!(matches!(info.last_result, SyncResult::PartialFailure(_)));
+    }
+
+    #[test]
+    fn test_sync_status_full_failure() {
+        let mut status = SyncStatus::default();
+
+        let mut report = SyncReport::new("dead-host", SyncMethod::Rsync);
+        report.add_path_result(PathSyncResult {
+            success: false,
+            error: Some("Host unreachable".into()),
+            ..Default::default()
+        });
+
+        status.update("dead-host", &report);
+
+        let info = status.get("dead-host").unwrap();
+        assert!(matches!(info.last_result, SyncResult::Failed(_)));
+    }
+
+    #[test]
+    fn test_sync_engine_with_timeouts() {
+        let engine = SyncEngine::new(Path::new("/data"))
+            .with_connection_timeout(30)
+            .with_transfer_timeout(600);
+
+        assert_eq!(engine.connection_timeout, 30);
+        assert_eq!(engine.transfer_timeout, 600);
+    }
+
+    #[test]
+    fn test_sync_error_display() {
+        assert_eq!(
+            SyncError::NoHost.to_string(),
+            "Source has no host configured"
+        );
+        assert_eq!(
+            SyncError::NoPaths.to_string(),
+            "Source has no paths configured"
+        );
+        assert_eq!(
+            SyncError::Timeout(30).to_string(),
+            "Connection timed out after 30 seconds"
+        );
+        assert_eq!(SyncError::Cancelled.to_string(), "Sync cancelled");
+    }
 }

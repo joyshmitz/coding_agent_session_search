@@ -873,3 +873,174 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
         dry_run: opts.dry_run,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_setup_options_default() {
+        let opts = SetupOptions::default();
+        assert!(!opts.dry_run);
+        assert!(!opts.non_interactive);
+        assert!(opts.hosts.is_none());
+        assert!(!opts.skip_install);
+        assert!(!opts.skip_index);
+        assert!(!opts.skip_sync);
+        assert_eq!(opts.timeout, 10);
+        assert!(!opts.resume);
+        assert!(!opts.verbose);
+        assert!(!opts.json);
+    }
+
+    #[test]
+    fn test_setup_state_default() {
+        let state = SetupState::default();
+        assert!(!state.discovery_complete);
+        assert_eq!(state.discovered_hosts, 0);
+        assert!(state.discovered_host_names.is_empty());
+        assert!(!state.probing_complete);
+        assert!(state.probed_hosts.is_empty());
+        assert!(!state.selection_complete);
+        assert!(state.selected_host_names.is_empty());
+        assert!(!state.installation_complete);
+        assert!(state.completed_installs.is_empty());
+        assert!(!state.indexing_complete);
+        assert!(state.completed_indexes.is_empty());
+        assert!(!state.configuration_complete);
+        assert!(!state.sync_complete);
+        assert!(state.current_operation.is_none());
+        assert!(state.started_at.is_none());
+    }
+
+    #[test]
+    fn test_setup_state_has_progress_empty() {
+        let state = SetupState::default();
+        assert!(!state.has_progress());
+    }
+
+    #[test]
+    fn test_setup_state_has_progress_discovery() {
+        let mut state = SetupState::default();
+        state.discovery_complete = true;
+        assert!(state.has_progress());
+    }
+
+    #[test]
+    fn test_setup_state_has_progress_probing() {
+        let mut state = SetupState::default();
+        state.probing_complete = true;
+        assert!(state.has_progress());
+    }
+
+    #[test]
+    fn test_setup_state_has_progress_selection() {
+        let mut state = SetupState::default();
+        state.selection_complete = true;
+        assert!(state.has_progress());
+    }
+
+    #[test]
+    fn test_setup_state_has_progress_installation() {
+        let mut state = SetupState::default();
+        state.installation_complete = true;
+        assert!(state.has_progress());
+    }
+
+    #[test]
+    fn test_setup_state_has_progress_indexing() {
+        let mut state = SetupState::default();
+        state.indexing_complete = true;
+        assert!(state.has_progress());
+    }
+
+    #[test]
+    fn test_setup_state_has_progress_configuration() {
+        let mut state = SetupState::default();
+        state.configuration_complete = true;
+        assert!(state.has_progress());
+    }
+
+    #[test]
+    fn test_setup_state_serde_roundtrip() {
+        let mut state = SetupState::default();
+        state.discovery_complete = true;
+        state.discovered_hosts = 5;
+        state.discovered_host_names = vec!["host1".to_string(), "host2".to_string()];
+        state.selected_host_names = vec!["host1".to_string()];
+        state.started_at = Some("2025-01-01T00:00:00Z".to_string());
+
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: SetupState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.discovery_complete, state.discovery_complete);
+        assert_eq!(deserialized.discovered_hosts, state.discovered_hosts);
+        assert_eq!(
+            deserialized.discovered_host_names,
+            state.discovered_host_names
+        );
+        assert_eq!(deserialized.selected_host_names, state.selected_host_names);
+        assert_eq!(deserialized.started_at, state.started_at);
+    }
+
+    #[test]
+    fn test_setup_error_display_cancelled() {
+        let err = SetupError::Cancelled;
+        assert_eq!(format!("{err}"), "Setup cancelled by user");
+    }
+
+    #[test]
+    fn test_setup_error_display_no_hosts() {
+        let err = SetupError::NoHosts;
+        assert_eq!(format!("{err}"), "No SSH hosts found or selected");
+    }
+
+    #[test]
+    fn test_setup_error_display_interrupted() {
+        let err = SetupError::Interrupted;
+        assert_eq!(format!("{err}"), "Setup interrupted");
+    }
+
+    #[test]
+    fn test_setup_error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        let err = SetupError::Io(io_err);
+        assert!(format!("{err}").contains("IO error"));
+    }
+
+    #[test]
+    fn test_setup_result_structure() {
+        let result = SetupResult {
+            sources_added: 3,
+            hosts_installed: 1,
+            hosts_indexed: 2,
+            total_sessions: 150,
+            dry_run: false,
+        };
+        assert_eq!(result.sources_added, 3);
+        assert_eq!(result.hosts_installed, 1);
+        assert_eq!(result.hosts_indexed, 2);
+        assert_eq!(result.total_sessions, 150);
+        assert!(!result.dry_run);
+    }
+
+    #[test]
+    fn test_setup_result_dry_run() {
+        let result = SetupResult {
+            sources_added: 5,
+            hosts_installed: 0,
+            hosts_indexed: 0,
+            total_sessions: 0,
+            dry_run: true,
+        };
+        assert!(result.dry_run);
+        assert_eq!(result.sources_added, 5);
+    }
+
+    #[test]
+    fn test_setup_state_path() {
+        let path = SetupState::path();
+        assert!(path.ends_with("setup_state.json"));
+        assert!(path.to_string_lossy().contains("cass"));
+    }
+}
