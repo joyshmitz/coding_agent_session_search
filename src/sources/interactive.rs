@@ -54,7 +54,7 @@ use std::fmt;
 use std::io::IsTerminal;
 
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect};
+use dialoguer::{Confirm, MultiSelect, theme::ColorfulTheme};
 
 use super::probe::{CassStatus, HostProbeResult};
 
@@ -876,6 +876,10 @@ mod tests {
                 os: "Linux".into(),
                 arch: "x86_64".into(),
                 distro: None,
+                has_cargo: false,
+                has_cargo_binstall: false,
+                has_curl: false,
+                has_wget: false,
                 remote_home: "/home/ubuntu".into(),
             }),
             resources: None,
@@ -895,6 +899,10 @@ mod tests {
                 os: "Linux".into(),
                 arch: "x86_64".into(),
                 distro: None,
+                has_cargo: false,
+                has_cargo_binstall: false,
+                has_curl: false,
+                has_wget: false,
                 remote_home: "/".into(),
             }),
             resources: None,
@@ -914,6 +922,10 @@ mod tests {
                 os: "Linux".into(),
                 arch: "x86_64".into(),
                 distro: None,
+                has_cargo: false,
+                has_cargo_binstall: false,
+                has_curl: false,
+                has_wget: false,
                 remote_home: "".into(),
             }),
             resources: None,
