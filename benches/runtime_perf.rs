@@ -318,87 +318,82 @@ fn bench_wildcard_large_dataset(c: &mut Criterion) {
 }
 
 // ============================================================
-// Concurrent Search Benchmarks
+// Concurrent & Scaling Benchmarks
 // ============================================================
 
-/// Benchmark concurrent searches from multiple threads
-fn bench_concurrent_search(c: &mut Criterion) {
-    use std::sync::Arc;
-    use std::thread;
+/// Benchmark parallel data generation throughput using rayon.
+///
+/// Note: SearchClient contains rusqlite::Connection which is !Send/!Sync,
+/// so we can't share it across threads for concurrent search. Instead we
+/// measure parallel data generation which tests rayon integration and
+/// throughput of the conversation generation infrastructure.
+fn bench_concurrent_indexing(c: &mut Criterion) {
+    use rayon::prelude::*;
 
-    // 200 conversations x 15 messages = 3000 documents
+    let mut group = c.benchmark_group("concurrent_indexing");
+
+    // Benchmark parallel conversation generation (simulates concurrent workload)
+    group.bench_function("generate_100_convs_parallel", |b| {
+        b.iter(|| {
+            let convs: Vec<_> = (0..100i64)
+                .into_par_iter()
+                .map(|i| sample_conv(i, 10))
+                .collect();
+            black_box(convs.len())
+        })
+    });
+
+    // Benchmark sequential for comparison
+    group.bench_function("generate_100_convs_sequential", |b| {
+        b.iter(|| {
+            let convs: Vec<_> = (0..100i64).map(|i| sample_conv(i, 10)).collect();
+            black_box(convs.len())
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmark rapid sequential searches (simulates interactive use)
+fn bench_rapid_sequential_search(c: &mut Criterion) {
     let (_tmp, client) = seed_index(200, 15);
-    let client = Arc::new(client);
     let filters = coding_agent_search::search::query::SearchFilters::default();
 
-    let mut group = c.benchmark_group("concurrent_search");
+    let mut group = c.benchmark_group("rapid_sequential");
 
-    // Baseline: single-threaded
-    group.bench_function("single_thread", |b| {
+    // Simulate rapid user typing - many queries in sequence
+    group.bench_function("10_queries_sequential", |b| {
+        let queries = [
+            "lorem",
+            "ipsum",
+            "dolor",
+            "sit",
+            "amet",
+            "consectetur",
+            "adipiscing",
+            "elit",
+            "sed",
+            "do",
+        ];
         b.iter(|| {
-            let hits = client
-                .search(black_box("lorem"), filters.clone(), 20, 0)
-                .unwrap();
-            black_box(hits.len())
-        })
-    });
-
-    // 2 concurrent searches
-    group.bench_function("2_threads", |b| {
-        b.iter(|| {
-            let handles: Vec<_> = (0..2)
-                .map(|i| {
-                    let c = client.clone();
-                    let f = filters.clone();
-                    thread::spawn(move || {
-                        let query = if i % 2 == 0 { "lorem" } else { "ipsum" };
-                        c.search(query, f, 20, 0).unwrap()
-                    })
-                })
-                .collect();
-
-            for h in handles {
-                black_box(h.join().unwrap());
+            for q in &queries {
+                let hits = client
+                    .search(black_box(*q), filters.clone(), 20, 0)
+                    .unwrap();
+                black_box(hits.len());
             }
         })
     });
 
-    // 4 concurrent searches
-    group.bench_function("4_threads", |b| {
+    // Simulate search refinement - increasingly specific queries
+    group.bench_function("refinement_sequence", |b| {
+        let queries = ["l", "lo", "lor", "lore", "lorem"];
         b.iter(|| {
-            let queries = ["lorem", "ipsum", "dolor", "amet"];
-            let handles: Vec<_> = queries
-                .iter()
-                .map(|q| {
-                    let c = client.clone();
-                    let f = filters.clone();
-                    let query = q.to_string();
-                    thread::spawn(move || c.search(&query, f, 20, 0).unwrap())
-                })
-                .collect();
-
-            for h in handles {
-                black_box(h.join().unwrap());
-            }
-        })
-    });
-
-    // 8 concurrent searches (stress test)
-    group.bench_function("8_threads", |b| {
-        b.iter(|| {
-            let handles: Vec<_> = (0..8)
-                .map(|i| {
-                    let c = client.clone();
-                    let f = filters.clone();
-                    thread::spawn(move || {
-                        let query = format!("query{}", i % 4);
-                        c.search(&query, f, 20, 0).unwrap()
-                    })
-                })
-                .collect();
-
-            for h in handles {
-                black_box(h.join().unwrap());
+            for q in &queries {
+                let hits = client
+                    .search(black_box(*q), filters.clone(), 20, 0)
+                    .unwrap();
+                black_box(hits.len());
             }
         })
     });
@@ -463,7 +458,8 @@ criterion_group!(
     bench_wildcard_substring,
     bench_wildcard_suffix_common,
     bench_wildcard_large_dataset,
-    bench_concurrent_search,
+    bench_concurrent_indexing,
+    bench_rapid_sequential_search,
     bench_search_scaling,
 );
 criterion_main!(runtime_perf);
