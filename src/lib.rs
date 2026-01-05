@@ -416,6 +416,9 @@ pub enum Commands {
     /// Manage remote sources (P5.x)
     #[command(subcommand)]
     Sources(SourcesCommand),
+    /// Manage semantic search models
+    #[command(subcommand)]
+    Models(ModelsCommand),
 }
 
 /// Subcommands for managing remote sources (P5.x)
@@ -499,6 +502,101 @@ pub enum SourcesCommand {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Interactive wizard to discover, configure, and set up remote sources
+    Setup {
+        /// Preview what would happen without making changes
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip interactive prompts (use defaults)
+        #[arg(long)]
+        non_interactive: bool,
+        /// Specific hosts to configure (skips discovery/selection)
+        #[arg(long, value_delimiter = ',')]
+        hosts: Option<Vec<String>>,
+        /// Skip cass installation on remotes
+        #[arg(long)]
+        skip_install: bool,
+        /// Skip indexing on remotes
+        #[arg(long)]
+        skip_index: bool,
+        /// Skip syncing after setup
+        #[arg(long)]
+        skip_sync: bool,
+        /// SSH connection timeout in seconds
+        #[arg(long, default_value = "10")]
+        timeout: u64,
+        /// Continue from previous interrupted setup
+        #[arg(long)]
+        resume: bool,
+        /// Show detailed progress output
+        #[arg(long, short)]
+        verbose: bool,
+        /// Output as JSON (implies non-interactive)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Subcommands for managing semantic search models
+#[derive(Subcommand, Debug, Clone)]
+pub enum ModelsCommand {
+    /// Show model installation status
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download and install the semantic search model
+    Install {
+        /// Model to install (default: all-minilm-l6-v2)
+        #[arg(long, default_value = "all-minilm-l6-v2")]
+        model: String,
+        /// Custom mirror URL for downloading
+        #[arg(long)]
+        mirror: Option<String>,
+        /// Install from local file (for air-gapped environments)
+        #[arg(long)]
+        from_file: Option<PathBuf>,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Verify model integrity (SHA256 checksums)
+    Verify {
+        /// Attempt to repair corrupted files
+        #[arg(long)]
+        repair: bool,
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove model files to free disk space
+    Remove {
+        /// Model to remove (default: all-minilm-l6-v2)
+        #[arg(long, default_value = "all-minilm-l6-v2")]
+        model: String,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Check for model updates
+    CheckUpdate {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
     },
 }
 
@@ -1916,6 +2014,9 @@ async fn execute_cli(
                 Commands::Sources(subcmd) => {
                     run_sources_command(subcmd)?;
                 }
+                Commands::Models(subcmd) => {
+                    run_models_command(subcmd)?;
+                }
                 _ => {}
             }
         }
@@ -2076,6 +2177,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Expand { .. }) => "expand".to_string(),
         Some(Commands::Timeline { .. }) => "timeline".to_string(),
         Some(Commands::Sources(..)) => "sources".to_string(),
+        Some(Commands::Models(..)) => "models".to_string(),
         None => "(default)".to_string(),
     }
 }
@@ -7230,6 +7332,31 @@ fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
         } => {
             run_sources_discover(&preset, skip_existing, json)?;
         }
+        SourcesCommand::Setup {
+            dry_run,
+            non_interactive,
+            hosts,
+            skip_install,
+            skip_index,
+            skip_sync,
+            timeout,
+            resume,
+            verbose,
+            json,
+        } => {
+            run_sources_setup(sources::setup::SetupOptions {
+                dry_run,
+                non_interactive: non_interactive || json,
+                hosts,
+                skip_install,
+                skip_index,
+                skip_sync,
+                timeout,
+                resume,
+                verbose,
+                json,
+            })?;
+        }
     }
     Ok(())
 }
@@ -8380,6 +8507,652 @@ fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) ->
             "  {}",
             "cass sources add --name <host> --host <host> --paths '~/.claude/projects'".dimmed()
         );
+    }
+
+    Ok(())
+}
+
+/// Run the interactive sources setup wizard
+fn run_sources_setup(opts: sources::setup::SetupOptions) -> CliResult<()> {
+    use sources::setup::{SetupError, run_setup};
+
+    match run_setup(&opts) {
+        Ok(result) => {
+            if opts.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "success",
+                        "dry_run": result.dry_run,
+                        "sources_added": result.sources_added,
+                        "hosts_installed": result.hosts_installed,
+                        "hosts_indexed": result.hosts_indexed,
+                        "total_sessions": result.total_sessions,
+                    })
+                );
+            }
+            Ok(())
+        }
+        Err(SetupError::Cancelled) => {
+            if opts.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "cancelled",
+                        "message": "Setup cancelled by user"
+                    })
+                );
+            }
+            Ok(())
+        }
+        Err(SetupError::Interrupted) => {
+            // Progress saved, exit cleanly
+            std::process::exit(130);
+        }
+        Err(SetupError::NoHosts) => {
+            if opts.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "no_hosts",
+                        "message": "No SSH hosts found or selected"
+                    })
+                );
+            }
+            Ok(())
+        }
+        Err(e) => Err(CliError {
+            code: 9,
+            kind: "setup",
+            message: format!("Setup failed: {e}"),
+            hint: Some("Run with --verbose for more details".into()),
+            retryable: true,
+        }),
+    }
+}
+
+/// Handle models subcommands
+fn run_models_command(cmd: ModelsCommand) -> CliResult<()> {
+    match cmd {
+        ModelsCommand::Status { json } => run_models_status(json),
+        ModelsCommand::Install {
+            model,
+            mirror,
+            from_file,
+            yes,
+            data_dir,
+        } => run_models_install(&model, mirror.as_deref(), from_file.as_deref(), yes, data_dir),
+        ModelsCommand::Verify {
+            repair,
+            data_dir,
+            json,
+        } => run_models_verify(repair, data_dir, json),
+        ModelsCommand::Remove {
+            model,
+            yes,
+            data_dir,
+        } => run_models_remove(&model, yes, data_dir),
+        ModelsCommand::CheckUpdate { json, data_dir } => run_models_check_update(json, data_dir),
+    }
+}
+
+/// Show semantic model installation status
+fn run_models_status(json_output: bool) -> CliResult<()> {
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use crate::search::model_download::{check_model_installed, ModelManifest, ModelState};
+
+    let data_dir = default_data_dir();
+    let model_dir = FastEmbedder::default_model_dir(&data_dir);
+    let manifest = ModelManifest::minilm_v2();
+
+    let state = check_model_installed(&model_dir);
+    let total_size = manifest.total_size();
+    let total_size_mb = total_size as f64 / 1_048_576.0;
+
+    // Check for file sizes on disk
+    let mut installed_size: u64 = 0;
+    let mut file_info: Vec<serde_json::Value> = Vec::new();
+    for mfile in &manifest.files {
+        let file_path = model_dir.join(&mfile.name);
+        let exists = file_path.is_file();
+        let size = if exists {
+            file_path.metadata().map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        if exists {
+            installed_size += size;
+        }
+        file_info.push(serde_json::json!({
+            "name": mfile.name,
+            "expected_size": mfile.size,
+            "actual_size": size,
+            "exists": exists,
+            "size_match": exists && size == mfile.size,
+        }));
+    }
+
+    if json_output {
+        let output = serde_json::json!({
+            "model_id": manifest.id,
+            "model_dir": model_dir.display().to_string(),
+            "state": match &state {
+                ModelState::Ready => "ready",
+                ModelState::NotInstalled => "not_installed",
+                ModelState::NeedsConsent => "needs_consent",
+                ModelState::Downloading { .. } => "downloading",
+                ModelState::Verifying => "verifying",
+                ModelState::Disabled { .. } => "disabled",
+                ModelState::VerificationFailed { .. } => "verification_failed",
+                ModelState::UpdateAvailable { .. } => "update_available",
+                ModelState::Cancelled => "cancelled",
+            },
+            "state_detail": state.summary(),
+            "revision": manifest.revision,
+            "license": manifest.license,
+            "total_size_bytes": total_size,
+            "installed_size_bytes": installed_size,
+            "files": file_info,
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+    } else {
+        use colored::Colorize;
+
+        println!("Semantic Search Model Status");
+        println!("============================");
+        println!();
+        println!("Model:    {} ({})", manifest.id, manifest.license);
+        println!("Revision: {}", &manifest.revision[..12]);
+        println!("Location: {}", model_dir.display());
+        println!("Size:     {:.1} MB", total_size_mb);
+        println!();
+
+        let status_str = match &state {
+            ModelState::Ready => "Ready".green().to_string(),
+            ModelState::NotInstalled => "Not Installed".yellow().to_string(),
+            ModelState::NeedsConsent => "Needs Consent".yellow().to_string(),
+            ModelState::Downloading { progress_pct, .. } => {
+                format!("Downloading ({}%)", progress_pct).cyan().to_string()
+            }
+            ModelState::Verifying => "Verifying".cyan().to_string(),
+            ModelState::Disabled { reason } => format!("Disabled: {}", reason).red().to_string(),
+            ModelState::VerificationFailed { reason } => {
+                format!("Verification Failed: {}", reason).red().to_string()
+            }
+            ModelState::UpdateAvailable {
+                current_revision,
+                latest_revision,
+            } => format!("Update Available ({} -> {})", &current_revision[..8], &latest_revision[..8])
+                .yellow()
+                .to_string(),
+            ModelState::Cancelled => "Cancelled".yellow().to_string(),
+        };
+        println!("Status: {}", status_str);
+        println!();
+
+        // Show files
+        println!("Files:");
+        for mfile in &manifest.files {
+            let file_path = model_dir.join(&mfile.name);
+            let exists = file_path.is_file();
+            let size = if exists {
+                file_path.metadata().map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            let size_mb = mfile.size as f64 / 1_048_576.0;
+
+            let status = if exists && size == mfile.size {
+                "✓".green().to_string()
+            } else if exists {
+                "⚠".yellow().to_string()
+            } else {
+                "✗".red().to_string()
+            };
+            println!("  {} {} ({:.1} MB)", status, mfile.name, size_mb);
+        }
+        println!();
+
+        // Suggestions based on state
+        match state {
+            ModelState::NotInstalled | ModelState::NeedsConsent => {
+                println!("To install the model, run:");
+                println!("  cass models install");
+            }
+            ModelState::VerificationFailed { .. } => {
+                println!("To repair the model, run:");
+                println!("  cass models verify --repair");
+            }
+            ModelState::UpdateAvailable { .. } => {
+                println!("To update the model, run:");
+                println!("  cass models install");
+            }
+            ModelState::Ready => {
+                println!("Model is ready for semantic search.");
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Download and install the semantic search model
+fn run_models_install(
+    model_name: &str,
+    mirror: Option<&str>,
+    from_file: Option<&Path>,
+    skip_confirm: bool,
+    data_dir_override: Option<PathBuf>,
+) -> CliResult<()> {
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use crate::search::model_download::{check_model_installed, ModelDownloader, ModelManifest};
+    use colored::Colorize;
+    use indicatif::{ProgressBar, ProgressStyle};
+
+    // Only support the default model for now
+    if model_name != "all-minilm-l6-v2" {
+        return Err(CliError {
+            code: 20,
+            kind: "model",
+            message: format!("Unknown model '{}'. Only 'all-minilm-l6-v2' is supported.", model_name),
+            hint: Some("Use 'cass models status' to see available models".into()),
+            retryable: false,
+        });
+    }
+
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let model_dir = FastEmbedder::default_model_dir(&data_dir);
+    let manifest = ModelManifest::minilm_v2();
+
+    // Check if from_file is specified
+    if let Some(file_path) = from_file {
+        return Err(CliError {
+            code: 21,
+            kind: "model",
+            message: format!("--from-file not yet implemented: {}", file_path.display()),
+            hint: Some("Download from HuggingFace instead".into()),
+            retryable: false,
+        });
+    }
+
+    // Check if mirror is specified
+    if let Some(mirror_url) = mirror {
+        return Err(CliError {
+            code: 21,
+            kind: "model",
+            message: format!("--mirror not yet implemented: {}", mirror_url),
+            hint: Some("Download from HuggingFace instead".into()),
+            retryable: false,
+        });
+    }
+
+    // Check current state
+    let state = check_model_installed(&model_dir);
+    if state.is_ready() {
+        println!("{} Model is already installed and verified.", "✓".green());
+        println!("  Location: {}", model_dir.display());
+        return Ok(());
+    }
+
+    let total_size = manifest.total_size();
+    let total_size_mb = total_size as f64 / 1_048_576.0;
+
+    // Confirm download unless -y flag
+    if !skip_confirm {
+        println!("Semantic Search Model Installation");
+        println!("===================================");
+        println!();
+        println!("Model:   {} ({})", manifest.id, manifest.license);
+        println!("Size:    {:.1} MB", total_size_mb);
+        println!("Source:  HuggingFace ({})", manifest.repo);
+        println!();
+        println!("This will download the model from HuggingFace.");
+        print!("Continue? [y/N] ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if !input.trim().eq_ignore_ascii_case("y") && !input.trim().eq_ignore_ascii_case("yes") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Create model directory parent
+    if let Some(parent) = model_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| CliError {
+            code: 22,
+            kind: "io",
+            message: format!("Failed to create model directory: {}", e),
+            hint: None,
+            retryable: false,
+        })?;
+    }
+
+    println!();
+    println!("Downloading model files...");
+
+    // Set up progress bar
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%)")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("=> "),
+    );
+
+    let downloader = ModelDownloader::new(model_dir.clone());
+    let pb_clone = pb.clone();
+
+    let result = downloader.download(
+        &manifest,
+        Some(Box::new(move |progress| {
+            pb_clone.set_position(progress.total_bytes);
+        })),
+    );
+
+    match result {
+        Ok(()) => {
+            pb.finish_with_message("Download complete");
+            println!();
+            println!("{} Model installed successfully!", "✓".green());
+            println!("  Location: {}", model_dir.display());
+            println!();
+            println!("Semantic search is now available. Run 'cass search' to try it out.");
+            Ok(())
+        }
+        Err(e) => {
+            pb.abandon_with_message("Download failed");
+            Err(CliError {
+                code: 23,
+                kind: "download",
+                message: format!("Model download failed: {}", e),
+                hint: Some("Check your network connection and try again".into()),
+                retryable: true,
+            })
+        }
+    }
+}
+
+/// Verify model file integrity
+fn run_models_verify(repair: bool, data_dir_override: Option<PathBuf>, json_output: bool) -> CliResult<()> {
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use crate::search::model_download::{compute_sha256, ModelManifest};
+    use colored::Colorize;
+
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let model_dir = FastEmbedder::default_model_dir(&data_dir);
+    let manifest = ModelManifest::minilm_v2();
+
+    if !model_dir.is_dir() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "not_installed",
+                    "model_dir": model_dir.display().to_string(),
+                    "error": "Model directory does not exist",
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!("{} Model is not installed.", "✗".red());
+            println!("  Expected location: {}", model_dir.display());
+            println!();
+            println!("To install, run:");
+            println!("  cass models install");
+        }
+        return Ok(());
+    }
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut all_valid = true;
+    let mut files_to_repair: Vec<&str> = Vec::new();
+
+    if !json_output {
+        println!("Verifying model files...");
+        println!();
+    }
+
+    for mfile in &manifest.files {
+        let file_path = model_dir.join(&mfile.name);
+        let exists = file_path.is_file();
+
+        let (valid, actual_hash, error) = if exists {
+            match compute_sha256(&file_path) {
+                Ok(hash) => {
+                    let matches = hash == mfile.sha256;
+                    (matches, Some(hash), None)
+                }
+                Err(e) => (false, None, Some(e.to_string())),
+            }
+        } else {
+            (false, None, Some("File not found".to_string()))
+        };
+
+        if !valid {
+            all_valid = false;
+            files_to_repair.push(&mfile.name);
+        }
+
+        results.push(serde_json::json!({
+            "file": mfile.name,
+            "exists": exists,
+            "valid": valid,
+            "expected_sha256": mfile.sha256,
+            "actual_sha256": actual_hash,
+            "error": error,
+        }));
+
+        if !json_output {
+            let status = if valid {
+                "✓".green().to_string()
+            } else {
+                "✗".red().to_string()
+            };
+            println!("  {} {}", status, mfile.name);
+            if let Some(ref err) = error {
+                println!("      Error: {}", err);
+            } else if !valid {
+                println!("      Expected: {}", &mfile.sha256[..16]);
+                if let Some(ref actual) = actual_hash {
+                    println!("      Got:      {}", &actual[..16]);
+                }
+            }
+        }
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "model_dir": model_dir.display().to_string(),
+                "all_valid": all_valid,
+                "files": results,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!();
+        if all_valid {
+            println!("{} All model files verified successfully.", "✓".green());
+        } else {
+            println!(
+                "{} {} file(s) failed verification.",
+                "✗".red(),
+                files_to_repair.len()
+            );
+            if repair {
+                println!();
+                println!("Repair requested - re-downloading corrupted files...");
+                // For now, suggest full reinstall
+                println!("Note: Repair requires full reinstall.");
+                println!("Run: cass models install -y");
+            } else {
+                println!();
+                println!("To repair corrupted files, run:");
+                println!("  cass models verify --repair");
+                println!("Or reinstall:");
+                println!("  cass models install -y");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove model files
+fn run_models_remove(model_name: &str, skip_confirm: bool, data_dir_override: Option<PathBuf>) -> CliResult<()> {
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use colored::Colorize;
+
+    // Only support the default model for now
+    if model_name != "all-minilm-l6-v2" {
+        return Err(CliError {
+            code: 20,
+            kind: "model",
+            message: format!("Unknown model '{}'. Only 'all-minilm-l6-v2' is supported.", model_name),
+            hint: Some("Use 'cass models status' to see available models".into()),
+            retryable: false,
+        });
+    }
+
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let model_dir = FastEmbedder::default_model_dir(&data_dir);
+
+    if !model_dir.is_dir() {
+        println!("{} Model is not installed.", "✗".yellow());
+        println!("  Expected location: {}", model_dir.display());
+        return Ok(());
+    }
+
+    // Calculate size
+    let mut total_size: u64 = 0;
+    if let Ok(entries) = std::fs::read_dir(&model_dir) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                total_size += metadata.len();
+            }
+        }
+    }
+    let size_mb = total_size as f64 / 1_048_576.0;
+
+    if !skip_confirm {
+        println!("Remove Semantic Search Model");
+        println!("============================");
+        println!();
+        println!("Model:    {}", model_name);
+        println!("Location: {}", model_dir.display());
+        println!("Size:     {:.1} MB", size_mb);
+        println!();
+        println!("This will remove all model files. Semantic search will be unavailable");
+        println!("until the model is reinstalled.");
+        print!("Continue? [y/N] ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if !input.trim().eq_ignore_ascii_case("y") && !input.trim().eq_ignore_ascii_case("yes") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Remove the directory
+    std::fs::remove_dir_all(&model_dir).map_err(|e| CliError {
+        code: 24,
+        kind: "io",
+        message: format!("Failed to remove model directory: {}", e),
+        hint: Some("Check file permissions".into()),
+        retryable: false,
+    })?;
+
+    println!();
+    println!("{} Model removed successfully.", "✓".green());
+    println!("  Freed {:.1} MB", size_mb);
+    println!();
+    println!("To reinstall, run:");
+    println!("  cass models install");
+
+    Ok(())
+}
+
+/// Check for model updates
+fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>) -> CliResult<()> {
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use crate::search::model_download::{check_model_installed, check_version_mismatch, ModelManifest, ModelState};
+    use colored::Colorize;
+
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let model_dir = FastEmbedder::default_model_dir(&data_dir);
+    let manifest = ModelManifest::minilm_v2();
+
+    let state = check_model_installed(&model_dir);
+
+    if !state.is_ready() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "update_available": false,
+                    "reason": "model_not_installed",
+                    "current_revision": null,
+                    "latest_revision": manifest.revision,
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!("{} Model is not installed.", "✗".yellow());
+            println!("  Latest revision: {}", &manifest.revision[..12]);
+            println!();
+            println!("To install, run:");
+            println!("  cass models install");
+        }
+        return Ok(());
+    }
+
+    // Check for version mismatch
+    let update_info = check_version_mismatch(&model_dir, &manifest);
+
+    if let Some(ModelState::UpdateAvailable {
+        current_revision,
+        latest_revision,
+    }) = update_info
+    {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "update_available": true,
+                    "current_revision": current_revision,
+                    "latest_revision": latest_revision,
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!("{} Update available!", "⚠".yellow());
+            println!("  Current: {}", &current_revision[..12]);
+            println!("  Latest:  {}", &latest_revision[..12]);
+            println!();
+            println!("To update, run:");
+            println!("  cass models install");
+        }
+    } else {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "update_available": false,
+                    "current_revision": manifest.revision,
+                    "latest_revision": manifest.revision,
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!("{} Model is up to date.", "✓".green());
+            println!("  Revision: {}", &manifest.revision[..12]);
+        }
     }
 
     Ok(())

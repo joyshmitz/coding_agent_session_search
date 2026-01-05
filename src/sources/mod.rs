@@ -74,6 +74,7 @@ pub mod install;
 pub mod interactive;
 pub mod probe;
 pub mod provenance;
+pub mod setup;
 pub mod sync;
 
 // Re-export commonly used config types
@@ -112,3 +113,6 @@ pub use interactive::{
     InteractiveError, confirm_action, confirm_with_details, probe_to_display_info,
     run_host_selection,
 };
+
+// Re-export commonly used setup types
+pub use setup::{SetupError, SetupOptions, SetupResult, SetupState, run_setup};
