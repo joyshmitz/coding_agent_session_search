@@ -3,7 +3,6 @@
 //! This module provides rich interactive components using dialoguer, including:
 //! - Multi-select host picker with multi-line item display
 //! - Confirmation prompts for destructive operations
-//! - Progress display integration with indicatif
 //!
 //! # Design Decision: dialoguer vs inquire
 //!
