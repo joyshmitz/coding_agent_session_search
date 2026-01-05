@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "coding-agent-search"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -506,7 +506,7 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "colored",
- "console 0.16.1",
+ "console 0.15.11",
  "crc32fast",
  "criterion",
  "crossbeam-channel",
@@ -519,7 +519,7 @@ dependencies = [
  "half",
  "indicatif",
  "insta",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "lru",
  "memmap2",
  "notify",
@@ -541,7 +541,7 @@ dependencies = [
  "syntect",
  "tantivy",
  "tempfile",
- "thiserror 2.0.17",
+ "thiserror 1.0.69",
  "tokio",
  "toml",
  "tracing",
@@ -607,6 +607,7 @@ dependencies = [
  "encode_unicode",
  "libc",
  "once_cell",
+ "unicode-width 0.2.0",
  "windows-sys 0.59.0",
 ]
 

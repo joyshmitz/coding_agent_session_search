@@ -315,11 +315,12 @@ fn ingest_batch(
     convs: &[NormalizedConversation],
     progress: &Option<Arc<IndexingProgress>>,
 ) -> Result<()> {
-    for conv in convs {
-        persist::persist_conversation(storage, t_index, conv)?;
-        if let Some(p) = progress {
-            p.current.fetch_add(1, Ordering::Relaxed);
-        }
+    // Use batched insert for better SQLite performance (single transaction)
+    persist::persist_conversations_batched(storage, t_index, convs)?;
+
+    // Update progress counter for all conversations at once
+    if let Some(p) = progress {
+        p.current.fetch_add(convs.len(), Ordering::Relaxed);
     }
     Ok(())
 }
@@ -376,6 +377,24 @@ impl ConnectorKind {
             "pi_agent" => Some(Self::PiAgent),
             "factory" => Some(Self::Factory),
             _ => None,
+        }
+    }
+
+    /// Create a boxed connector instance for this kind.
+    /// Centralizes connector instantiation to avoid duplicate match arms.
+    fn create_connector(&self) -> Box<dyn Connector + Send> {
+        match self {
+            Self::Codex => Box::new(CodexConnector::new()),
+            Self::Cline => Box::new(ClineConnector::new()),
+            Self::Gemini => Box::new(GeminiConnector::new()),
+            Self::Claude => Box::new(ClaudeCodeConnector::new()),
+            Self::Amp => Box::new(AmpConnector::new()),
+            Self::OpenCode => Box::new(OpenCodeConnector::new()),
+            Self::Aider => Box::new(AiderConnector::new()),
+            Self::Cursor => Box::new(CursorConnector::new()),
+            Self::ChatGpt => Box::new(ChatGptConnector::new()),
+            Self::PiAgent => Box::new(PiAgentConnector::new()),
+            Self::Factory => Box::new(FactoryConnector::new()),
         }
     }
 }
@@ -506,19 +525,7 @@ fn reindex_paths(
     }
 
     for (kind, ts) in triggers {
-        let conn: Box<dyn Connector> = match kind {
-            ConnectorKind::Codex => Box::new(CodexConnector::new()),
-            ConnectorKind::Cline => Box::new(ClineConnector::new()),
-            ConnectorKind::Gemini => Box::new(GeminiConnector::new()),
-            ConnectorKind::Claude => Box::new(ClaudeCodeConnector::new()),
-            ConnectorKind::Amp => Box::new(AmpConnector::new()),
-            ConnectorKind::OpenCode => Box::new(OpenCodeConnector::new()),
-            ConnectorKind::Aider => Box::new(AiderConnector::new()),
-            ConnectorKind::Cursor => Box::new(CursorConnector::new()),
-            ConnectorKind::ChatGpt => Box::new(ChatGptConnector::new()),
-            ConnectorKind::PiAgent => Box::new(PiAgentConnector::new()),
-            ConnectorKind::Factory => Box::new(FactoryConnector::new()),
-        };
+        let conn = kind.create_connector();
         let detect = conn.detect();
         if !detect.detected {
             continue;
@@ -1088,6 +1095,63 @@ pub mod persist {
                 .collect();
             t_index.add_messages(conv, &new_msgs)?;
         }
+        Ok(())
+    }
+
+    /// Persist multiple conversations in a single database transaction for better performance.
+    /// This reduces SQLite transaction overhead when indexing many conversations at once.
+    pub fn persist_conversations_batched(
+        storage: &mut SqliteStorage,
+        t_index: &mut TantivyIndex,
+        convs: &[NormalizedConversation],
+    ) -> Result<()> {
+        if convs.is_empty() {
+            return Ok(());
+        }
+
+        // Prepare data for batched insert: (agent_id, workspace_id, Conversation)
+        let mut prepared: Vec<(i64, Option<i64>, Conversation)> = Vec::with_capacity(convs.len());
+
+        for conv in convs {
+            let agent = Agent {
+                id: None,
+                slug: conv.agent_slug.clone(),
+                name: conv.agent_slug.clone(),
+                version: None,
+                kind: AgentKind::Cli,
+            };
+            let agent_id = storage.ensure_agent(&agent)?;
+
+            let workspace_id = if let Some(ws) = &conv.workspace {
+                Some(storage.ensure_workspace(ws, None)?)
+            } else {
+                None
+            };
+
+            let internal_conv = map_to_internal(conv);
+            prepared.push((agent_id, workspace_id, internal_conv));
+        }
+
+        // Build references for the batched call
+        let refs: Vec<(i64, Option<i64>, &Conversation)> =
+            prepared.iter().map(|(a, w, c)| (*a, *w, c)).collect();
+
+        // Execute batched insert (single transaction)
+        let outcomes = storage.insert_conversations_batched(&refs)?;
+
+        // Add newly inserted messages to Tantivy index
+        for (conv, outcome) in convs.iter().zip(outcomes.iter()) {
+            if !outcome.inserted_indices.is_empty() {
+                let new_msgs: Vec<_> = conv
+                    .messages
+                    .iter()
+                    .filter(|m| outcome.inserted_indices.contains(&m.idx))
+                    .cloned()
+                    .collect();
+                t_index.add_messages(conv, &new_msgs)?;
+            }
+        }
+
         Ok(())
     }
 
