@@ -8810,9 +8810,13 @@ fn run_models_status(json_output: bool) -> CliResult<()> {
             ModelState::UpdateAvailable {
                 current_revision,
                 latest_revision,
-            } => format!("Update Available ({} -> {})", &current_revision[..8], &latest_revision[..8])
-                .yellow()
-                .to_string(),
+            } => format!(
+                "Update Available ({} -> {})",
+                current_revision.get(..8).unwrap_or(current_revision),
+                latest_revision.get(..8).unwrap_or(latest_revision)
+            )
+            .yellow()
+            .to_string(),
             ModelState::Cancelled => "Cancelled".yellow().to_string(),
         };
         println!("Status: {}", status_str);
@@ -9009,7 +9013,7 @@ fn run_models_verify(repair: bool, data_dir_override: Option<PathBuf>, json_outp
     use crate::search::model_download::{compute_sha256, ModelManifest};
     use colored::Colorize;
 
-    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
     let model_dir = FastEmbedder::default_model_dir(&data_dir);
     let manifest = ModelManifest::minilm_v2();
 
@@ -9083,9 +9087,9 @@ fn run_models_verify(repair: bool, data_dir_override: Option<PathBuf>, json_outp
             if let Some(ref err) = error {
                 println!("      Error: {}", err);
             } else if !valid {
-                println!("      Expected: {}", &mfile.sha256[..16]);
+                println!("      Expected: {}", mfile.sha256.get(..16).unwrap_or(&mfile.sha256));
                 if let Some(ref actual) = actual_hash {
-                    println!("      Got:      {}", &actual[..16]);
+                    println!("      Got:      {}", actual.get(..16).unwrap_or(actual));
                 }
             }
         }
@@ -9113,10 +9117,10 @@ fn run_models_verify(repair: bool, data_dir_override: Option<PathBuf>, json_outp
             );
             if repair {
                 println!();
-                println!("Repair requested - re-downloading corrupted files...");
-                // For now, suggest full reinstall
-                println!("Note: Repair requires full reinstall.");
-                println!("Run: cass models install -y");
+                println!("Repairing by re-downloading model files...");
+                println!();
+                // Actually perform the repair by re-running install
+                return run_models_install("all-minilm-l6-v2", None, None, true, data_dir_override);
             } else {
                 println!();
                 println!("To repair corrupted files, run:");
@@ -9232,7 +9236,7 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
             );
         } else {
             println!("{} Model is not installed.", "✗".yellow());
-            println!("  Latest revision: {}", &manifest.revision[..12]);
+            println!("  Latest revision: {}", manifest.revision.get(..12).unwrap_or(&manifest.revision));
             println!();
             println!("To install, run:");
             println!("  cass models install");
@@ -9260,8 +9264,8 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
             );
         } else {
             println!("{} Update available!", "⚠".yellow());
-            println!("  Current: {}", &current_revision[..12]);
-            println!("  Latest:  {}", &latest_revision[..12]);
+            println!("  Current: {}", current_revision.get(..12).unwrap_or(&current_revision));
+            println!("  Latest:  {}", latest_revision.get(..12).unwrap_or(&latest_revision));
             println!();
             println!("To update, run:");
             println!("  cass models install");
@@ -9278,7 +9282,7 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
         );
     } else {
         println!("{} Model is up to date.", "✓".green());
-        println!("  Revision: {}", &manifest.revision[..12]);
+        println!("  Revision: {}", manifest.revision.get(..12).unwrap_or(&manifest.revision));
     }
 
     Ok(())
