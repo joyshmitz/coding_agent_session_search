@@ -350,27 +350,34 @@ fn test_rsync_stats_parsing() {
 }
 
 /// Integration test: Verify container cleanup on drop.
+///
+/// This test verifies that SshTestServer's Drop implementation doesn't panic.
+/// The actual container cleanup is handled by Docker's --rm flag and the
+/// explicit `docker stop` in Drop.
 #[test]
 #[ignore = "requires Docker"]
 fn test_container_cleanup() {
     require_docker();
 
-    let _container_name = {
+    // Create server in inner scope so Drop runs at block end
+    {
         let server = SshTestServer::start().expect("SSH server should start");
-        // Verify container is running
-        let _output = std::process::Command::new("docker")
-            .args(["ps", "-q", "-f", &format!("name={}", server.ssh_target())])
-            .output()
-            .expect("docker ps should work");
 
-        // Return the container name to check after drop
-        // (Container is dropped at end of this block)
-        "placeholder".to_string()
-    };
+        // Verify the server is actually working before we drop it
+        let output = server
+            .ssh_exec("echo cleanup_test")
+            .expect("SSH should work");
+        assert!(
+            output.contains("cleanup_test"),
+            "Server should be responsive"
+        );
+
+        // Server is dropped at end of this block
+    }
 
     // After the server is dropped, wait a moment for cleanup
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    // Note: The actual cleanup verification would need to track the container name
-    // which is internal to SshTestServer. For now, we just verify no crash on drop.
+    // If we reach here without panic, Drop worked correctly.
+    // The container is auto-removed by Docker's --rm flag.
 }

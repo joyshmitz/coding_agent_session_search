@@ -20,14 +20,17 @@
 //! use coding_agent_search::sources::probe::{probe_host, probe_hosts_parallel};
 //! use coding_agent_search::sources::config::DiscoveredHost;
 //!
-//! // Single host probe
+//! // Single host probe (returns HostProbeResult directly, not Result)
 //! let host = DiscoveredHost { name: "laptop".into(), .. };
-//! let result = probe_host(&host, 10)?;
+//! let result = probe_host(&host, 10);
+//! if result.reachable {
+//!     println!("Connected in {}ms", result.connection_time_ms);
+//! }
 //!
-//! // Parallel probing with progress
+//! // Parallel probing with progress (synchronous, uses rayon internally)
 //! let results = probe_hosts_parallel(&hosts, 10, |done, total, name| {
 //!     println!("Probing {}/{}: {}", done, total, name);
-//! }).await;
+//! });
 //! ```
 
 use std::collections::HashMap;
@@ -269,7 +272,7 @@ for dir in ~/.claude/projects ~/.codex/sessions ~/.cursor \
         SIZE=$(du -sm "$expanded_dir" 2>/dev/null | cut -f1)
         # Count JSONL files for session estimate
         if [ -d "$expanded_dir" ]; then
-            COUNT=$(find "$expanded_dir" -name "*.jsonl" -o -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+            COUNT=$(find "$expanded_dir" \( -name "*.jsonl" -o -name "*.json" \) 2>/dev/null | wc -l | tr -d ' ')
         else
             COUNT=1  # Single file
         fi
