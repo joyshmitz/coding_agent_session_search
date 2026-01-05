@@ -3959,7 +3959,9 @@ pub fn run_tui(
 
                 // Mode indicator is handled separately for styled rendering
                 // Add download progress if downloading
-                if let SemanticAvailability::Downloading { progress_pct, .. } = &semantic_availability {
+                if let SemanticAvailability::Downloading { progress_pct, .. } =
+                    &semantic_availability
+                {
                     footer_parts.push(format!("⬇️ {}%", progress_pct));
                 }
                 if matches!(match_mode, MatchMode::Standard) {
@@ -4068,7 +4070,8 @@ pub fn run_tui(
                 }
 
                 // Add styled mode indicator
-                let (mode_token, mode_color) = styled_mode_indicator(search_mode, &semantic_availability);
+                let (mode_token, mode_color) =
+                    styled_mode_indicator(search_mode, &semantic_availability);
                 if !footer_spans.is_empty() {
                     footer_spans.push(Span::styled(" | ", Style::default().fg(palette.hint)));
                 }
@@ -6948,7 +6951,9 @@ pub fn run_tui(
                                     };
                                     status = format!("Hybrid search failed: {err}. Using lexical.");
                                     // Toast: hybrid search failed
-                                    toast_manager.push(Toast::warning("Hybrid search failed, using lexical"));
+                                    toast_manager.push(Toast::warning(
+                                        "Hybrid search failed, using lexical",
+                                    ));
                                     client.search_with_fallback(
                                         &lexical_query,
                                         filters.clone(),
@@ -6979,7 +6984,9 @@ pub fn run_tui(
                                     status =
                                         format!("Semantic search failed: {err}. Using lexical.");
                                     // Toast: semantic search failed
-                                    toast_manager.push(Toast::warning("Semantic search failed, using lexical"));
+                                    toast_manager.push(Toast::warning(
+                                        "Semantic search failed, using lexical",
+                                    ));
                                     client.search_with_fallback(
                                         &lexical_query,
                                         filters.clone(),
