@@ -800,7 +800,8 @@ impl SourceConfigGenerator {
 
         // Get remote home from system info
         if let Some(ref sys_info) = probe.system_info {
-            let remote_home = &sys_info.remote_home;
+            // Normalize remote_home by trimming trailing slashes to avoid double slashes
+            let remote_home = sys_info.remote_home.trim_end_matches('/');
 
             // Don't create mappings if remote_home is empty or root
             if !remote_home.is_empty() && remote_home != "/" {
@@ -815,7 +816,7 @@ impl SourceConfigGenerator {
 
                 // Also map remote home directly (more general fallback)
                 mappings.push(PathMapping::new(
-                    remote_home.clone(),
+                    remote_home,
                     self.local_home.to_string_lossy().to_string(),
                 ));
             }
@@ -1472,5 +1473,36 @@ mod tests {
 
         let source = generator.generate_source("server", &probe);
         assert!(source.path_mappings.is_empty());
+    }
+
+    #[test]
+    fn test_trailing_slash_remote_home_normalized() {
+        let generator = SourceConfigGenerator::new();
+        // Remote home with trailing slash should be normalized
+        let mut sys_info = make_test_sys_info("linux", "/home/user/");
+        sys_info.remote_home = "/home/user/".into(); // Explicitly set with trailing slash
+
+        let probe = make_test_probe(
+            true,
+            vec![make_test_agent("claude", "~/.claude/projects")],
+            Some(sys_info),
+        );
+
+        let source = generator.generate_source("server", &probe);
+
+        // Should have mappings without double slashes
+        assert!(!source.path_mappings.is_empty());
+        // The projects mapping should NOT have double slashes
+        let projects_mapping = source
+            .path_mappings
+            .iter()
+            .find(|m| m.from.contains("projects"));
+        assert!(projects_mapping.is_some());
+        // Check no double slashes
+        assert!(
+            !projects_mapping.unwrap().from.contains("//"),
+            "Path mapping should not contain double slashes: {}",
+            projects_mapping.unwrap().from
+        );
     }
 }
