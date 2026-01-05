@@ -42,6 +42,7 @@ use crate::ui::components::help_strip;
 use crate::ui::components::palette::{self, PaletteAction, PaletteState};
 use crate::ui::components::pills::{self, Pill};
 use crate::ui::components::theme::ThemePalette;
+use crate::ui::components::toast::{Toast, ToastManager, render_toasts};
 use crate::ui::components::widgets::search_bar;
 use crate::ui::data::{ConversationView, InputMode, load_conversation, role_style};
 use crate::ui::shortcuts;
@@ -1927,11 +1928,27 @@ fn search_mode_label(mode: SearchMode) -> &'static str {
     }
 }
 
-fn search_mode_token(mode: SearchMode) -> &'static str {
+/// Get the mode indicator with appropriate styling based on mode and semantic availability.
+/// Returns (mode_token, color) where color is appropriate for the mode:
+/// - LEX: default (white)
+/// - SEM: cyan (ML semantic)
+/// - SEM*: cyan (hash fallback semantic)
+/// - HYB: magenta (hybrid mode)
+fn styled_mode_indicator(
+    mode: SearchMode,
+    semantic_availability: &SemanticAvailability,
+) -> (&'static str, Color) {
     match mode {
-        SearchMode::Lexical => "LEX",
-        SearchMode::Semantic => "SEM",
-        SearchMode::Hybrid => "HYB",
+        SearchMode::Lexical => ("LEX", Color::White),
+        SearchMode::Semantic => {
+            // Distinguish ML semantic (SEM) from hash fallback (SEM*)
+            if matches!(semantic_availability, SemanticAvailability::HashFallback) {
+                ("SEM*", Color::Cyan)
+            } else {
+                ("SEM", Color::Cyan)
+            }
+        }
+        SearchMode::Hybrid => ("HYB", Color::Magenta),
     }
 }
 
@@ -2628,6 +2645,10 @@ pub fn run_tui(
     // Model download state
     let mut download_rx: Option<mpsc::Receiver<DownloadProgress>> = None;
     let mut download_cancel: Option<Arc<AtomicBool>> = None;
+    // Toast notification manager for semantic state changes
+    let mut toast_manager = ToastManager::new()
+        .with_max_visible(2)
+        .with_position(crate::ui::components::toast::ToastPosition::TopRight);
     let mut cached_detail: Option<(String, ConversationView)> = None;
     let mut detail_find: Option<DetailFindState> = None;
     let mut last_query = String::new();
@@ -3936,7 +3957,11 @@ pub fn run_tui(
                     }
                 }
 
-                footer_parts.push(format!("mode:{}", search_mode_token(search_mode)));
+                // Mode indicator is handled separately for styled rendering
+                // Add download progress if downloading
+                if let SemanticAvailability::Downloading { progress_pct, .. } = &semantic_availability {
+                    footer_parts.push(format!("⬇️ {}%", progress_pct));
+                }
                 if matches!(match_mode, MatchMode::Standard) {
                     footer_parts.push("match:standard".to_string());
                 }
@@ -4031,7 +4056,28 @@ pub fn run_tui(
                 let query_bar = Paragraph::new(query_display).alignment(Alignment::Center);
                 f.render_widget(query_bar, footer_split[0]);
 
-                let footer_line = footer_parts.join(" | ");
+                // Build styled footer line with colored mode indicator
+                let mut footer_spans: Vec<Span> = Vec::new();
+
+                // Add regular footer parts
+                for (i, part) in footer_parts.iter().enumerate() {
+                    if i > 0 {
+                        footer_spans.push(Span::styled(" | ", Style::default().fg(palette.hint)));
+                    }
+                    footer_spans.push(Span::raw(part.clone()));
+                }
+
+                // Add styled mode indicator
+                let (mode_token, mode_color) = styled_mode_indicator(search_mode, &semantic_availability);
+                if !footer_spans.is_empty() {
+                    footer_spans.push(Span::styled(" | ", Style::default().fg(palette.hint)));
+                }
+                footer_spans.push(Span::styled(
+                    format!("mode:{}", mode_token),
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ));
+
+                let footer_line = Line::from(footer_spans);
                 let footer = Paragraph::new(footer_line);
                 f.render_widget(footer, footer_split[1]);
 
@@ -4353,6 +4399,9 @@ pub fn run_tui(
                     let area = centered_rect(70, 60, f.area());
                     palette::draw_palette(f, area, &palette_state, palette);
                 }
+
+                // Render toast notifications (bead 2yg2)
+                render_toasts(f, &toast_manager, &palette);
             })?;
             needs_draw = false;
         }
@@ -4783,6 +4832,8 @@ pub fn run_tui(
                             total_bytes: total_size,
                         };
                         status = "Downloading model... Press Esc to cancel.".to_string();
+                        // Toast: download started
+                        toast_manager.push(Toast::info("Downloading model..."));
                     }
                     KeyCode::Char('h' | 'H') => {
                         show_consent_dialog = false;
@@ -4791,6 +4842,8 @@ pub fn run_tui(
                         search_mode = SearchMode::Semantic;
                         status =
                             "Using hash-based semantic search (approximate but fast).".to_string();
+                        // Toast: using hash fallback
+                        toast_manager.push(Toast::info("Using hash fallback"));
                     }
                     _ => {}
                 }
@@ -4808,6 +4861,8 @@ pub fn run_tui(
                 semantic_availability = SemanticAvailability::NotInstalled;
                 search_mode = SearchMode::Lexical;
                 status = "Download cancelled. Staying in lexical mode.".to_string();
+                // Toast: download cancelled
+                toast_manager.push(Toast::warning("Download cancelled"));
                 needs_draw = true;
                 continue;
             }
@@ -6849,6 +6904,10 @@ pub fn run_tui(
         }
 
         if last_tick.elapsed() >= tick_rate {
+            // Tick toasts to remove expired notifications
+            toast_manager.tick();
+            needs_draw = !toast_manager.is_empty() || needs_draw;
+
             if let Some(client) = &search_client {
                 let should_search = dirty_since.is_some_and(|t| t.elapsed() >= debounce);
 
@@ -6888,6 +6947,8 @@ pub fn run_tui(
                                         context: format!("hybrid search: {err}"),
                                     };
                                     status = format!("Hybrid search failed: {err}. Using lexical.");
+                                    // Toast: hybrid search failed
+                                    toast_manager.push(Toast::warning("Hybrid search failed, using lexical"));
                                     client.search_with_fallback(
                                         &lexical_query,
                                         filters.clone(),
@@ -6917,6 +6978,8 @@ pub fn run_tui(
                                     };
                                     status =
                                         format!("Semantic search failed: {err}. Using lexical.");
+                                    // Toast: semantic search failed
+                                    toast_manager.push(Toast::warning("Semantic search failed, using lexical"));
                                     client.search_with_fallback(
                                         &lexical_query,
                                         filters.clone(),
@@ -7187,10 +7250,14 @@ pub fn run_tui(
                             search_mode = SearchMode::Semantic;
                             status =
                                 "Model installed! Semantic search is now available.".to_string();
+                            // Toast: semantic search ready
+                            toast_manager.push(Toast::success("Semantic search ready"));
                         } else {
                             // Model downloaded but may need index building
                             status =
                                 format!("Model downloaded. {}", semantic_availability.summary());
+                            // Toast: index building
+                            toast_manager.push(Toast::info("Semantic index building..."));
                         }
                         download_rx = None;
                         download_cancel = None;
@@ -7204,6 +7271,8 @@ pub fn run_tui(
                             context: format!("Download failed: {err_msg}"),
                         };
                         status = format!("Download failed: {err_msg}");
+                        // Toast: download failed
+                        toast_manager.push(Toast::error(format!("Download failed: {err_msg}")));
                         download_rx = None;
                         download_cancel = None;
                     } else {
@@ -7253,6 +7322,11 @@ pub fn run_tui(
                     last_indexing_state = Some(current_state);
                     needs_draw = true;
                 }
+            }
+            // Tick toast manager to expire old notifications (bead 2yg2)
+            toast_manager.tick();
+            if !toast_manager.is_empty() {
+                needs_draw = true; // Redraw while toasts are visible
             }
             last_tick = Instant::now();
         }
