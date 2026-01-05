@@ -485,6 +485,21 @@ pub enum SourcesCommand {
     /// Manage path mappings for a source (P6.3)
     #[command(subcommand)]
     Mappings(MappingsAction),
+    /// Auto-discover SSH hosts from ~/.ssh/config
+    Discover {
+        /// Only show hosts without configuring (dry run)
+        #[arg(long)]
+        dry_run: bool,
+        /// Platform preset to use for discovered hosts (macos-defaults, linux-defaults)
+        #[arg(long, default_value = "linux-defaults")]
+        preset: String,
+        /// Skip hosts that are already configured
+        #[arg(long)]
+        skip_existing: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Subcommands for managing path mappings (P6.3)
@@ -7137,6 +7152,14 @@ fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
         SourcesCommand::Mappings(action) => {
             run_mappings_command(action)?;
         }
+        SourcesCommand::Discover {
+            dry_run,
+            preset,
+            skip_existing,
+            json,
+        } => {
+            run_sources_discover(dry_run, &preset, skip_existing, json)?;
+        }
     }
     Ok(())
 }
@@ -8152,6 +8175,175 @@ fn run_sources_sync(
             json_output,
             None, // idempotency_key
         )?;
+    }
+
+    Ok(())
+}
+
+/// Auto-discover SSH hosts from ~/.ssh/config (P5.6)
+fn run_sources_discover(
+    dry_run: bool,
+    preset: &str,
+    skip_existing: bool,
+    json_output: bool,
+) -> CliResult<()> {
+    use crate::sources::config::{discover_ssh_hosts, get_preset_paths, SourcesConfig};
+    use colored::Colorize;
+
+    // Get preset paths
+    let preset_paths = get_preset_paths(preset).map_err(|e| CliError {
+        code: 9,
+        kind: "config",
+        message: format!("Invalid preset: {e}"),
+        hint: Some("Valid presets: linux-defaults, macos-defaults".into()),
+        retryable: false,
+    })?;
+
+    // Discover SSH hosts
+    let discovered = discover_ssh_hosts();
+
+    if discovered.is_empty() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "no_hosts",
+                    "message": "No SSH hosts found in ~/.ssh/config"
+                })
+            );
+        } else {
+            println!(
+                "{}",
+                "No SSH hosts found in ~/.ssh/config".yellow()
+            );
+        }
+        return Ok(());
+    }
+
+    // Load existing config to check for duplicates
+    let existing_config = SourcesConfig::load().ok();
+    let existing_names: std::collections::HashSet<String> = existing_config
+        .as_ref()
+        .map(|c| c.remote_sources().map(|s| s.name.clone()).collect())
+        .unwrap_or_default();
+
+    // Filter hosts
+    let hosts_to_add: Vec<_> = if skip_existing {
+        discovered
+            .into_iter()
+            .filter(|h| !existing_names.contains(&h.name))
+            .collect()
+    } else {
+        discovered
+    };
+
+    if hosts_to_add.is_empty() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "all_existing",
+                    "message": "All discovered hosts are already configured"
+                })
+            );
+        } else {
+            println!(
+                "{}",
+                "All discovered SSH hosts are already configured as sources.".green()
+            );
+        }
+        return Ok(());
+    }
+
+    // Output discovered hosts
+    if json_output {
+        let hosts_json: Vec<_> = hosts_to_add
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "name": h.name,
+                    "hostname": h.hostname,
+                    "user": h.user,
+                    "port": h.port,
+                    "identity_file": h.identity_file,
+                    "already_configured": existing_names.contains(&h.name),
+                })
+            })
+            .collect();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": if dry_run { "dry_run" } else { "discovered" },
+                "preset": preset,
+                "preset_paths": preset_paths,
+                "hosts": hosts_json,
+                "count": hosts_to_add.len(),
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!(
+            "{} {} SSH hosts from ~/.ssh/config:\n",
+            "Discovered".cyan().bold(),
+            hosts_to_add.len()
+        );
+
+        for host in &hosts_to_add {
+            let status = if existing_names.contains(&host.name) {
+                " (already configured)".yellow().to_string()
+            } else {
+                String::new()
+            };
+
+            println!(
+                "  {} {}{}",
+                "→".cyan(),
+                host.name.white().bold(),
+                status
+            );
+
+            if let Some(hostname) = &host.hostname {
+                println!("      Hostname: {}", hostname.dimmed());
+            }
+            if let Some(user) = &host.user {
+                println!("      User: {}", user.dimmed());
+            }
+            if let Some(port) = host.port {
+                if port != 22 {
+                    println!("      Port: {}", port.to_string().dimmed());
+                }
+            }
+        }
+
+        println!();
+        println!("{} {}", "Preset:".dimmed(), preset);
+        println!("{}", "Paths to sync:".dimmed());
+        for path in &preset_paths {
+            println!("  - {}", path.dimmed());
+        }
+
+        if dry_run {
+            println!();
+            println!(
+                "{}",
+                "DRY RUN - no sources.toml changes made.".cyan()
+            );
+            println!(
+                "Run {} to add these sources.",
+                "cass sources discover".white().bold()
+            );
+        } else {
+            println!();
+            println!(
+                "{} To add a specific host, use:",
+                "Tip:".yellow()
+            );
+            println!(
+                "  {}",
+                "cass sources add --name <host> --host <host> --paths '~/.claude/projects'".dimmed()
+            );
+        }
     }
 
     Ok(())

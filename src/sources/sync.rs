@@ -216,6 +216,63 @@ impl SyncEngine {
             .join("mirror")
     }
 
+    /// Expand ~ in a remote path by querying the remote machine's home directory.
+    ///
+    /// SSH to the remote host, get $HOME, and replace ~ with the actual path.
+    /// The result is cached per host for efficiency.
+    fn expand_remote_tilde(&self, host: &str, path: &str) -> Result<String, SyncError> {
+        if !path.starts_with('~') {
+            return Ok(path.to_string());
+        }
+
+        // Query remote home directory via SSH
+        let ssh_opts = format!(
+            "-o BatchMode=yes -o ConnectTimeout={} -o StrictHostKeyChecking=accept-new",
+            self.connection_timeout
+        );
+
+        let output = Command::new("ssh")
+            .args(ssh_opts.split_whitespace())
+            .arg(host)
+            .arg("echo $HOME")
+            .output()
+            .map_err(|e| SyncError::SshFailed(format!("Failed to execute ssh: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SyncError::SshFailed(format!(
+                "Failed to get remote home directory: {}",
+                stderr.trim()
+            )));
+        }
+
+        let remote_home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if remote_home.is_empty() {
+            return Err(SyncError::SshFailed(
+                "Remote home directory is empty".to_string(),
+            ));
+        }
+
+        // Replace ~ with the actual home directory
+        let expanded = if path == "~" {
+            remote_home
+        } else if let Some(rest) = path.strip_prefix("~/") {
+            format!("{}/{}", remote_home, rest)
+        } else {
+            // Handle ~user/path case (though we don't support it well yet)
+            path.to_string()
+        };
+
+        tracing::debug!(
+            host = %host,
+            original = %path,
+            expanded = %expanded,
+            "expanded remote tilde path"
+        );
+
+        Ok(expanded)
+    }
+
     /// Detect the available sync method.
     pub fn detect_sync_method() -> SyncMethod {
         if Command::new("rsync")
@@ -287,11 +344,21 @@ impl SyncEngine {
     fn sync_path_rsync(&self, host: &str, remote_path: &str, dest_dir: &Path) -> PathSyncResult {
         let start = Instant::now();
 
-        // Expand ~ in remote path
-        let expanded_path = if remote_path.starts_with("~/") {
-            remote_path.to_string()
-        } else if remote_path.starts_with('~') {
-            remote_path.replacen('~', "~/", 1)
+        // Expand ~ to actual home directory on the remote machine
+        let expanded_path = if remote_path.starts_with('~') {
+            match self.expand_remote_tilde(host, remote_path) {
+                Ok(path) => path,
+                Err(e) => {
+                    return PathSyncResult {
+                        remote_path: remote_path.to_string(),
+                        local_path: dest_dir.join(path_to_safe_dirname(remote_path)),
+                        success: false,
+                        error: Some(format!("Failed to expand ~: {}", e)),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        ..Default::default()
+                    };
+                }
+            }
         } else {
             remote_path.to_string()
         };

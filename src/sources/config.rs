@@ -467,6 +467,134 @@ pub fn get_preset_paths(preset: &str) -> Result<Vec<String>, ConfigError> {
     }
 }
 
+// =============================================================================
+// SSH Config Discovery
+// =============================================================================
+
+/// Discovered SSH host from ~/.ssh/config
+#[derive(Debug, Clone)]
+pub struct DiscoveredHost {
+    /// Host alias from SSH config
+    pub name: String,
+    /// Hostname or IP address
+    pub hostname: Option<String>,
+    /// Username
+    pub user: Option<String>,
+    /// Port (defaults to 22)
+    pub port: Option<u16>,
+    /// Identity file path
+    pub identity_file: Option<String>,
+}
+
+impl DiscoveredHost {
+    /// Get the SSH connection string (user@host or just host)
+    pub fn connection_string(&self) -> String {
+        if let Some(user) = &self.user {
+            format!("{}@{}", user, self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+/// Discover SSH hosts from ~/.ssh/config.
+///
+/// Parses the SSH config file and returns a list of discovered hosts
+/// that could be used as remote sources.
+pub fn discover_ssh_hosts() -> Vec<DiscoveredHost> {
+    let ssh_config_path = dirs::home_dir()
+        .map(|h| h.join(".ssh").join("config"))
+        .unwrap_or_default();
+
+    if !ssh_config_path.exists() {
+        return Vec::new();
+    }
+
+    let content = match std::fs::read_to_string(&ssh_config_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    parse_ssh_config(&content)
+}
+
+/// Parse SSH config file content into discovered hosts.
+fn parse_ssh_config(content: &str) -> Vec<DiscoveredHost> {
+    let mut hosts = Vec::new();
+    let mut current_host: Option<DiscoveredHost> = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        // Skip comments and empty lines
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Parse key-value pairs
+        let parts: Vec<&str> = line.splitn(2, |c: char| c.is_whitespace()).collect();
+        if parts.len() != 2 {
+            continue;
+        }
+
+        let key = parts[0].to_lowercase();
+        let value = parts[1].trim();
+
+        match key.as_str() {
+            "host" => {
+                // Save previous host if exists
+                if let Some(host) = current_host.take() {
+                    // Skip wildcard patterns and generic hosts
+                    if !host.name.contains('*') && !host.name.contains('?') {
+                        hosts.push(host);
+                    }
+                }
+
+                // Start new host (skip wildcards)
+                if !value.contains('*') && !value.contains('?') {
+                    current_host = Some(DiscoveredHost {
+                        name: value.to_string(),
+                        hostname: None,
+                        user: None,
+                        port: None,
+                        identity_file: None,
+                    });
+                }
+            }
+            "hostname" => {
+                if let Some(ref mut host) = current_host {
+                    host.hostname = Some(value.to_string());
+                }
+            }
+            "user" => {
+                if let Some(ref mut host) = current_host {
+                    host.user = Some(value.to_string());
+                }
+            }
+            "port" => {
+                if let Some(ref mut host) = current_host {
+                    host.port = value.parse().ok();
+                }
+            }
+            "identityfile" => {
+                if let Some(ref mut host) = current_host {
+                    host.identity_file = Some(value.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Don't forget the last host
+    if let Some(host) = current_host {
+        if !host.name.contains('*') && !host.name.contains('?') {
+            hosts.push(host);
+        }
+    }
+
+    hosts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,5 +862,15 @@ mod tests {
         assert_eq!(SyncSchedule::Manual.to_string(), "manual");
         assert_eq!(SyncSchedule::Hourly.to_string(), "hourly");
         assert_eq!(SyncSchedule::Daily.to_string(), "daily");
+    }
+
+    #[test]
+    fn test_discover_ssh_hosts() {
+        // Just test that the function doesn't panic
+        let hosts = super::discover_ssh_hosts();
+        // Could be empty if no ~/.ssh/config exists
+        for host in hosts {
+            assert!(!host.name.is_empty());
+        }
     }
 }

@@ -74,7 +74,8 @@ pub mod sync;
 
 // Re-export commonly used config types
 pub use config::{
-    ConfigError, Platform, SourceDefinition, SourcesConfig, SyncSchedule, get_preset_paths,
+    ConfigError, DiscoveredHost, Platform, SourceDefinition, SourcesConfig, SyncSchedule,
+    discover_ssh_hosts, get_preset_paths,
 };
 
 // Re-export commonly used provenance types
