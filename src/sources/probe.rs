@@ -577,10 +577,19 @@ where
 }
 
 /// Cache for probe results to avoid repeated probing.
-#[derive(Debug, Default)]
+///
+/// Note: Use `ProbeCache::new(ttl_secs)` to create a cache. The `Default`
+/// implementation uses a 5-minute TTL.
+#[derive(Debug)]
 pub struct ProbeCache {
     results: HashMap<String, (HostProbeResult, std::time::Instant)>,
     ttl_secs: u64,
+}
+
+impl Default for ProbeCache {
+    fn default() -> Self {
+        Self::new(300) // 5-minute default TTL
+    }
 }
 
 impl ProbeCache {
