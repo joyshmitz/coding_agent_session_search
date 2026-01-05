@@ -189,9 +189,7 @@ impl Connector for ClaudeCodeConnector {
                     });
                 }
                 // Re-assign sequential indices after filtering
-                for (i, msg) in messages.iter_mut().enumerate() {
-                    msg.idx = i as i64;
-                }
+                super::reindex_messages(&mut messages);
             } else {
                 content_string = fs::read_to_string(entry.path())
                     .with_context(|| format!("read {}", entry.path().display()))?;
@@ -247,9 +245,7 @@ impl Connector for ClaudeCodeConnector {
                     }
                 }
                 // Re-assign sequential indices after filtering
-                for (i, msg) in messages.iter_mut().enumerate() {
-                    msg.idx = i as i64;
-                }
+                super::reindex_messages(&mut messages);
             }
             if messages.is_empty() {
                 if file_count <= 3 {

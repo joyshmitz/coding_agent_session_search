@@ -254,9 +254,7 @@ impl Connector for CodexConnector {
                     }
                 }
                 // Re-assign sequential indices after filtering
-                for (i, msg) in messages.iter_mut().enumerate() {
-                    msg.idx = i as i64;
-                }
+                super::reindex_messages(&mut messages);
             } else if ext == Some("json") {
                 let content = fs::read_to_string(&file)
                     .with_context(|| format!("read rollout {}", file.display()))?;
@@ -309,9 +307,7 @@ impl Connector for CodexConnector {
                     }
                 }
                 // Re-assign sequential indices after filtering
-                for (i, msg) in messages.iter_mut().enumerate() {
-                    msg.idx = i as i64;
-                }
+                super::reindex_messages(&mut messages);
             }
 
             if messages.is_empty() {

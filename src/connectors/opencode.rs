@@ -373,9 +373,7 @@ fn load_messages(session_msg_dir: &PathBuf, part_dir: &PathBuf) -> Result<Vec<No
 
     // Sort by timestamp and assign indices
     messages.sort_by_key(|m| m.created_at.unwrap_or(i64::MAX));
-    for (i, msg) in messages.iter_mut().enumerate() {
-        msg.idx = i as i64;
-    }
+    super::reindex_messages(&mut messages);
 
     Ok(messages)
 }

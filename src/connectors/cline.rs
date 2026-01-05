@@ -232,9 +232,7 @@ impl Connector for ClineConnector {
                 messages.sort_by_key(|m| m.created_at.unwrap_or(0));
 
                 // Re-index
-                for (i, msg) in messages.iter_mut().enumerate() {
-                    msg.idx = i as i64;
-                }
+                super::reindex_messages(&mut messages);
 
                 let mut title = None;
                 let mut workspace = None;

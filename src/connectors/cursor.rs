@@ -416,9 +416,7 @@ impl CursorConnector {
         }
 
         // Re-index messages
-        for (i, msg) in messages.iter_mut().enumerate() {
-            msg.idx = i as i64;
-        }
+        super::reindex_messages(&mut messages);
 
         // Extract model info
         let model_name = val
@@ -599,9 +597,7 @@ impl CursorConnector {
         }
 
         // Re-index
-        for (i, msg) in messages.iter_mut().enumerate() {
-            msg.idx = i as i64;
-        }
+        super::reindex_messages(&mut messages);
 
         let title = messages.first().map(|m| {
             m.content

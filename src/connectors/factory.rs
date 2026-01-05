@@ -242,9 +242,7 @@ fn parse_factory_session(path: &Path) -> Result<Option<NormalizedConversation>> 
     }
 
     // Reassign sequential indices
-    for (i, msg) in messages.iter_mut().enumerate() {
-        msg.idx = i as i64;
-    }
+    super::reindex_messages(&mut messages);
 
     if messages.is_empty() {
         return Ok(None);

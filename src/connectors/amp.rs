@@ -253,9 +253,7 @@ fn extract_messages(val: &Value, _since_ts: Option<i64>) -> Option<Vec<Normalize
     }
 
     // Re-assign indices after filtering to maintain sequential order
-    for (i, msg) in out.iter_mut().enumerate() {
-        msg.idx = i as i64;
-    }
+    super::reindex_messages(&mut out);
 
     if out.is_empty() { None } else { Some(out) }
 }
