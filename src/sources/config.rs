@@ -840,14 +840,15 @@ impl SourceConfigGenerator {
 
     /// Detect platform from probe results.
     fn detect_platform(&self, probe: &HostProbeResult) -> Option<Platform> {
-        probe.system_info.as_ref().and_then(|si| {
-            match si.os.to_lowercase().as_str() {
+        probe
+            .system_info
+            .as_ref()
+            .and_then(|si| match si.os.to_lowercase().as_str() {
                 "darwin" => Some(Platform::Macos),
                 "linux" => Some(Platform::Linux),
                 "windows" => Some(Platform::Windows),
                 _ => None,
-            }
-        })
+            })
     }
 
     /// Generate a ConfigPreview from probe results.
@@ -957,7 +958,10 @@ impl SourcesConfig {
     /// Merge multiple sources from a preview.
     ///
     /// Returns a tuple of (added_count, skipped_names).
-    pub fn merge_preview(&mut self, preview: &ConfigPreview) -> Result<(usize, Vec<String>), ConfigError> {
+    pub fn merge_preview(
+        &mut self,
+        preview: &ConfigPreview,
+    ) -> Result<(usize, Vec<String>), ConfigError> {
         let mut added = 0;
         let mut skipped = Vec::new();
 
@@ -1366,13 +1370,22 @@ mod tests {
 
         let source = generator.generate_source("server", &probe);
         assert!(!source.path_mappings.is_empty());
-        assert!(source.path_mappings.iter().any(|m| m.from.contains("/home/ubuntu")));
+        assert!(
+            source
+                .path_mappings
+                .iter()
+                .any(|m| m.from.contains("/home/ubuntu"))
+        );
     }
 
     #[test]
     fn test_generate_source_platform_detection() {
         let generator = SourceConfigGenerator::new();
-        let probe = make_test_probe(true, vec![], Some(make_test_sys_info("linux", "/home/user")));
+        let probe = make_test_probe(
+            true,
+            vec![],
+            Some(make_test_sys_info("linux", "/home/user")),
+        );
         let source = generator.generate_source("server", &probe);
         assert_eq!(source.platform, Some(Platform::Linux));
     }

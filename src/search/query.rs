@@ -45,12 +45,15 @@ pub struct SearchFilters {
     pub session_paths: HashSet<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchMode {
+    /// Lexical (BM25) search - keyword matching
     #[default]
     Lexical,
+    /// Semantic search - embedding similarity
     Semantic,
+    /// Hybrid search - RRF fusion of lexical and semantic
     Hybrid,
 }
 

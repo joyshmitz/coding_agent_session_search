@@ -236,6 +236,9 @@ pub enum Commands {
         /// Enables chained searches: `cass search "query1" --robot-format sessions | cass search "query2" --sessions-from -`
         #[arg(long)]
         sessions_from: Option<String>,
+        /// Search mode: lexical (default), semantic, or hybrid
+        #[arg(long, value_enum)]
+        mode: Option<crate::search::query::SearchMode>,
     },
     /// Show statistics about indexed data
     Stats {
@@ -1736,6 +1739,7 @@ async fn execute_cli(
                     highlight,
                     source,
                     sessions_from,
+                    mode,
                 } => {
                     run_cli_search(
                         &query,
@@ -1772,6 +1776,7 @@ async fn execute_cli(
                         highlight,
                         source,
                         sessions_from,
+                        mode,
                     )?;
                 }
                 Commands::Stats {
@@ -2695,8 +2700,9 @@ fn run_cli_search(
     highlight: bool,
     source: Option<String>,
     sessions_from: Option<String>,
+    mode: Option<crate::search::query::SearchMode>,
 ) -> CliResult<()> {
-    use crate::search::query::{QueryExplanation, SearchClient, SearchFilters};
+    use crate::search::query::{QueryExplanation, SearchClient, SearchFilters, SearchMode};
     use crate::search::tantivy::index_dir;
     use crate::sources::provenance::SourceFilter;
     use std::collections::HashSet;
@@ -2863,21 +2869,78 @@ fn run_cli_search(
         });
     }
 
-    let result = client
-        .search_with_fallback(
-            query,
-            filters.clone(),
-            search_limit,
-            search_offset,
-            sparse_threshold,
-        )
-        .map_err(|e| CliError {
-            code: 9,
-            kind: "search",
-            message: format!("search failed: {e}"),
-            hint: None,
-            retryable: true,
-        })?;
+    // Determine effective search mode (default to Lexical)
+    let effective_mode = mode.unwrap_or(SearchMode::Lexical);
+
+    let result = match effective_mode {
+        SearchMode::Lexical => client
+            .search_with_fallback(query, filters.clone(), search_limit, search_offset, sparse_threshold)
+            .map_err(|e| CliError {
+                code: 9,
+                kind: "search",
+                message: format!("search failed: {e}"),
+                hint: None,
+                retryable: true,
+            })?,
+        SearchMode::Semantic => {
+            let hits = client
+                .search_semantic(query, filters.clone(), search_limit, search_offset)
+                .map_err(|e| {
+                    let err_str = e.to_string();
+                    if err_str.contains("unavailable") || err_str.contains("no embedder") {
+                        CliError {
+                            code: 15,
+                            kind: "semantic-unavailable",
+                            message: "Semantic search not available".to_string(),
+                            hint: Some(
+                                "Run 'cass tui' and press Alt+S to set up semantic search, or use --mode lexical"
+                                    .to_string(),
+                            ),
+                            retryable: false,
+                        }
+                    } else {
+                        CliError {
+                            code: 9,
+                            kind: "search",
+                            message: format!("semantic search failed: {e}"),
+                            hint: Some("Try --mode lexical as fallback".to_string()),
+                            retryable: true,
+                        }
+                    }
+                })?;
+            crate::search::query::SearchResult {
+                hits,
+                wildcard_fallback: false,
+                cache_stats: crate::search::query::CacheStats::default(),
+                suggestions: Vec::new(),
+            }
+        }
+        SearchMode::Hybrid => client
+            .search_hybrid(query, query, filters.clone(), search_limit, search_offset, sparse_threshold)
+            .map_err(|e| {
+                let err_str = e.to_string();
+                if err_str.contains("unavailable") || err_str.contains("no embedder") {
+                    CliError {
+                        code: 15,
+                        kind: "semantic-unavailable",
+                        message: "Hybrid search not available (requires semantic search)".to_string(),
+                        hint: Some(
+                            "Run 'cass tui' and press Alt+S to set up semantic search, or use --mode lexical"
+                                .to_string(),
+                        ),
+                        retryable: false,
+                    }
+                } else {
+                    CliError {
+                        code: 9,
+                        kind: "search",
+                        message: format!("hybrid search failed: {e}"),
+                        hint: Some("Try --mode lexical as fallback".to_string()),
+                        retryable: true,
+                    }
+                }
+            })?,
+    };
 
     // Check if search exceeded timeout - return partial results with timeout indicator
     let timed_out = timeout_duration.is_some_and(|t| start_time.elapsed() > t);
@@ -3034,6 +3097,7 @@ fn run_cli_search(
             explanation.as_ref(),
             timed_out,
             timeout_ms,
+            effective_mode,
         )?;
     } else if display_result.hits.is_empty() {
         eprintln!("No results found.");
@@ -3316,6 +3380,7 @@ fn output_robot_results(
     explanation: Option<&crate::search::query::QueryExplanation>,
     timed_out: bool,
     timeout_ms: Option<u64>,
+    search_mode: crate::search::query::SearchMode,
 ) -> CliResult<()> {
     // Expand presets (minimal, summary, provenance, all, *)
     let resolved_fields = expand_field_presets(fields);
@@ -3381,6 +3446,7 @@ fn output_robot_results(
             if include_meta && let serde_json::Value::Object(ref mut map) = payload {
                 let mut meta = serde_json::json!({
                     "elapsed_ms": elapsed_ms,
+                    "search_mode": search_mode,
                     "wildcard_fallback": result.wildcard_fallback,
                     "cache_stats": {
                         "hits": result.cache_stats.cache_hits,
@@ -3460,6 +3526,7 @@ fn output_robot_results(
                         "count": filtered_hits.len(),
                         "total_matches": total_matches,
                         "elapsed_ms": elapsed_ms,
+                        "search_mode": search_mode,
                         "wildcard_fallback": result.wildcard_fallback,
                         "cache_stats": {
                             "hits": result.cache_stats.cache_hits,
@@ -3584,6 +3651,7 @@ fn output_robot_results(
             if include_meta && let serde_json::Value::Object(ref mut map) = payload {
                 let mut meta = serde_json::json!({
                     "elapsed_ms": elapsed_ms,
+                    "search_mode": search_mode,
                     "wildcard_fallback": result.wildcard_fallback,
                     "tokens_estimated": tokens_estimated,
                     "max_tokens": max_tokens,
