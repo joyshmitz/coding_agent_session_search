@@ -69,6 +69,7 @@
 //! ```
 
 pub mod config;
+pub mod index;
 pub mod install;
 pub mod probe;
 pub mod provenance;
@@ -98,4 +99,9 @@ pub use probe::{
 // Re-export commonly used install types
 pub use install::{
     InstallError, InstallMethod, InstallProgress, InstallResult, InstallStage, RemoteInstaller,
+};
+
+// Re-export commonly used index types
+pub use index::{
+    IndexError, IndexProgress, IndexResult, IndexStage, RemoteIndexer,
 };
