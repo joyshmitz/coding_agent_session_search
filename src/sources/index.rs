@@ -91,15 +91,9 @@ impl IndexError {
             IndexError::Timeout(_) => {
                 "Index timed out. Try running manually: ssh host 'cass index'"
             }
-            IndexError::PermissionDenied => {
-                "Check file permissions in agent data directories."
-            }
-            IndexError::CassNotFound => {
-                "cass is not installed. Run installation first."
-            }
-            IndexError::SshFailed(_) => {
-                "Check SSH connection and credentials."
-            }
+            IndexError::PermissionDenied => "Check file permissions in agent data directories.",
+            IndexError::CassNotFound => "cass is not installed. Run installation first.",
+            IndexError::SshFailed(_) => "Check SSH connection and credentials.",
             _ => "See error details above.",
         }
     }
@@ -201,18 +195,21 @@ impl RemoteIndexer {
     /// Check if indexing is needed based on probe result.
     ///
     /// Returns true if the remote should be indexed:
-    /// - cass not found (just installed, needs index)
     /// - cass installed but never indexed
     /// - Index exists but has zero sessions
+    ///
+    /// Returns false if:
+    /// - cass not found (can't index without cass)
+    /// - Already has indexed sessions
     pub fn needs_indexing(probe: &HostProbeResult) -> bool {
         match &probe.cass_status {
-            // Not found means it was likely just installed
-            CassStatus::NotFound => true,
-            // Explicitly not indexed
+            // Not found - can't index without cass installed
+            CassStatus::NotFound => false,
+            // Explicitly not indexed - needs indexing
             CassStatus::InstalledNotIndexed { .. } => true,
-            // Indexed but empty
+            // Indexed but empty - try indexing again
             CassStatus::Indexed { session_count, .. } => *session_count == 0,
-            // Unknown status - try indexing
+            // Unknown status - assume we should try
             CassStatus::Unknown => true,
         }
     }
@@ -263,7 +260,10 @@ impl RemoteIndexer {
                 stage: IndexStage::Failed {
                     error: result.error.clone().unwrap_or_default(),
                 },
-                message: result.error.clone().unwrap_or_else(|| "Unknown error".into()),
+                message: result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Unknown error".into()),
                 sessions_found: 0,
                 sessions_indexed: 0,
                 percent: None,
@@ -437,7 +437,9 @@ fi
                 {
                     progress_pct = (progress_pct + 5).min(40);
                     on_progress(IndexProgress {
-                        stage: IndexStage::Scanning { agent: agent.clone() },
+                        stage: IndexStage::Scanning {
+                            agent: agent.clone(),
+                        },
                         message: format!("Scanning {}...", agent),
                         sessions_found,
                         sessions_indexed: 0,
@@ -607,9 +609,10 @@ mod tests {
     }
 
     #[test]
-    fn test_needs_indexing_when_not_found() {
+    fn test_no_indexing_when_not_found() {
+        // Can't index if cass isn't installed
         let probe = mock_probe_not_found();
-        assert!(RemoteIndexer::needs_indexing(&probe));
+        assert!(!RemoteIndexer::needs_indexing(&probe));
     }
 
     #[test]
@@ -664,14 +667,8 @@ mod tests {
 
     #[test]
     fn test_extract_session_count() {
-        assert_eq!(
-            extract_session_count("found 234 sessions"),
-            Some(234)
-        );
-        assert_eq!(
-            extract_session_count("Indexed 291 sessions"),
-            Some(291)
-        );
+        assert_eq!(extract_session_count("found 234 sessions"), Some(234));
+        assert_eq!(extract_session_count("Indexed 291 sessions"), Some(291));
         assert_eq!(
             extract_session_count("Processing 42 conversations"),
             Some(42)
@@ -696,15 +693,17 @@ mod tests {
     #[test]
     fn test_index_error_help_messages() {
         assert!(IndexError::DiskFull.help_message().contains("Free disk"));
-        assert!(IndexError::Timeout(600)
-            .help_message()
-            .contains("manually"));
-        assert!(IndexError::PermissionDenied
-            .help_message()
-            .contains("permissions"));
-        assert!(IndexError::CassNotFound
-            .help_message()
-            .contains("installed"));
+        assert!(IndexError::Timeout(600).help_message().contains("manually"));
+        assert!(
+            IndexError::PermissionDenied
+                .help_message()
+                .contains("permissions")
+        );
+        assert!(
+            IndexError::CassNotFound
+                .help_message()
+                .contains("installed")
+        );
     }
 
     #[test]

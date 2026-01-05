@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::search::embedder::Embedder;
 use crate::search::fastembed_embedder::FastEmbedder;
-use crate::search::model_download::{check_version_mismatch, ModelManifest, ModelState};
+use crate::search::model_download::{ModelManifest, ModelState, check_version_mismatch};
 use crate::search::vector_index::{
     ROLE_ASSISTANT, ROLE_USER, SemanticFilterMaps, VectorIndex, vector_index_path,
 };
@@ -31,9 +31,7 @@ use crate::storage::sqlite::SqliteStorage;
 #[derive(Debug, Clone)]
 pub enum SemanticAvailability {
     /// Model is ready for use.
-    Ready {
-        embedder_id: String,
-    },
+    Ready { embedder_id: String },
 
     // =========================================================================
     // TUI-centric states for user flow
@@ -74,9 +72,7 @@ pub enum SemanticAvailability {
     HashFallback,
 
     /// Semantic search disabled by policy or user.
-    Disabled {
-        reason: String,
-    },
+    Disabled { reason: String },
 
     // =========================================================================
     // Diagnostic states for troubleshooting
@@ -88,20 +84,13 @@ pub enum SemanticAvailability {
     },
 
     /// Vector index is missing.
-    IndexMissing {
-        index_path: PathBuf,
-    },
+    IndexMissing { index_path: PathBuf },
 
     /// Database is unavailable.
-    DatabaseUnavailable {
-        db_path: PathBuf,
-        error: String,
-    },
+    DatabaseUnavailable { db_path: PathBuf, error: String },
 
     /// Failed to load semantic context.
-    LoadFailed {
-        context: String,
-    },
+    LoadFailed { context: String },
 
     /// Model update available - index rebuild needed.
     UpdateAvailable {
@@ -208,7 +197,7 @@ impl SemanticAvailability {
             SemanticAvailability::Verifying => "VFY...",
             SemanticAvailability::IndexBuilding { .. } => "IDX...",
             SemanticAvailability::Disabled { .. } => "OFF",
-            SemanticAvailability::ModelMissing { .. } => "ERR",
+            SemanticAvailability::ModelMissing { .. } => "NOMODEL",
             SemanticAvailability::IndexMissing { .. } => "NOIDX",
             SemanticAvailability::DatabaseUnavailable { .. } => "NODB",
             SemanticAvailability::LoadFailed { .. } => "ERR",
@@ -231,9 +220,7 @@ impl SemanticAvailability {
             } => {
                 let mb_done = *bytes_downloaded as f64 / 1_048_576.0;
                 let mb_total = *total_bytes as f64 / 1_048_576.0;
-                format!(
-                    "downloading model: {progress_pct}% ({mb_done:.1}/{mb_total:.1} MB)"
-                )
+                format!("downloading model: {progress_pct}% ({mb_done:.1}/{mb_total:.1} MB)")
             }
             SemanticAvailability::Verifying => "verifying model checksum".to_string(),
             SemanticAvailability::IndexBuilding {
