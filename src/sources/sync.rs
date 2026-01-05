@@ -187,7 +187,7 @@ impl SyncEngine {
     /// Create a new sync engine.
     ///
     /// # Arguments
-    /// * `data_dir` - The cass data directory (e.g., ~/.local/share/cass)
+    /// * `data_dir` - The cass data directory (e.g., ~/.local/share/coding-agent-search)
     pub fn new(data_dir: &Path) -> Self {
         Self {
             local_store: data_dir.to_path_buf(),
@@ -227,6 +227,7 @@ impl SyncEngine {
 
         let output = Command::new("ssh")
             .args(ssh_opts.split_whitespace())
+            .arg("--")
             .arg(host)
             .arg("echo $HOME")
             .output()
@@ -413,6 +414,7 @@ impl SyncEngine {
             &self.transfer_timeout.to_string(),
             "-e",
             &ssh_opts,
+            "--",
             &remote_spec,
             local_path.to_str().unwrap_or("."),
         ]);
