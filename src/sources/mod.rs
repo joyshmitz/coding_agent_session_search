@@ -107,6 +107,7 @@ pub use index::{IndexError, IndexProgress, IndexResult, IndexStage, RemoteIndexe
 
 // Re-export commonly used interactive types
 pub use interactive::{
-    CassStatusDisplay, HostDisplayInfo, HostSelectionResult, HostSelector, InteractiveError,
-    confirm_action, confirm_with_details,
+    CassStatusDisplay, HostDisplayInfo, HostSelectionResult, HostSelector, HostState,
+    InteractiveError, confirm_action, confirm_with_details, probe_to_display_info,
+    run_host_selection,
 };
