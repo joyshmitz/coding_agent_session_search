@@ -21,6 +21,8 @@ use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::path::Path;
 use std::process::Command as StdCommand;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
@@ -28,7 +30,10 @@ use syntect::parsing::SyntaxSet;
 
 use crate::default_data_dir;
 use crate::model::types::MessageRole;
-use crate::search::model_manager::{SemanticAvailability, load_semantic_context};
+use crate::search::model_download::{DownloadProgress, ModelDownloader, ModelManifest};
+use crate::search::model_manager::{
+    SemanticAvailability, default_model_dir, load_semantic_context,
+};
 use crate::search::query::{
     CacheStats, QuerySuggestion, SearchClient, SearchFilters, SearchHit, SearchMode,
 };
@@ -1087,6 +1092,34 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             ]
             .as_ref(),
         )
+        .split(popup_layout[1]);
+
+    horizontal[1]
+}
+
+/// Create a centered popup with fixed dimensions.
+/// The popup is clamped to available terminal space and centered.
+fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
+    // Clamp dimensions to available space (leave margin for visual separation)
+    let actual_width = width.min(r.width.saturating_sub(4));
+    let actual_height = height.min(r.height.saturating_sub(2));
+
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(r.height.saturating_sub(actual_height) / 2),
+            Constraint::Length(actual_height),
+            Constraint::Length(r.height.saturating_sub(actual_height) / 2),
+        ])
+        .split(r);
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(r.width.saturating_sub(actual_width) / 2),
+            Constraint::Length(actual_width),
+            Constraint::Length(r.width.saturating_sub(actual_width) / 2),
+        ])
         .split(popup_layout[1]);
 
     horizontal[1]
@@ -2592,6 +2625,9 @@ pub fn run_tui(
     let mut bulk_action_idx: usize = 0;
     // Model download consent dialog state
     let mut show_consent_dialog = false;
+    // Model download state
+    let mut download_rx: Option<mpsc::Receiver<DownloadProgress>> = None;
+    let mut download_cancel: Option<Arc<AtomicBool>> = None;
     let mut cached_detail: Option<(String, ConversationView)> = None;
     let mut detail_find: Option<DetailFindState> = None;
     let mut last_query = String::new();
@@ -4165,7 +4201,10 @@ pub fn run_tui(
 
                 // Model download consent dialog
                 if show_consent_dialog {
-                    let area = centered_rect(65, 40, f.area());
+                    // Fixed width of 62 chars to fit content comfortably:
+                    // - Longest line ~55 chars + 2 border + 4 padding
+                    // Height: 9 content lines + 2 border + 1 title = 12
+                    let area = centered_rect_fixed(62, 12, f.area());
                     let block = Block::default()
                         .title(Span::styled(
                             " Semantic Search ",
@@ -4173,6 +4212,7 @@ pub fn run_tui(
                                 .fg(palette.accent)
                                 .add_modifier(Modifier::BOLD),
                         ))
+                        .title_alignment(Alignment::Center)
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(palette.accent))
@@ -4182,11 +4222,11 @@ pub fn run_tui(
                     let content = vec![
                         Line::from(""),
                         Line::from(Span::styled(
-                            "Semantic search requires a 23MB model download from",
+                            "Semantic search requires a 23MB model download",
                             Style::default().fg(palette.fg),
                         )),
                         Line::from(Span::styled(
-                            "HuggingFace (sentence-transformers/all-MiniLM-L6-v2).",
+                            "from HuggingFace (all-MiniLM-L6-v2).",
                             Style::default().fg(palette.fg),
                         )),
                         Line::from(""),
@@ -4199,34 +4239,28 @@ pub fn run_tui(
                             Style::default().fg(palette.hint),
                         )),
                         Line::from(""),
-                        Line::from(""),
                         Line::from(vec![
                             Span::styled(
-                                "[D] ",
+                                "[D]",
                                 Style::default()
                                     .fg(palette.accent)
                                     .add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled("Download", Style::default().fg(palette.fg)),
-                            Span::raw("   "),
+                            Span::styled(" Download  ", Style::default().fg(palette.fg)),
                             Span::styled(
-                                "[H] ",
+                                "[H]",
                                 Style::default()
                                     .fg(palette.accent)
                                     .add_modifier(Modifier::BOLD),
                             ),
+                            Span::styled(" Hash mode  ", Style::default().fg(palette.fg)),
                             Span::styled(
-                                "Hash mode (approximate)",
-                                Style::default().fg(palette.fg),
-                            ),
-                            Span::raw("   "),
-                            Span::styled(
-                                "[Esc] ",
+                                "[Esc]",
                                 Style::default()
                                     .fg(palette.accent)
                                     .add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled("Cancel", Style::default().fg(palette.fg)),
+                            Span::styled(" Cancel", Style::default().fg(palette.fg)),
                         ]),
                     ];
 
@@ -4689,10 +4723,66 @@ pub fn run_tui(
                     }
                     KeyCode::Char('d' | 'D') => {
                         show_consent_dialog = false;
-                        // TODO: Start model download in background
-                        // For now, just show a status message
-                        status = "Model download not yet implemented. Use hash mode for now."
-                            .to_string();
+                        // Start model download in background
+                        let model_dir = default_model_dir(&data_dir);
+                        let manifest = ModelManifest::minilm_v2();
+                        let total_size = manifest.total_size();
+                        let total_files = manifest.files.len();
+                        let downloader = ModelDownloader::new(model_dir);
+                        let cancel_handle = downloader.cancellation_handle();
+                        download_cancel = Some(cancel_handle);
+
+                        // Create channel for progress updates
+                        let (tx, rx) = mpsc::channel();
+                        download_rx = Some(rx);
+
+                        // Clone tx for use in final completion message
+                        let tx_final = tx.clone();
+
+                        // Spawn download thread
+                        std::thread::spawn(move || {
+                            let callback: Box<dyn Fn(DownloadProgress) + Send + Sync> =
+                                Box::new(move |progress| {
+                                    let _ = tx.send(progress);
+                                });
+                            let result = downloader.download(&manifest, Some(callback));
+                            // Send a final progress to indicate completion or failure
+                            match result {
+                                Ok(_) => {
+                                    let _ = tx_final.send(DownloadProgress {
+                                        current_file: "complete".to_string(),
+                                        file_index: total_files,
+                                        total_files,
+                                        file_bytes: total_size,
+                                        file_total: total_size,
+                                        total_bytes: total_size,
+                                        grand_total: total_size,
+                                        progress_pct: 100,
+                                    });
+                                }
+                                Err(e) => {
+                                    // Send failure signal so UI can show error
+                                    let _ = tx_final.send(DownloadProgress {
+                                        current_file: format!("error:{e}"),
+                                        file_index: 0,
+                                        total_files: 0,
+                                        file_bytes: 0,
+                                        file_total: 0,
+                                        total_bytes: 0,
+                                        grand_total: total_size,
+                                        progress_pct: 0,
+                                    });
+                                }
+                            }
+                        });
+
+                        // Update state to show download in progress
+                        semantic_availability = SemanticAvailability::Downloading {
+                            progress_pct: 0,
+                            bytes_downloaded: 0,
+                            total_bytes: total_size,
+                        };
+                        status = "Downloading model... Press Esc to cancel.".to_string();
                     }
                     KeyCode::Char('h' | 'H') => {
                         show_consent_dialog = false;
@@ -4704,6 +4794,21 @@ pub fn run_tui(
                     }
                     _ => {}
                 }
+                continue;
+            }
+
+            // Model download cancellation: handle Esc when download is active
+            if download_cancel.is_some() && key.code == KeyCode::Esc {
+                // Cancel the active download
+                if let Some(ref cancel) = download_cancel {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+                download_rx = None;
+                download_cancel = None;
+                semantic_availability = SemanticAvailability::NotInstalled;
+                search_mode = SearchMode::Lexical;
+                status = "Download cancelled. Staying in lexical mode.".to_string();
+                needs_draw = true;
                 continue;
             }
 
@@ -7058,6 +7163,65 @@ pub fn run_tui(
                     needs_draw = true;
                 }
                 update_info = info;
+            }
+            // Poll for model download progress (bead 44pw)
+            if let Some(ref rx) = download_rx {
+                // Drain all pending progress messages (get the latest)
+                let mut latest_progress: Option<DownloadProgress> = None;
+                while let Ok(progress) = rx.try_recv() {
+                    latest_progress = Some(progress);
+                }
+                if let Some(progress) = latest_progress {
+                    if progress.progress_pct >= 100 && progress.current_file == "complete" {
+                        // Download completed successfully
+                        // Reload semantic context to get Ready state
+                        // Re-initialize semantic context with the search client
+                        if let Some(ref client) = search_client {
+                            semantic_availability =
+                                initialize_semantic_context(client, &data_dir, &db_path);
+                        } else {
+                            let setup = load_semantic_context(&data_dir, &db_path);
+                            semantic_availability = setup.availability;
+                        }
+                        if semantic_availability.is_ready() {
+                            search_mode = SearchMode::Semantic;
+                            status =
+                                "Model installed! Semantic search is now available.".to_string();
+                        } else {
+                            // Model downloaded but may need index building
+                            status =
+                                format!("Model downloaded. {}", semantic_availability.summary());
+                        }
+                        download_rx = None;
+                        download_cancel = None;
+                    } else if progress.current_file.starts_with("error:") {
+                        // Download failed - extract error message and reset state
+                        let err_msg = progress
+                            .current_file
+                            .strip_prefix("error:")
+                            .unwrap_or("Unknown error");
+                        semantic_availability = SemanticAvailability::LoadFailed {
+                            context: format!("Download failed: {err_msg}"),
+                        };
+                        status = format!("Download failed: {err_msg}");
+                        download_rx = None;
+                        download_cancel = None;
+                    } else {
+                        // Update progress
+                        semantic_availability = SemanticAvailability::Downloading {
+                            progress_pct: progress.progress_pct,
+                            bytes_downloaded: progress.total_bytes,
+                            total_bytes: progress.grand_total,
+                        };
+                        let mb_done = progress.total_bytes as f64 / 1_048_576.0;
+                        let mb_total = progress.grand_total as f64 / 1_048_576.0;
+                        status = format!(
+                            "Downloading: {}% ({:.1}/{:.1} MB) - Press Esc to cancel",
+                            progress.progress_pct, mb_done, mb_total
+                        );
+                    }
+                    needs_draw = true;
+                }
             }
             // Check if indexing progress changed and trigger redraw (bead 019)
             // Includes discovered_agents to trigger redraw when new agents are found

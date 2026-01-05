@@ -50,7 +50,7 @@ use std::fmt;
 use std::io::IsTerminal;
 
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect};
+use dialoguer::{Confirm, MultiSelect, theme::ColorfulTheme};
 
 use super::probe::{CassStatus, HostProbeResult};
 
