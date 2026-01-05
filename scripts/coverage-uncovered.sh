@@ -43,19 +43,46 @@ if ! command -v cargo-llvm-cov &> /dev/null; then
     exit 1
 fi
 
+# Check if jq is installed (needed for percentage calculation)
+if ! command -v jq &> /dev/null; then
+    echo "Warning: jq not installed - coverage percentage will not be displayed"
+    echo "Install with: brew install jq (macOS) or apt install jq (Linux)"
+    echo ""
+fi
+
 echo "Analyzing uncovered code..."
 echo ""
 
-# Show uncovered lines with context
-cargo llvm-cov \
-    --all-features \
-    --workspace \
-    --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-    --show-missing-lines \
-    -- \
-    --skip install_sh \
-    --skip install_ps1 \
-    2>&1
+# Common options for all coverage runs
+COMMON_OPTS=(
+    --all-features
+    --workspace
+    --ignore-filename-regex='(tests/|benches/|\.cargo/)'
+)
+
+# Test exclusions (same as CI)
+TEST_OPTS=(
+    --
+    --skip install_sh
+    --skip install_ps1
+)
+
+# Clean previous coverage data
+echo "Cleaning previous coverage data..."
+cargo llvm-cov clean --workspace
+
+# Run tests ONCE with coverage instrumentation (no report yet)
+echo ""
+echo "Running tests with coverage instrumentation..."
+cargo llvm-cov "${COMMON_OPTS[@]}" \
+    --no-report \
+    "${TEST_OPTS[@]}"
+
+# Show uncovered lines from collected data (no re-running tests)
+echo ""
+echo "Showing uncovered lines..."
+cargo llvm-cov report "${COMMON_OPTS[@]}" \
+    --show-missing-lines
 
 echo ""
 echo "========================================"
@@ -63,36 +90,32 @@ echo "  Uncovered Code Analysis Complete"
 echo "========================================"
 echo ""
 
-# Get coverage percentage
-COVERAGE_JSON=$(cargo llvm-cov \
-    --all-features \
-    --workspace \
-    --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-    --json \
-    -- \
-    --skip install_sh \
-    --skip install_ps1 \
-    2>/dev/null)
+# Get coverage percentage from JSON (no re-running tests)
+if command -v jq &> /dev/null; then
+    COVERAGE_JSON=$(cargo llvm-cov report "${COMMON_OPTS[@]}" --json 2>/dev/null)
 
-if [ -n "$COVERAGE_JSON" ]; then
-    TOTAL_LINES=$(echo "$COVERAGE_JSON" | jq -r '.data[0].totals.lines.count // 0')
-    COVERED_LINES=$(echo "$COVERAGE_JSON" | jq -r '.data[0].totals.lines.covered // 0')
+    if [ -n "$COVERAGE_JSON" ]; then
+        TOTAL_LINES=$(echo "$COVERAGE_JSON" | jq -r '.data[0].totals.lines.count // 0')
+        COVERED_LINES=$(echo "$COVERAGE_JSON" | jq -r '.data[0].totals.lines.covered // 0')
 
-    if [ "$TOTAL_LINES" -gt 0 ]; then
-        PERCENT=$(echo "scale=2; $COVERED_LINES * 100 / $TOTAL_LINES" | bc)
-        UNCOVERED=$((TOTAL_LINES - COVERED_LINES))
+        if [ -n "$TOTAL_LINES" ] && [ "$TOTAL_LINES" != "0" ] && [ "$TOTAL_LINES" != "null" ]; then
+            # Use awk for floating-point math (more portable than bc)
+            PERCENT=$(awk "BEGIN {printf \"%.2f\", $COVERED_LINES * 100 / $TOTAL_LINES}")
+            UNCOVERED=$((TOTAL_LINES - COVERED_LINES))
 
-        echo "Line coverage: ${PERCENT}%"
-        echo "Covered lines: $COVERED_LINES / $TOTAL_LINES"
-        echo "Uncovered lines: $UNCOVERED"
-        echo ""
+            echo "Line coverage: ${PERCENT}%"
+            echo "Covered lines: $COVERED_LINES / $TOTAL_LINES"
+            echo "Uncovered lines: $UNCOVERED"
+            echo ""
 
-        if [ "$FAIL_MODE" = true ]; then
-            if (( $(echo "$PERCENT < $THRESHOLD" | bc -l) )); then
-                echo "FAIL: Coverage ${PERCENT}% is below ${THRESHOLD}% threshold"
-                exit 1
-            else
-                echo "PASS: Coverage ${PERCENT}% meets ${THRESHOLD}% threshold"
+            if [ "$FAIL_MODE" = true ]; then
+                # Use awk for floating-point comparison (more portable than bc)
+                if awk "BEGIN {exit !($PERCENT < $THRESHOLD)}"; then
+                    echo "FAIL: Coverage ${PERCENT}% is below ${THRESHOLD}% threshold"
+                    exit 1
+                else
+                    echo "PASS: Coverage ${PERCENT}% meets ${THRESHOLD}% threshold"
+                fi
             fi
         fi
     fi

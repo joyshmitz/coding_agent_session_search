@@ -317,6 +317,142 @@ fn bench_wildcard_large_dataset(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================
+// Concurrent Search Benchmarks
+// ============================================================
+
+/// Benchmark concurrent searches from multiple threads
+fn bench_concurrent_search(c: &mut Criterion) {
+    use std::sync::Arc;
+    use std::thread;
+
+    // 200 conversations x 15 messages = 3000 documents
+    let (_tmp, client) = seed_index(200, 15);
+    let client = Arc::new(client);
+    let filters = coding_agent_search::search::query::SearchFilters::default();
+
+    let mut group = c.benchmark_group("concurrent_search");
+
+    // Baseline: single-threaded
+    group.bench_function("single_thread", |b| {
+        b.iter(|| {
+            let hits = client
+                .search(black_box("lorem"), filters.clone(), 20, 0)
+                .unwrap();
+            black_box(hits.len())
+        })
+    });
+
+    // 2 concurrent searches
+    group.bench_function("2_threads", |b| {
+        b.iter(|| {
+            let handles: Vec<_> = (0..2)
+                .map(|i| {
+                    let c = client.clone();
+                    let f = filters.clone();
+                    thread::spawn(move || {
+                        let query = if i % 2 == 0 { "lorem" } else { "ipsum" };
+                        c.search(query, f, 20, 0).unwrap()
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                black_box(h.join().unwrap());
+            }
+        })
+    });
+
+    // 4 concurrent searches
+    group.bench_function("4_threads", |b| {
+        b.iter(|| {
+            let queries = ["lorem", "ipsum", "dolor", "amet"];
+            let handles: Vec<_> = queries
+                .iter()
+                .map(|q| {
+                    let c = client.clone();
+                    let f = filters.clone();
+                    let query = q.to_string();
+                    thread::spawn(move || c.search(&query, f, 20, 0).unwrap())
+                })
+                .collect();
+
+            for h in handles {
+                black_box(h.join().unwrap());
+            }
+        })
+    });
+
+    // 8 concurrent searches (stress test)
+    group.bench_function("8_threads", |b| {
+        b.iter(|| {
+            let handles: Vec<_> = (0..8)
+                .map(|i| {
+                    let c = client.clone();
+                    let f = filters.clone();
+                    thread::spawn(move || {
+                        let query = format!("query{}", i % 4);
+                        c.search(&query, f, 20, 0).unwrap()
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                black_box(h.join().unwrap());
+            }
+        })
+    });
+
+    group.finish();
+}
+
+// ============================================================
+// Scaling Benchmarks
+// ============================================================
+
+/// Benchmark search latency at different index sizes
+fn bench_search_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("search_scaling");
+    group.sample_size(20); // Fewer samples for larger datasets
+
+    // Small: 50 conversations
+    let (_tmp_small, client_small) = seed_index(50, 10);
+    let filters = coding_agent_search::search::query::SearchFilters::default();
+
+    group.bench_function("50_convs", |b| {
+        b.iter(|| {
+            let hits = client_small
+                .search(black_box("lorem"), filters.clone(), 20, 0)
+                .unwrap();
+            black_box(hits.len())
+        })
+    });
+
+    // Medium: 200 conversations
+    let (_tmp_med, client_med) = seed_index(200, 10);
+    group.bench_function("200_convs", |b| {
+        b.iter(|| {
+            let hits = client_med
+                .search(black_box("lorem"), filters.clone(), 20, 0)
+                .unwrap();
+            black_box(hits.len())
+        })
+    });
+
+    // Large: 500 conversations
+    let (_tmp_large, client_large) = seed_index(500, 10);
+    group.bench_function("500_convs", |b| {
+        b.iter(|| {
+            let hits = client_large
+                .search(black_box("lorem"), filters.clone(), 20, 0)
+                .unwrap();
+            black_box(hits.len())
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     runtime_perf,
     bench_indexing,
@@ -327,5 +463,7 @@ criterion_group!(
     bench_wildcard_substring,
     bench_wildcard_suffix_common,
     bench_wildcard_large_dataset,
+    bench_concurrent_search,
+    bench_search_scaling,
 );
 criterion_main!(runtime_perf);
