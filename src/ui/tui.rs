@@ -6908,8 +6908,12 @@ pub fn run_tui(
 
         if last_tick.elapsed() >= tick_rate {
             // Tick toasts to remove expired notifications
+            // Check BEFORE tick - if we had toasts, we need to redraw to update or clear them
+            let had_toasts = !toast_manager.is_empty();
             toast_manager.tick();
-            needs_draw = !toast_manager.is_empty() || needs_draw;
+            if had_toasts {
+                needs_draw = true;
+            }
 
             if let Some(client) = &search_client {
                 let should_search = dirty_since.is_some_and(|t| t.elapsed() >= debounce);
