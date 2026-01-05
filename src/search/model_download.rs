@@ -14,8 +14,8 @@
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -285,7 +285,18 @@ pub struct ModelDownloader {
 impl ModelDownloader {
     /// Create a new model downloader.
     pub fn new(target_dir: PathBuf) -> Self {
-        let temp_dir = target_dir.with_extension("downloading");
+        // Use parent + modified filename to avoid with_extension() replacing dots in dir names
+        // e.g., "model.v2" should become "model.v2.downloading", not "model.downloading"
+        let temp_dir = if let Some(parent) = target_dir.parent() {
+            let dir_name = target_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("model");
+            parent.join(format!("{}.downloading", dir_name))
+        } else {
+            // Fallback for root paths (unlikely)
+            target_dir.with_extension("downloading")
+        };
         Self {
             target_dir,
             temp_dir,
@@ -670,12 +681,14 @@ mod tests {
         assert!(ModelState::Ready.is_ready());
         assert!(!ModelState::NotInstalled.is_ready());
         assert!(!ModelState::NeedsConsent.is_ready());
-        assert!(!ModelState::Downloading {
-            progress_pct: 0,
-            bytes_downloaded: 0,
-            total_bytes: 0
-        }
-        .is_ready());
+        assert!(
+            !ModelState::Downloading {
+                progress_pct: 0,
+                bytes_downloaded: 0,
+                total_bytes: 0
+            }
+            .is_ready()
+        );
     }
 
     #[test]

@@ -369,7 +369,9 @@ impl RemoteInstaller {
         self.check_resources()?;
 
         // Choose method
-        let method = self.choose_method().ok_or(InstallError::NoMethodAvailable)?;
+        let method = self
+            .choose_method()
+            .ok_or(InstallError::NoMethodAvailable)?;
 
         on_progress(InstallProgress {
             stage: InstallStage::Preparing,
@@ -929,7 +931,10 @@ mod tests {
         let resources = mock_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
-        assert_eq!(installer.choose_method(), Some(InstallMethod::FullBootstrap));
+        assert_eq!(
+            installer.choose_method(),
+            Some(InstallMethod::FullBootstrap)
+        );
     }
 
     #[test]

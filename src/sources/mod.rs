@@ -71,6 +71,7 @@
 pub mod config;
 pub mod index;
 pub mod install;
+pub mod interactive;
 pub mod probe;
 pub mod provenance;
 pub mod sync;
@@ -102,6 +103,10 @@ pub use install::{
 };
 
 // Re-export commonly used index types
-pub use index::{
-    IndexError, IndexProgress, IndexResult, IndexStage, RemoteIndexer,
+pub use index::{IndexError, IndexProgress, IndexResult, IndexStage, RemoteIndexer};
+
+// Re-export commonly used interactive types
+pub use interactive::{
+    CassStatusDisplay, HostDisplayInfo, HostSelectionResult, HostSelector, InteractiveError,
+    confirm_action, confirm_with_details,
 };
