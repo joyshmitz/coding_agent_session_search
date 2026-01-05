@@ -6938,6 +6938,8 @@ pub fn run_tui(
                         let reason = semantic_unavailable_message(&semantic_availability);
                         status = format!("Semantic unavailable: {reason}. Using lexical.");
                     }
+                    // Track effective search mode for ranking (bead vq8v)
+                    let mut effective_search_mode = SearchMode::Lexical;
                     let search_result = match search_mode {
                         SearchMode::Hybrid if use_semantic => {
                             match client.search_hybrid(
@@ -6948,7 +6950,10 @@ pub fn run_tui(
                                 page * page_size,
                                 SPARSE_THRESHOLD,
                             ) {
-                                Ok(result) => Ok(result),
+                                Ok(result) => {
+                                    effective_search_mode = SearchMode::Hybrid;
+                                    Ok(result)
+                                }
                                 Err(err) => {
                                     semantic_availability = SemanticAvailability::LoadFailed {
                                         context: format!("hybrid search: {err}"),
@@ -6975,12 +6980,15 @@ pub fn run_tui(
                                 page_size,
                                 page * page_size,
                             ) {
-                                Ok(hits) => Ok(crate::search::query::SearchResult {
-                                    hits,
-                                    wildcard_fallback: false,
-                                    cache_stats: CacheStats::default(),
-                                    suggestions: Vec::new(),
-                                }),
+                                Ok(hits) => {
+                                    effective_search_mode = SearchMode::Semantic;
+                                    Ok(crate::search::query::SearchResult {
+                                        hits,
+                                        wildcard_fallback: false,
+                                        cache_stats: CacheStats::default(),
+                                        suggestions: Vec::new(),
+                                    })
+                                }
                                 Err(err) => {
                                     semantic_availability = SemanticAvailability::LoadFailed {
                                         context: format!("semantic search: {err}"),
@@ -7130,36 +7138,98 @@ pub fn run_tui(
                                         }
                                     });
                                 } else {
-                                    // Alpha: recency weight factor for blended ranking
-                                    let alpha = match ranking_mode {
-                                        RankingMode::RecentHeavy => 1.0,
-                                        RankingMode::Balanced => 0.4,
-                                        RankingMode::RelevanceHeavy => 0.1,
-                                        RankingMode::MatchQualityHeavy => 0.2, // Low recency, high quality focus
-                                        RankingMode::DateNewest | RankingMode::DateOldest => {
-                                            unreachable!()
+                                    // RankingMode support for all search modes (bead vq8v)
+                                    // Recency helper (shared across all modes)
+                                    let recency = |h: &SearchHit| -> f32 {
+                                        if max_created <= 0.0 {
+                                            return 0.0;
                                         }
+                                        h.created_at.map_or(0.0, |v| v as f32 / max_created)
                                     };
-                                    // Per-hit quality factor based on match_type
-                                    //   Exact: 1.0, Prefix: 0.9, Suffix: 0.8,
-                                    //   Substring: 0.7, ImplicitWildcard: 0.6
-                                    let quality_factor =
-                                        |h: &SearchHit| -> f32 { h.match_type.quality_factor() };
-                                    results.sort_by(|a, b| {
-                                        let recency = |h: &SearchHit| -> f32 {
-                                            if max_created <= 0.0 {
-                                                return 0.0;
-                                            }
-                                            h.created_at.map_or(0.0, |v| v as f32 / max_created)
-                                        };
-                                        let score_a =
-                                            (a.score * quality_factor(a)) + alpha * recency(a);
-                                        let score_b =
-                                            (b.score * quality_factor(b)) + alpha * recency(b);
-                                        score_b
-                                            .partial_cmp(&score_a)
-                                            .unwrap_or(std::cmp::Ordering::Equal)
-                                    });
+
+                                    match effective_search_mode {
+                                        SearchMode::Lexical => {
+                                            // Lexical: BM25 score * quality_factor + alpha * recency
+                                            let alpha = match ranking_mode {
+                                                RankingMode::RecentHeavy => 1.0,
+                                                RankingMode::Balanced => 0.4,
+                                                RankingMode::RelevanceHeavy => 0.1,
+                                                RankingMode::MatchQualityHeavy => 0.2,
+                                                RankingMode::DateNewest
+                                                | RankingMode::DateOldest => unreachable!(),
+                                            };
+                                            // Per-hit quality factor based on match_type
+                                            //   Exact: 1.0, Prefix: 0.9, Suffix: 0.8,
+                                            //   Substring: 0.7, ImplicitWildcard: 0.6
+                                            let quality_factor = |h: &SearchHit| -> f32 {
+                                                h.match_type.quality_factor()
+                                            };
+                                            results.sort_by(|a, b| {
+                                                let score_a = (a.score * quality_factor(a))
+                                                    + alpha * recency(a);
+                                                let score_b = (b.score * quality_factor(b))
+                                                    + alpha * recency(b);
+                                                score_b
+                                                    .partial_cmp(&score_a)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            });
+                                        }
+                                        SearchMode::Semantic => {
+                                            // Semantic: normalize similarity [-1,1] -> [0,1]
+                                            // Then apply weighted blend (per bead vq8v spec)
+                                            let (score_weight, recency_weight) = match ranking_mode
+                                            {
+                                                RankingMode::RecentHeavy => (0.3, 0.7),
+                                                RankingMode::Balanced => (0.5, 0.5),
+                                                RankingMode::RelevanceHeavy => (0.8, 0.2),
+                                                RankingMode::MatchQualityHeavy => (0.85, 0.15),
+                                                RankingMode::DateNewest
+                                                | RankingMode::DateOldest => unreachable!(),
+                                            };
+                                            let norm_score = |h: &SearchHit| (h.score + 1.0) / 2.0;
+                                            results.sort_by(|a, b| {
+                                                let score_a = score_weight * norm_score(a)
+                                                    + recency_weight * recency(a);
+                                                let score_b = score_weight * norm_score(b)
+                                                    + recency_weight * recency(b);
+                                                score_b
+                                                    .partial_cmp(&score_a)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            });
+                                        }
+                                        SearchMode::Hybrid => {
+                                            // Hybrid: RRF scores normalized to [0,1], then weighted blend
+                                            let max_rrf = results
+                                                .iter()
+                                                .map(|h| h.score)
+                                                .fold(0.0f32, f32::max);
+                                            let (score_weight, recency_weight) = match ranking_mode
+                                            {
+                                                RankingMode::RecentHeavy => (0.3, 0.7),
+                                                RankingMode::Balanced => (0.5, 0.5),
+                                                RankingMode::RelevanceHeavy => (0.8, 0.2),
+                                                RankingMode::MatchQualityHeavy => (0.85, 0.15),
+                                                RankingMode::DateNewest
+                                                | RankingMode::DateOldest => unreachable!(),
+                                            };
+                                            let norm_score = |h: &SearchHit| {
+                                                if max_rrf > 0.0 {
+                                                    h.score / max_rrf
+                                                } else {
+                                                    0.0
+                                                }
+                                            };
+                                            results.sort_by(|a, b| {
+                                                let score_a = score_weight * norm_score(a)
+                                                    + recency_weight * recency(a);
+                                                let score_b = score_weight * norm_score(b)
+                                                    + recency_weight * recency(b);
+                                                score_b
+                                                    .partial_cmp(&score_a)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            });
+                                        }
+                                    }
                                 }
                                 panes = rebuild_panes_with_filter(
                                     &results,

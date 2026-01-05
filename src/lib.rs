@@ -8709,7 +8709,13 @@ fn run_models_command(cmd: ModelsCommand) -> CliResult<()> {
             from_file,
             yes,
             data_dir,
-        } => run_models_install(&model, mirror.as_deref(), from_file.as_deref(), yes, data_dir),
+        } => run_models_install(
+            &model,
+            mirror.as_deref(),
+            from_file.as_deref(),
+            yes,
+            data_dir,
+        ),
         ModelsCommand::Verify {
             repair,
             data_dir,
@@ -8727,7 +8733,7 @@ fn run_models_command(cmd: ModelsCommand) -> CliResult<()> {
 /// Show semantic model installation status
 fn run_models_status(json_output: bool) -> CliResult<()> {
     use crate::search::fastembed_embedder::FastEmbedder;
-    use crate::search::model_download::{check_model_installed, ModelManifest, ModelState};
+    use crate::search::model_download::{ModelManifest, ModelState, check_model_installed};
 
     let data_dir = default_data_dir();
     let model_dir = FastEmbedder::default_model_dir(&data_dir);
@@ -8782,7 +8788,10 @@ fn run_models_status(json_output: bool) -> CliResult<()> {
             "installed_size_bytes": installed_size,
             "files": file_info,
         });
-        println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).unwrap_or_default()
+        );
     } else {
         use colored::Colorize;
 
@@ -8790,7 +8799,10 @@ fn run_models_status(json_output: bool) -> CliResult<()> {
         println!("============================");
         println!();
         println!("Model:    {} ({})", manifest.id, manifest.license);
-        println!("Revision: {}", manifest.revision.get(..12).unwrap_or(&manifest.revision));
+        println!(
+            "Revision: {}",
+            manifest.revision.get(..12).unwrap_or(&manifest.revision)
+        );
         println!("Location: {}", model_dir.display());
         println!("Size:     {:.1} MB", total_size_mb);
         println!();
@@ -8800,7 +8812,9 @@ fn run_models_status(json_output: bool) -> CliResult<()> {
             ModelState::NotInstalled => "Not Installed".yellow().to_string(),
             ModelState::NeedsConsent => "Needs Consent".yellow().to_string(),
             ModelState::Downloading { progress_pct, .. } => {
-                format!("Downloading ({}%)", progress_pct).cyan().to_string()
+                format!("Downloading ({}%)", progress_pct)
+                    .cyan()
+                    .to_string()
             }
             ModelState::Verifying => "Verifying".cyan().to_string(),
             ModelState::Disabled { reason } => format!("Disabled: {}", reason).red().to_string(),
@@ -8878,7 +8892,7 @@ fn run_models_install(
     data_dir_override: Option<PathBuf>,
 ) -> CliResult<()> {
     use crate::search::fastembed_embedder::FastEmbedder;
-    use crate::search::model_download::{check_model_installed, ModelDownloader, ModelManifest};
+    use crate::search::model_download::{ModelDownloader, ModelManifest, check_model_installed};
     use colored::Colorize;
     use indicatif::{ProgressBar, ProgressStyle};
 
@@ -8887,7 +8901,10 @@ fn run_models_install(
         return Err(CliError {
             code: 20,
             kind: "model",
-            message: format!("Unknown model '{}'. Only 'all-minilm-l6-v2' is supported.", model_name),
+            message: format!(
+                "Unknown model '{}'. Only 'all-minilm-l6-v2' is supported.",
+                model_name
+            ),
             hint: Some("Use 'cass models status' to see available models".into()),
             retryable: false,
         });
@@ -9008,9 +9025,13 @@ fn run_models_install(
 }
 
 /// Verify model file integrity
-fn run_models_verify(repair: bool, data_dir_override: Option<PathBuf>, json_output: bool) -> CliResult<()> {
+fn run_models_verify(
+    repair: bool,
+    data_dir_override: Option<PathBuf>,
+    json_output: bool,
+) -> CliResult<()> {
     use crate::search::fastembed_embedder::FastEmbedder;
-    use crate::search::model_download::{compute_sha256, ModelManifest};
+    use crate::search::model_download::{ModelManifest, compute_sha256};
     use colored::Colorize;
 
     let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
@@ -9087,7 +9108,10 @@ fn run_models_verify(repair: bool, data_dir_override: Option<PathBuf>, json_outp
             if let Some(ref err) = error {
                 println!("      Error: {}", err);
             } else if !valid {
-                println!("      Expected: {}", mfile.sha256.get(..16).unwrap_or(&mfile.sha256));
+                println!(
+                    "      Expected: {}",
+                    mfile.sha256.get(..16).unwrap_or(&mfile.sha256)
+                );
                 if let Some(ref actual) = actual_hash {
                     println!("      Got:      {}", actual.get(..16).unwrap_or(actual));
                 }
@@ -9135,7 +9159,11 @@ fn run_models_verify(repair: bool, data_dir_override: Option<PathBuf>, json_outp
 }
 
 /// Remove model files
-fn run_models_remove(model_name: &str, skip_confirm: bool, data_dir_override: Option<PathBuf>) -> CliResult<()> {
+fn run_models_remove(
+    model_name: &str,
+    skip_confirm: bool,
+    data_dir_override: Option<PathBuf>,
+) -> CliResult<()> {
     use crate::search::fastembed_embedder::FastEmbedder;
     use colored::Colorize;
 
@@ -9144,7 +9172,10 @@ fn run_models_remove(model_name: &str, skip_confirm: bool, data_dir_override: Op
         return Err(CliError {
             code: 20,
             kind: "model",
-            message: format!("Unknown model '{}'. Only 'all-minilm-l6-v2' is supported.", model_name),
+            message: format!(
+                "Unknown model '{}'. Only 'all-minilm-l6-v2' is supported.",
+                model_name
+            ),
             hint: Some("Use 'cass models status' to see available models".into()),
             retryable: false,
         });
@@ -9213,7 +9244,9 @@ fn run_models_remove(model_name: &str, skip_confirm: bool, data_dir_override: Op
 /// Check for model updates
 fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>) -> CliResult<()> {
     use crate::search::fastembed_embedder::FastEmbedder;
-    use crate::search::model_download::{check_model_installed, check_version_mismatch, ModelManifest, ModelState};
+    use crate::search::model_download::{
+        ModelManifest, ModelState, check_model_installed, check_version_mismatch,
+    };
     use colored::Colorize;
 
     let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
@@ -9236,7 +9269,10 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
             );
         } else {
             println!("{} Model is not installed.", "✗".yellow());
-            println!("  Latest revision: {}", manifest.revision.get(..12).unwrap_or(&manifest.revision));
+            println!(
+                "  Latest revision: {}",
+                manifest.revision.get(..12).unwrap_or(&manifest.revision)
+            );
             println!();
             println!("To install, run:");
             println!("  cass models install");
@@ -9264,8 +9300,14 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
             );
         } else {
             println!("{} Update available!", "⚠".yellow());
-            println!("  Current: {}", current_revision.get(..12).unwrap_or(&current_revision));
-            println!("  Latest:  {}", latest_revision.get(..12).unwrap_or(&latest_revision));
+            println!(
+                "  Current: {}",
+                current_revision.get(..12).unwrap_or(&current_revision)
+            );
+            println!(
+                "  Latest:  {}",
+                latest_revision.get(..12).unwrap_or(&latest_revision)
+            );
             println!();
             println!("To update, run:");
             println!("  cass models install");
@@ -9282,7 +9324,10 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
         );
     } else {
         println!("{} Model is up to date.", "✓".green());
-        println!("  Revision: {}", manifest.revision.get(..12).unwrap_or(&manifest.revision));
+        println!(
+            "  Revision: {}",
+            manifest.revision.get(..12).unwrap_or(&manifest.revision)
+        );
     }
 
     Ok(())

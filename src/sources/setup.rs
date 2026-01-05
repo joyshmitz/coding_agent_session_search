@@ -16,8 +16,8 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
 use colored::Colorize;
@@ -29,7 +29,7 @@ use super::discover_ssh_hosts;
 use super::index::{IndexProgress, RemoteIndexer};
 use super::install::{InstallProgress, RemoteInstaller};
 use super::interactive::{confirm_action, run_host_selection};
-use super::probe::{probe_hosts_parallel, CassStatus, HostProbeResult};
+use super::probe::{CassStatus, HostProbeResult, probe_hosts_parallel};
 
 /// Options for the setup wizard.
 #[derive(Debug, Clone)]
@@ -222,10 +222,7 @@ fn print_phase_header(phase: &str) {
     println!();
     println!(
         "{}",
-        format!("┌─ {} ", phase)
-            .bold()
-            .on_bright_black()
-            .white()
+        format!("┌─ {} ", phase).bold().on_bright_black().white()
     );
 }
 
@@ -324,15 +321,9 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
 
         if !opts.json {
             if opts.hosts.is_some() {
-                print_phase_done(&format!(
-                    "Using {} specified host(s)",
-                    hosts.len()
-                ));
+                print_phase_done(&format!("Using {} specified host(s)", hosts.len()));
             } else {
-                print_phase_done(&format!(
-                    "Found {} SSH hosts in ~/.ssh/config",
-                    hosts.len()
-                ));
+                print_phase_done(&format!("Found {} SSH hosts in ~/.ssh/config", hosts.len()));
             }
         }
 
@@ -388,12 +379,16 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
         };
 
         let progress_clone = progress.clone();
-        let results = probe_hosts_parallel(&discovered_hosts, opts.timeout, move |completed, total, name| {
-            if let Some(ref pb) = progress_clone {
-                pb.set_position(completed as u64);
-                pb.set_message(format!("{}/{} - {}", completed, total, name));
-            }
-        });
+        let results = probe_hosts_parallel(
+            &discovered_hosts,
+            opts.timeout,
+            move |completed, total, name| {
+                if let Some(ref pb) = progress_clone {
+                    pb.set_position(completed as u64);
+                    pb.set_message(format!("{}/{} - {}", completed, total, name));
+                }
+            },
+        );
 
         if let Some(pb) = &progress {
             pb.finish_and_clear();
@@ -569,8 +564,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
                     for host in needs_install {
                         check_interrupted()?;
 
-                        state.current_operation =
-                            Some(format!("Installing on {}", host.host_name));
+                        state.current_operation = Some(format!("Installing on {}", host.host_name));
                         state.save()?;
 
                         // Create installer for this specific host
@@ -595,11 +589,8 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
                             }
                             continue;
                         };
-                        let installer = RemoteInstaller::new(
-                            host.host_name.clone(),
-                            system_info,
-                            resources,
-                        );
+                        let installer =
+                            RemoteInstaller::new(host.host_name.clone(), system_info, resources);
 
                         if !opts.json {
                             println!("│ Installing on {}...", host.host_name);
@@ -622,11 +613,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
                         match installer.install(progress_callback) {
                             Ok(_) => {
                                 if !opts.json {
-                                    println!(
-                                        "│ {} {} installed",
-                                        "✓".green(),
-                                        host.host_name
-                                    );
+                                    println!("│ {} {} installed", "✓".green(), host.host_name);
                                 }
                                 state.completed_installs.push(host.host_name.clone());
                                 state.save()?;
@@ -634,12 +621,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
                             }
                             Err(e) => {
                                 if !opts.json {
-                                    println!(
-                                        "│ {} {} failed: {}",
-                                        "✗".red(),
-                                        host.host_name,
-                                        e
-                                    );
+                                    println!("│ {} {} failed: {}", "✗".red(), host.host_name, e);
                                 }
                                 if opts.verbose {
                                     eprintln!("  Install error: {e}");
@@ -733,7 +715,12 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
                         }
                         Err(e) => {
                             if !opts.json {
-                                println!("│ {} Index error on {}: {}", "✗".red(), host.host_name, e);
+                                println!(
+                                    "│ {} Index error on {}: {}",
+                                    "✗".red(),
+                                    host.host_name,
+                                    e
+                                );
                             }
                         }
                     }
@@ -840,12 +827,20 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
             println!("│");
             println!("│ {} {} sources configured", "✓".green(), sources_added);
             if hosts_installed > 0 {
-                println!("│ {} cass installed on {} hosts", "✓".green(), hosts_installed);
+                println!(
+                    "│ {} cass installed on {} hosts",
+                    "✓".green(),
+                    hosts_installed
+                );
             }
             if hosts_indexed > 0 {
                 println!("│ {} {} hosts indexed", "✓".green(), hosts_indexed);
             }
-            println!("│ {} ~{} sessions now searchable", "✓".green(), total_sessions);
+            println!(
+                "│ {} ~{} sessions now searchable",
+                "✓".green(),
+                total_sessions
+            );
             println!("│");
             println!(
                 "│ Run '{}' to search across all machines",
