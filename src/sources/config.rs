@@ -686,21 +686,26 @@ impl ConfigPreview {
     pub fn display(&self) {
         println!();
         println!("{}", "Configuration Preview".bold().underline());
-        println!("  The following will be added to sources.toml:\n");
 
-        for source in &self.sources_to_add {
-            println!("  {}:", source.name.cyan());
-            println!("    {}:", "Paths".dimmed());
-            for path in &source.paths {
-                println!("      {}", path);
-            }
-            if !source.path_mappings.is_empty() {
-                println!("    {}:", "Mappings".dimmed());
-                for mapping in &source.path_mappings {
-                    println!("      {} → {}", mapping.from, mapping.to);
+        if self.sources_to_add.is_empty() {
+            println!("  {}", "No new sources to add.".dimmed());
+        } else {
+            println!("  The following will be added to sources.toml:\n");
+
+            for source in &self.sources_to_add {
+                println!("  {}:", source.name.cyan());
+                println!("    {}:", "Paths".dimmed());
+                for path in &source.paths {
+                    println!("      {}", path);
                 }
+                if !source.path_mappings.is_empty() {
+                    println!("    {}:", "Mappings".dimmed());
+                    for mapping in &source.path_mappings {
+                        println!("      {} → {}", mapping.from, mapping.to);
+                    }
+                }
+                println!();
             }
-            println!();
         }
 
         if !self.sources_skipped.is_empty() {
