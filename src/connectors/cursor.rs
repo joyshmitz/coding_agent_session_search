@@ -446,7 +446,8 @@ impl CursorConnector {
         // source_path must be unique per conversation for proper lookup in the TUI.
         // Since multiple conversations live in the same database file, we append
         // the composer_id to create a unique synthetic path for each conversation.
-        let unique_source_path = db_path.join(&composer_id);
+        let safe_id = urlencoding::encode(&composer_id);
+        let unique_source_path = db_path.join(safe_id.as_ref());
 
         Some(NormalizedConversation {
             agent_slug: "cursor".to_string(),
@@ -610,7 +611,8 @@ impl CursorConnector {
         });
 
         // source_path must be unique per conversation for proper lookup in the TUI.
-        let unique_source_path = db_path.join(&id);
+        let safe_id = urlencoding::encode(&id);
+        let unique_source_path = db_path.join(safe_id.as_ref());
 
         Some(NormalizedConversation {
             agent_slug: "cursor".to_string(),
