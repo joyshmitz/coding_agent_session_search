@@ -2590,6 +2590,8 @@ pub fn run_tui(
     // Bulk action modal state
     let mut show_bulk_modal = false;
     let mut bulk_action_idx: usize = 0;
+    // Model download consent dialog state
+    let mut show_consent_dialog = false;
     let mut cached_detail: Option<(String, ConversationView)> = None;
     let mut detail_find: Option<DetailFindState> = None;
     let mut last_query = String::new();
@@ -4161,6 +4163,82 @@ pub fn run_tui(
                     f.render_widget(list, area);
                 }
 
+                // Model download consent dialog
+                if show_consent_dialog {
+                    let area = centered_rect(65, 40, f.area());
+                    let block = Block::default()
+                        .title(Span::styled(
+                            " Semantic Search ",
+                            Style::default()
+                                .fg(palette.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(palette.accent))
+                        .style(Style::default().bg(palette.surface));
+
+                    // Build dialog content
+                    let content = vec![
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "Semantic search requires a 23MB model download from",
+                            Style::default().fg(palette.fg),
+                        )),
+                        Line::from(Span::styled(
+                            "HuggingFace (sentence-transformers/all-MiniLM-L6-v2).",
+                            Style::default().fg(palette.fg),
+                        )),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "After download, the model runs locally.",
+                            Style::default().fg(palette.fg),
+                        )),
+                        Line::from(Span::styled(
+                            "Your search data never leaves your machine.",
+                            Style::default().fg(palette.hint),
+                        )),
+                        Line::from(""),
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled(
+                                "[D] ",
+                                Style::default()
+                                    .fg(palette.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled("Download", Style::default().fg(palette.fg)),
+                            Span::raw("   "),
+                            Span::styled(
+                                "[H] ",
+                                Style::default()
+                                    .fg(palette.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                "Hash mode (approximate)",
+                                Style::default().fg(palette.fg),
+                            ),
+                            Span::raw("   "),
+                            Span::styled(
+                                "[Esc] ",
+                                Style::default()
+                                    .fg(palette.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled("Cancel", Style::default().fg(palette.fg)),
+                        ]),
+                    ];
+
+                    let paragraph = Paragraph::new(content)
+                        .block(block)
+                        .alignment(Alignment::Center)
+                        .wrap(Wrap { trim: false });
+
+                    f.render_widget(ratatui::widgets::Clear, area);
+                    f.render_widget(paragraph, area);
+                }
+
                 // Source filter popup menu (P4.4)
                 if source_filter_menu_open {
                     use crate::sources::provenance::SourceFilter;
@@ -4596,6 +4674,33 @@ pub fn run_tui(
                     KeyCode::Char(c) => {
                         palette_state.query.push(c);
                         palette_state.refilter();
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            // Model download consent dialog: handle keys when open
+            if show_consent_dialog {
+                match key.code {
+                    KeyCode::Esc => {
+                        show_consent_dialog = false;
+                        status = "Cancelled. Staying in lexical mode.".to_string();
+                    }
+                    KeyCode::Char('d' | 'D') => {
+                        show_consent_dialog = false;
+                        // TODO: Start model download in background
+                        // For now, just show a status message
+                        status = "Model download not yet implemented. Use hash mode for now."
+                            .to_string();
+                    }
+                    KeyCode::Char('h' | 'H') => {
+                        show_consent_dialog = false;
+                        // Enable hash fallback mode
+                        semantic_availability = SemanticAvailability::HashFallback;
+                        search_mode = SearchMode::Semantic;
+                        status =
+                            "Using hash-based semantic search (approximate but fast).".to_string();
                     }
                     _ => {}
                 }
@@ -5202,8 +5307,14 @@ pub fn run_tui(
                             initialize_semantic_context(client, &data_dir, &db_path);
                     }
                     if !semantic_availability.is_ready() {
-                        let reason = semantic_unavailable_message(&semantic_availability);
-                        status = format!("Semantic unavailable: {reason}. Staying in lexical.");
+                        // Check if model needs to be installed - show consent dialog
+                        if semantic_availability.is_not_installed() {
+                            show_consent_dialog = true;
+                            status = "Model not installed. Press D to download, H for hash mode, Esc to cancel.".to_string();
+                        } else {
+                            let reason = semantic_unavailable_message(&semantic_availability);
+                            status = format!("Semantic unavailable: {reason}. Staying in lexical.");
+                        }
                         search_mode = SearchMode::Lexical;
                     } else if matches!(search_mode, SearchMode::Hybrid) {
                         status = "Search mode: Hybrid (RRF fusion)".to_string();
