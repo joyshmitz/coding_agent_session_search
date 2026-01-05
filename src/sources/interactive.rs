@@ -446,7 +446,12 @@ pub fn probe_to_display_info(
 
     // Format system info string
     let system_info = probe.system_info.as_ref().map(|si| {
-        let os_info = si.distro.as_deref().unwrap_or(&si.os);
+        // Use distro if present and non-empty, otherwise fall back to OS
+        let os_info = si
+            .distro
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .unwrap_or(&si.os);
         if let Some(res) = &probe.resources {
             let disk_gb = res.disk_available_mb / 1024;
             format!("{} • {}GB free", os_info, disk_gb)
@@ -934,5 +939,34 @@ mod tests {
         };
         let display_empty = probe_to_display_info(&probe_empty, &HashSet::new());
         assert_eq!(display_empty.username, "user");
+    }
+
+    #[test]
+    fn test_probe_to_display_info_empty_distro_fallback() {
+        use super::super::probe::SystemInfo;
+
+        // When distro is Some(""), should fall back to OS name
+        let probe = HostProbeResult {
+            host_name: "test".into(),
+            reachable: true,
+            connection_time_ms: 50,
+            cass_status: CassStatus::NotFound,
+            detected_agents: vec![],
+            system_info: Some(SystemInfo {
+                os: "Linux".into(),
+                arch: "x86_64".into(),
+                distro: Some("".into()), // Empty string distro
+                has_cargo: false,
+                has_cargo_binstall: false,
+                has_curl: false,
+                has_wget: false,
+                remote_home: "/home/user".into(),
+            }),
+            resources: None,
+            error: None,
+        };
+        let display = probe_to_display_info(&probe, &HashSet::new());
+        // system_info should show "Linux" not empty string
+        assert!(display.system_info.as_ref().unwrap().contains("Linux"));
     }
 }
