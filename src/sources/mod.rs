@@ -78,7 +78,8 @@ pub mod sync;
 
 // Re-export commonly used config types
 pub use config::{
-    ConfigError, DiscoveredHost, Platform, SourceDefinition, SourcesConfig, SyncSchedule,
+    BackupInfo, ConfigError, ConfigPreview, DiscoveredHost, MergeResult, PathMapping, Platform,
+    SkipReason, SourceConfigGenerator, SourceDefinition, SourcesConfig, SyncSchedule,
     discover_ssh_hosts, get_preset_paths,
 };
 
