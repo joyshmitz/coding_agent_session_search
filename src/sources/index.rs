@@ -387,6 +387,8 @@ fi
             std::thread::sleep(poll_interval);
 
             let output = self.run_ssh_command(poll_script, Duration::from_secs(30))?;
+            // Track if we've seen Building this poll cycle (avoid multiple increments per poll)
+            let mut saw_building_this_poll = false;
 
             if output.contains("STATUS=COMPLETE") {
                 // Extract session count
@@ -454,8 +456,11 @@ fi
                     sessions_found = count;
                 }
 
-                // Look for building phase
-                if line.contains("Building") || line.contains("Indexing") {
+                // Look for building phase (only report once per poll to avoid racing progress)
+                if !saw_building_this_poll
+                    && (line.contains("Building") || line.contains("Indexing"))
+                {
+                    saw_building_this_poll = true;
                     progress_pct = (progress_pct + 5).min(85);
                     on_progress(IndexProgress {
                         stage: IndexStage::Building,
