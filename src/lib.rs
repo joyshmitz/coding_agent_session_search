@@ -9138,21 +9138,19 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
             println!("To update, run:");
             println!("  cass models install");
         }
+    } else if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "update_available": false,
+                "current_revision": manifest.revision,
+                "latest_revision": manifest.revision,
+            }))
+            .unwrap_or_default()
+        );
     } else {
-        if json_output {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "update_available": false,
-                    "current_revision": manifest.revision,
-                    "latest_revision": manifest.revision,
-                }))
-                .unwrap_or_default()
-            );
-        } else {
-            println!("{} Model is up to date.", "✓".green());
-            println!("  Revision: {}", &manifest.revision[..12]);
-        }
+        println!("{} Model is up to date.", "✓".green());
+        println!("  Revision: {}", &manifest.revision[..12]);
     }
 
     Ok(())

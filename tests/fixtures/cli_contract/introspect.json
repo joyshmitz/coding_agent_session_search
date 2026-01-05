@@ -976,6 +976,12 @@
       "description": "Manage remote sources (P5.x)",
       "arguments": [],
       "has_json_output": false
+    },
+    {
+      "name": "models",
+      "description": "Manage semantic search models",
+      "arguments": [],
+      "has_json_output": false
     }
   ],
   "response_schemas": {
