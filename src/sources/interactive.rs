@@ -26,7 +26,9 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use coding_agent_search::sources::interactive::{HostSelector, HostDisplayInfo, CassStatusDisplay};
+//! use coding_agent_search::sources::interactive::{
+//!     HostSelector, HostDisplayInfo, HostState, CassStatusDisplay
+//! };
 //!
 //! let hosts = vec![
 //!     HostDisplayInfo {
@@ -37,6 +39,8 @@
 //!         detected_agents: vec!["claude".into(), "codex".into()],
 //!         reachable: true,
 //!         error: None,
+//!         state: HostState::ReadyToSync,
+//!         system_info: Some("ubuntu 22.04 • 45GB free".into()),
 //!     },
 //!     // ... more hosts
 //! ];
