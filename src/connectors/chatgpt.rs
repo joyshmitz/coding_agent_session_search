@@ -461,7 +461,13 @@ impl Connector for ChatGptConnector {
         let looks_like_base = |path: &PathBuf| {
             path.file_name()
                 .is_some_and(|n| n.to_str().unwrap_or("").contains("openai"))
-                || path.join("conversations-").exists()
+                || path.read_dir().ok().is_some_and(|entries| {
+                    entries.flatten().any(|e| {
+                        e.file_name()
+                            .to_str()
+                            .is_some_and(|n| n.starts_with("conversations-"))
+                    })
+                })
         };
 
         let base = if ctx.use_default_detection() {
