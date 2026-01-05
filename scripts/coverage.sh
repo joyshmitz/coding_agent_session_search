@@ -34,7 +34,7 @@ for arg in "$@"; do
     esac
 done
 
-# Check if cargo-llvm-cov is installed
+# Check dependencies
 if ! command -v cargo-llvm-cov &> /dev/null; then
     echo "Error: cargo-llvm-cov not installed"
     echo ""
@@ -43,6 +43,12 @@ if ! command -v cargo-llvm-cov &> /dev/null; then
     echo "  cargo install cargo-llvm-cov"
     echo ""
     exit 1
+fi
+
+if ! command -v jq &> /dev/null; then
+    echo "Warning: jq not installed - coverage percentage will not be displayed"
+    echo "Install with: brew install jq (macOS) or apt install jq (Linux)"
+    echo ""
 fi
 
 mkdir -p "$REPORT_DIR"
@@ -68,37 +74,38 @@ TEST_OPTS=(
     --skip install_ps1
 )
 
-# Generate LCOV format for external tools
+# Run tests ONCE with coverage instrumentation (no report yet)
 echo ""
-echo "Generating LCOV report..."
+echo "Running tests with coverage instrumentation..."
 cargo llvm-cov "${COMMON_OPTS[@]}" \
-    --lcov \
-    --output-path "$REPORT_DIR/lcov.info" \
+    --no-report \
     "${TEST_OPTS[@]}"
 
-# Generate JSON summary for programmatic access
+# Generate reports from collected coverage data (no re-running tests)
 echo ""
+echo "Generating LCOV report..."
+cargo llvm-cov report "${COMMON_OPTS[@]}" \
+    --lcov \
+    --output-path "$REPORT_DIR/lcov.info"
+
 echo "Generating JSON summary..."
-cargo llvm-cov "${COMMON_OPTS[@]}" \
+cargo llvm-cov report "${COMMON_OPTS[@]}" \
     --json \
-    --output-path "$REPORT_DIR/coverage.json" \
-    "${TEST_OPTS[@]}"
+    --output-path "$REPORT_DIR/coverage.json"
 
 # Generate HTML report (unless quick mode)
 if [ "$QUICK_MODE" = false ]; then
-    echo ""
     echo "Generating HTML report..."
-    cargo llvm-cov "${COMMON_OPTS[@]}" \
+    cargo llvm-cov report "${COMMON_OPTS[@]}" \
         --html \
-        --output-dir "$REPORT_DIR/html" \
-        "${TEST_OPTS[@]}"
+        --output-dir "$REPORT_DIR/html"
 fi
 
 # Print summary to console
 echo ""
 echo "Coverage Summary"
 echo "================"
-cargo llvm-cov "${COMMON_OPTS[@]}" "${TEST_OPTS[@]}"
+cargo llvm-cov report "${COMMON_OPTS[@]}"
 
 echo ""
 echo "Reports generated:"
@@ -108,12 +115,13 @@ if [ "$QUICK_MODE" = false ]; then
     echo "  HTML: $REPORT_DIR/html/index.html"
 fi
 
-# Extract and display total coverage percentage
-if [ -f "$REPORT_DIR/coverage.json" ]; then
-    TOTAL_LINES=$(jq -r '.data[0].totals.lines.count // 0' "$REPORT_DIR/coverage.json")
-    COVERED_LINES=$(jq -r '.data[0].totals.lines.covered // 0' "$REPORT_DIR/coverage.json")
-    if [ "$TOTAL_LINES" -gt 0 ]; then
-        PERCENT=$(echo "scale=2; $COVERED_LINES * 100 / $TOTAL_LINES" | bc)
+# Extract and display total coverage percentage (requires jq)
+if [ -f "$REPORT_DIR/coverage.json" ] && command -v jq &> /dev/null; then
+    TOTAL_LINES=$(jq -r '.data[0].totals.lines.count // 0' "$REPORT_DIR/coverage.json" 2>/dev/null || echo "0")
+    COVERED_LINES=$(jq -r '.data[0].totals.lines.covered // 0' "$REPORT_DIR/coverage.json" 2>/dev/null || echo "0")
+    if [ -n "$TOTAL_LINES" ] && [ "$TOTAL_LINES" != "0" ] && [ "$TOTAL_LINES" != "null" ]; then
+        # Use awk for floating-point math (more portable than bc)
+        PERCENT=$(awk "BEGIN {printf \"%.2f\", $COVERED_LINES * 100 / $TOTAL_LINES}")
         echo ""
         echo "Total line coverage: ${PERCENT}% ($COVERED_LINES / $TOTAL_LINES lines)"
     fi
