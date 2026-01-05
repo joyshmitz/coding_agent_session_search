@@ -6113,6 +6113,12 @@ pub fn default_db_path() -> PathBuf {
 }
 
 pub fn default_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CASS_DATA_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
     directories::ProjectDirs::from("com", "coding-agent-search", "coding-agent-search")
         .map(|p| p.data_dir().to_path_buf())
         .or_else(|| dirs::home_dir().map(|h| h.join(".coding-agent-search")))
@@ -7405,6 +7411,21 @@ fn parse_source_url(url: &str, name: Option<&str>) -> Result<(String, String), C
     // Strip ssh:// prefix if present
     let host = url.strip_prefix("ssh://").unwrap_or(url);
 
+    // Basic hardening: avoid whitespace/control chars and option-injection.
+    if host.trim().is_empty()
+        || host.starts_with('-')
+        || host.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(CliError {
+            code: 10,
+            kind: "config",
+            message: "Invalid host: contains whitespace/control characters or starts with '-'"
+                .into(),
+            hint: Some("Use format: user@hostname (e.g., user@laptop.local)".into()),
+            retryable: false,
+        });
+    }
+
     // Validate URL contains @
     if !host.contains('@') {
         return Err(CliError {
@@ -7443,6 +7464,7 @@ fn test_ssh_connectivity(host: &str) -> CliResult<()> {
             "BatchMode=yes",
             "-o",
             "StrictHostKeyChecking=accept-new",
+            "--",
             host,
             "echo",
             "ok",
@@ -7542,24 +7564,17 @@ fn run_sources_remove(name: &str, purge: bool, skip_confirm: bool) -> CliResult<
     // Handle purge
     if purge {
         // Find and remove synced data directory
-        // Respect XDG_DATA_HOME first (important for testing and Linux users)
-        let data_dir = std::env::var("XDG_DATA_HOME")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(dirs::data_local_dir);
-
-        if let Some(data_dir) = data_dir {
-            let source_dir = data_dir.join("cass").join("remotes").join(name);
-            if source_dir.exists() {
-                std::fs::remove_dir_all(&source_dir).map_err(|e| CliError {
-                    code: 15,
-                    kind: "io",
-                    message: format!("Failed to delete synced data: {e}"),
-                    hint: None,
-                    retryable: false,
-                })?;
-                println!("Deleted synced data at {}", source_dir.display());
-            }
+        let data_dir = default_data_dir();
+        let source_dir = data_dir.join("remotes").join(name);
+        if source_dir.exists() {
+            std::fs::remove_dir_all(&source_dir).map_err(|e| CliError {
+                code: 15,
+                kind: "io",
+                message: format!("Failed to delete synced data: {e}"),
+                hint: None,
+                retryable: false,
+            })?;
+            println!("Deleted synced data at {}", source_dir.display());
         }
         println!("Note: Run 'cass reindex' to remove entries from the search index.");
     }
@@ -7731,6 +7746,7 @@ fn check_ssh_connectivity(host: &str) -> DiagnosticCheck {
             "BatchMode=yes",
             "-o",
             "StrictHostKeyChecking=accept-new",
+            "--",
             host,
             "true",
         ])
@@ -7778,6 +7794,7 @@ fn check_rsync_available(host: &str) -> DiagnosticCheck {
             "ConnectTimeout=5",
             "-o",
             "BatchMode=yes",
+            "--",
             host,
             "rsync",
             "--version",
@@ -7835,6 +7852,7 @@ fn check_remote_path(host: &str, path: &str) -> DiagnosticCheck {
             "ConnectTimeout=5",
             "-o",
             "BatchMode=yes",
+            "--",
             host,
             "sh",
             "-c",
@@ -7880,52 +7898,44 @@ fn check_remote_path(host: &str, path: &str) -> DiagnosticCheck {
 
 /// Check if local storage directory is writable
 fn check_local_storage(source_name: &str) -> DiagnosticCheck {
-    if let Some(data_dir) = dirs::data_local_dir() {
-        let source_dir = data_dir.join("cass").join("remotes").join(source_name);
+    let data_dir = default_data_dir();
+    let source_dir = data_dir.join("remotes").join(source_name);
 
-        // Try to create the directory if it doesn't exist
-        if !source_dir.exists() {
-            if std::fs::create_dir_all(&source_dir).is_ok() {
-                return DiagnosticCheck {
-                    name: "Local Storage".into(),
-                    status: "pass".into(),
-                    message: format!("{} is writable", source_dir.display()),
-                    remediation: None,
-                };
-            } else {
-                return DiagnosticCheck {
-                    name: "Local Storage".into(),
-                    status: "fail".into(),
-                    message: format!("Cannot create {}", source_dir.display()),
-                    remediation: Some("Check file permissions on data directory".into()),
-                };
-            }
-        }
-
-        // Directory exists, check if writable
-        let test_file = source_dir.join(".doctor_test");
-        if std::fs::write(&test_file, b"test").is_ok() {
-            let _ = std::fs::remove_file(&test_file);
-            DiagnosticCheck {
+    // Try to create the directory if it doesn't exist
+    if !source_dir.exists() {
+        if std::fs::create_dir_all(&source_dir).is_ok() {
+            return DiagnosticCheck {
                 name: "Local Storage".into(),
                 status: "pass".into(),
                 message: format!("{} is writable", source_dir.display()),
                 remediation: None,
-            }
+            };
         } else {
-            DiagnosticCheck {
+            return DiagnosticCheck {
                 name: "Local Storage".into(),
                 status: "fail".into(),
-                message: format!("{} is not writable", source_dir.display()),
+                message: format!("Cannot create {}", source_dir.display()),
                 remediation: Some("Check file permissions on data directory".into()),
-            }
+            };
+        }
+    }
+
+    // Directory exists, check if writable
+    let test_file = source_dir.join(".doctor_test");
+    if std::fs::write(&test_file, b"test").is_ok() {
+        let _ = std::fs::remove_file(&test_file);
+        DiagnosticCheck {
+            name: "Local Storage".into(),
+            status: "pass".into(),
+            message: format!("{} is writable", source_dir.display()),
+            remediation: None,
         }
     } else {
         DiagnosticCheck {
             name: "Local Storage".into(),
             status: "fail".into(),
-            message: "Could not determine local data directory".into(),
-            remediation: Some("Set XDG_DATA_HOME or HOME environment variable".into()),
+            message: format!("{} is not writable", source_dir.display()),
+            remediation: Some("Check file permissions on data directory".into()),
         }
     }
 }
@@ -7996,19 +8006,9 @@ fn run_sources_sync(
         return Ok(());
     }
 
-    // Get data directory for sync engine and status
-    // Respect XDG_DATA_HOME first (important for testing and Linux users)
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .map(|p| PathBuf::from(p).join("cass"))
-        .or_else(|| dirs::data_local_dir().map(|d| d.join("cass")))
-        .ok_or_else(|| CliError {
-            code: 9,
-            kind: "config",
-            message: "Could not determine data directory".into(),
-            hint: Some("Set XDG_DATA_HOME or HOME environment variable".into()),
-            retryable: false,
-        })?;
+    // Use the same data dir as the rest of the app (DB, Tantivy index, remotes mirror).
+    // Override with `CASS_DATA_DIR` or command-specific `--data-dir` flags elsewhere.
+    let data_dir = default_data_dir();
 
     // Create sync engine
     let engine = SyncEngine::new(&data_dir);
@@ -8178,7 +8178,7 @@ fn run_sources_sync(
 
 /// Auto-discover SSH hosts from ~/.ssh/config (P5.6)
 fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) -> CliResult<()> {
-    use crate::sources::config::{discover_ssh_hosts, get_preset_paths, SourcesConfig};
+    use crate::sources::config::{SourcesConfig, discover_ssh_hosts, get_preset_paths};
     use colored::Colorize;
 
     // Get preset paths
@@ -8203,10 +8203,7 @@ fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) ->
                 })
             );
         } else {
-            println!(
-                "{}",
-                "No SSH hosts found in ~/.ssh/config".yellow()
-            );
+            println!("{}", "No SSH hosts found in ~/.ssh/config".yellow());
         }
         return Ok(());
     }
@@ -8287,12 +8284,7 @@ fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) ->
                 String::new()
             };
 
-            println!(
-                "  {} {}{}",
-                "→".cyan(),
-                host.name.white().bold(),
-                status
-            );
+            println!("  {} {}{}", "→".cyan(), host.name.white().bold(), status);
 
             if let Some(hostname) = &host.hostname {
                 println!("      Hostname: {}", hostname.dimmed());
@@ -8315,10 +8307,7 @@ fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) ->
         }
 
         println!();
-        println!(
-            "{} To add a host as a source, use:",
-            "Next step:".yellow()
-        );
+        println!("{} To add a host as a source, use:", "Next step:".yellow());
         println!(
             "  {}",
             "cass sources add --name <host> --host <host> --paths '~/.claude/projects'".dimmed()
