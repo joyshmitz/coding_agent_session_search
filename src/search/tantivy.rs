@@ -48,7 +48,7 @@ impl MergeStatus {
 }
 
 // Bump this when schema/tokenizer changes. Used to trigger rebuilds.
-pub const SCHEMA_HASH: &str = "tantivy-schema-v6-workspace-original";
+pub const SCHEMA_HASH: &str = "tantivy-schema-v6-provenance-indexed";
 
 #[derive(Clone, Copy)]
 pub struct Fields {
@@ -263,16 +263,34 @@ impl TantivyIndex {
         conv: &NormalizedConversation,
         messages: &[crate::connectors::NormalizedMessage],
     ) -> Result<()> {
+        // Provenance fields (P3.x): default to local, but honor metadata injected by indexer.
+        let cass_origin = conv.metadata.get("cass").and_then(|c| c.get("origin"));
+        let source_id = cass_origin
+            .and_then(|o| o.get("source_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(LOCAL_SOURCE_ID);
+        let origin_kind = cass_origin
+            .and_then(|o| o.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("local");
+        let origin_host = cass_origin
+            .and_then(|o| o.get("host"))
+            .and_then(|v| v.as_str());
+
         for msg in messages {
             let mut d = doc! {
                 self.fields.agent => conv.agent_slug.clone(),
                 self.fields.source_path => conv.source_path.to_string_lossy().into_owned(),
                 self.fields.msg_idx => msg.idx as u64,
                 self.fields.content => msg.content.clone(),
-                // Provenance fields - default to local until Phase 2 adds origin to NormalizedConversation
-                self.fields.source_id => LOCAL_SOURCE_ID,
-                self.fields.origin_kind => "local",
+                self.fields.source_id => source_id,
+                self.fields.origin_kind => origin_kind,
             };
+            if let Some(host) = origin_host
+                && !host.is_empty()
+            {
+                d.add_text(self.fields.origin_host, host);
+            }
             if let Some(ws) = &conv.workspace {
                 d.add_text(self.fields.workspace, ws.to_string_lossy());
             }
@@ -297,8 +315,6 @@ impl TantivyIndex {
                 generate_edge_ngrams(&msg.content),
             );
             d.add_text(self.fields.preview, build_preview(&msg.content, 400));
-            // Note: origin_host not added here as it's empty for local sources
-            // Will be populated in Phase 2 when NormalizedConversation has origin
             self.writer.add_document(d)?;
         }
         Ok(())

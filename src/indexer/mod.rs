@@ -65,9 +65,11 @@ pub fn run_index(
     let mut storage = SqliteStorage::open(&opts.db_path)?;
     let index_path = index_dir(&opts.data_dir)?;
 
-    // Detect if we are rebuilding due to missing meta/schema mismatch
-    let schema_matches = index_path.join("schema_hash.json").exists()
-        && std::fs::read_to_string(index_path.join("schema_hash.json"))
+    // Detect if we are rebuilding due to missing meta/schema mismatch/index corruption.
+    // IMPORTANT: This must stay aligned with TantivyIndex::open_or_create() rebuild triggers.
+    let schema_hash_path = index_path.join("schema_hash.json");
+    let schema_matches = schema_hash_path.exists()
+        && std::fs::read_to_string(&schema_hash_path)
             .ok()
             .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
             .and_then(|json| {
@@ -77,20 +79,31 @@ pub fn run_index(
             })
             .as_deref()
             == Some(crate::search::tantivy::SCHEMA_HASH);
-    let needs_rebuild = opts.force_rebuild
-        || !index_path.join("meta.json").exists()
-        || (index_path.join("schema_hash.json").exists() && !schema_matches);
+
+    // Treat missing schema hash as rebuild (open_or_create will wipe/recreate).
+    let mut needs_rebuild =
+        opts.force_rebuild || !index_path.join("meta.json").exists() || !schema_matches;
+
+    // Preflight open: if Tantivy can't open, force a rebuild so we do a full scan and
+    // reindex messages into the new Tantivy index (SQLite is incremental-only by default).
+    if !needs_rebuild && let Err(e) = tantivy::Index::open_in_dir(&index_path) {
+        tracing::warn!(
+            error = %e,
+            path = %index_path.display(),
+            "tantivy open preflight failed; forcing rebuild"
+        );
+        needs_rebuild = true;
+    }
 
     if needs_rebuild && let Some(p) = &opts.progress {
         p.is_rebuilding.store(true, Ordering::Relaxed);
     }
 
-    let mut t_index = if needs_rebuild {
-        std::fs::remove_dir_all(&index_path).ok();
-        TantivyIndex::open_or_create(&index_path)?
-    } else {
-        TantivyIndex::open_or_create(&index_path)?
-    };
+    if needs_rebuild {
+        // Clean slate: avoid stale lock files and ensure a fresh Tantivy index.
+        let _ = std::fs::remove_dir_all(&index_path);
+    }
+    let mut t_index = TantivyIndex::open_or_create(&index_path)?;
 
     if opts.full {
         reset_storage(&mut storage)?;
@@ -238,7 +251,13 @@ pub fn run_index(
     }
 
     for (name, convs) in pending_batches {
-        ingest_batch(&mut storage, &mut t_index, &convs, &opts.progress)?;
+        ingest_batch(
+            &mut storage,
+            &mut t_index,
+            &convs,
+            &opts.progress,
+            needs_rebuild,
+        )?;
         tracing::info!(
             connector = name,
             conversations = convs.len(),
@@ -314,9 +333,10 @@ fn ingest_batch(
     t_index: &mut TantivyIndex,
     convs: &[NormalizedConversation],
     progress: &Option<Arc<IndexingProgress>>,
+    force_tantivy_reindex: bool,
 ) -> Result<()> {
     // Use batched insert for better SQLite performance (single transaction)
-    persist::persist_conversations_batched(storage, t_index, convs)?;
+    persist::persist_conversations_batched(storage, t_index, convs, force_tantivy_reindex)?;
 
     // Update progress counter for all conversations at once
     if let Some(p) = progress {
@@ -576,7 +596,7 @@ fn reindex_paths(
                 .lock()
                 .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
 
-            ingest_batch(&mut storage, &mut t_index, &convs, &opts.progress)?;
+            ingest_batch(&mut storage, &mut t_index, &convs, &opts.progress, false)?;
 
             // Commit to Tantivy immediately to ensure index consistency before advancing watch state.
             t_index.commit()?;
@@ -892,16 +912,19 @@ fn inject_provenance(conv: &mut NormalizedConversation, origin: &Origin) {
 
     // Add cass.origin provenance
     if let Some(obj) = conv.metadata.as_object_mut() {
-        obj.insert(
-            "cass".to_string(),
-            serde_json::json!({
-                "origin": {
+        let cass = obj
+            .entry("cass".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(cass_obj) = cass.as_object_mut() {
+            cass_obj.insert(
+                "origin".to_string(),
+                serde_json::json!({
                     "source_id": origin.source_id,
                     "kind": origin.kind.as_str(),
                     "host": origin.host
-                }
-            }),
-        );
+                }),
+            );
+        }
     }
 }
 
@@ -1104,6 +1127,7 @@ pub mod persist {
         storage: &mut SqliteStorage,
         t_index: &mut TantivyIndex,
         convs: &[NormalizedConversation],
+        force_tantivy_reindex: bool,
     ) -> Result<()> {
         if convs.is_empty() {
             return Ok(());
@@ -1141,7 +1165,10 @@ pub mod persist {
 
         // Add newly inserted messages to Tantivy index
         for (conv, outcome) in convs.iter().zip(outcomes.iter()) {
-            if !outcome.inserted_indices.is_empty() {
+            if force_tantivy_reindex {
+                // Rebuild path: the Tantivy index is known-empty, so index all messages.
+                t_index.add_messages(conv, &conv.messages)?;
+            } else if !outcome.inserted_indices.is_empty() {
                 let new_msgs: Vec<_> = conv
                     .messages
                     .iter()
