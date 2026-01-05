@@ -222,7 +222,7 @@ if command -v cass &> /dev/null; then
         STATS=$(cass stats --json 2>/dev/null)
         if [ $? -eq 0 ]; then
             # Extract total conversations from JSON
-            SESSIONS=$(echo "$STATS" | grep -o '"total_conversations":[0-9]*' | cut -d: -f2)
+            SESSIONS=$(echo "$STATS" | grep -o '"conversations":[0-9]*' | cut -d: -f2)
             echo "CASS_SESSIONS=${SESSIONS:-0}"
         fi
     else
@@ -298,6 +298,7 @@ pub fn probe_host(host: &DiscoveredHost, timeout_secs: u64) -> HostProbeResult {
     let start = Instant::now();
 
     // Build SSH command with appropriate options
+    // Use UserKnownHostsFile=/dev/null to avoid polluting known_hosts during mass probing
     let ssh_opts = format!(
         "-o BatchMode=yes -o ConnectTimeout={} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null",
         timeout_secs
@@ -306,6 +307,7 @@ pub fn probe_host(host: &DiscoveredHost, timeout_secs: u64) -> HostProbeResult {
     // Use the host alias directly (SSH config handles Port, User, IdentityFile, ProxyJump, etc.)
     let mut cmd = Command::new("ssh");
     cmd.args(ssh_opts.split_whitespace())
+        .arg("--")
         .arg(&host.name)
         .arg("bash -s")
         .stdin(Stdio::piped())

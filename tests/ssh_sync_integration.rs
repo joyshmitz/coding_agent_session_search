@@ -267,16 +267,9 @@ fn test_probe_host_real_ssh() {
 
     let server = SshTestServer::start().expect("SSH server should start");
 
-    // Create a DiscoveredHost for the test server
-    // Note: We need to use a custom SSH config or rely on the probe script
-    // handling the port via -p option
-
-    // For now, test the probe script directly via SSH
-    let _probe_script = include_str!("../src/sources/probe.rs");
-
-    // Extract just the PROBE_SCRIPT constant from the file
-    // (In a real test, we'd import this properly)
-    // For simplicity, let's just verify SSH connectivity
+    // Test basic probe-like operations via SSH
+    // Note: Full probe testing would require custom SSH config for the port.
+    // For now, verify we can execute the same commands the probe script uses.
 
     let output = server
         .ssh_exec("uname -s && uname -m && echo HOME=$HOME")
