@@ -216,16 +216,10 @@ impl SyncEngine {
             .join("mirror")
     }
 
-    /// Expand ~ in a remote path by querying the remote machine's home directory.
+    /// Get the remote home directory by SSH-ing to the host and running `echo $HOME`.
     ///
-    /// SSH to the remote host, get $HOME, and replace ~ with the actual path.
-    /// The result is cached per host for efficiency.
-    fn expand_remote_tilde(&self, host: &str, path: &str) -> Result<String, SyncError> {
-        if !path.starts_with('~') {
-            return Ok(path.to_string());
-        }
-
-        // Query remote home directory via SSH
+    /// This is called once per source sync to avoid repeated SSH calls for each path.
+    fn get_remote_home(&self, host: &str) -> Result<String, SyncError> {
         let ssh_opts = format!(
             "-o BatchMode=yes -o ConnectTimeout={} -o StrictHostKeyChecking=accept-new",
             self.connection_timeout
@@ -253,24 +247,30 @@ impl SyncEngine {
             ));
         }
 
-        // Replace ~ with the actual home directory
-        let expanded = if path == "~" {
-            remote_home
-        } else if let Some(rest) = path.strip_prefix("~/") {
-            format!("{}/{}", remote_home, rest)
-        } else {
-            // Handle ~user/path case (though we don't support it well yet)
-            path.to_string()
+        tracing::debug!(host = %host, remote_home = %remote_home, "got remote home directory");
+        Ok(remote_home)
+    }
+
+    /// Expand ~ in a remote path using the provided home directory.
+    ///
+    /// If `remote_home` is None, returns the path unchanged.
+    fn expand_tilde_with_home(path: &str, remote_home: Option<&str>) -> String {
+        if !path.starts_with('~') {
+            return path.to_string();
+        }
+
+        let Some(home) = remote_home else {
+            return path.to_string();
         };
 
-        tracing::debug!(
-            host = %host,
-            original = %path,
-            expanded = %expanded,
-            "expanded remote tilde path"
-        );
-
-        Ok(expanded)
+        if path == "~" {
+            home.to_string()
+        } else if let Some(rest) = path.strip_prefix("~/") {
+            format!("{}/{}", home, rest)
+        } else {
+            // ~user/path case - not supported, return as-is
+            path.to_string()
+        }
     }
 
     /// Detect the available sync method.
@@ -310,9 +310,24 @@ impl SyncEngine {
         let mirror_dir = self.mirror_dir(&source.name);
         std::fs::create_dir_all(&mirror_dir)?;
 
+        // Pre-fetch remote home directory if any paths use tilde (avoids multiple SSH calls)
+        let remote_home = if source.paths.iter().any(|p| p.starts_with('~')) {
+            match self.get_remote_home(host) {
+                Ok(home) => Some(home),
+                Err(e) => {
+                    tracing::warn!(host = %host, error = %e, "Failed to get remote home directory");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         for remote_path in &source.paths {
             let result = match method {
-                SyncMethod::Rsync => self.sync_path_rsync(host, remote_path, &mirror_dir),
+                SyncMethod::Rsync => {
+                    self.sync_path_rsync(host, remote_path, &mirror_dir, remote_home.as_deref())
+                }
                 SyncMethod::Sftp => self.sync_path_sftp(host, remote_path, &mirror_dir),
             };
             report.add_path_result(result);
@@ -341,27 +356,28 @@ impl SyncEngine {
     /// Sync a single path using rsync.
     ///
     /// **IMPORTANT**: Uses rsync WITHOUT --delete for safe additive syncs.
-    fn sync_path_rsync(&self, host: &str, remote_path: &str, dest_dir: &Path) -> PathSyncResult {
+    ///
+    /// The `remote_home` parameter should be pre-fetched via `get_remote_home()` to avoid
+    /// repeated SSH calls for each path.
+    fn sync_path_rsync(
+        &self,
+        host: &str,
+        remote_path: &str,
+        dest_dir: &Path,
+        remote_home: Option<&str>,
+    ) -> PathSyncResult {
         let start = Instant::now();
 
-        // Expand ~ to actual home directory on the remote machine
-        let expanded_path = if remote_path.starts_with('~') {
-            match self.expand_remote_tilde(host, remote_path) {
-                Ok(path) => path,
-                Err(e) => {
-                    return PathSyncResult {
-                        remote_path: remote_path.to_string(),
-                        local_path: dest_dir.join(path_to_safe_dirname(remote_path)),
-                        success: false,
-                        error: Some(format!("Failed to expand ~: {}", e)),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        ..Default::default()
-                    };
-                }
-            }
-        } else {
-            remote_path.to_string()
-        };
+        // Expand ~ using pre-fetched home directory (no SSH call here)
+        let expanded_path = Self::expand_tilde_with_home(remote_path, remote_home);
+
+        // If tilde expansion failed (no remote_home provided), log a warning
+        if remote_path.starts_with('~') && expanded_path == remote_path {
+            tracing::warn!(
+                remote_path = %remote_path,
+                "Could not expand tilde in path (remote home directory not available)"
+            );
+        }
 
         // Convert remote path to safe local directory name
         let safe_name = path_to_safe_dirname(&expanded_path);

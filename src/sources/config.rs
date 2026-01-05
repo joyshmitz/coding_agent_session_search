@@ -586,10 +586,11 @@ fn parse_ssh_config(content: &str) -> Vec<DiscoveredHost> {
     }
 
     // Don't forget the last host
-    if let Some(host) = current_host {
-        if !host.name.contains('*') && !host.name.contains('?') {
-            hosts.push(host);
-        }
+    if let Some(host) = current_host
+        && !host.name.contains('*')
+        && !host.name.contains('?')
+    {
+        hosts.push(host);
     }
 
     hosts

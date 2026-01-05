@@ -487,13 +487,10 @@ pub enum SourcesCommand {
     Mappings(MappingsAction),
     /// Auto-discover SSH hosts from ~/.ssh/config
     Discover {
-        /// Only show hosts without configuring (dry run)
-        #[arg(long)]
-        dry_run: bool,
-        /// Platform preset to use for discovered hosts (macos-defaults, linux-defaults)
+        /// Platform preset for default paths (macos-defaults, linux-defaults)
         #[arg(long, default_value = "linux-defaults")]
         preset: String,
-        /// Skip hosts that are already configured
+        /// Skip hosts that are already configured as sources
         #[arg(long)]
         skip_existing: bool,
         /// Output as JSON
@@ -7153,12 +7150,11 @@ fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
             run_mappings_command(action)?;
         }
         SourcesCommand::Discover {
-            dry_run,
             preset,
             skip_existing,
             json,
         } => {
-            run_sources_discover(dry_run, &preset, skip_existing, json)?;
+            run_sources_discover(&preset, skip_existing, json)?;
         }
     }
     Ok(())
@@ -8181,12 +8177,7 @@ fn run_sources_sync(
 }
 
 /// Auto-discover SSH hosts from ~/.ssh/config (P5.6)
-fn run_sources_discover(
-    dry_run: bool,
-    preset: &str,
-    skip_existing: bool,
-    json_output: bool,
-) -> CliResult<()> {
+fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) -> CliResult<()> {
     use crate::sources::config::{discover_ssh_hosts, get_preset_paths, SourcesConfig};
     use colored::Colorize;
 
@@ -8274,7 +8265,7 @@ fn run_sources_discover(
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "status": if dry_run { "dry_run" } else { "discovered" },
+                "status": "discovered",
                 "preset": preset,
                 "preset_paths": preset_paths,
                 "hosts": hosts_json,
@@ -8309,10 +8300,10 @@ fn run_sources_discover(
             if let Some(user) = &host.user {
                 println!("      User: {}", user.dimmed());
             }
-            if let Some(port) = host.port {
-                if port != 22 {
-                    println!("      Port: {}", port.to_string().dimmed());
-                }
+            if let Some(port) = host.port
+                && port != 22
+            {
+                println!("      Port: {}", port.to_string().dimmed());
             }
         }
 
@@ -8323,27 +8314,15 @@ fn run_sources_discover(
             println!("  - {}", path.dimmed());
         }
 
-        if dry_run {
-            println!();
-            println!(
-                "{}",
-                "DRY RUN - no sources.toml changes made.".cyan()
-            );
-            println!(
-                "Run {} to add these sources.",
-                "cass sources discover".white().bold()
-            );
-        } else {
-            println!();
-            println!(
-                "{} To add a specific host, use:",
-                "Tip:".yellow()
-            );
-            println!(
-                "  {}",
-                "cass sources add --name <host> --host <host> --paths '~/.claude/projects'".dimmed()
-            );
-        }
+        println!();
+        println!(
+            "{} To add a host as a source, use:",
+            "Next step:".yellow()
+        );
+        println!(
+            "  {}",
+            "cass sources add --name <host> --host <host> --paths '~/.claude/projects'".dimmed()
+        );
     }
 
     Ok(())
