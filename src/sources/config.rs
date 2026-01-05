@@ -212,6 +212,12 @@ impl SourceDefinition {
             return Err(ConfigError::Validation("SSH sources require a host".into()));
         }
 
+        if self.is_remote()
+            && let Some(host) = self.host.as_deref()
+        {
+            validate_ssh_host(host)?;
+        }
+
         Ok(())
     }
 
@@ -248,6 +254,28 @@ impl SourceDefinition {
 fn has_dot_components(path: &Path) -> bool {
     path.components()
         .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+}
+
+fn validate_ssh_host(host: &str) -> Result<(), ConfigError> {
+    let host = host.trim();
+
+    if host.is_empty() {
+        return Err(ConfigError::Validation("SSH host cannot be empty".into()));
+    }
+
+    if host.starts_with('-') {
+        return Err(ConfigError::Validation(
+            "SSH host cannot start with '-' (would be parsed as an ssh option)".into(),
+        ));
+    }
+
+    if host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(ConfigError::Validation(
+            "SSH host cannot contain whitespace or control characters".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Sync schedule for remote sources.
@@ -642,6 +670,15 @@ mod tests {
     fn test_source_validation_ssh_without_host() {
         let mut source = SourceDefinition::ssh("test", "host");
         source.host = None;
+        assert!(source.validate().is_err());
+    }
+
+    #[test]
+    fn test_source_validation_ssh_host_hardening() {
+        let source = SourceDefinition::ssh("test", "-oProxyCommand=evil");
+        assert!(source.validate().is_err());
+
+        let source = SourceDefinition::ssh("test", "user@host withspace");
         assert!(source.validate().is_err());
     }
 
