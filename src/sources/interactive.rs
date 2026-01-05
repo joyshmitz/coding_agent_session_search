@@ -50,7 +50,7 @@ use std::fmt;
 use std::io::IsTerminal;
 
 use colored::Colorize;
-use dialoguer::{Confirm, MultiSelect, theme::ColorfulTheme};
+use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect};
 
 use super::probe::{CassStatus, HostProbeResult};
 
@@ -464,13 +464,13 @@ pub fn probe_to_display_info(
     let username = probe
         .system_info
         .as_ref()
-        .map(|si| {
+        .and_then(|si| {
             // Extract username from remote_home path like "/home/ubuntu"
+            // Filter out empty results from paths like "/" or ""
             si.remote_home
                 .rsplit('/')
-                .next()
-                .unwrap_or("user")
-                .to_string()
+                .find(|s| !s.is_empty())
+                .map(String::from)
         })
         .unwrap_or_else(|| "user".to_string());
 
@@ -855,5 +855,67 @@ mod tests {
             status,
             CassStatusDisplay::InstalledNotIndexed { .. }
         ));
+    }
+
+    #[test]
+    fn test_probe_to_display_info_username_extraction() {
+        use super::super::probe::SystemInfo;
+
+        // Normal case: /home/ubuntu -> ubuntu
+        let probe = HostProbeResult {
+            host_name: "test".into(),
+            reachable: true,
+            connection_time_ms: 50,
+            cass_status: CassStatus::NotFound,
+            detected_agents: vec![],
+            system_info: Some(SystemInfo {
+                os: "Linux".into(),
+                arch: "x86_64".into(),
+                distro: None,
+                remote_home: "/home/ubuntu".into(),
+            }),
+            resources: None,
+            error: None,
+        };
+        let display = probe_to_display_info(&probe, &HashSet::new());
+        assert_eq!(display.username, "ubuntu");
+
+        // Edge case: root path "/" -> should fall back to "user"
+        let probe_root = HostProbeResult {
+            host_name: "test".into(),
+            reachable: true,
+            connection_time_ms: 50,
+            cass_status: CassStatus::NotFound,
+            detected_agents: vec![],
+            system_info: Some(SystemInfo {
+                os: "Linux".into(),
+                arch: "x86_64".into(),
+                distro: None,
+                remote_home: "/".into(),
+            }),
+            resources: None,
+            error: None,
+        };
+        let display_root = probe_to_display_info(&probe_root, &HashSet::new());
+        assert_eq!(display_root.username, "user");
+
+        // Edge case: empty path -> should fall back to "user"
+        let probe_empty = HostProbeResult {
+            host_name: "test".into(),
+            reachable: true,
+            connection_time_ms: 50,
+            cass_status: CassStatus::NotFound,
+            detected_agents: vec![],
+            system_info: Some(SystemInfo {
+                os: "Linux".into(),
+                arch: "x86_64".into(),
+                distro: None,
+                remote_home: "".into(),
+            }),
+            resources: None,
+            error: None,
+        };
+        let display_empty = probe_to_display_info(&probe_empty, &HashSet::new());
+        assert_eq!(display_empty.username, "user");
     }
 }
