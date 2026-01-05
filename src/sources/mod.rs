@@ -69,6 +69,7 @@
 //! ```
 
 pub mod config;
+pub mod probe;
 pub mod provenance;
 pub mod sync;
 
@@ -85,4 +86,10 @@ pub use provenance::{LOCAL_SOURCE_ID, Origin, Source, SourceFilter, SourceKind};
 pub use sync::{
     PathSyncResult, SourceSyncInfo, SyncEngine, SyncError, SyncMethod, SyncReport, SyncResult,
     SyncStatus,
+};
+
+// Re-export commonly used probe types
+pub use probe::{
+    CassStatus, DetectedAgent, HostProbeResult, ProbeCache, ResourceInfo, SystemInfo, probe_host,
+    probe_hosts_parallel,
 };
