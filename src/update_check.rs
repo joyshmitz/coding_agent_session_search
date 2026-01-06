@@ -479,4 +479,151 @@ mod tests {
         };
         assert!(!not_newer.should_show());
     }
+
+    // =========================================================================
+    // Upgrade Process Tests
+    // =========================================================================
+
+    #[test]
+    fn test_version_comparison_upgrade_scenarios() {
+        // Test various upgrade scenarios with semver comparison
+        let test_cases = vec![
+            ("0.1.50", "0.1.52", true, "patch upgrade"),
+            ("0.1.52", "0.2.0", true, "minor upgrade"),
+            ("0.1.52", "1.0.0", true, "major upgrade"),
+            ("0.1.52", "0.1.52", false, "same version"),
+            ("0.1.52", "0.1.51", false, "downgrade"),
+            ("0.1.52", "0.1.52-alpha", false, "prerelease is older"),
+            (
+                "0.1.52-alpha",
+                "0.1.52",
+                true,
+                "stable is newer than prerelease",
+            ),
+        ];
+
+        for (current, latest, expected_newer, scenario) in test_cases {
+            let current_ver = Version::parse(current).expect("valid current version");
+            let latest_ver = Version::parse(latest).expect("valid latest version");
+            let is_newer = latest_ver > current_ver;
+            assert_eq!(
+                is_newer, expected_newer,
+                "scenario '{}': {} -> {} should be is_newer={}",
+                scenario, current, latest, expected_newer
+            );
+        }
+    }
+
+    #[test]
+    fn test_update_state_persistence_round_trip() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let state_file = temp_dir.path().join("update_state.json");
+
+        // Create state with specific values
+        let mut state = UpdateState {
+            last_check_ts: 1234567890,
+            skipped_version: Some("0.1.50".to_string()),
+        };
+
+        // Write to temp location
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        std::fs::write(&state_file, &json).unwrap();
+
+        // Read back
+        let loaded: UpdateState =
+            serde_json::from_str(&std::fs::read_to_string(&state_file).unwrap()).unwrap();
+
+        assert_eq!(loaded.last_check_ts, 1234567890);
+        assert_eq!(loaded.skipped_version, Some("0.1.50".to_string()));
+        assert!(loaded.is_skipped("0.1.50"));
+        assert!(!loaded.is_skipped("0.1.51"));
+
+        // Modify and save again
+        state.skip_version("0.1.51");
+        state.mark_checked();
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        std::fs::write(&state_file, &json).unwrap();
+
+        let loaded: UpdateState =
+            serde_json::from_str(&std::fs::read_to_string(&state_file).unwrap()).unwrap();
+        assert!(loaded.is_skipped("0.1.51"));
+        assert!(!loaded.is_skipped("0.1.50")); // Only latest skip is stored
+    }
+
+    #[test]
+    fn test_update_info_upgrade_workflow() {
+        // Simulate the full upgrade decision workflow
+
+        // Case 1: New version available, not skipped -> should show
+        let info = UpdateInfo {
+            latest_version: "0.2.0".into(),
+            current_version: "0.1.52".into(),
+            release_url: "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.0".into(),
+            is_newer: true,
+            is_skipped: false,
+        };
+        assert!(info.should_show(), "should show upgrade banner");
+        assert!(info.is_newer, "should detect newer version");
+
+        // Case 2: User skips this version
+        let mut state = UpdateState::default();
+        state.skip_version(&info.latest_version);
+        assert!(state.is_skipped(&info.latest_version));
+
+        // Now the info should not show (simulating re-check)
+        let info_after_skip = UpdateInfo {
+            is_skipped: state.is_skipped(&info.latest_version),
+            ..info.clone()
+        };
+        assert!(
+            !info_after_skip.should_show(),
+            "should not show banner for skipped version"
+        );
+
+        // Case 3: New version beyond skipped -> should show again
+        state.clear_skip();
+        let newer_info = UpdateInfo {
+            latest_version: "0.3.0".into(),
+            current_version: "0.1.52".into(),
+            release_url: "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.3.0".into(),
+            is_newer: true,
+            is_skipped: false,
+        };
+        assert!(
+            newer_info.should_show(),
+            "should show banner for version newer than skipped"
+        );
+    }
+
+    #[test]
+    fn test_check_interval_respects_cadence() {
+        let mut state = UpdateState::default();
+
+        // Fresh state should check
+        assert!(state.should_check());
+
+        // After checking, should not check again immediately
+        state.mark_checked();
+        assert!(!state.should_check());
+
+        // After half the interval, still should not check
+        state.last_check_ts = now_unix() - (CHECK_INTERVAL_SECS as i64 / 2);
+        assert!(!state.should_check());
+
+        // After full interval, should check again
+        state.last_check_ts = now_unix() - CHECK_INTERVAL_SECS as i64 - 1;
+        assert!(state.should_check());
+    }
+
+    #[test]
+    fn test_github_repo_constant_is_valid() {
+        // Verify the repo constant is properly formatted
+        assert!(GITHUB_REPO.contains('/'));
+        let parts: Vec<&str> = GITHUB_REPO.split('/').collect();
+        assert_eq!(parts.len(), 2, "should be owner/repo format");
+        assert!(!parts[0].is_empty(), "owner should not be empty");
+        assert!(!parts[1].is_empty(), "repo should not be empty");
+        assert_eq!(parts[0], "Dicklesworthstone");
+        assert_eq!(parts[1], "coding_agent_session_search");
+    }
 }
