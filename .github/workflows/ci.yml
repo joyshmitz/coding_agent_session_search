@@ -15,14 +15,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: fmt
         run: cargo fmt -- --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: check
         run: cargo check --all-targets
-      - name: tests
-        run: cargo test -- --skip install_sh --skip install_ps1
+      - name: tests (with JUnit XML report)
+        run: |
+          cargo nextest run --profile ci \
+            -E 'not (test(install_sh) | test(install_ps1))' \
+            --no-fail-fast
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-check
+          path: target/nextest/ci/junit.xml
+          retention-days: 14
+          if-no-files-found: ignore
+      - name: Test Report Summary
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Unit Tests
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
+          fail-on-error: false
       - name: benches (run, quick)
         run: cargo bench --bench runtime_perf --bench search_perf --bench index_perf -- --sample-size=10 --warm-up-time=0.05 --measurement-time=0.2
       - name: Install UBS
@@ -33,8 +54,8 @@ jobs:
         run: |
           CHANGED=$(git diff --name-only origin/main...HEAD | tr '\n' ' ')
           if [ -n "$CHANGED" ]; then ./ubs $CHANGED; fi
-      - name: ratatui snapshot + hotkey tests
-        run: cargo test --tests -- ui_
+      # Note: ui_ tests are already run by nextest with proper serialization
+      # (configured in .config/nextest.toml with threads-required)
 
   e2e:
     runs-on: ubuntu-latest
@@ -42,16 +63,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Create trace/log directories
         run: mkdir -p test-artifacts/traces test-artifacts/logs
-      - name: e2e install scripts (file:// artifacts)
-        run: cargo test --test install_scripts -- --test-threads=1
-      - name: e2e index + tui headless smoke
-        run: cargo test --test e2e_index_tui -- --test-threads=1
-      - name: e2e filters
-        run: cargo test --test e2e_filters -- --test-threads=1
-      - name: e2e multi-connector
-        run: cargo test --test e2e_multi_connector -- --test-threads=1
+      - name: e2e tests (with JUnit XML report)
+        run: |
+          cargo nextest run --profile e2e \
+            -E 'binary(install_scripts) | binary(e2e_index_tui) | binary(e2e_filters) | binary(e2e_multi_connector)' \
+            --no-fail-fast
       - name: Collect trace files
         if: always()
         run: |
@@ -60,6 +80,8 @@ jobs:
           find . -name "*.trace" -type f 2>/dev/null | head -20 | xargs -I {} cp {} test-artifacts/traces/ 2>/dev/null || true
           # Collect test output logs
           echo "Test run completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > test-artifacts/logs/run-summary.txt
+          # Copy JUnit XML to artifacts
+          cp target/nextest/e2e/junit.xml test-artifacts/ 2>/dev/null || true
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -68,6 +90,14 @@ jobs:
           path: test-artifacts/
           retention-days: 7
           if-no-files-found: ignore
+      - name: E2E Test Report Summary
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: E2E Tests
+          path: target/nextest/e2e/junit.xml
+          reporter: java-junit
+          fail-on-error: false
 
   coverage:
     runs-on: ubuntu-latest
@@ -79,18 +109,23 @@ jobs:
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Generate coverage report
+      - name: Run tests with coverage
         run: |
+          # Run tests ONCE with coverage instrumentation (no report yet)
           cargo llvm-cov --all-features --workspace \
             --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-            --lcov --output-path lcov.info \
+            --no-report \
             -- --skip install_sh --skip install_ps1
-      - name: Generate coverage summary
+      - name: Generate coverage reports
         run: |
-          cargo llvm-cov --all-features --workspace \
+          # Generate LCOV from collected data (no re-running tests)
+          cargo llvm-cov report --all-features --workspace \
             --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-            --text \
-            -- --skip install_sh --skip install_ps1 > coverage-summary.txt
+            --lcov --output-path lcov.info
+          # Generate text summary from collected data
+          cargo llvm-cov report --all-features --workspace \
+            --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
+            --text > coverage-summary.txt
           echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           tail -20 coverage-summary.txt >> $GITHUB_STEP_SUMMARY

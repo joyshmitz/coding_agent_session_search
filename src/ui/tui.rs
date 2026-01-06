@@ -21,6 +21,8 @@ use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::path::Path;
 use std::process::Command as StdCommand;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
@@ -28,7 +30,10 @@ use syntect::parsing::SyntaxSet;
 
 use crate::default_data_dir;
 use crate::model::types::MessageRole;
-use crate::search::model_manager::{SemanticAvailability, load_semantic_context};
+use crate::search::model_download::{DownloadProgress, ModelDownloader, ModelManifest};
+use crate::search::model_manager::{
+    SemanticAvailability, default_model_dir, load_semantic_context,
+};
 use crate::search::query::{
     CacheStats, QuerySuggestion, SearchClient, SearchFilters, SearchHit, SearchMode,
 };
@@ -37,6 +42,7 @@ use crate::ui::components::help_strip;
 use crate::ui::components::palette::{self, PaletteAction, PaletteState};
 use crate::ui::components::pills::{self, Pill};
 use crate::ui::components::theme::ThemePalette;
+use crate::ui::components::toast::{Toast, ToastManager, render_toasts};
 use crate::ui::components::widgets::search_bar;
 use crate::ui::data::{ConversationView, InputMode, load_conversation, role_style};
 use crate::ui::shortcuts;
@@ -885,7 +891,7 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
             "  tui_state.json - UI preferences | watch_state.json - Watch timestamps".to_string(),
             "  remotes/ - Synced session data from remote sources".to_string(),
             "Config: ~/.config/cass/sources.toml (remote sources)".to_string(),
-            "Agents: Claude, Codex, Gemini, Cline, OpenCode, Amp, Cursor, ChatGPT, Aider, Pi-Agent"
+            "Agents: Claude, Codex, Gemini, Cline, OpenCode, Amp, Cursor, ChatGPT, Aider, Pi-Agent, Factory"
                 .to_string(),
         ],
     ));
@@ -932,7 +938,9 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
             "F11 cycle source filter: all → local → remote → all".to_string(),
             "Shift+F11 opens source filter menu (select specific sources)".to_string(),
             "Remote sessions show [source-name] in results list".to_string(),
+            "Setup: cass sources setup (interactive wizard with SSH discovery)".to_string(),
             "CLI: cass sources add|list|doctor|sync|mappings".to_string(),
+            "Sync: rsync over SSH (delta transfers, additive-only for safety)".to_string(),
             "Config: ~/.config/cass/sources.toml".to_string(),
         ],
     ));
@@ -1087,6 +1095,34 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             ]
             .as_ref(),
         )
+        .split(popup_layout[1]);
+
+    horizontal[1]
+}
+
+/// Create a centered popup with fixed dimensions.
+/// The popup is clamped to available terminal space and centered.
+fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
+    // Clamp dimensions to available space (leave margin for visual separation)
+    let actual_width = width.min(r.width.saturating_sub(4));
+    let actual_height = height.min(r.height.saturating_sub(2));
+
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(r.height.saturating_sub(actual_height) / 2),
+            Constraint::Length(actual_height),
+            Constraint::Length(r.height.saturating_sub(actual_height) / 2),
+        ])
+        .split(r);
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(r.width.saturating_sub(actual_width) / 2),
+            Constraint::Length(actual_width),
+            Constraint::Length(r.width.saturating_sub(actual_width) / 2),
+        ])
         .split(popup_layout[1]);
 
     horizontal[1]
@@ -1894,11 +1930,27 @@ fn search_mode_label(mode: SearchMode) -> &'static str {
     }
 }
 
-fn search_mode_token(mode: SearchMode) -> &'static str {
+/// Get the mode indicator with appropriate styling based on mode and semantic availability.
+/// Returns (mode_token, color) where color is appropriate for the mode:
+/// - LEX: default (white)
+/// - SEM: cyan (ML semantic)
+/// - SEM*: cyan (hash fallback semantic)
+/// - HYB: magenta (hybrid mode)
+fn styled_mode_indicator(
+    mode: SearchMode,
+    semantic_availability: &SemanticAvailability,
+) -> (&'static str, Color) {
     match mode {
-        SearchMode::Lexical => "LEX",
-        SearchMode::Semantic => "SEM",
-        SearchMode::Hybrid => "HYB",
+        SearchMode::Lexical => ("LEX", Color::White),
+        SearchMode::Semantic => {
+            // Distinguish ML semantic (SEM) from hash fallback (SEM*)
+            if matches!(semantic_availability, SemanticAvailability::HashFallback) {
+                ("SEM*", Color::Cyan)
+            } else {
+                ("SEM", Color::Cyan)
+            }
+        }
+        SearchMode::Hybrid => ("HYB", Color::Magenta),
     }
 }
 
@@ -1929,23 +1981,8 @@ fn initialize_semantic_context(
 }
 
 fn semantic_unavailable_message(availability: &SemanticAvailability) -> String {
-    match availability {
-        SemanticAvailability::ModelMissing { missing_files, .. } => {
-            if missing_files.is_empty() {
-                "model files missing".to_string()
-            } else {
-                format!("missing {}", missing_files.join(", "))
-            }
-        }
-        SemanticAvailability::IndexMissing { index_path } => {
-            format!("index missing at {}", index_path.display())
-        }
-        SemanticAvailability::DatabaseUnavailable { error, .. } => {
-            format!("db unavailable ({error})")
-        }
-        SemanticAvailability::LoadFailed { context } => context.clone(),
-        SemanticAvailability::Ready { .. } => "ready".to_string(),
-    }
+    // Use the built-in summary method which handles all variants
+    availability.summary()
 }
 
 use crate::ui::components::breadcrumbs::{self, BreadcrumbKind};
@@ -2151,7 +2188,11 @@ fn load_state(path: &std::path::Path) -> TuiStatePersisted {
 
 fn save_state(path: &std::path::Path, state: &TuiStatePersisted) {
     if let Ok(body) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(path, body);
+        // Use atomic write: temp file + rename to prevent corruption on crash
+        let temp_path = path.with_extension("json.tmp");
+        if std::fs::write(&temp_path, &body).is_ok() {
+            let _ = std::fs::rename(&temp_path, path);
+        }
     }
 }
 
@@ -2456,7 +2497,7 @@ pub fn run_tui(
     }
 
     if once
-        && std::env::var("TUI_HEADLESS")
+        && dotenvy::var("TUI_HEADLESS")
             .map(|v| v == "1")
             .unwrap_or(false)
     {
@@ -2483,7 +2524,7 @@ pub fn run_tui(
 
     // UI metrics flag (bead 020) - emit privacy-safe local metrics when enabled
     // Set CASS_UI_METRICS=1 to enable tracing of UI interactions
-    let ui_metrics_enabled = std::env::var("CASS_UI_METRICS")
+    let ui_metrics_enabled = dotenvy::var("CASS_UI_METRICS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
@@ -2497,6 +2538,8 @@ pub fn run_tui(
             "Index ready at {} - type to search (Esc/F10 quit, F1 help)",
             index_path.display()
         )
+    } else if progress.is_some() {
+        "Index not ready yet. Background indexing is running...".to_string()
     } else {
         format!(
             "Index not present at {}. Run `cass index --full` then reopen TUI.",
@@ -2527,7 +2570,7 @@ pub fn run_tui(
 
     // UI metrics: log session start (bead 020)
     if ui_metrics_enabled {
-        let animations_enabled = !std::env::var("CASS_DISABLE_ANIMATIONS")
+        let animations_enabled = !dotenvy::var("CASS_DISABLE_ANIMATIONS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         tracing::info!(
@@ -2550,7 +2593,7 @@ pub fn run_tui(
     let mut results: Vec<SearchHit> = Vec::new();
     let mut wildcard_fallback: bool = false; // True when search used implicit wildcards
     let mut suggestions: Vec<QuerySuggestion> = Vec::new(); // Did-you-mean suggestions for zero hits
-    let cache_debug = std::env::var("CASS_DEBUG_CACHE_METRICS")
+    let cache_debug = dotenvy::var("CASS_DEBUG_CACHE_METRICS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let mut cache_stats: Option<CacheStats> = None;
@@ -2578,7 +2621,7 @@ pub fn run_tui(
 
     // Staggered reveal animation state (bead 013)
     // Env flag to disable animations for performance-sensitive terminals
-    let animations_enabled = !std::env::var("CASS_DISABLE_ANIMATIONS")
+    let animations_enabled = !dotenvy::var("CASS_DISABLE_ANIMATIONS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     // When new results arrive, we start a staggered reveal animation
@@ -2605,6 +2648,15 @@ pub fn run_tui(
     // Bulk action modal state
     let mut show_bulk_modal = false;
     let mut bulk_action_idx: usize = 0;
+    // Model download consent dialog state
+    let mut show_consent_dialog = false;
+    // Model download state
+    let mut download_rx: Option<mpsc::Receiver<DownloadProgress>> = None;
+    let mut download_cancel: Option<Arc<AtomicBool>> = None;
+    // Toast notification manager for semantic state changes
+    let mut toast_manager = ToastManager::new()
+        .with_max_visible(2)
+        .with_position(crate::ui::components::toast::ToastPosition::TopRight);
     let mut cached_detail: Option<(String, ConversationView)> = None;
     let mut detail_find: Option<DetailFindState> = None;
     let mut last_query = String::new();
@@ -2679,9 +2731,9 @@ pub fn run_tui(
     let mut peek_window_saved: Option<ContextWindow> = None;
     let mut peek_badge_until: Option<Instant> = None;
     let mut help_scroll: u16 = 0;
-    let editor_cmd = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+    let editor_cmd = dotenvy::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let (editor_bin, editor_args) = split_editor_command(&editor_cmd);
-    let editor_line_flag = std::env::var("EDITOR_LINE_FLAG").unwrap_or_else(|_| "+".into());
+    let editor_line_flag = dotenvy::var("EDITOR_LINE_FLAG").unwrap_or_else(|_| "+".into());
     let mut time_preset_idx: usize = 0;
 
     // Mouse support: track layout regions for click/scroll handling
@@ -2713,6 +2765,8 @@ pub fn run_tui(
     // Track last indexing state to detect changes and trigger redraw
     // Tuple: (phase, current, total, is_rebuild, discovered_agents)
     let mut last_indexing_state: Option<(usize, usize, usize, bool, usize)> = None;
+    let mut last_index_error: Option<String> = None;
+    let mut last_index_redraw = Instant::now();
 
     // Helper to get indexing phase info (returns phase, current, total, is_rebuild, pct, discovered_agents)
     let get_indexing_state = |progress: &std::sync::Arc<crate::indexer::IndexingProgress>| -> (usize, usize, usize, bool, usize, usize) {
@@ -2789,7 +2843,11 @@ pub fn run_tui(
             DensityMode::Compact => {
                 // Compact: minimal - just icon + percentage or agent count
                 if phase == 1 {
-                    format!(" | {icon} {discovered} agents")
+                    if total > 0 {
+                        format!(" | {icon} {current}/{total} · {discovered} agents")
+                    } else {
+                        format!(" | {icon} {discovered} agents")
+                    }
                 } else if is_rebuild {
                     format!(" | {icon} {pct}% ⚠")
                 } else {
@@ -2806,7 +2864,13 @@ pub fn run_tui(
                 let tput_spark = render_throughput_sparkline(tput_history);
 
                 let mut s = if phase == 1 {
-                    format!(" | {icon} {phase_str} ({discovered} agents)")
+                    if total > 0 {
+                        format!(
+                            " | {icon} {phase_str} {current}/{total} {bar} ({discovered} agents)"
+                        )
+                    } else {
+                        format!(" | {icon} {phase_str} ({discovered} agents)")
+                    }
                 } else {
                     format!(" | {icon} {current}/{total} ({pct}%) {bar}")
                 };
@@ -2833,7 +2897,13 @@ pub fn run_tui(
                 let current_tput = tput_history.back().copied().unwrap_or(0);
 
                 let mut s = if phase == 1 {
-                    format!(" | {icon} {phase_str} ({discovered} agents found)")
+                    if total > 0 {
+                        format!(
+                            " | {icon} {phase_str} {current}/{total} {bar} ({discovered} agents)"
+                        )
+                    } else {
+                        format!(" | {icon} {phase_str} ({discovered} agents found)")
+                    }
                 } else {
                     let tput_str = if current_tput > 0 {
                         format!(" ~{current_tput}/s")
@@ -3076,6 +3146,18 @@ pub fn run_tui(
 
                             if phase == 1 {
                                 // Discovery phase - show agents found count
+                                if total > 0 {
+                                    lines.push(Line::from(Span::styled(
+                                        format!("  Scanned {current}/{total} connectors"),
+                                        Style::default().fg(palette.hint),
+                                    )));
+                                } else {
+                                    lines.push(Line::from(Span::styled(
+                                        "  Scanning connectors...",
+                                        Style::default().fg(palette.hint),
+                                    )));
+                                }
+                                lines.push(Line::from(""));
                                 lines.push(Line::from(Span::styled(
                                     format!("  Found {discovered} coding agent(s) so far..."),
                                     Style::default().fg(palette.hint),
@@ -3113,6 +3195,30 @@ pub fn run_tui(
                                 Style::default().fg(palette.hint),
                             )));
                         }
+                        lines.push(Line::from(""));
+                    }
+
+                    if indexing_active.is_none_or(|(phase, _, _, _, _, _)| phase == 0)
+                        && let Some(err) = last_index_error.as_ref()
+                    {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(vec![
+                            Span::styled("  ⚠ ", Style::default().fg(palette.system)),
+                            Span::styled(
+                                "Indexer error",
+                                Style::default()
+                                    .fg(palette.system)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                        lines.push(Line::from(Span::styled(
+                            format!("  {err}"),
+                            Style::default().fg(palette.hint),
+                        )));
+                        lines.push(Line::from(Span::styled(
+                            "  See cass.log for details, or run `cass index --full`.",
+                            Style::default().fg(palette.hint),
+                        )));
                         lines.push(Line::from(""));
                     }
 
@@ -3913,7 +4019,13 @@ pub fn run_tui(
                     }
                 }
 
-                footer_parts.push(format!("mode:{}", search_mode_token(search_mode)));
+                // Mode indicator is handled separately for styled rendering
+                // Add download progress if downloading
+                if let SemanticAvailability::Downloading { progress_pct, .. } =
+                    &semantic_availability
+                {
+                    footer_parts.push(format!("⬇️ {}%", progress_pct));
+                }
                 if matches!(match_mode, MatchMode::Standard) {
                     footer_parts.push("match:standard".to_string());
                 }
@@ -4008,7 +4120,29 @@ pub fn run_tui(
                 let query_bar = Paragraph::new(query_display).alignment(Alignment::Center);
                 f.render_widget(query_bar, footer_split[0]);
 
-                let footer_line = footer_parts.join(" | ");
+                // Build styled footer line with colored mode indicator
+                let mut footer_spans: Vec<Span> = Vec::new();
+
+                // Add regular footer parts
+                for (i, part) in footer_parts.iter().enumerate() {
+                    if i > 0 {
+                        footer_spans.push(Span::styled(" | ", Style::default().fg(palette.hint)));
+                    }
+                    footer_spans.push(Span::raw(part.clone()));
+                }
+
+                // Add styled mode indicator
+                let (mode_token, mode_color) =
+                    styled_mode_indicator(search_mode, &semantic_availability);
+                if !footer_spans.is_empty() {
+                    footer_spans.push(Span::styled(" | ", Style::default().fg(palette.hint)));
+                }
+                footer_spans.push(Span::styled(
+                    format!("mode:{}", mode_token),
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ));
+
+                let footer_line = Line::from(footer_spans);
                 let footer = Paragraph::new(footer_line);
                 f.render_widget(footer, footer_split[1]);
 
@@ -4176,6 +4310,80 @@ pub fn run_tui(
                     f.render_widget(list, area);
                 }
 
+                // Model download consent dialog
+                if show_consent_dialog {
+                    // Fixed width of 62 chars to fit content comfortably:
+                    // - Longest line ~55 chars + 2 border + 4 padding
+                    // Height: 9 content lines + 2 border + 1 title = 12
+                    let area = centered_rect_fixed(62, 12, f.area());
+                    let block = Block::default()
+                        .title(Span::styled(
+                            " Semantic Search ",
+                            Style::default()
+                                .fg(palette.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .title_alignment(Alignment::Center)
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(palette.accent))
+                        .style(Style::default().bg(palette.surface));
+
+                    // Build dialog content
+                    let content = vec![
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "Semantic search requires a 23MB model download",
+                            Style::default().fg(palette.fg),
+                        )),
+                        Line::from(Span::styled(
+                            "from HuggingFace (all-MiniLM-L6-v2).",
+                            Style::default().fg(palette.fg),
+                        )),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "After download, the model runs locally.",
+                            Style::default().fg(palette.fg),
+                        )),
+                        Line::from(Span::styled(
+                            "Your search data never leaves your machine.",
+                            Style::default().fg(palette.hint),
+                        )),
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled(
+                                "[D]",
+                                Style::default()
+                                    .fg(palette.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" Download  ", Style::default().fg(palette.fg)),
+                            Span::styled(
+                                "[H]",
+                                Style::default()
+                                    .fg(palette.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" Hash mode  ", Style::default().fg(palette.fg)),
+                            Span::styled(
+                                "[Esc]",
+                                Style::default()
+                                    .fg(palette.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" Cancel", Style::default().fg(palette.fg)),
+                        ]),
+                    ];
+
+                    let paragraph = Paragraph::new(content)
+                        .block(block)
+                        .alignment(Alignment::Center)
+                        .wrap(Wrap { trim: false });
+
+                    f.render_widget(ratatui::widgets::Clear, area);
+                    f.render_widget(paragraph, area);
+                }
+
                 // Source filter popup menu (P4.4)
                 if source_filter_menu_open {
                     use crate::sources::provenance::SourceFilter;
@@ -4256,6 +4464,9 @@ pub fn run_tui(
                     let area = centered_rect(70, 60, f.area());
                     palette::draw_palette(f, area, &palette_state, palette);
                 }
+
+                // Render toast notifications (bead 2yg2)
+                render_toasts(f, &toast_manager, &palette);
             })?;
             needs_draw = false;
         }
@@ -4617,6 +4828,110 @@ pub fn run_tui(
                 continue;
             }
 
+            // Model download consent dialog: handle keys when open
+            if show_consent_dialog {
+                match key.code {
+                    KeyCode::Esc => {
+                        show_consent_dialog = false;
+                        status = "Cancelled. Staying in lexical mode.".to_string();
+                    }
+                    KeyCode::Char('d' | 'D') => {
+                        show_consent_dialog = false;
+                        // Start model download in background
+                        let model_dir = default_model_dir(&data_dir);
+                        let manifest = ModelManifest::minilm_v2();
+                        let total_size = manifest.total_size();
+                        let total_files = manifest.files.len();
+                        let downloader = ModelDownloader::new(model_dir);
+                        let cancel_handle = downloader.cancellation_handle();
+                        download_cancel = Some(cancel_handle);
+
+                        // Create channel for progress updates
+                        let (tx, rx) = mpsc::channel();
+                        download_rx = Some(rx);
+
+                        // Clone tx for use in final completion message
+                        let tx_final = tx.clone();
+
+                        // Spawn download thread
+                        std::thread::spawn(move || {
+                            let callback: Box<dyn Fn(DownloadProgress) + Send + Sync> =
+                                Box::new(move |progress| {
+                                    let _ = tx.send(progress);
+                                });
+                            let result = downloader.download(&manifest, Some(callback));
+                            // Send a final progress to indicate completion or failure
+                            match result {
+                                Ok(_) => {
+                                    let _ = tx_final.send(DownloadProgress {
+                                        current_file: "complete".to_string(),
+                                        file_index: total_files,
+                                        total_files,
+                                        file_bytes: total_size,
+                                        file_total: total_size,
+                                        total_bytes: total_size,
+                                        grand_total: total_size,
+                                        progress_pct: 100,
+                                    });
+                                }
+                                Err(e) => {
+                                    // Send failure signal so UI can show error
+                                    let _ = tx_final.send(DownloadProgress {
+                                        current_file: format!("error:{e}"),
+                                        file_index: 0,
+                                        total_files: 0,
+                                        file_bytes: 0,
+                                        file_total: 0,
+                                        total_bytes: 0,
+                                        grand_total: total_size,
+                                        progress_pct: 0,
+                                    });
+                                }
+                            }
+                        });
+
+                        // Update state to show download in progress
+                        semantic_availability = SemanticAvailability::Downloading {
+                            progress_pct: 0,
+                            bytes_downloaded: 0,
+                            total_bytes: total_size,
+                        };
+                        status = "Downloading model... Press Esc to cancel.".to_string();
+                        // Toast: download started
+                        toast_manager.push(Toast::info("Downloading model..."));
+                    }
+                    KeyCode::Char('h' | 'H') => {
+                        show_consent_dialog = false;
+                        // Enable hash fallback mode
+                        semantic_availability = SemanticAvailability::HashFallback;
+                        search_mode = SearchMode::Semantic;
+                        status =
+                            "Using hash-based semantic search (approximate but fast).".to_string();
+                        // Toast: using hash fallback
+                        toast_manager.push(Toast::info("Using hash fallback"));
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            // Model download cancellation: handle Esc when download is active
+            if download_cancel.is_some() && key.code == KeyCode::Esc {
+                // Cancel the active download
+                if let Some(ref cancel) = download_cancel {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+                download_rx = None;
+                download_cancel = None;
+                semantic_availability = SemanticAvailability::NotInstalled;
+                search_mode = SearchMode::Lexical;
+                status = "Download cancelled. Staying in lexical mode.".to_string();
+                // Toast: download cancelled
+                toast_manager.push(Toast::warning("Download cancelled"));
+                needs_draw = true;
+                continue;
+            }
+
             // Bulk action modal: handle keys when open
             if show_bulk_modal {
                 const BULK_ACTIONS: [&str; 4] = [
@@ -4648,8 +4963,8 @@ pub fn run_tui(
                         match bulk_action_idx {
                             0 => {
                                 // Open all in editor
-                                let editor = std::env::var("EDITOR")
-                                    .or_else(|_| std::env::var("VISUAL"))
+                                let editor = dotenvy::var("EDITOR")
+                                    .or_else(|_| dotenvy::var("VISUAL"))
                                     .unwrap_or_else(|_| "code".to_string());
                                 let (editor_bin, editor_args) = split_editor_command(&editor);
                                 // Exit raw mode
@@ -5022,8 +5337,8 @@ pub fn run_tui(
                         {
                             let path = &hit.source_path;
                             // Determine editor: $EDITOR, $VISUAL, or fallback chain
-                            let editor = std::env::var("EDITOR")
-                                .or_else(|_| std::env::var("VISUAL"))
+                            let editor = dotenvy::var("EDITOR")
+                                .or_else(|_| dotenvy::var("VISUAL"))
                                 .unwrap_or_else(|_| {
                                     // Try common editors in order of preference
                                     for candidate in ["code", "vim", "nano", "vi"] {
@@ -5217,8 +5532,14 @@ pub fn run_tui(
                             initialize_semantic_context(client, &data_dir, &db_path);
                     }
                     if !semantic_availability.is_ready() {
-                        let reason = semantic_unavailable_message(&semantic_availability);
-                        status = format!("Semantic unavailable: {reason}. Staying in lexical.");
+                        // Check if model needs to be installed - show consent dialog
+                        if semantic_availability.is_not_installed() {
+                            show_consent_dialog = true;
+                            status = "Model not installed. Press D to download, H for hash mode, Esc to cancel.".to_string();
+                        } else {
+                            let reason = semantic_unavailable_message(&semantic_availability);
+                            status = format!("Semantic unavailable: {reason}. Staying in lexical.");
+                        }
                         search_mode = SearchMode::Lexical;
                     } else if matches!(search_mode, SearchMode::Hybrid) {
                         status = "Search mode: Hybrid (RRF fusion)".to_string();
@@ -5588,8 +5909,8 @@ pub fn run_tui(
                                         panes.get(*pane_idx).and_then(|p| p.hits.get(*hit_idx))
                                     })
                                     .collect();
-                                let editor = std::env::var("EDITOR")
-                                    .or_else(|_| std::env::var("VISUAL"))
+                                let editor = dotenvy::var("EDITOR")
+                                    .or_else(|_| dotenvy::var("VISUAL"))
                                     .unwrap_or_else(|_| "code".to_string());
                                 let (editor_bin, editor_args) = split_editor_command(&editor);
                                 // Exit raw mode
@@ -6648,6 +6969,14 @@ pub fn run_tui(
         }
 
         if last_tick.elapsed() >= tick_rate {
+            // Tick toasts to remove expired notifications
+            // Check BEFORE tick - if we had toasts, we need to redraw to update or clear them
+            let had_toasts = !toast_manager.is_empty();
+            toast_manager.tick();
+            if had_toasts {
+                needs_draw = true;
+            }
+
             if let Some(client) = &search_client {
                 let should_search = dirty_since.is_some_and(|t| t.elapsed() >= debounce);
 
@@ -6671,6 +7000,8 @@ pub fn run_tui(
                         let reason = semantic_unavailable_message(&semantic_availability);
                         status = format!("Semantic unavailable: {reason}. Using lexical.");
                     }
+                    // Track effective search mode for ranking (bead vq8v)
+                    let mut effective_search_mode = SearchMode::Lexical;
                     let search_result = match search_mode {
                         SearchMode::Hybrid if use_semantic => {
                             match client.search_hybrid(
@@ -6681,12 +7012,19 @@ pub fn run_tui(
                                 page * page_size,
                                 SPARSE_THRESHOLD,
                             ) {
-                                Ok(result) => Ok(result),
+                                Ok(result) => {
+                                    effective_search_mode = SearchMode::Hybrid;
+                                    Ok(result)
+                                }
                                 Err(err) => {
                                     semantic_availability = SemanticAvailability::LoadFailed {
                                         context: format!("hybrid search: {err}"),
                                     };
                                     status = format!("Hybrid search failed: {err}. Using lexical.");
+                                    // Toast: hybrid search failed
+                                    toast_manager.push(Toast::warning(
+                                        "Hybrid search failed, using lexical",
+                                    ));
                                     client.search_with_fallback(
                                         &lexical_query,
                                         filters.clone(),
@@ -6704,18 +7042,25 @@ pub fn run_tui(
                                 page_size,
                                 page * page_size,
                             ) {
-                                Ok(hits) => Ok(crate::search::query::SearchResult {
-                                    hits,
-                                    wildcard_fallback: false,
-                                    cache_stats: CacheStats::default(),
-                                    suggestions: Vec::new(),
-                                }),
+                                Ok(hits) => {
+                                    effective_search_mode = SearchMode::Semantic;
+                                    Ok(crate::search::query::SearchResult {
+                                        hits,
+                                        wildcard_fallback: false,
+                                        cache_stats: CacheStats::default(),
+                                        suggestions: Vec::new(),
+                                    })
+                                }
                                 Err(err) => {
                                     semantic_availability = SemanticAvailability::LoadFailed {
                                         context: format!("semantic search: {err}"),
                                     };
                                     status =
                                         format!("Semantic search failed: {err}. Using lexical.");
+                                    // Toast: semantic search failed
+                                    toast_manager.push(Toast::warning(
+                                        "Semantic search failed, using lexical",
+                                    ));
                                     client.search_with_fallback(
                                         &lexical_query,
                                         filters.clone(),
@@ -6855,36 +7200,98 @@ pub fn run_tui(
                                         }
                                     });
                                 } else {
-                                    // Alpha: recency weight factor for blended ranking
-                                    let alpha = match ranking_mode {
-                                        RankingMode::RecentHeavy => 1.0,
-                                        RankingMode::Balanced => 0.4,
-                                        RankingMode::RelevanceHeavy => 0.1,
-                                        RankingMode::MatchQualityHeavy => 0.2, // Low recency, high quality focus
-                                        RankingMode::DateNewest | RankingMode::DateOldest => {
-                                            unreachable!()
+                                    // RankingMode support for all search modes (bead vq8v)
+                                    // Recency helper (shared across all modes)
+                                    let recency = |h: &SearchHit| -> f32 {
+                                        if max_created <= 0.0 {
+                                            return 0.0;
                                         }
+                                        h.created_at.map_or(0.0, |v| v as f32 / max_created)
                                     };
-                                    // Per-hit quality factor based on match_type
-                                    //   Exact: 1.0, Prefix: 0.9, Suffix: 0.8,
-                                    //   Substring: 0.7, ImplicitWildcard: 0.6
-                                    let quality_factor =
-                                        |h: &SearchHit| -> f32 { h.match_type.quality_factor() };
-                                    results.sort_by(|a, b| {
-                                        let recency = |h: &SearchHit| -> f32 {
-                                            if max_created <= 0.0 {
-                                                return 0.0;
-                                            }
-                                            h.created_at.map_or(0.0, |v| v as f32 / max_created)
-                                        };
-                                        let score_a =
-                                            (a.score * quality_factor(a)) + alpha * recency(a);
-                                        let score_b =
-                                            (b.score * quality_factor(b)) + alpha * recency(b);
-                                        score_b
-                                            .partial_cmp(&score_a)
-                                            .unwrap_or(std::cmp::Ordering::Equal)
-                                    });
+
+                                    match effective_search_mode {
+                                        SearchMode::Lexical => {
+                                            // Lexical: BM25 score * quality_factor + alpha * recency
+                                            let alpha = match ranking_mode {
+                                                RankingMode::RecentHeavy => 1.0,
+                                                RankingMode::Balanced => 0.4,
+                                                RankingMode::RelevanceHeavy => 0.1,
+                                                RankingMode::MatchQualityHeavy => 0.2,
+                                                RankingMode::DateNewest
+                                                | RankingMode::DateOldest => unreachable!(),
+                                            };
+                                            // Per-hit quality factor based on match_type
+                                            //   Exact: 1.0, Prefix: 0.9, Suffix: 0.8,
+                                            //   Substring: 0.7, ImplicitWildcard: 0.6
+                                            let quality_factor = |h: &SearchHit| -> f32 {
+                                                h.match_type.quality_factor()
+                                            };
+                                            results.sort_by(|a, b| {
+                                                let score_a = (a.score * quality_factor(a))
+                                                    + alpha * recency(a);
+                                                let score_b = (b.score * quality_factor(b))
+                                                    + alpha * recency(b);
+                                                score_b
+                                                    .partial_cmp(&score_a)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            });
+                                        }
+                                        SearchMode::Semantic => {
+                                            // Semantic: normalize similarity [-1,1] -> [0,1]
+                                            // Then apply weighted blend (per bead vq8v spec)
+                                            let (score_weight, recency_weight) = match ranking_mode
+                                            {
+                                                RankingMode::RecentHeavy => (0.3, 0.7),
+                                                RankingMode::Balanced => (0.5, 0.5),
+                                                RankingMode::RelevanceHeavy => (0.8, 0.2),
+                                                RankingMode::MatchQualityHeavy => (0.85, 0.15),
+                                                RankingMode::DateNewest
+                                                | RankingMode::DateOldest => unreachable!(),
+                                            };
+                                            let norm_score = |h: &SearchHit| (h.score + 1.0) / 2.0;
+                                            results.sort_by(|a, b| {
+                                                let score_a = score_weight * norm_score(a)
+                                                    + recency_weight * recency(a);
+                                                let score_b = score_weight * norm_score(b)
+                                                    + recency_weight * recency(b);
+                                                score_b
+                                                    .partial_cmp(&score_a)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            });
+                                        }
+                                        SearchMode::Hybrid => {
+                                            // Hybrid: RRF scores normalized to [0,1], then weighted blend
+                                            let max_rrf = results
+                                                .iter()
+                                                .map(|h| h.score)
+                                                .fold(0.0f32, f32::max);
+                                            let (score_weight, recency_weight) = match ranking_mode
+                                            {
+                                                RankingMode::RecentHeavy => (0.3, 0.7),
+                                                RankingMode::Balanced => (0.5, 0.5),
+                                                RankingMode::RelevanceHeavy => (0.8, 0.2),
+                                                RankingMode::MatchQualityHeavy => (0.85, 0.15),
+                                                RankingMode::DateNewest
+                                                | RankingMode::DateOldest => unreachable!(),
+                                            };
+                                            let norm_score = |h: &SearchHit| {
+                                                if max_rrf > 0.0 {
+                                                    h.score / max_rrf
+                                                } else {
+                                                    0.0
+                                                }
+                                            };
+                                            results.sort_by(|a, b| {
+                                                let score_a = score_weight * norm_score(a)
+                                                    + recency_weight * recency(a);
+                                                let score_b = score_weight * norm_score(b)
+                                                    + recency_weight * recency(b);
+                                                score_b
+                                                    .partial_cmp(&score_a)
+                                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                            });
+                                        }
+                                    }
                                 }
                                 panes = rebuild_panes_with_filter(
                                     &results,
@@ -6963,6 +7370,71 @@ pub fn run_tui(
                 }
                 update_info = info;
             }
+            // Poll for model download progress (bead 44pw)
+            if let Some(ref rx) = download_rx {
+                // Drain all pending progress messages (get the latest)
+                let mut latest_progress: Option<DownloadProgress> = None;
+                while let Ok(progress) = rx.try_recv() {
+                    latest_progress = Some(progress);
+                }
+                if let Some(progress) = latest_progress {
+                    if progress.progress_pct >= 100 && progress.current_file == "complete" {
+                        // Download completed successfully
+                        // Reload semantic context to get Ready state
+                        // Re-initialize semantic context with the search client
+                        if let Some(ref client) = search_client {
+                            semantic_availability =
+                                initialize_semantic_context(client, &data_dir, &db_path);
+                        } else {
+                            let setup = load_semantic_context(&data_dir, &db_path);
+                            semantic_availability = setup.availability;
+                        }
+                        if semantic_availability.is_ready() {
+                            search_mode = SearchMode::Semantic;
+                            status =
+                                "Model installed! Semantic search is now available.".to_string();
+                            // Toast: semantic search ready
+                            toast_manager.push(Toast::success("Semantic search ready"));
+                        } else {
+                            // Model downloaded but may need index building
+                            status =
+                                format!("Model downloaded. {}", semantic_availability.summary());
+                            // Toast: index building
+                            toast_manager.push(Toast::info("Semantic index building..."));
+                        }
+                        download_rx = None;
+                        download_cancel = None;
+                    } else if progress.current_file.starts_with("error:") {
+                        // Download failed - extract error message and reset state
+                        let err_msg = progress
+                            .current_file
+                            .strip_prefix("error:")
+                            .unwrap_or("Unknown error");
+                        semantic_availability = SemanticAvailability::LoadFailed {
+                            context: format!("Download failed: {err_msg}"),
+                        };
+                        status = format!("Download failed: {err_msg}");
+                        // Toast: download failed
+                        toast_manager.push(Toast::error(format!("Download failed: {err_msg}")));
+                        download_rx = None;
+                        download_cancel = None;
+                    } else {
+                        // Update progress
+                        semantic_availability = SemanticAvailability::Downloading {
+                            progress_pct: progress.progress_pct,
+                            bytes_downloaded: progress.total_bytes,
+                            total_bytes: progress.grand_total,
+                        };
+                        let mb_done = progress.total_bytes as f64 / 1_048_576.0;
+                        let mb_total = progress.grand_total as f64 / 1_048_576.0;
+                        status = format!(
+                            "Downloading: {}% ({:.1}/{:.1} MB) - Press Esc to cancel",
+                            progress.progress_pct, mb_done, mb_total
+                        );
+                    }
+                    needs_draw = true;
+                }
+            }
             // Check if indexing progress changed and trigger redraw (bead 019)
             // Includes discovered_agents to trigger redraw when new agents are found
             if let Some(ref p) = progress {
@@ -6992,6 +7464,23 @@ pub fn run_tui(
                     }
                     last_indexing_state = Some(current_state);
                     needs_draw = true;
+                }
+
+                // Surface background indexer errors to the UI
+                let index_err = p.last_error.lock().ok().and_then(|err| err.clone());
+                if index_err != last_index_error {
+                    if let Some(ref err) = index_err {
+                        status = format!("Indexer error: {err} (see cass.log)");
+                        toast_manager.push(Toast::error("Indexer failed (see cass.log)"));
+                        needs_draw = true;
+                    }
+                    last_index_error = index_err;
+                }
+
+                // Heartbeat redraw while indexing is active (keeps HUD responsive)
+                if phase > 0 && last_index_redraw.elapsed() >= Duration::from_millis(500) {
+                    needs_draw = true;
+                    last_index_redraw = Instant::now();
                 }
             }
             last_tick = Instant::now();

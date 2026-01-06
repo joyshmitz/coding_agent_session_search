@@ -770,6 +770,61 @@
       "has_json_output": true
     },
     {
+      "name": "doctor",
+      "description": "Diagnose and fix installation issues (NEVER deletes user data)",
+      "arguments": [
+        {
+          "name": "data-dir",
+          "description": "Override data dir",
+          "arg_type": "option",
+          "value_type": "path",
+          "required": false
+        },
+        {
+          "name": "json",
+          "description": "Output as JSON",
+          "arg_type": "flag",
+          "required": false,
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "fix",
+          "description": "Automatically fix detected issues",
+          "arg_type": "flag",
+          "required": false,
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "verbose",
+          "short": "v",
+          "description": "Include verbose diagnostic details",
+          "arg_type": "flag",
+          "required": false,
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "force-rebuild",
+          "description": "Force index rebuild even if healthy",
+          "arg_type": "flag",
+          "required": false,
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "has_json_output": true
+    },
+    {
       "name": "context",
       "description": "Find related sessions for a given source path",
       "arguments": [
@@ -974,6 +1029,12 @@
     {
       "name": "sources",
       "description": "Manage remote sources (P5.x)",
+      "arguments": [],
+      "has_json_output": false
+    },
+    {
+      "name": "models",
+      "description": "Manage semantic search models",
       "arguments": [],
       "has_json_output": false
     }

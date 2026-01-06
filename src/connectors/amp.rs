@@ -23,7 +23,7 @@ impl AmpConnector {
     fn cache_root() -> PathBuf {
         // Check XDG_DATA_HOME first (important for testing and cross-platform consistency)
         // Note: dirs::data_dir() on macOS ignores XDG_DATA_HOME
-        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        if let Ok(xdg) = dotenvy::var("XDG_DATA_HOME") {
             return PathBuf::from(xdg).join("amp");
         }
         dirs::data_dir()
@@ -253,9 +253,7 @@ fn extract_messages(val: &Value, _since_ts: Option<i64>) -> Option<Vec<Normalize
     }
 
     // Re-assign indices after filtering to maintain sequential order
-    for (i, msg) in out.iter_mut().enumerate() {
-        msg.idx = i as i64;
-    }
+    super::reindex_messages(&mut out);
 
     if out.is_empty() { None } else { Some(out) }
 }

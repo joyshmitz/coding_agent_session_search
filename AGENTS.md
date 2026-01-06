@@ -405,8 +405,84 @@ Returns in <50ms:
 | 0 | Success | N/A |
 | 1 | Health check failed | Yes—run `cass index --full` |
 | 2 | Usage/parsing error | No—fix syntax |
-| 3 | Missing index | Yes—run `cass index` first |
+| 3 | Index/DB missing | Yes—run `cass index --full` |
+| 4 | Network error | Yes—check connectivity |
+| 5 | Data corruption | Yes—run `cass index --full --force-rebuild` |
+| 6 | Incompatible version | No—update cass |
+| 7 | Lock/busy | Yes—retry later |
+| 8 | Partial result | Yes—increase timeout |
 | 9 | Unknown error | Maybe |
+
+### Multi-Machine Search Setup
+
+cass can search across agent sessions from multiple machines. Use the interactive setup wizard for the easiest configuration:
+
+```bash
+cass sources setup
+```
+
+#### What the wizard does:
+1. **Discovers** SSH hosts from your ~/.ssh/config
+2. **Probes** each host to check for:
+   - Existing cass installation (and version)
+   - Agent session data (Claude, Codex, Cursor, Gemini)
+   - System resources (disk, memory)
+3. **Lets you select** which hosts to configure
+4. **Installs cass** on remotes if needed
+5. **Indexes** existing sessions on remotes
+6. **Configures** sources.toml with correct paths
+7. **Syncs** data to your local machine
+
+#### For scripting (non-interactive):
+```bash
+cass sources setup --non-interactive --hosts css,csd,yto
+cass sources setup --json --hosts css  # JSON output for parsing
+```
+
+#### Key flags:
+| Flag | Purpose |
+|------|---------|
+| `--hosts <names>` | Configure only these hosts (comma-separated) |
+| `--dry-run` | Preview without making changes |
+| `--resume` | Resume interrupted setup |
+| `--skip-install` | Don't install cass on remotes |
+| `--skip-index` | Don't run remote indexing |
+| `--skip-sync` | Don't sync after setup |
+| `--json` | Output progress as JSON |
+
+#### After setup:
+```bash
+# Search across all sources
+cass search "database migration"
+
+# Sync latest data
+cass sources sync --all
+
+# List configured sources
+cass sources list
+```
+
+#### Manual configuration:
+If you prefer manual setup, edit `~/.config/cass/sources.toml`:
+```toml
+[[sources]]
+name = "my-server"
+type = "ssh"
+host = "user@server.example.com"
+paths = ["~/.claude/projects"]
+
+[[sources.path_mappings]]
+from = "/home/user/projects"
+to = "/Users/me/projects"
+```
+
+#### Troubleshooting:
+- **Host unreachable**: Verify SSH config with `ssh <host>` manually
+- **Permission denied**: Load SSH key with `ssh-add ~/.ssh/id_rsa`
+- **cargo not found**: Use `--skip-install` and install manually
+- **Interrupted setup**: Resume with `cass sources setup --resume`
+
+For machine-readable docs: `cass robot-docs sources`
 
 ---
 
@@ -523,3 +599,66 @@ Returns structured results with file paths, line ranges, and extracted code snip
 - **Don't** use `warp_grep` to find a specific function name → use `ripgrep`
 - **Don't** use `ripgrep` to understand "how does X work" → wastes time with manual reads
 - **Don't** use `ripgrep` for codemods → risks collateral edits
+
+<!-- bv-agent-instructions-v1 -->
+
+---
+
+## Beads Workflow Integration
+
+This project uses [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+
+### Essential Commands
+
+```bash
+# View issues (launches TUI - avoid in automated sessions)
+bv
+
+# CLI commands for agents (use these instead)
+bd ready              # Show issues ready to work (no blockers)
+bd list --status=open # All open issues
+bd show <id>          # Full issue details with dependencies
+bd create --title="..." --type=task --priority=2
+bd update <id> --status=in_progress
+bd close <id> --reason="Completed"
+bd close <id1> <id2>  # Close multiple issues at once
+bd sync               # Commit and push changes
+```
+
+### Workflow Pattern
+
+1. **Start**: Run `bd ready` to find actionable work
+2. **Claim**: Use `bd update <id> --status=in_progress`
+3. **Work**: Implement the task
+4. **Complete**: Use `bd close <id>`
+5. **Sync**: Always run `bd sync` at session end
+
+### Key Concepts
+
+- **Dependencies**: Issues can block other issues. `bd ready` shows only unblocked work.
+- **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers, not words)
+- **Types**: task, bug, feature, epic, question, docs
+- **Blocking**: `bd dep add <issue> <depends-on>` to add dependencies
+
+### Session Protocol
+
+**Before ending any session, run this checklist:**
+
+```bash
+git status              # Check what changed
+git add <files>         # Stage code changes
+bd sync                 # Commit beads changes
+git commit -m "..."     # Commit code
+bd sync                 # Commit any new beads changes
+git push                # Push to remote
+```
+
+### Best Practices
+
+- Check `bd ready` at session start to find available work
+- Update status as you work (in_progress → closed)
+- Create new issues with `bd create` when you discover tasks
+- Use descriptive titles and set appropriate priority/type
+- Always `bd sync` before ending session
+
+<!-- end-bv-agent-instructions -->

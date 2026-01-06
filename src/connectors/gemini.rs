@@ -135,7 +135,7 @@ impl GeminiConnector {
     }
 
     fn root() -> PathBuf {
-        std::env::var("GEMINI_HOME").map_or_else(
+        dotenvy::var("GEMINI_HOME").map_or_else(
             |_| dirs::home_dir().unwrap_or_default().join(".gemini/tmp"),
             PathBuf::from,
         )
@@ -299,9 +299,7 @@ impl Connector for GeminiConnector {
             }
 
             // Re-assign sequential indices after filtering
-            for (i, msg) in messages.iter_mut().enumerate() {
-                msg.idx = i as i64;
-            }
+            super::reindex_messages(&mut messages);
 
             if messages.is_empty() {
                 continue;

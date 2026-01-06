@@ -28,7 +28,7 @@ const CONTRACT_VERSION: &str = "1";
 const DEFAULT_STALE_THRESHOLD_SECS: u64 = 1800;
 
 fn read_watch_once_paths_env() -> Option<Vec<std::path::PathBuf>> {
-    std::env::var("CASS_TEST_WATCH_PATHS")
+    dotenvy::var("CASS_TEST_WATCH_PATHS")
         .ok()
         .map(|list| {
             list.split(',')
@@ -236,6 +236,9 @@ pub enum Commands {
         /// Enables chained searches: `cass search "query1" --robot-format sessions | cass search "query2" --sessions-from -`
         #[arg(long)]
         sessions_from: Option<String>,
+        /// Search mode: lexical (default), semantic, or hybrid
+        #[arg(long, value_enum)]
+        mode: Option<crate::search::query::SearchMode>,
     },
     /// Show statistics about indexed data
     Stats {
@@ -341,6 +344,25 @@ pub enum Commands {
         #[arg(long, default_value = "300")]
         stale_threshold: u64,
     },
+    /// Diagnose and repair cass installation issues. Safe by default - never deletes user data.
+    /// Use --fix to apply automatic repairs (rebuilds derived data only, preserves source sessions).
+    Doctor {
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Apply safe fixes automatically (rebuilds index/db from source data)
+        #[arg(long)]
+        fix: bool,
+        /// Run all checks verbosely (show passed checks too)
+        #[arg(long, short)]
+        verbose: bool,
+        /// Force index rebuild even if index appears healthy
+        #[arg(long)]
+        force_rebuild: bool,
+    },
     /// Find related sessions for a given source path
     Context {
         /// Path to the source session file
@@ -413,6 +435,9 @@ pub enum Commands {
     /// Manage remote sources (P5.x)
     #[command(subcommand)]
     Sources(SourcesCommand),
+    /// Manage semantic search models
+    #[command(subcommand)]
+    Models(ModelsCommand),
 }
 
 /// Subcommands for managing remote sources (P5.x)
@@ -485,6 +510,165 @@ pub enum SourcesCommand {
     /// Manage path mappings for a source (P6.3)
     #[command(subcommand)]
     Mappings(MappingsAction),
+    /// Auto-discover SSH hosts from ~/.ssh/config
+    Discover {
+        /// Platform preset for default paths (macos-defaults, linux-defaults)
+        #[arg(long, default_value = "linux-defaults")]
+        preset: String,
+        /// Skip hosts that are already configured as sources
+        #[arg(long)]
+        skip_existing: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Interactive wizard to discover, configure, and set up remote sources.
+    ///
+    /// This wizard automates configuring cass to search across multiple machines.
+    /// It discovers SSH hosts from ~/.ssh/config, checks each for existing cass
+    /// installations and agent session data, then guides you through selecting
+    /// which machines to configure for remote search.
+    ///
+    /// # Workflow Phases
+    ///
+    /// 1. **Discovery**: Parses ~/.ssh/config to find configured hosts
+    /// 2. **Probing**: Connects to each host via SSH to check cass status and data
+    /// 3. **Selection**: Interactive selection of which hosts to configure
+    /// 4. **Installation**: Installs cass on hosts that don't have it (optional)
+    /// 5. **Indexing**: Runs `cass index` on remotes (optional)
+    /// 6. **Configuration**: Generates and saves sources.toml entries
+    /// 7. **Sync**: Downloads session data to local machine (optional)
+    ///
+    /// # Examples
+    ///
+    /// ```bash
+    /// # Interactive wizard (recommended for first-time setup)
+    /// cass sources setup
+    ///
+    /// # Configure specific hosts only
+    /// cass sources setup --hosts css,csd,yto
+    ///
+    /// # Preview without making changes
+    /// cass sources setup --dry-run
+    ///
+    /// # Resume an interrupted setup
+    /// cass sources setup --resume
+    ///
+    /// # Non-interactive for scripting (uses auto-detected defaults)
+    /// cass sources setup --non-interactive --hosts css,csd
+    ///
+    /// # Skip installation and indexing, just configure
+    /// cass sources setup --hosts css --skip-install --skip-index
+    ///
+    /// # JSON output for automation
+    /// cass sources setup --json --hosts css
+    /// ```
+    ///
+    /// # State and Resume
+    ///
+    /// If setup is interrupted (Ctrl+C, connection lost), state is saved to
+    /// `~/.config/cass/setup_state.json`. Resume with `cass sources setup --resume`.
+    ///
+    /// # See Also
+    ///
+    /// - `cass sources list` - List configured sources
+    /// - `cass sources sync` - Sync data from sources
+    /// - `cass sources discover` - Just discover hosts (no setup)
+    /// - `cass robot-docs sources` - Machine-readable sources documentation
+    Setup {
+        /// Preview what would happen without making changes
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip interactive prompts (use auto-detected defaults for scripting)
+        #[arg(long)]
+        non_interactive: bool,
+        /// Configure only these hosts (comma-separated SSH aliases, skips discovery/selection)
+        #[arg(long, value_delimiter = ',')]
+        hosts: Option<Vec<String>>,
+        /// Skip cass installation on remotes that don't have it
+        #[arg(long)]
+        skip_install: bool,
+        /// Skip running `cass index` on remotes
+        #[arg(long)]
+        skip_index: bool,
+        /// Skip syncing data after setup completes
+        #[arg(long)]
+        skip_sync: bool,
+        /// SSH connection timeout in seconds
+        #[arg(long, default_value = "10")]
+        timeout: u64,
+        /// Resume from previous interrupted setup (reads ~/.config/cass/setup_state.json)
+        #[arg(long)]
+        resume: bool,
+        /// Show detailed progress output
+        #[arg(long, short)]
+        verbose: bool,
+        /// Output progress as JSON (implies non-interactive, for scripting)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Subcommands for managing semantic search models
+#[derive(Subcommand, Debug, Clone)]
+pub enum ModelsCommand {
+    /// Show model installation status
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download and install the semantic search model
+    Install {
+        /// Model to install (default: all-minilm-l6-v2)
+        #[arg(long, default_value = "all-minilm-l6-v2")]
+        model: String,
+        /// Custom mirror URL for downloading
+        #[arg(long)]
+        mirror: Option<String>,
+        /// Install from local file (for air-gapped environments)
+        #[arg(long)]
+        from_file: Option<PathBuf>,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Verify model integrity (SHA256 checksums)
+    Verify {
+        /// Attempt to repair corrupted files
+        #[arg(long)]
+        repair: bool,
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove model files to free disk space
+    Remove {
+        /// Model to remove (default: all-minilm-l6-v2)
+        #[arg(long, default_value = "all-minilm-l6-v2")]
+        model: String,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Check for model updates
+    CheckUpdate {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 /// Subcommands for managing path mappings (P6.3)
@@ -557,6 +741,7 @@ pub enum RobotTopic {
     Examples,
     Contracts,
     Wrap,
+    Sources,
 }
 
 /// Output format for robot/automation mode
@@ -1563,7 +1748,7 @@ async fn execute_cli(
     // Block TUI in non-TTY contexts unless TUI_HEADLESS is set (for testing)
     if matches!(command, Commands::Tui { .. })
         && !stdout_is_tty
-        && std::env::var("TUI_HEADLESS").is_err()
+        && dotenvy::var("TUI_HEADLESS").is_err()
     {
         return Err(CliError::usage(
             "No subcommand provided; in non-TTY contexts TUI is disabled.",
@@ -1724,6 +1909,7 @@ async fn execute_cli(
                     highlight,
                     source,
                     sessions_from,
+                    mode,
                 } => {
                     run_cli_search(
                         &query,
@@ -1760,6 +1946,7 @@ async fn execute_cli(
                         highlight,
                         source,
                         sessions_from,
+                        mode,
                     )?;
                 }
                 Commands::Stats {
@@ -1850,6 +2037,15 @@ async fn execute_cli(
                 } => {
                     run_health(&data_dir, cli.db.clone(), json, stale_threshold, robot_meta)?;
                 }
+                Commands::Doctor {
+                    data_dir,
+                    json,
+                    fix,
+                    verbose,
+                    force_rebuild,
+                } => {
+                    run_doctor(&data_dir, cli.db.clone(), json, fix, verbose, force_rebuild)?;
+                }
                 Commands::Context {
                     path,
                     data_dir,
@@ -1898,6 +2094,9 @@ async fn execute_cli(
                 }
                 Commands::Sources(subcmd) => {
                     run_sources_command(subcmd)?;
+                }
+                Commands::Models(subcmd) => {
+                    run_models_command(subcmd)?;
                 }
                 _ => {}
             }
@@ -2054,11 +2253,13 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Introspect { .. }) => "introspect".to_string(),
         Some(Commands::RobotDocs { topic }) => format!("robot-docs:{topic:?}"),
         Some(Commands::Health { .. }) => "health".to_string(),
+        Some(Commands::Doctor { .. }) => "doctor".to_string(),
         Some(Commands::Context { .. }) => "context".to_string(),
         Some(Commands::Export { .. }) => "export".to_string(),
         Some(Commands::Expand { .. }) => "expand".to_string(),
         Some(Commands::Timeline { .. }) => "timeline".to_string(),
         Some(Commands::Sources(..)) => "sources".to_string(),
+        Some(Commands::Models(..)) => "models".to_string(),
         None => "(default)".to_string(),
     }
 }
@@ -2078,6 +2279,7 @@ fn is_robot_mode(command: &Commands) -> bool {
         Commands::Diag { json, .. } => *json,
         Commands::Status { json, .. } => *json,
         Commands::Health { json, .. } => *json,
+        Commands::Doctor { json, .. } => *json,
         Commands::ApiVersion { json, .. } => *json,
         Commands::State { json, .. } => *json,
         Commands::View { json, .. } => *json,
@@ -2267,7 +2469,7 @@ fn print_robot_help(wrap: WrapConfig) -> CliResult<()> {
         "  Use -v/--verbose with --json to enable INFO logs if needed",
         "",
         "Subcommands: search | stats | view | index | tui | robot-docs <topic>",
-        "Topics: commands | env | paths | schemas | guide | exit-codes | examples | contracts | wrap",
+        "Topics: commands | env | paths | schemas | guide | exit-codes | examples | contracts | wrap | sources",
         "Exit codes: 0 ok; 2 usage; 3 missing index/db; 9 unknown",
         "More: cass robot-docs examples | cass robot-docs commands",
     ];
@@ -2405,6 +2607,81 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  Default: no forced wrap (wide output).".to_string(),
             "  --wrap <n>: wrap informational text to n columns.".to_string(),
             "  --nowrap: force no wrapping even if wrap set elsewhere.".to_string(),
+        ],
+        RobotTopic::Sources => vec![
+            "sources:".to_string(),
+            String::new(),
+            "# cass sources setup - Interactive Remote Sources Wizard".to_string(),
+            String::new(),
+            "## Overview".to_string(),
+            "The setup wizard automates configuring cass to search across multiple machines.".to_string(),
+            "It discovers SSH hosts from ~/.ssh/config, checks their status, and handles".to_string(),
+            "installation, indexing, and configuration automatically.".to_string(),
+            String::new(),
+            "## Quick Start".to_string(),
+            "  cass sources setup                    # Interactive (recommended)".to_string(),
+            "  cass sources setup --hosts css,csd    # Configure specific hosts".to_string(),
+            "  cass sources setup --dry-run          # Preview without changes".to_string(),
+            "  cass sources setup --resume           # Resume interrupted setup".to_string(),
+            String::new(),
+            "## Workflow Phases".to_string(),
+            "  1. Discovery  - Parses ~/.ssh/config to find configured hosts".to_string(),
+            "  2. Probing    - Connects via SSH to check cass status and agent data".to_string(),
+            "  3. Selection  - Interactive selection of which hosts to configure".to_string(),
+            "  4. Install    - Installs cass on hosts without it (optional)".to_string(),
+            "  5. Indexing   - Runs `cass index` on remotes (optional)".to_string(),
+            "  6. Config     - Generates sources.toml entries".to_string(),
+            "  7. Sync       - Downloads session data to local machine (optional)".to_string(),
+            String::new(),
+            "## Flags Reference".to_string(),
+            "  --hosts <names>      Only configure these hosts (comma-separated SSH aliases)".to_string(),
+            "  --dry-run            Preview without making changes".to_string(),
+            "  --resume             Resume from ~/.config/cass/setup_state.json".to_string(),
+            "  --non-interactive    Skip prompts, use auto-detected defaults".to_string(),
+            "  --skip-install       Don't install cass on remotes".to_string(),
+            "  --skip-index         Don't run remote indexing".to_string(),
+            "  --skip-sync          Don't sync after setup".to_string(),
+            "  --json               Output progress as JSON for scripting".to_string(),
+            "  --timeout <secs>     SSH connection timeout (default: 10)".to_string(),
+            "  --verbose            Show detailed progress".to_string(),
+            String::new(),
+            "## Non-Interactive Usage (Scripting)".to_string(),
+            "  cass sources setup --non-interactive --hosts css,csd".to_string(),
+            "  cass sources setup --non-interactive --hosts css --skip-install --skip-index".to_string(),
+            "  cass sources setup --json --hosts css  # JSON output for parsing".to_string(),
+            String::new(),
+            "## State and Resume".to_string(),
+            "State saved to ~/.config/cass/setup_state.json on interruption.".to_string(),
+            "Resume with: cass sources setup --resume".to_string(),
+            String::new(),
+            "## Generated Configuration".to_string(),
+            "The wizard generates sources.toml entries like:".to_string(),
+            "  [[sources]]".to_string(),
+            "  name = \"css\"".to_string(),
+            "  type = \"ssh\"".to_string(),
+            "  host = \"css\"".to_string(),
+            "  paths = [\"~/.claude/projects\", \"~/.codex/sessions\"]".to_string(),
+            "  sync_schedule = \"manual\"".to_string(),
+            "  [[sources.path_mappings]]".to_string(),
+            "  from = \"/data/projects\"".to_string(),
+            "  to = \"/Users/username/projects\"".to_string(),
+            String::new(),
+            "## After Setup".to_string(),
+            "  cass search \"query\"       # Search across all sources".to_string(),
+            "  cass sources sync --all   # Sync latest data".to_string(),
+            "  cass sources list         # List configured sources".to_string(),
+            String::new(),
+            "## Troubleshooting".to_string(),
+            "  \"Host unreachable\": Verify SSH config with `ssh <host>` manually".to_string(),
+            "  \"Permission denied\": Load SSH key with `ssh-add ~/.ssh/id_rsa`".to_string(),
+            "  \"cargo not found\": Use --skip-install and install manually".to_string(),
+            "  \"Index taking too long\": Large histories take time; runs in background".to_string(),
+            String::new(),
+            "## Related Commands".to_string(),
+            "  cass sources list         List configured sources".to_string(),
+            "  cass sources sync         Sync data from sources".to_string(),
+            "  cass sources discover     Just discover hosts (no setup)".to_string(),
+            "  cass sources add          Manually add a source".to_string(),
         ],
     };
 
@@ -2683,8 +2960,9 @@ fn run_cli_search(
     highlight: bool,
     source: Option<String>,
     sessions_from: Option<String>,
+    mode: Option<crate::search::query::SearchMode>,
 ) -> CliResult<()> {
-    use crate::search::query::{QueryExplanation, SearchClient, SearchFilters};
+    use crate::search::query::{QueryExplanation, SearchClient, SearchFilters, SearchMode};
     use crate::search::tantivy::index_dir;
     use crate::sources::provenance::SourceFilter;
     use std::collections::HashSet;
@@ -2851,21 +3129,78 @@ fn run_cli_search(
         });
     }
 
-    let result = client
-        .search_with_fallback(
-            query,
-            filters.clone(),
-            search_limit,
-            search_offset,
-            sparse_threshold,
-        )
-        .map_err(|e| CliError {
-            code: 9,
-            kind: "search",
-            message: format!("search failed: {e}"),
-            hint: None,
-            retryable: true,
-        })?;
+    // Determine effective search mode (default to Lexical)
+    let effective_mode = mode.unwrap_or(SearchMode::Lexical);
+
+    let result = match effective_mode {
+        SearchMode::Lexical => client
+            .search_with_fallback(query, filters.clone(), search_limit, search_offset, sparse_threshold)
+            .map_err(|e| CliError {
+                code: 9,
+                kind: "search",
+                message: format!("search failed: {e}"),
+                hint: None,
+                retryable: true,
+            })?,
+        SearchMode::Semantic => {
+            let hits = client
+                .search_semantic(query, filters.clone(), search_limit, search_offset)
+                .map_err(|e| {
+                    let err_str = e.to_string();
+                    if err_str.contains("unavailable") || err_str.contains("no embedder") {
+                        CliError {
+                            code: 15,
+                            kind: "semantic-unavailable",
+                            message: "Semantic search not available".to_string(),
+                            hint: Some(
+                                "Run 'cass tui' and press Alt+S to set up semantic search, or use --mode lexical"
+                                    .to_string(),
+                            ),
+                            retryable: false,
+                        }
+                    } else {
+                        CliError {
+                            code: 9,
+                            kind: "search",
+                            message: format!("semantic search failed: {e}"),
+                            hint: Some("Try --mode lexical as fallback".to_string()),
+                            retryable: true,
+                        }
+                    }
+                })?;
+            crate::search::query::SearchResult {
+                hits,
+                wildcard_fallback: false,
+                cache_stats: crate::search::query::CacheStats::default(),
+                suggestions: Vec::new(),
+            }
+        }
+        SearchMode::Hybrid => client
+            .search_hybrid(query, query, filters.clone(), search_limit, search_offset, sparse_threshold)
+            .map_err(|e| {
+                let err_str = e.to_string();
+                if err_str.contains("unavailable") || err_str.contains("no embedder") {
+                    CliError {
+                        code: 15,
+                        kind: "semantic-unavailable",
+                        message: "Hybrid search not available (requires semantic search)".to_string(),
+                        hint: Some(
+                            "Run 'cass tui' and press Alt+S to set up semantic search, or use --mode lexical"
+                                .to_string(),
+                        ),
+                        retryable: false,
+                    }
+                } else {
+                    CliError {
+                        code: 9,
+                        kind: "search",
+                        message: format!("hybrid search failed: {e}"),
+                        hint: Some("Try --mode lexical as fallback".to_string()),
+                        retryable: true,
+                    }
+                }
+            })?,
+    };
 
     // Check if search exceeded timeout - return partial results with timeout indicator
     let timed_out = timeout_duration.is_some_and(|t| start_time.elapsed() > t);
@@ -3022,6 +3357,7 @@ fn run_cli_search(
             explanation.as_ref(),
             timed_out,
             timeout_ms,
+            effective_mode,
         )?;
     } else if display_result.hits.is_empty() {
         eprintln!("No results found.");
@@ -3304,6 +3640,7 @@ fn output_robot_results(
     explanation: Option<&crate::search::query::QueryExplanation>,
     timed_out: bool,
     timeout_ms: Option<u64>,
+    search_mode: crate::search::query::SearchMode,
 ) -> CliResult<()> {
     // Expand presets (minimal, summary, provenance, all, *)
     let resolved_fields = expand_field_presets(fields);
@@ -3369,6 +3706,7 @@ fn output_robot_results(
             if include_meta && let serde_json::Value::Object(ref mut map) = payload {
                 let mut meta = serde_json::json!({
                     "elapsed_ms": elapsed_ms,
+                    "search_mode": search_mode,
                     "wildcard_fallback": result.wildcard_fallback,
                     "cache_stats": {
                         "hits": result.cache_stats.cache_hits,
@@ -3448,6 +3786,7 @@ fn output_robot_results(
                         "count": filtered_hits.len(),
                         "total_matches": total_matches,
                         "elapsed_ms": elapsed_ms,
+                        "search_mode": search_mode,
                         "wildcard_fallback": result.wildcard_fallback,
                         "cache_stats": {
                             "hits": result.cache_stats.cache_hits,
@@ -3572,6 +3911,7 @@ fn output_robot_results(
             if include_meta && let serde_json::Value::Object(ref mut map) = payload {
                 let mut meta = serde_json::json!({
                     "elapsed_ms": elapsed_ms,
+                    "search_mode": search_mode,
                     "wildcard_fallback": result.wildcard_fallback,
                     "tokens_estimated": tokens_estimated,
                     "max_tokens": max_tokens,
@@ -4399,6 +4739,1031 @@ fn run_health(
             kind: "health",
             message: "Health check failed".to_string(),
             hint: Some("Run 'cass index --full' to rebuild the index/database.".to_string()),
+            retryable: true,
+        })
+    }
+}
+
+fn ensure_cass_origin(
+    metadata: &mut serde_json::Value,
+    source_id: &str,
+    kind: crate::sources::provenance::SourceKind,
+    host: Option<&str>,
+) {
+    if !metadata.is_object() {
+        *metadata = serde_json::json!({});
+    }
+
+    let Some(obj) = metadata.as_object_mut() else {
+        return;
+    };
+
+    let cass = obj
+        .entry("cass".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(cass_obj) = cass.as_object_mut() else {
+        return;
+    };
+
+    let origin = cass_obj
+        .entry("origin".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(origin_obj) = origin.as_object_mut() {
+        origin_obj
+            .entry("source_id".to_string())
+            .or_insert_with(|| serde_json::Value::String(source_id.to_string()));
+        origin_obj
+            .entry("kind".to_string())
+            .or_insert_with(|| serde_json::Value::String(kind.as_str().to_string()));
+        if let Some(host) = host {
+            origin_obj
+                .entry("host".to_string())
+                .or_insert_with(|| serde_json::Value::String(host.to_string()));
+        }
+    }
+}
+
+fn rebuild_tantivy_from_db(
+    db_path: &Path,
+    data_dir: &Path,
+    total_conversations: usize,
+    progress: Option<std::sync::Arc<indexer::IndexingProgress>>,
+) -> CliResult<usize> {
+    use crate::connectors::{NormalizedConversation, NormalizedMessage};
+    use crate::model::types::MessageRole;
+    use crate::search::tantivy::TantivyIndex;
+    use crate::sources::provenance::{LOCAL_SOURCE_ID, SourceKind};
+    use crate::storage::sqlite::SqliteStorage;
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
+
+    let storage = SqliteStorage::open_readonly(db_path).map_err(|e| CliError {
+        code: 5,
+        kind: "doctor",
+        message: format!("failed to open database for rebuild: {e}"),
+        hint: None,
+        retryable: true,
+    })?;
+
+    let sources = storage.list_sources().unwrap_or_default();
+    let mut source_map: HashMap<String, (SourceKind, Option<String>)> = HashMap::new();
+    for source in sources {
+        source_map.insert(source.id, (source.kind, source.host_label));
+    }
+
+    let index_path = crate::search::tantivy::index_dir(data_dir).map_err(|e| CliError {
+        code: 5,
+        kind: "doctor",
+        message: format!("failed to resolve index path: {e}"),
+        hint: None,
+        retryable: true,
+    })?;
+
+    let _ = std::fs::remove_dir_all(&index_path);
+    std::fs::create_dir_all(&index_path).map_err(|e| CliError {
+        code: 5,
+        kind: "doctor",
+        message: format!("failed to create index directory: {e}"),
+        hint: None,
+        retryable: true,
+    })?;
+
+    let mut t_index = TantivyIndex::open_or_create(&index_path).map_err(|e| CliError {
+        code: 5,
+        kind: "doctor",
+        message: format!("failed to create tantivy index: {e}"),
+        hint: None,
+        retryable: true,
+    })?;
+
+    if let Some(p) = &progress {
+        p.phase.store(2, Ordering::Relaxed);
+        p.is_rebuilding.store(true, Ordering::Relaxed);
+        p.total.store(total_conversations, Ordering::Relaxed);
+        p.current.store(0, Ordering::Relaxed);
+        p.discovered_agents.store(0, Ordering::Relaxed);
+    }
+
+    let page_size: i64 = 200;
+    let mut offset: i64 = 0;
+    let mut indexed_docs: usize = 0;
+
+    loop {
+        let batch = storage
+            .list_conversations(page_size, offset)
+            .map_err(|e| CliError::unknown(format!("failed to list conversations: {e}")))?;
+        if batch.is_empty() {
+            break;
+        }
+
+        for conv in batch {
+            let Some(conv_id) = conv.id else {
+                continue;
+            };
+
+            let messages = storage
+                .fetch_messages(conv_id)
+                .map_err(|e| CliError::unknown(format!("failed to fetch messages: {e}")))?;
+
+            let mut metadata = conv.metadata_json.clone();
+            let (kind, host_label) =
+                source_map.get(&conv.source_id).cloned().unwrap_or_else(|| {
+                    let fallback_kind = if conv.source_id == LOCAL_SOURCE_ID {
+                        SourceKind::Local
+                    } else {
+                        SourceKind::Ssh
+                    };
+                    (fallback_kind, None)
+                });
+
+            let host = conv.origin_host.as_deref().or(host_label.as_deref());
+            ensure_cass_origin(&mut metadata, &conv.source_id, kind, host);
+
+            let normalized_messages: Vec<NormalizedMessage> = messages
+                .into_iter()
+                .map(|msg| {
+                    let role = match msg.role {
+                        MessageRole::User => "user".to_string(),
+                        MessageRole::Agent => "assistant".to_string(),
+                        MessageRole::Tool => "tool".to_string(),
+                        MessageRole::System => "system".to_string(),
+                        MessageRole::Other(other) => other,
+                    };
+
+                    NormalizedMessage {
+                        idx: msg.idx,
+                        role,
+                        author: msg.author,
+                        created_at: msg.created_at,
+                        content: msg.content,
+                        extra: msg.extra_json,
+                        snippets: Vec::new(),
+                    }
+                })
+                .collect();
+
+            let normalized = NormalizedConversation {
+                agent_slug: conv.agent_slug,
+                external_id: conv.external_id,
+                title: conv.title,
+                workspace: conv.workspace,
+                source_path: conv.source_path,
+                started_at: conv.started_at,
+                ended_at: conv.ended_at,
+                metadata,
+                messages: normalized_messages,
+            };
+
+            indexed_docs += normalized.messages.len();
+            t_index
+                .add_messages(&normalized, &normalized.messages)
+                .map_err(|e| CliError::unknown(format!("failed to index messages: {e}")))?;
+
+            if let Some(p) = &progress {
+                p.current.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        offset += page_size;
+    }
+
+    t_index
+        .commit()
+        .map_err(|e| CliError::unknown(format!("failed to commit index: {e}")))?;
+
+    if let Some(p) = &progress {
+        p.phase.store(0, Ordering::Relaxed);
+        p.is_rebuilding.store(false, Ordering::Relaxed);
+    }
+
+    Ok(indexed_docs)
+}
+
+fn wait_with_progress<T>(
+    handle: std::thread::JoinHandle<CliResult<T>>,
+    progress: std::sync::Arc<indexer::IndexingProgress>,
+    show_progress: bool,
+    show_plain: bool,
+    initial_message: &str,
+) -> CliResult<T> {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    if show_progress {
+        use indicatif::{ProgressBar, ProgressStyle};
+
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        pb.set_message(initial_message.to_string());
+        pb.enable_steady_tick(Duration::from_millis(80));
+
+        let mut last_phase = usize::MAX;
+        let mut last_current = usize::MAX;
+        let mut last_agents = usize::MAX;
+        let mut last_update = Instant::now();
+
+        loop {
+            if handle.is_finished() {
+                break;
+            }
+
+            let phase = progress.phase.load(Ordering::Relaxed);
+            let total = progress.total.load(Ordering::Relaxed);
+            let current = progress.current.load(Ordering::Relaxed);
+            let agents = progress.discovered_agents.load(Ordering::Relaxed);
+            let is_rebuilding = progress.is_rebuilding.load(Ordering::Relaxed);
+
+            let agent_names: Vec<String> = progress
+                .discovered_agent_names
+                .lock()
+                .map(|names| names.clone())
+                .unwrap_or_default();
+
+            let phase_str = match phase {
+                1 => "Scanning",
+                2 => "Indexing",
+                _ => "Preparing",
+            };
+
+            let rebuild_indicator = if is_rebuilding { " (rebuilding)" } else { "" };
+
+            let msg = if phase == 1 {
+                let scan_progress = if total > 0 {
+                    format!("{current}/{total} connectors")
+                } else {
+                    "scanning connectors".to_string()
+                };
+                if agents > 0 {
+                    let names_preview = if agent_names.len() <= 3 {
+                        agent_names.join(", ")
+                    } else {
+                        format!(
+                            "{}, ... +{} more",
+                            agent_names[..3].join(", "),
+                            agent_names.len() - 3
+                        )
+                    };
+                    format!(
+                        "{}{}: {} · {} agent(s): {}",
+                        phase_str, rebuild_indicator, scan_progress, agents, names_preview
+                    )
+                } else {
+                    format!(
+                        "{}{}: {} · detecting agents...",
+                        phase_str, rebuild_indicator, scan_progress
+                    )
+                }
+            } else if phase == 2 {
+                if total > 0 {
+                    let pct = (current as f64 / total as f64 * 100.0).min(100.0);
+                    format!(
+                        "{}{}: {}/{} conversations ({:.0}%)",
+                        phase_str, rebuild_indicator, current, total, pct
+                    )
+                } else {
+                    format!("{}{}: Processing...", phase_str, rebuild_indicator)
+                }
+            } else {
+                format!("{}{}...", phase_str, rebuild_indicator)
+            };
+
+            let now = Instant::now();
+            let should_update = phase != last_phase
+                || current != last_current
+                || agents != last_agents
+                || now.duration_since(last_update).as_millis() > 500;
+
+            if should_update {
+                pb.set_message(msg);
+                last_phase = phase;
+                last_current = current;
+                last_agents = agents;
+                last_update = now;
+            }
+
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let total = progress.total.load(Ordering::Relaxed);
+        let current = progress.current.load(Ordering::Relaxed);
+        let agents = progress.discovered_agents.load(Ordering::Relaxed);
+        pb.finish_with_message(format!(
+            "Done: {} conversations from {} agent(s)",
+            current.max(total),
+            agents
+        ));
+    } else if show_plain {
+        eprintln!("Starting index...");
+        let mut last_phase = usize::MAX;
+        let mut last_agents = 0;
+        let mut last_current = 0;
+        let mut last_scan_current = 0;
+
+        loop {
+            if handle.is_finished() {
+                break;
+            }
+
+            let phase = progress.phase.load(Ordering::Relaxed);
+            let total = progress.total.load(Ordering::Relaxed);
+            let current = progress.current.load(Ordering::Relaxed);
+            let agents = progress.discovered_agents.load(Ordering::Relaxed);
+
+            if phase != last_phase {
+                match phase {
+                    1 => eprintln!("Scanning for agents..."),
+                    2 => eprintln!("Indexing conversations..."),
+                    _ => {}
+                }
+                last_phase = phase;
+            }
+
+            if phase == 1 && current != last_scan_current {
+                if total > 0 {
+                    eprintln!("  Scanned {}/{} connectors", current, total);
+                } else {
+                    eprintln!("  Scanned {} connectors", current);
+                }
+                last_scan_current = current;
+            }
+
+            if agents > last_agents {
+                eprintln!("  Found {} agent(s)", agents);
+                last_agents = agents;
+            }
+
+            if phase == 2 && current > last_current && current.is_multiple_of(100) {
+                if total > 0 {
+                    eprintln!("  Indexed {}/{} conversations", current, total);
+                } else {
+                    eprintln!("  Indexed {} conversations", current);
+                }
+                last_current = current;
+            }
+
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    } else {
+        while !handle.is_finished() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    handle.join().map_err(|_| CliError {
+        code: 9,
+        kind: "doctor",
+        message: "doctor worker thread panicked".to_string(),
+        hint: None,
+        retryable: true,
+    })?
+}
+
+/// Comprehensive diagnostic and repair tool for cass installation.
+/// CRITICAL: This function NEVER deletes user data. It only rebuilds derived data (index, db)
+/// from source session files. This is essential because users may have only one copy of their
+/// agent session data, and Codex/Claude Code auto-expire older logs.
+#[allow(clippy::collapsible_if, clippy::collapsible_else_if)]
+fn run_doctor(
+    data_dir_override: &Option<PathBuf>,
+    db_override: Option<PathBuf>,
+    json: bool,
+    fix: bool,
+    verbose: bool,
+    force_rebuild: bool,
+) -> CliResult<()> {
+    use colored::*;
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
+    let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
+    let index_path = crate::search::tantivy::index_dir(&data_dir).map_err(|e| CliError {
+        code: 5,
+        kind: "doctor",
+        message: format!("failed to resolve index directory: {e}"),
+        hint: None,
+        retryable: true,
+    })?;
+    let lock_path = data_dir.join(".index.lock");
+
+    // Track all checks and their results
+    #[derive(serde::Serialize)]
+    struct Check {
+        name: String,
+        status: String, // "pass", "warn", "fail"
+        message: String,
+        fix_available: bool,
+        fix_applied: bool,
+    }
+
+    let mut checks: Vec<Check> = Vec::new();
+    let mut needs_rebuild = force_rebuild;
+    let mut db_ok = false;
+    let mut db_conversations: Option<usize> = None;
+    let mut db_messages: Option<usize> = None;
+    let mut auto_fix_actions: Vec<String> = Vec::new();
+    let mut auto_fix_applied = false;
+
+    // Helper macro to add a check (avoids closure borrow issues)
+    macro_rules! add_check {
+        ($name:expr, $status:expr, $message:expr, $fix_available:expr) => {
+            checks.push(Check {
+                name: $name.to_string(),
+                status: $status.to_string(),
+                message: $message.to_string(),
+                fix_available: $fix_available,
+                fix_applied: false,
+            });
+        };
+    }
+
+    // 1. Check data directory exists and is writable
+    if data_dir.exists() {
+        if std::fs::metadata(&data_dir)
+            .map(|m| !m.permissions().readonly())
+            .unwrap_or(false)
+        {
+            add_check!(
+                "data_directory",
+                "pass",
+                format!("Data directory exists: {}", data_dir.display()),
+                false
+            );
+        } else {
+            add_check!(
+                "data_directory",
+                "fail",
+                format!("Data directory not writable: {}", data_dir.display()),
+                false
+            );
+        }
+    } else {
+        if std::fs::create_dir_all(&data_dir).is_ok() {
+            checks.push(Check {
+                name: "data_directory".to_string(),
+                status: "pass".to_string(),
+                message: format!("Data directory created: {}", data_dir.display()),
+                fix_available: true,
+                fix_applied: true,
+            });
+            auto_fix_actions.push("Created missing data directory".to_string());
+            auto_fix_applied = true;
+        } else {
+            add_check!(
+                "data_directory",
+                "fail",
+                format!("Data directory missing: {}", data_dir.display()),
+                true
+            );
+        }
+    }
+
+    // 2. Check for stale lock files
+    if lock_path.exists() {
+        // Check if lock is stale (older than 1 hour)
+        let is_stale = std::fs::metadata(&lock_path)
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map(|d| d.as_secs() > 3600).unwrap_or(true))
+            .unwrap_or(true);
+
+        if is_stale {
+            if std::fs::remove_file(&lock_path).is_ok() {
+                checks.push(Check {
+                    name: "lock_file".to_string(),
+                    status: "pass".to_string(),
+                    message: "Stale lock file removed".to_string(),
+                    fix_available: true,
+                    fix_applied: true,
+                });
+                auto_fix_actions.push("Removed stale lock file".to_string());
+                auto_fix_applied = true;
+            } else {
+                add_check!(
+                    "lock_file",
+                    "warn",
+                    "Stale lock file found (older than 1 hour)",
+                    true
+                );
+            }
+        } else {
+            add_check!(
+                "lock_file",
+                "warn",
+                "Active lock file found - another process may be indexing",
+                false
+            );
+        }
+    } else {
+        add_check!("lock_file", "pass", "No stale lock files", false);
+    }
+
+    // 3. Check database exists and is readable
+    if db_path.exists() {
+        match rusqlite::Connection::open(&db_path) {
+            Ok(conn) => {
+                let conv_count = conn
+                    .query_row("SELECT COUNT(*) FROM conversations", [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .ok();
+                let msg_count = conn
+                    .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+                    .ok();
+
+                if let (Some(conv_count), Some(msg_count)) = (conv_count, msg_count) {
+                    db_ok = true;
+                    db_conversations = Some(conv_count.max(0) as usize);
+                    db_messages = Some(msg_count.max(0) as usize);
+                    add_check!(
+                        "database",
+                        "pass",
+                        format!(
+                            "Database OK ({} conversations, {} messages)",
+                            conv_count, msg_count
+                        ),
+                        false
+                    );
+                } else {
+                    add_check!("database", "fail", "Database query failed", true);
+                    needs_rebuild = true;
+                }
+            }
+            Err(e) => {
+                add_check!(
+                    "database",
+                    "fail",
+                    format!("Cannot open database: {}", e),
+                    true
+                );
+                needs_rebuild = true;
+            }
+        }
+    } else {
+        add_check!("database", "fail", "Database not found", true);
+        needs_rebuild = true;
+    }
+
+    // 4. Check Tantivy index exists and is readable
+    if index_path.join("meta.json").exists() {
+        match tantivy::Index::open_in_dir(&index_path) {
+            Ok(index) => {
+                match index.reader() {
+                    Ok(reader) => {
+                        let searcher = reader.searcher();
+                        let num_docs = searcher.num_docs();
+                        add_check!(
+                            "index",
+                            "pass",
+                            format!("Search index OK ({} documents)", num_docs),
+                            false
+                        );
+
+                        // Check if index is empty but database has data
+                        if num_docs == 0 && db_ok {
+                            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                                if let Ok(msg_count) =
+                                    conn.query_row("SELECT COUNT(*) FROM messages", [], |r| {
+                                        r.get::<_, i64>(0)
+                                    })
+                                {
+                                    if msg_count > 0 {
+                                        add_check!(
+                                            "index_sync",
+                                            "warn",
+                                            format!(
+                                                "Index is empty but database has {} messages",
+                                                msg_count
+                                            ),
+                                            true
+                                        );
+                                        needs_rebuild = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        add_check!("index", "fail", format!("Cannot read index: {}", e), true);
+                        needs_rebuild = true;
+                    }
+                }
+            }
+            Err(e) => {
+                add_check!("index", "fail", format!("Cannot open index: {}", e), true);
+                needs_rebuild = true;
+            }
+        }
+    } else {
+        add_check!("index", "fail", "Search index not found", true);
+        needs_rebuild = true;
+    }
+
+    // 5. Check config file
+    let config_path = data_dir.join("config.toml");
+    if config_path.exists() {
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => match toml::from_str::<toml::Value>(&content) {
+                Ok(_) => {
+                    add_check!("config", "pass", "Config file valid", false);
+                }
+                Err(e) => {
+                    add_check!(
+                        "config",
+                        "warn",
+                        format!("Config parse error: {}", e),
+                        false
+                    );
+                }
+            },
+            Err(e) => {
+                add_check!(
+                    "config",
+                    "warn",
+                    format!("Cannot read config: {}", e),
+                    false
+                );
+            }
+        }
+    } else {
+        add_check!("config", "pass", "No config file (using defaults)", false);
+    }
+
+    // 6. Check sources.toml
+    let sources_path = dirs::config_dir()
+        .unwrap_or_else(|| data_dir.clone())
+        .join("cass")
+        .join("sources.toml");
+    if sources_path.exists() {
+        match std::fs::read_to_string(&sources_path) {
+            Ok(content) => match toml::from_str::<toml::Value>(&content) {
+                Ok(_) => {
+                    add_check!("sources_config", "pass", "Sources config valid", false);
+                }
+                Err(e) => {
+                    add_check!(
+                        "sources_config",
+                        "warn",
+                        format!("Sources config parse error: {}", e),
+                        false
+                    );
+                }
+            },
+            Err(e) => {
+                add_check!(
+                    "sources_config",
+                    "warn",
+                    format!("Cannot read sources config: {}", e),
+                    false
+                );
+            }
+        }
+    } else {
+        add_check!(
+            "sources_config",
+            "pass",
+            "No remote sources configured",
+            false
+        );
+    }
+
+    // 7. Check common session directories exist
+    let mut session_dirs_found = 0usize;
+    let home = dirs::home_dir().unwrap_or_default();
+    let session_paths = [
+        home.join(".claude"),        // Claude Code
+        home.join(".codex"),         // Codex
+        home.join(".cursor"),        // Cursor
+        home.join(".aider"),         // Aider
+        home.join(".chatgpt"),       // ChatGPT
+        home.join(".config/gemini"), // Gemini
+    ];
+    for path in &session_paths {
+        if path.exists() {
+            session_dirs_found += 1;
+        }
+    }
+    if session_dirs_found > 0 {
+        add_check!(
+            "sessions",
+            "pass",
+            format!("Found {} agent session directories", session_dirs_found),
+            false
+        );
+    } else {
+        add_check!(
+            "sessions",
+            "warn",
+            "No agent session directories found",
+            false
+        );
+    }
+
+    // Apply fix: rebuild index if needed
+    if needs_rebuild {
+        let stderr_is_tty = std::io::stderr().is_terminal();
+        let show_progress = !json && stderr_is_tty;
+        let show_plain = !json && !stderr_is_tty;
+
+        if !json {
+            println!();
+            if fix {
+                println!(
+                    "{} Rebuilding index (this may take a moment)...",
+                    "→".cyan()
+                );
+            } else {
+                println!(
+                    "{} Auto-repair: rebuilding index (this may take a moment)...",
+                    "→".cyan()
+                );
+            }
+        }
+
+        let progress = std::sync::Arc::new(indexer::IndexingProgress::default());
+        let rebuild_from_db = db_ok && db_messages.unwrap_or(0) > 0;
+
+        if rebuild_from_db {
+            let total_convs = db_conversations.unwrap_or(0);
+            let rebuild_handle = std::thread::spawn({
+                let progress = progress.clone();
+                let db_path = db_path.clone();
+                let data_dir = data_dir.clone();
+                move || rebuild_tantivy_from_db(&db_path, &data_dir, total_convs, Some(progress))
+            });
+
+            let rebuild_result = wait_with_progress(
+                rebuild_handle,
+                progress,
+                show_progress,
+                show_plain,
+                "Rebuilding search index from database...",
+            );
+
+            match rebuild_result {
+                Ok(message_count) => {
+                    needs_rebuild = false;
+                    auto_fix_actions.push("Rebuilt search index from database".to_string());
+                    auto_fix_applied = true;
+                    for check in &mut checks {
+                        if check.name == "index" || check.name == "index_sync" {
+                            check.status = "pass".to_string();
+                            check.fix_applied = true;
+                            check.message = "Search index rebuilt from database".to_string();
+                        }
+                    }
+                    checks.push(Check {
+                        name: "rebuild".to_string(),
+                        status: "pass".to_string(),
+                        message: format!(
+                            "Index rebuilt from database ({} messages)",
+                            message_count
+                        ),
+                        fix_available: true,
+                        fix_applied: true,
+                    });
+                }
+                Err(e) => {
+                    checks.push(Check {
+                        name: "rebuild".to_string(),
+                        status: "fail".to_string(),
+                        message: format!("Index rebuild failed: {}", e),
+                        fix_available: true,
+                        fix_applied: false,
+                    });
+                }
+            }
+        } else {
+            // Preserve existing DB when possible; rebuild only derived data.
+            let mut can_rebuild = true;
+            let mut db_backup_done = false;
+            if db_path.exists() && !db_ok {
+                let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                let backup_path = db_path.with_extension(format!("corrupt.{ts}"));
+                match std::fs::rename(&db_path, &backup_path) {
+                    Ok(_) => {
+                        db_backup_done = true;
+                        checks.push(Check {
+                            name: "database_backup".to_string(),
+                            status: "pass".to_string(),
+                            message: format!(
+                                "Backed up corrupted database to {}",
+                                backup_path.display()
+                            ),
+                            fix_available: true,
+                            fix_applied: true,
+                        });
+                        auto_fix_actions.push(format!(
+                            "Backed up corrupted database to {}",
+                            backup_path.display()
+                        ));
+                        auto_fix_applied = true;
+                    }
+                    Err(e) => {
+                        checks.push(Check {
+                            name: "database_backup".to_string(),
+                            status: "fail".to_string(),
+                            message: format!("Failed to backup corrupted database: {}", e),
+                            fix_available: true,
+                            fix_applied: false,
+                        });
+                        can_rebuild = false;
+                    }
+                }
+            }
+
+            if !can_rebuild {
+                checks.push(Check {
+                    name: "rebuild".to_string(),
+                    status: "fail".to_string(),
+                    message: "Index rebuild skipped because database backup failed".to_string(),
+                    fix_available: true,
+                    fix_applied: false,
+                });
+                needs_rebuild = true;
+            } else {
+                let index_opts = indexer::IndexOptions {
+                    full: false,
+                    force_rebuild,
+                    watch: false,
+                    watch_once_paths: None,
+                    db_path: db_path.clone(),
+                    data_dir: data_dir.clone(),
+                    progress: Some(progress.clone()),
+                };
+
+                let rebuild_handle = std::thread::spawn(move || {
+                    indexer::run_index(index_opts, None)
+                        .map(|_| 0usize)
+                        .map_err(|e| CliError {
+                            code: 5,
+                            kind: "doctor",
+                            message: format!("index rebuild failed: {e}"),
+                            hint: None,
+                            retryable: true,
+                        })
+                });
+
+                let rebuild_result = wait_with_progress(
+                    rebuild_handle,
+                    progress,
+                    show_progress,
+                    show_plain,
+                    "Rebuilding index from source sessions...",
+                );
+
+                match rebuild_result {
+                    Ok(_) => {
+                        needs_rebuild = false;
+                        let rebuild_note = if db_backup_done {
+                            "Rebuilt index from source sessions (new database created)".to_string()
+                        } else {
+                            "Rebuilt index from source sessions (database preserved)".to_string()
+                        };
+                        auto_fix_actions.push(rebuild_note.clone());
+                        auto_fix_applied = true;
+                        for check in &mut checks {
+                            if check.name == "index" || check.name == "index_sync" {
+                                check.status = "pass".to_string();
+                                check.fix_applied = true;
+                                check.message = rebuild_note.clone();
+                            }
+                        }
+                        checks.push(Check {
+                            name: "rebuild".to_string(),
+                            status: "pass".to_string(),
+                            message: "Index rebuilt successfully".to_string(),
+                            fix_available: true,
+                            fix_applied: true,
+                        });
+                    }
+                    Err(e) => {
+                        checks.push(Check {
+                            name: "rebuild".to_string(),
+                            status: "fail".to_string(),
+                            message: format!("Index rebuild failed: {}", e),
+                            fix_available: true,
+                            fix_applied: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Count issues
+    let fail_count = checks.iter().filter(|c| c.status == "fail").count();
+    let warn_count = checks.iter().filter(|c| c.status == "warn").count();
+    let issues_found = fail_count + warn_count;
+    let issues_fixed = checks.iter().filter(|c| c.fix_applied).count();
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let all_pass = checks.iter().all(|c| c.status == "pass");
+
+    // Output
+    if json {
+        let payload = serde_json::json!({
+            "healthy": fail_count == 0,
+            "issues_found": issues_found,
+            "issues_fixed": issues_fixed,
+            "failures": fail_count,
+            "warnings": warn_count,
+            "needs_rebuild": needs_rebuild,
+            "auto_fix_applied": auto_fix_applied,
+            "auto_fix_actions": auto_fix_actions,
+            "checks": checks,
+            "_meta": {
+                "elapsed_ms": elapsed_ms,
+                "data_dir": data_dir.display().to_string(),
+                "db_path": db_path.display().to_string(),
+                "fix_mode": fix,
+            }
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+    } else {
+        // Human-readable output
+        println!("{}", "CASS Doctor".bold());
+        println!();
+
+        for check in &checks {
+            let icon = match check.status.as_str() {
+                "pass" => "✓".green(),
+                "warn" => "⚠".yellow(),
+                "fail" => "✗".red(),
+                _ => "?".normal(),
+            };
+
+            // Show passed checks only in verbose mode
+            if check.status == "pass" && !verbose {
+                continue;
+            }
+
+            let fix_indicator = if check.fix_applied {
+                " [fixed]".green().to_string()
+            } else if check.fix_available && !fix {
+                " [fixable]".yellow().to_string()
+            } else {
+                String::new()
+            };
+
+            println!(
+                "{} {}: {}{}",
+                icon,
+                check.name.bold(),
+                check.message,
+                fix_indicator
+            );
+        }
+
+        println!();
+        if all_pass {
+            println!("{} All checks passed ({elapsed_ms}ms)", "✓".green());
+        } else {
+            let summary_icon = if fail_count > 0 {
+                "✗".red()
+            } else {
+                "⚠".yellow()
+            };
+            println!(
+                "{} {} failure(s), {} warning(s), {} fixed ({elapsed_ms}ms)",
+                summary_icon, fail_count, warn_count, issues_fixed
+            );
+
+            if auto_fix_applied && !auto_fix_actions.is_empty() {
+                println!();
+                println!("{}", "Auto-repair actions:".bold());
+                for action in &auto_fix_actions {
+                    println!("  - {action}");
+                }
+            }
+
+            if needs_rebuild {
+                println!();
+                println!("{}", "Recommended action:".bold());
+                println!("  cass index --full     # Rebuild from source sessions");
+                println!();
+                println!("{}", "Note: Your source session files are SAFE. Only derived data (index/db) will be rebuilt.".dimmed());
+            }
+        }
+    }
+
+    if fail_count == 0 {
+        Ok(())
+    } else {
+        Err(CliError {
+            code: 5, // Data corruption code
+            kind: "doctor",
+            message: format!("{} failure(s) remain", fail_count),
+            hint: Some(
+                "Automatic safe repairs were attempted. Run 'cass index --full' to rebuild from source sessions or check cass.log for details."
+                    .to_string(),
+            ),
             retryable: true,
         })
     }
@@ -5856,6 +7221,7 @@ fn spawn_background_indexer(
 ) -> Option<Sender<IndexerEvent>> {
     let (tx, rx) = crossbeam_channel::unbounded();
     let tx_clone = tx.clone();
+    let progress_for_error = progress.clone();
     std::thread::spawn(move || {
         let db_path = db.unwrap_or_else(|| data_dir.join("agent_search.db"));
         let opts = IndexOptions {
@@ -5870,6 +7236,14 @@ fn spawn_background_indexer(
         // Pass the receiver to run_index so it can listen for commands
         if let Err(e) = indexer::run_index(opts, Some((tx_clone, rx))) {
             warn!("Background indexer failed: {}", e);
+            if let Some(p) = progress_for_error {
+                if let Ok(mut last_error) = p.last_error.lock() {
+                    *last_error = Some(e.to_string());
+                }
+                p.phase.store(0, std::sync::atomic::Ordering::Relaxed);
+                p.is_rebuilding
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     });
     Some(tx)
@@ -5976,6 +7350,10 @@ fn run_index_with_data(
     let watch_once_paths = watch_once
         .filter(|paths| !paths.is_empty())
         .or_else(read_watch_once_paths_env);
+
+    // Create progress tracker for real-time feedback
+    let index_progress = std::sync::Arc::new(indexer::IndexingProgress::default());
+
     let opts = IndexOptions {
         full,
         force_rebuild,
@@ -5983,21 +7361,14 @@ fn run_index_with_data(
         watch_once_paths: watch_once_paths.clone(),
         db_path: db_path.clone(),
         data_dir: data_dir.clone(),
-        progress: None,
+        progress: Some(index_progress.clone()),
     };
-    let spinner = if json {
-        None
-    } else {
-        match progress {
-            ProgressResolved::Bars => Some(indicatif::ProgressBar::new_spinner()),
-            ProgressResolved::Plain => None,
-            ProgressResolved::None => None,
-        }
-    };
-    if let Some(pb) = &spinner {
-        pb.set_message(if full { "index --full" } else { "index" });
-        pb.enable_steady_tick(Duration::from_millis(120));
-    } else if !json && matches!(progress, ProgressResolved::Plain) {
+
+    // Set up progress display
+    let show_progress = !json && matches!(progress, ProgressResolved::Bars);
+    let show_plain = !json && matches!(progress, ProgressResolved::Plain);
+
+    if show_plain {
         eprintln!(
             "index starting (full={}, watch={}, watch_once={})",
             full,
@@ -6010,21 +7381,220 @@ fn run_index_with_data(
     }
 
     let start = Instant::now();
-    // CLI index command doesn't support manual reindex triggering from TUI, so pass None
-    let res = indexer::run_index(opts, None).map_err(|e| {
-        let chain = e
-            .chain()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(" | ");
-        CliError {
+
+    // Run indexer in background thread so we can poll progress
+    let opts_clone = opts.clone();
+    let index_handle = std::thread::spawn(move || indexer::run_index(opts_clone, None));
+
+    // Poll and display progress while indexer runs
+    if show_progress {
+        use indicatif::{ProgressBar, ProgressStyle};
+        use std::sync::atomic::Ordering;
+
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        // Set initial message BEFORE starting the tick
+        pb.set_message(if full {
+            "Starting full index...".to_string()
+        } else {
+            "Starting incremental index...".to_string()
+        });
+        pb.enable_steady_tick(Duration::from_millis(80));
+
+        // Track last values to detect changes; use sentinel values to force first update
+        let mut last_phase = usize::MAX;
+        let mut last_current = usize::MAX;
+        let mut last_agents = usize::MAX;
+        let mut last_update = std::time::Instant::now();
+
+        loop {
+            // Check if indexer finished
+            if index_handle.is_finished() {
+                break;
+            }
+
+            let phase = index_progress.phase.load(Ordering::Relaxed);
+            let total = index_progress.total.load(Ordering::Relaxed);
+            let current = index_progress.current.load(Ordering::Relaxed);
+            let agents = index_progress.discovered_agents.load(Ordering::Relaxed);
+            let is_rebuilding = index_progress.is_rebuilding.load(Ordering::Relaxed);
+
+            // Get agent names for display
+            let agent_names: Vec<String> = index_progress
+                .discovered_agent_names
+                .lock()
+                .map(|names| names.clone())
+                .unwrap_or_default();
+
+            let phase_str = match phase {
+                1 => "Scanning",
+                2 => "Indexing",
+                _ => "Preparing",
+            };
+
+            let rebuild_indicator = if is_rebuilding { " (rebuilding)" } else { "" };
+
+            let msg = if phase == 1 {
+                let scan_progress = if total > 0 {
+                    format!("{current}/{total} connectors")
+                } else {
+                    "scanning connectors".to_string()
+                };
+                if agents > 0 {
+                    let names_preview = if agent_names.len() <= 3 {
+                        agent_names.join(", ")
+                    } else {
+                        format!(
+                            "{}, ... +{} more",
+                            agent_names[..3].join(", "),
+                            agent_names.len() - 3
+                        )
+                    };
+                    format!(
+                        "{}{}: {} · {} agent(s): {}",
+                        phase_str, rebuild_indicator, scan_progress, agents, names_preview
+                    )
+                } else {
+                    format!(
+                        "{}{}: {} · detecting agents...",
+                        phase_str, rebuild_indicator, scan_progress
+                    )
+                }
+            } else if phase == 2 {
+                // Indexing phase - show progress
+                if total > 0 {
+                    let pct = (current as f64 / total as f64 * 100.0).min(100.0);
+                    format!(
+                        "{}{}: {}/{} conversations ({:.0}%)",
+                        phase_str, rebuild_indicator, current, total, pct
+                    )
+                } else {
+                    format!("{}{}: Processing...", phase_str, rebuild_indicator)
+                }
+            } else {
+                format!("{}{}...", phase_str, rebuild_indicator)
+            };
+
+            // Update when values change OR every 500ms to show activity
+            let now = std::time::Instant::now();
+            let should_update = phase != last_phase
+                || current != last_current
+                || agents != last_agents
+                || now.duration_since(last_update).as_millis() > 500;
+
+            if should_update {
+                pb.set_message(msg);
+                last_phase = phase;
+                last_current = current;
+                last_agents = agents;
+                last_update = now;
+            }
+
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // Final update
+        let total = index_progress.total.load(Ordering::Relaxed);
+        let current = index_progress.current.load(Ordering::Relaxed);
+        let agents = index_progress.discovered_agents.load(Ordering::Relaxed);
+        pb.finish_with_message(format!(
+            "Done: {} conversations from {} agent(s)",
+            current.max(total),
+            agents
+        ));
+    } else if show_plain {
+        // Plain mode: print periodic status updates
+        use std::sync::atomic::Ordering;
+
+        eprintln!("Starting index...");
+        let mut last_phase = usize::MAX;
+        let mut last_agents = 0;
+        let mut last_current = 0;
+        let mut last_scan_current = 0;
+
+        loop {
+            if index_handle.is_finished() {
+                break;
+            }
+
+            let phase = index_progress.phase.load(Ordering::Relaxed);
+            let total = index_progress.total.load(Ordering::Relaxed);
+            let current = index_progress.current.load(Ordering::Relaxed);
+            let agents = index_progress.discovered_agents.load(Ordering::Relaxed);
+
+            // Print status on phase change
+            if phase != last_phase {
+                match phase {
+                    1 => eprintln!("Scanning for agents..."),
+                    2 => eprintln!("Indexing conversations..."),
+                    _ => {}
+                }
+                last_phase = phase;
+            }
+
+            // Print scan progress during discovery
+            if phase == 1 && current != last_scan_current {
+                if total > 0 {
+                    eprintln!("  Scanned {}/{} connectors", current, total);
+                } else {
+                    eprintln!("  Scanned {} connectors", current);
+                }
+                last_scan_current = current;
+            }
+
+            // Print agent discovery updates
+            if agents > last_agents {
+                eprintln!("  Found {} agent(s)", agents);
+                last_agents = agents;
+            }
+
+            // Print indexing progress every 100 conversations
+            if phase == 2 && current > last_current && current % 100 == 0 {
+                if total > 0 {
+                    eprintln!("  Indexed {}/{} conversations", current, total);
+                } else {
+                    eprintln!("  Indexed {} conversations", current);
+                }
+                last_current = current;
+            }
+
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    } else {
+        // No progress display (json mode or none): just wait for completion
+        while !index_handle.is_finished() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    // Get the result from the indexer thread
+    let res = index_handle
+        .join()
+        .map_err(|_| CliError {
             code: 9,
             kind: "index",
-            message: format!("index failed: {chain}"),
+            message: "index thread panicked".to_string(),
             hint: None,
             retryable: true,
-        }
-    });
+        })?
+        .map_err(|e| {
+            let chain = e
+                .chain()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            CliError {
+                code: 9,
+                kind: "index",
+                message: format!("index failed: {chain}"),
+                hint: None,
+                retryable: true,
+            }
+        });
     let elapsed_ms = start.elapsed().as_millis();
 
     if let Err(err) = &res {
@@ -6087,9 +7657,7 @@ fn run_index_with_data(
         );
     }
 
-    if let Some(pb) = spinner {
-        pb.finish_and_clear();
-    } else if !json && matches!(progress, ProgressResolved::Plain) {
+    if show_plain {
         eprintln!("index completed");
     }
 
@@ -6101,6 +7669,12 @@ pub fn default_db_path() -> PathBuf {
 }
 
 pub fn default_data_dir() -> PathBuf {
+    if let Ok(dir) = dotenvy::var("CASS_DATA_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
     directories::ProjectDirs::from("com", "coding-agent-search", "coding-agent-search")
         .map(|p| p.data_dir().to_path_buf())
         .or_else(|| dirs::home_dir().map(|h| h.join(".coding-agent-search")))
@@ -6139,9 +7713,9 @@ struct ReleaseInfo {
 
 async fn maybe_prompt_for_update(once: bool) -> Result<()> {
     if once
-        || std::env::var("CI").is_ok()
-        || std::env::var("TUI_HEADLESS").is_ok()
-        || std::env::var("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT").is_ok()
+        || dotenvy::var("CI").is_ok()
+        || dotenvy::var("TUI_HEADLESS").is_ok()
+        || dotenvy::var("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT").is_ok()
         || !io::stdin().is_terminal()
     {
         return Ok(());
@@ -6245,6 +7819,232 @@ fn run_self_update(tag: &str) -> Result<bool> {
 // NEW COMMANDS: Export, Expand, Timeline
 // ============================================================================
 
+/// Detect if a path points to an OpenCode storage session file.
+/// OpenCode stores sessions in: storage/session/{projectID}/{sessionID}.json
+fn detect_opencode_session(path: &Path) -> bool {
+    // Must be a JSON file
+    if path.extension().map(|e| e != "json").unwrap_or(true) {
+        return false;
+    }
+
+    // Primary check: verify directory structure
+    // Path should be: {storage_root}/session/{projectID}/{sessionID}.json
+    // with sibling message/ and/or part/ directories
+    if let Some(parent) = path.parent()
+        && let Some(session_dir) = parent.parent()
+        && session_dir
+            .file_name()
+            .map(|n| n == "session")
+            .unwrap_or(false)
+        && let Some(storage_root) = session_dir.parent()
+    {
+        let message_dir = storage_root.join("message");
+        let part_dir = storage_root.join("part");
+        if message_dir.exists() || part_dir.exists() {
+            return true;
+        }
+    }
+
+    // Fallback: check if path follows opencode naming convention
+    // Pattern: .../opencode/storage/session/...
+    let components: Vec<_> = path.components().map(|c| c.as_os_str()).collect();
+    for window in components.windows(3) {
+        let w0 = window[0].to_string_lossy().to_lowercase();
+        let w1 = window[1].to_string_lossy().to_lowercase();
+        let w2 = window[2].to_string_lossy().to_lowercase();
+        if w0.contains("opencode") && w1 == "storage" && w2 == "session" {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Load an OpenCode session for export.
+/// Returns (title, start_ts, end_ts, messages as JSON values).
+#[allow(clippy::type_complexity)]
+fn load_opencode_session_for_export(
+    session_path: &Path,
+) -> anyhow::Result<(
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Vec<serde_json::Value>,
+)> {
+    use anyhow::Context;
+    use std::collections::HashMap;
+    use walkdir::WalkDir;
+
+    // Parse session file
+    let session_content = std::fs::read_to_string(session_path)
+        .with_context(|| format!("read session file {}", session_path.display()))?;
+    let session: serde_json::Value = serde_json::from_str(&session_content)
+        .with_context(|| format!("parse session JSON {}", session_path.display()))?;
+
+    let session_id = session["id"]
+        .as_str()
+        .context("session missing 'id' field")?;
+    let session_title = session["title"].as_str().map(String::from);
+    let session_start = session["time"]["created"].as_i64();
+    let session_end = session["time"]["updated"].as_i64();
+
+    // Find storage root by going up from session file
+    // Path: storage/session/{projectID}/{sessionID}.json
+    let storage_root = session_path
+        .parent() // {projectID}/
+        .and_then(|p| p.parent()) // session/
+        .and_then(|p| p.parent()) // storage/
+        .context("cannot determine storage root from session path")?;
+
+    let message_dir = storage_root.join("message").join(session_id);
+    let part_dir = storage_root.join("part");
+
+    if !message_dir.exists() {
+        anyhow::bail!("message directory not found: {}", message_dir.display());
+    }
+
+    // Build map of message_id -> parts
+    #[derive(serde::Deserialize, Clone)]
+    struct PartInfo {
+        #[serde(rename = "messageID")]
+        message_id: Option<String>,
+        #[serde(rename = "type")]
+        part_type: Option<String>,
+        text: Option<String>,
+        state: Option<PartState>,
+    }
+    #[derive(serde::Deserialize, Clone)]
+    struct PartState {
+        output: Option<String>,
+    }
+
+    let mut parts_by_msg: HashMap<String, Vec<PartInfo>> = HashMap::new();
+    if part_dir.exists() {
+        for entry in WalkDir::new(&part_dir).into_iter().flatten() {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let p = entry.path();
+            if p.extension().map(|e| e == "json").unwrap_or(false)
+                && let Ok(content) = std::fs::read_to_string(p)
+                && let Ok(part) = serde_json::from_str::<PartInfo>(&content)
+                && let Some(msg_id) = &part.message_id
+            {
+                parts_by_msg.entry(msg_id.clone()).or_default().push(part);
+            }
+        }
+    }
+
+    // Load messages
+    #[derive(serde::Deserialize)]
+    struct MsgInfo {
+        id: String,
+        role: Option<String>,
+        #[serde(rename = "modelID")]
+        model_id: Option<String>,
+        time: Option<MsgTime>,
+    }
+    #[derive(serde::Deserialize)]
+    struct MsgTime {
+        created: Option<i64>,
+    }
+
+    let mut messages: Vec<(i64, serde_json::Value)> = Vec::new();
+
+    for entry in WalkDir::new(&message_dir)
+        .max_depth(1)
+        .into_iter()
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let p = entry.path();
+        if !p.extension().map(|e| e == "json").unwrap_or(false) {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(p) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let msg_info: MsgInfo = match serde_json::from_str(&content) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        // Assemble content from parts
+        let parts = parts_by_msg.get(&msg_info.id).cloned().unwrap_or_default();
+        let mut content_pieces: Vec<String> = Vec::new();
+        for part in &parts {
+            match part.part_type.as_deref() {
+                Some("text") => {
+                    if let Some(text) = &part.text
+                        && !text.trim().is_empty()
+                    {
+                        content_pieces.push(text.clone());
+                    }
+                }
+                Some("tool") => {
+                    if let Some(state) = &part.state
+                        && let Some(output) = &state.output
+                        && !output.trim().is_empty()
+                    {
+                        content_pieces.push(format!("[Tool Output]\n{output}"));
+                    }
+                }
+                Some("reasoning") => {
+                    if let Some(text) = &part.text
+                        && !text.trim().is_empty()
+                    {
+                        content_pieces.push(format!("[Reasoning]\n{text}"));
+                    }
+                }
+                Some("patch") => {
+                    if let Some(text) = &part.text
+                        && !text.trim().is_empty()
+                    {
+                        content_pieces.push(format!("[Patch]\n{text}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let assembled_content = content_pieces.join("\n\n");
+        if assembled_content.trim().is_empty() {
+            continue;
+        }
+
+        let role = msg_info.role.unwrap_or_else(|| "assistant".to_string());
+        let timestamp = msg_info.time.as_ref().and_then(|t| t.created).unwrap_or(0);
+
+        // Build JSON value matching expected format for formatters
+        let msg_json = serde_json::json!({
+            "role": role,
+            "content": assembled_content,
+            "timestamp": timestamp,
+            "model": msg_info.model_id,
+        });
+
+        messages.push((timestamp, msg_json));
+    }
+
+    // Sort by timestamp
+    messages.sort_by_key(|(ts, _)| *ts);
+    let sorted_messages: Vec<serde_json::Value> = messages.into_iter().map(|(_, m)| m).collect();
+
+    // Compute timestamps from messages if not in session
+    let start = session_start.or_else(|| {
+        sorted_messages
+            .first()
+            .and_then(|m| m["timestamp"].as_i64())
+    });
+    let end = session_end.or_else(|| sorted_messages.last().and_then(|m| m["timestamp"].as_i64()));
+
+    Ok((session_title, start, end, sorted_messages))
+}
+
 /// Export a conversation to markdown or other formats
 fn run_export(
     path: &Path,
@@ -6265,34 +8065,66 @@ fn run_export(
         });
     }
 
-    let file = File::open(path).map_err(|e| CliError {
-        code: 9,
-        kind: "file-open",
-        message: format!("Failed to open file: {e}"),
-        hint: None,
-        retryable: false,
-    })?;
-
-    let reader = BufReader::new(file);
     let mut messages: Vec<serde_json::Value> = Vec::new();
     let mut session_title: Option<String> = None;
     let mut session_start: Option<i64> = None;
-    let mut session_end: Option<i64> = None;
+    let mut _session_end: Option<i64> = None;
 
-    for line in reader.lines().map_while(Result::ok) {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-            if let Some(ts) = msg.get("timestamp").and_then(|t| t.as_i64()) {
-                if session_start.is_none() || ts < session_start.unwrap() {
-                    session_start = Some(ts);
-                }
-                if session_end.is_none() || ts > session_end.unwrap() {
-                    session_end = Some(ts);
-                }
+    // Check if this is an OpenCode storage session file
+    // OpenCode stores sessions in: storage/session/{projectID}/{sessionID}.json
+    // with messages in: storage/message/{sessionID}/*.json
+    // and parts in: storage/part/{messageID}/*.json
+    let is_opencode = detect_opencode_session(path);
+
+    if is_opencode {
+        // Load OpenCode session using split storage format
+        match load_opencode_session_for_export(path) {
+            Ok((title, start, end, msgs)) => {
+                session_title = title;
+                session_start = start;
+                _session_end = end;
+                messages = msgs;
             }
-            messages.push(msg);
+            Err(e) => {
+                return Err(CliError {
+                    code: 9,
+                    kind: "opencode-parse",
+                    message: format!("Failed to parse OpenCode session: {e}"),
+                    hint: Some(
+                        "Ensure the session file is valid and message/part directories exist"
+                            .into(),
+                    ),
+                    retryable: false,
+                });
+            }
+        }
+    } else {
+        // Standard JSONL format
+        let file = File::open(path).map_err(|e| CliError {
+            code: 9,
+            kind: "file-open",
+            message: format!("Failed to open file: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+
+        let reader = BufReader::new(file);
+
+        for line in reader.lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
+                if let Some(ts) = msg.get("timestamp").and_then(|t| t.as_i64()) {
+                    if session_start.is_none() || ts < session_start.unwrap() {
+                        session_start = Some(ts);
+                    }
+                    if _session_end.is_none() || ts > _session_end.unwrap() {
+                        _session_end = Some(ts);
+                    }
+                }
+                messages.push(msg);
+            }
         }
     }
 
@@ -6301,27 +8133,33 @@ fn run_export(
             code: 9,
             kind: "empty-session",
             message: format!("No messages found in: {}", path.display()),
-            hint: None,
+            hint: if is_opencode {
+                Some("Check that storage/message/{sessionID}/ contains message files".into())
+            } else {
+                None
+            },
             retryable: false,
         });
     }
 
-    // Find title from first user message
-    for msg in &messages {
-        let role = extract_role(msg);
-        if role == "user" {
-            let content = extract_text_content(msg);
-            if !content.is_empty() {
-                session_title = Some(
-                    content
-                        .lines()
-                        .next()
-                        .unwrap_or("Untitled Session")
-                        .chars()
-                        .take(80)
-                        .collect(),
-                );
-                break;
+    // Find title from first user message (only if no title already set)
+    if session_title.is_none() {
+        for msg in &messages {
+            let role = extract_role(msg);
+            if role == "user" {
+                let content = extract_text_content(msg);
+                if !content.is_empty() {
+                    session_title = Some(
+                        content
+                            .lines()
+                            .next()
+                            .unwrap_or("Untitled Session")
+                            .chars()
+                            .take(80)
+                            .collect(),
+                    );
+                    break;
+                }
             }
         }
     }
@@ -7137,6 +8975,38 @@ fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
         SourcesCommand::Mappings(action) => {
             run_mappings_command(action)?;
         }
+        SourcesCommand::Discover {
+            preset,
+            skip_existing,
+            json,
+        } => {
+            run_sources_discover(&preset, skip_existing, json)?;
+        }
+        SourcesCommand::Setup {
+            dry_run,
+            non_interactive,
+            hosts,
+            skip_install,
+            skip_index,
+            skip_sync,
+            timeout,
+            resume,
+            verbose,
+            json,
+        } => {
+            run_sources_setup(sources::setup::SetupOptions {
+                dry_run,
+                non_interactive: non_interactive || json,
+                hosts,
+                skip_install,
+                skip_index,
+                skip_sync,
+                timeout,
+                resume,
+                verbose,
+                json,
+            })?;
+        }
     }
     Ok(())
 }
@@ -7386,6 +9256,21 @@ fn parse_source_url(url: &str, name: Option<&str>) -> Result<(String, String), C
     // Strip ssh:// prefix if present
     let host = url.strip_prefix("ssh://").unwrap_or(url);
 
+    // Basic hardening: avoid whitespace/control chars and option-injection.
+    if host.trim().is_empty()
+        || host.starts_with('-')
+        || host.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(CliError {
+            code: 10,
+            kind: "config",
+            message: "Invalid host: contains whitespace/control characters or starts with '-'"
+                .into(),
+            hint: Some("Use format: user@hostname (e.g., user@laptop.local)".into()),
+            retryable: false,
+        });
+    }
+
     // Validate URL contains @
     if !host.contains('@') {
         return Err(CliError {
@@ -7424,6 +9309,7 @@ fn test_ssh_connectivity(host: &str) -> CliResult<()> {
             "BatchMode=yes",
             "-o",
             "StrictHostKeyChecking=accept-new",
+            "--",
             host,
             "echo",
             "ok",
@@ -7523,24 +9409,17 @@ fn run_sources_remove(name: &str, purge: bool, skip_confirm: bool) -> CliResult<
     // Handle purge
     if purge {
         // Find and remove synced data directory
-        // Respect XDG_DATA_HOME first (important for testing and Linux users)
-        let data_dir = std::env::var("XDG_DATA_HOME")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(dirs::data_local_dir);
-
-        if let Some(data_dir) = data_dir {
-            let source_dir = data_dir.join("cass").join("remotes").join(name);
-            if source_dir.exists() {
-                std::fs::remove_dir_all(&source_dir).map_err(|e| CliError {
-                    code: 15,
-                    kind: "io",
-                    message: format!("Failed to delete synced data: {e}"),
-                    hint: None,
-                    retryable: false,
-                })?;
-                println!("Deleted synced data at {}", source_dir.display());
-            }
+        let data_dir = default_data_dir();
+        let source_dir = data_dir.join("remotes").join(name);
+        if source_dir.exists() {
+            std::fs::remove_dir_all(&source_dir).map_err(|e| CliError {
+                code: 15,
+                kind: "io",
+                message: format!("Failed to delete synced data: {e}"),
+                hint: None,
+                retryable: false,
+            })?;
+            println!("Deleted synced data at {}", source_dir.display());
         }
         println!("Note: Run 'cass reindex' to remove entries from the search index.");
     }
@@ -7712,6 +9591,7 @@ fn check_ssh_connectivity(host: &str) -> DiagnosticCheck {
             "BatchMode=yes",
             "-o",
             "StrictHostKeyChecking=accept-new",
+            "--",
             host,
             "true",
         ])
@@ -7759,6 +9639,7 @@ fn check_rsync_available(host: &str) -> DiagnosticCheck {
             "ConnectTimeout=5",
             "-o",
             "BatchMode=yes",
+            "--",
             host,
             "rsync",
             "--version",
@@ -7816,6 +9697,7 @@ fn check_remote_path(host: &str, path: &str) -> DiagnosticCheck {
             "ConnectTimeout=5",
             "-o",
             "BatchMode=yes",
+            "--",
             host,
             "sh",
             "-c",
@@ -7861,52 +9743,44 @@ fn check_remote_path(host: &str, path: &str) -> DiagnosticCheck {
 
 /// Check if local storage directory is writable
 fn check_local_storage(source_name: &str) -> DiagnosticCheck {
-    if let Some(data_dir) = dirs::data_local_dir() {
-        let source_dir = data_dir.join("cass").join("remotes").join(source_name);
+    let data_dir = default_data_dir();
+    let source_dir = data_dir.join("remotes").join(source_name);
 
-        // Try to create the directory if it doesn't exist
-        if !source_dir.exists() {
-            if std::fs::create_dir_all(&source_dir).is_ok() {
-                return DiagnosticCheck {
-                    name: "Local Storage".into(),
-                    status: "pass".into(),
-                    message: format!("{} is writable", source_dir.display()),
-                    remediation: None,
-                };
-            } else {
-                return DiagnosticCheck {
-                    name: "Local Storage".into(),
-                    status: "fail".into(),
-                    message: format!("Cannot create {}", source_dir.display()),
-                    remediation: Some("Check file permissions on data directory".into()),
-                };
-            }
-        }
-
-        // Directory exists, check if writable
-        let test_file = source_dir.join(".doctor_test");
-        if std::fs::write(&test_file, b"test").is_ok() {
-            let _ = std::fs::remove_file(&test_file);
-            DiagnosticCheck {
+    // Try to create the directory if it doesn't exist
+    if !source_dir.exists() {
+        if std::fs::create_dir_all(&source_dir).is_ok() {
+            return DiagnosticCheck {
                 name: "Local Storage".into(),
                 status: "pass".into(),
                 message: format!("{} is writable", source_dir.display()),
                 remediation: None,
-            }
+            };
         } else {
-            DiagnosticCheck {
+            return DiagnosticCheck {
                 name: "Local Storage".into(),
                 status: "fail".into(),
-                message: format!("{} is not writable", source_dir.display()),
+                message: format!("Cannot create {}", source_dir.display()),
                 remediation: Some("Check file permissions on data directory".into()),
-            }
+            };
+        }
+    }
+
+    // Directory exists, check if writable
+    let test_file = source_dir.join(".doctor_test");
+    if std::fs::write(&test_file, b"test").is_ok() {
+        let _ = std::fs::remove_file(&test_file);
+        DiagnosticCheck {
+            name: "Local Storage".into(),
+            status: "pass".into(),
+            message: format!("{} is writable", source_dir.display()),
+            remediation: None,
         }
     } else {
         DiagnosticCheck {
             name: "Local Storage".into(),
             status: "fail".into(),
-            message: "Could not determine local data directory".into(),
-            remediation: Some("Set XDG_DATA_HOME or HOME environment variable".into()),
+            message: format!("{} is not writable", source_dir.display()),
+            remediation: Some("Check file permissions on data directory".into()),
         }
     }
 }
@@ -7977,19 +9851,9 @@ fn run_sources_sync(
         return Ok(());
     }
 
-    // Get data directory for sync engine and status
-    // Respect XDG_DATA_HOME first (important for testing and Linux users)
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .map(|p| PathBuf::from(p).join("cass"))
-        .or_else(|| dirs::data_local_dir().map(|d| d.join("cass")))
-        .ok_or_else(|| CliError {
-            code: 9,
-            kind: "config",
-            message: "Could not determine data directory".into(),
-            hint: Some("Set XDG_DATA_HOME or HOME environment variable".into()),
-            retryable: false,
-        })?;
+    // Use the same data dir as the rest of the app (DB, Tantivy index, remotes mirror).
+    // Override with `CASS_DATA_DIR` or command-specific `--data-dir` flags elsewhere.
+    let data_dir = default_data_dir();
 
     // Create sync engine
     let engine = SyncEngine::new(&data_dir);
@@ -8152,6 +10016,840 @@ fn run_sources_sync(
             json_output,
             None, // idempotency_key
         )?;
+    }
+
+    Ok(())
+}
+
+/// Auto-discover SSH hosts from ~/.ssh/config (P5.6)
+fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) -> CliResult<()> {
+    use crate::sources::config::{SourcesConfig, discover_ssh_hosts, get_preset_paths};
+    use colored::Colorize;
+
+    // Get preset paths
+    let preset_paths = get_preset_paths(preset).map_err(|e| CliError {
+        code: 9,
+        kind: "config",
+        message: format!("Invalid preset: {e}"),
+        hint: Some("Valid presets: linux-defaults, macos-defaults".into()),
+        retryable: false,
+    })?;
+
+    // Discover SSH hosts
+    let discovered = discover_ssh_hosts();
+
+    if discovered.is_empty() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "no_hosts",
+                    "message": "No SSH hosts found in ~/.ssh/config"
+                })
+            );
+        } else {
+            println!("{}", "No SSH hosts found in ~/.ssh/config".yellow());
+        }
+        return Ok(());
+    }
+
+    // Load existing config to check for duplicates
+    let existing_config = SourcesConfig::load().ok();
+    let existing_names: std::collections::HashSet<String> = existing_config
+        .as_ref()
+        .map(|c| c.remote_sources().map(|s| s.name.clone()).collect())
+        .unwrap_or_default();
+
+    // Filter hosts
+    let hosts_to_add: Vec<_> = if skip_existing {
+        discovered
+            .into_iter()
+            .filter(|h| !existing_names.contains(&h.name))
+            .collect()
+    } else {
+        discovered
+    };
+
+    if hosts_to_add.is_empty() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "all_existing",
+                    "message": "All discovered hosts are already configured"
+                })
+            );
+        } else {
+            println!(
+                "{}",
+                "All discovered SSH hosts are already configured as sources.".green()
+            );
+        }
+        return Ok(());
+    }
+
+    // Output discovered hosts
+    if json_output {
+        let hosts_json: Vec<_> = hosts_to_add
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "name": h.name,
+                    "hostname": h.hostname,
+                    "user": h.user,
+                    "port": h.port,
+                    "identity_file": h.identity_file,
+                    "already_configured": existing_names.contains(&h.name),
+                })
+            })
+            .collect();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "discovered",
+                "preset": preset,
+                "preset_paths": preset_paths,
+                "hosts": hosts_json,
+                "count": hosts_to_add.len(),
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!(
+            "{} {} SSH hosts from ~/.ssh/config:\n",
+            "Discovered".cyan().bold(),
+            hosts_to_add.len()
+        );
+
+        for host in &hosts_to_add {
+            let status = if existing_names.contains(&host.name) {
+                " (already configured)".yellow().to_string()
+            } else {
+                String::new()
+            };
+
+            println!("  {} {}{}", "→".cyan(), host.name.white().bold(), status);
+
+            if let Some(hostname) = &host.hostname {
+                println!("      Hostname: {}", hostname.dimmed());
+            }
+            if let Some(user) = &host.user {
+                println!("      User: {}", user.dimmed());
+            }
+            if let Some(port) = host.port
+                && port != 22
+            {
+                println!("      Port: {}", port.to_string().dimmed());
+            }
+        }
+
+        println!();
+        println!("{} {}", "Preset:".dimmed(), preset);
+        println!("{}", "Paths to sync:".dimmed());
+        for path in &preset_paths {
+            println!("  - {}", path.dimmed());
+        }
+
+        println!();
+        println!("{} To add a host as a source, use:", "Next step:".yellow());
+        println!(
+            "  {}",
+            "cass sources add --name <host> --host <host> --paths '~/.claude/projects'".dimmed()
+        );
+    }
+
+    Ok(())
+}
+
+/// Run the interactive sources setup wizard
+fn run_sources_setup(opts: sources::setup::SetupOptions) -> CliResult<()> {
+    use sources::setup::{SetupError, run_setup};
+
+    match run_setup(&opts) {
+        Ok(result) => {
+            if opts.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "success",
+                        "dry_run": result.dry_run,
+                        "sources_added": result.sources_added,
+                        "hosts_installed": result.hosts_installed,
+                        "hosts_indexed": result.hosts_indexed,
+                        "total_sessions": result.total_sessions,
+                    })
+                );
+            }
+            Ok(())
+        }
+        Err(SetupError::Cancelled) => {
+            if opts.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "cancelled",
+                        "message": "Setup cancelled by user"
+                    })
+                );
+            }
+            Ok(())
+        }
+        Err(SetupError::Interrupted) => {
+            // Progress saved, exit cleanly
+            std::process::exit(130);
+        }
+        Err(SetupError::NoHosts) => {
+            if opts.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "no_hosts",
+                        "message": "No SSH hosts found or selected"
+                    })
+                );
+            }
+            Ok(())
+        }
+        Err(e) => Err(CliError {
+            code: 9,
+            kind: "setup",
+            message: format!("Setup failed: {e}"),
+            hint: Some("Run with --verbose for more details".into()),
+            retryable: true,
+        }),
+    }
+}
+
+/// Handle models subcommands
+fn run_models_command(cmd: ModelsCommand) -> CliResult<()> {
+    match cmd {
+        ModelsCommand::Status { json } => run_models_status(json),
+        ModelsCommand::Install {
+            model,
+            mirror,
+            from_file,
+            yes,
+            data_dir,
+        } => run_models_install(
+            &model,
+            mirror.as_deref(),
+            from_file.as_deref(),
+            yes,
+            data_dir,
+        ),
+        ModelsCommand::Verify {
+            repair,
+            data_dir,
+            json,
+        } => run_models_verify(repair, data_dir, json),
+        ModelsCommand::Remove {
+            model,
+            yes,
+            data_dir,
+        } => run_models_remove(&model, yes, data_dir),
+        ModelsCommand::CheckUpdate { json, data_dir } => run_models_check_update(json, data_dir),
+    }
+}
+
+/// Show semantic model installation status
+fn run_models_status(json_output: bool) -> CliResult<()> {
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use crate::search::model_download::{ModelManifest, ModelState, check_model_installed};
+
+    let data_dir = default_data_dir();
+    let model_dir = FastEmbedder::default_model_dir(&data_dir);
+    let manifest = ModelManifest::minilm_v2();
+
+    let state = check_model_installed(&model_dir);
+    let total_size = manifest.total_size();
+    let total_size_mb = total_size as f64 / 1_048_576.0;
+
+    // Check for file sizes on disk
+    let mut installed_size: u64 = 0;
+    let mut file_info: Vec<serde_json::Value> = Vec::new();
+    for mfile in &manifest.files {
+        let file_path = model_dir.join(&mfile.name);
+        let exists = file_path.is_file();
+        let size = if exists {
+            file_path.metadata().map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        if exists {
+            installed_size += size;
+        }
+        file_info.push(serde_json::json!({
+            "name": mfile.name,
+            "expected_size": mfile.size,
+            "actual_size": size,
+            "exists": exists,
+            "size_match": exists && size == mfile.size,
+        }));
+    }
+
+    if json_output {
+        let output = serde_json::json!({
+            "model_id": manifest.id,
+            "model_dir": model_dir.display().to_string(),
+            "state": match &state {
+                ModelState::Ready => "ready",
+                ModelState::NotInstalled => "not_installed",
+                ModelState::NeedsConsent => "needs_consent",
+                ModelState::Downloading { .. } => "downloading",
+                ModelState::Verifying => "verifying",
+                ModelState::Disabled { .. } => "disabled",
+                ModelState::VerificationFailed { .. } => "verification_failed",
+                ModelState::UpdateAvailable { .. } => "update_available",
+                ModelState::Cancelled => "cancelled",
+            },
+            "state_detail": state.summary(),
+            "revision": manifest.revision,
+            "license": manifest.license,
+            "total_size_bytes": total_size,
+            "installed_size_bytes": installed_size,
+            "files": file_info,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).unwrap_or_default()
+        );
+    } else {
+        use colored::Colorize;
+
+        println!("Semantic Search Model Status");
+        println!("============================");
+        println!();
+        println!("Model:    {} ({})", manifest.id, manifest.license);
+        println!(
+            "Revision: {}",
+            manifest.revision.get(..12).unwrap_or(&manifest.revision)
+        );
+        println!("Location: {}", model_dir.display());
+        println!("Size:     {:.1} MB", total_size_mb);
+        println!();
+
+        let status_str = match &state {
+            ModelState::Ready => "Ready".green().to_string(),
+            ModelState::NotInstalled => "Not Installed".yellow().to_string(),
+            ModelState::NeedsConsent => "Needs Consent".yellow().to_string(),
+            ModelState::Downloading { progress_pct, .. } => {
+                format!("Downloading ({}%)", progress_pct)
+                    .cyan()
+                    .to_string()
+            }
+            ModelState::Verifying => "Verifying".cyan().to_string(),
+            ModelState::Disabled { reason } => format!("Disabled: {}", reason).red().to_string(),
+            ModelState::VerificationFailed { reason } => {
+                format!("Verification Failed: {}", reason).red().to_string()
+            }
+            ModelState::UpdateAvailable {
+                current_revision,
+                latest_revision,
+            } => format!(
+                "Update Available ({} -> {})",
+                current_revision.get(..8).unwrap_or(current_revision),
+                latest_revision.get(..8).unwrap_or(latest_revision)
+            )
+            .yellow()
+            .to_string(),
+            ModelState::Cancelled => "Cancelled".yellow().to_string(),
+        };
+        println!("Status: {}", status_str);
+        println!();
+
+        // Show files
+        println!("Files:");
+        for mfile in &manifest.files {
+            let file_path = model_dir.join(&mfile.name);
+            let exists = file_path.is_file();
+            let size = if exists {
+                file_path.metadata().map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            let size_mb = mfile.size as f64 / 1_048_576.0;
+
+            let status = if exists && size == mfile.size {
+                "✓".green().to_string()
+            } else if exists {
+                "⚠".yellow().to_string()
+            } else {
+                "✗".red().to_string()
+            };
+            println!("  {} {} ({:.1} MB)", status, mfile.name, size_mb);
+        }
+        println!();
+
+        // Suggestions based on state
+        match state {
+            ModelState::NotInstalled | ModelState::NeedsConsent => {
+                println!("To install the model, run:");
+                println!("  cass models install");
+            }
+            ModelState::VerificationFailed { .. } => {
+                println!("To repair the model, run:");
+                println!("  cass models verify --repair");
+            }
+            ModelState::UpdateAvailable { .. } => {
+                println!("To update the model, run:");
+                println!("  cass models install");
+            }
+            ModelState::Ready => {
+                println!("Model is ready for semantic search.");
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Download and install the semantic search model
+fn run_models_install(
+    model_name: &str,
+    mirror: Option<&str>,
+    from_file: Option<&Path>,
+    skip_confirm: bool,
+    data_dir_override: Option<PathBuf>,
+) -> CliResult<()> {
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use crate::search::model_download::{ModelDownloader, ModelManifest, check_model_installed};
+    use colored::Colorize;
+    use indicatif::{ProgressBar, ProgressStyle};
+
+    // Only support the default model for now
+    if model_name != "all-minilm-l6-v2" {
+        return Err(CliError {
+            code: 20,
+            kind: "model",
+            message: format!(
+                "Unknown model '{}'. Only 'all-minilm-l6-v2' is supported.",
+                model_name
+            ),
+            hint: Some("Use 'cass models status' to see available models".into()),
+            retryable: false,
+        });
+    }
+
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let model_dir = FastEmbedder::default_model_dir(&data_dir);
+    let manifest = ModelManifest::minilm_v2();
+
+    // Check if from_file is specified
+    if let Some(file_path) = from_file {
+        return Err(CliError {
+            code: 21,
+            kind: "model",
+            message: format!("--from-file not yet implemented: {}", file_path.display()),
+            hint: Some("Download from HuggingFace instead".into()),
+            retryable: false,
+        });
+    }
+
+    // Check if mirror is specified
+    if let Some(mirror_url) = mirror {
+        return Err(CliError {
+            code: 21,
+            kind: "model",
+            message: format!("--mirror not yet implemented: {}", mirror_url),
+            hint: Some("Download from HuggingFace instead".into()),
+            retryable: false,
+        });
+    }
+
+    // Check current state
+    let state = check_model_installed(&model_dir);
+    if state.is_ready() {
+        println!("{} Model is already installed and verified.", "✓".green());
+        println!("  Location: {}", model_dir.display());
+        return Ok(());
+    }
+
+    let total_size = manifest.total_size();
+    let total_size_mb = total_size as f64 / 1_048_576.0;
+
+    // Confirm download unless -y flag
+    if !skip_confirm {
+        println!("Semantic Search Model Installation");
+        println!("===================================");
+        println!();
+        println!("Model:   {} ({})", manifest.id, manifest.license);
+        println!("Size:    {:.1} MB", total_size_mb);
+        println!("Source:  HuggingFace ({})", manifest.repo);
+        println!();
+        println!("This will download the model from HuggingFace.");
+        print!("Continue? [y/N] ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if !input.trim().eq_ignore_ascii_case("y") && !input.trim().eq_ignore_ascii_case("yes") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Create model directory parent
+    if let Some(parent) = model_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| CliError {
+            code: 22,
+            kind: "io",
+            message: format!("Failed to create model directory: {}", e),
+            hint: None,
+            retryable: false,
+        })?;
+    }
+
+    println!();
+    println!("Downloading model files...");
+
+    // Set up progress bar
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({percent}%)")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("=> "),
+    );
+
+    let downloader = ModelDownloader::new(model_dir.clone());
+    let pb_clone = pb.clone();
+
+    let result = downloader.download(
+        &manifest,
+        Some(Box::new(move |progress| {
+            pb_clone.set_position(progress.total_bytes);
+        })),
+    );
+
+    match result {
+        Ok(()) => {
+            pb.finish_with_message("Download complete");
+            println!();
+            println!("{} Model installed successfully!", "✓".green());
+            println!("  Location: {}", model_dir.display());
+            println!();
+            println!("Semantic search is now available. Run 'cass search' to try it out.");
+            Ok(())
+        }
+        Err(e) => {
+            pb.abandon_with_message("Download failed");
+            Err(CliError {
+                code: 23,
+                kind: "download",
+                message: format!("Model download failed: {}", e),
+                hint: Some("Check your network connection and try again".into()),
+                retryable: true,
+            })
+        }
+    }
+}
+
+/// Verify model file integrity
+fn run_models_verify(
+    repair: bool,
+    data_dir_override: Option<PathBuf>,
+    json_output: bool,
+) -> CliResult<()> {
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use crate::search::model_download::{ModelManifest, compute_sha256};
+    use colored::Colorize;
+
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
+    let model_dir = FastEmbedder::default_model_dir(&data_dir);
+    let manifest = ModelManifest::minilm_v2();
+
+    if !model_dir.is_dir() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "not_installed",
+                    "model_dir": model_dir.display().to_string(),
+                    "error": "Model directory does not exist",
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!("{} Model is not installed.", "✗".red());
+            println!("  Expected location: {}", model_dir.display());
+            println!();
+            println!("To install, run:");
+            println!("  cass models install");
+        }
+        return Ok(());
+    }
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut all_valid = true;
+    let mut files_to_repair: Vec<&str> = Vec::new();
+
+    if !json_output {
+        println!("Verifying model files...");
+        println!();
+    }
+
+    for mfile in &manifest.files {
+        let file_path = model_dir.join(&mfile.name);
+        let exists = file_path.is_file();
+
+        let (valid, actual_hash, error) = if exists {
+            match compute_sha256(&file_path) {
+                Ok(hash) => {
+                    let matches = hash == mfile.sha256;
+                    (matches, Some(hash), None)
+                }
+                Err(e) => (false, None, Some(e.to_string())),
+            }
+        } else {
+            (false, None, Some("File not found".to_string()))
+        };
+
+        if !valid {
+            all_valid = false;
+            files_to_repair.push(&mfile.name);
+        }
+
+        results.push(serde_json::json!({
+            "file": mfile.name,
+            "exists": exists,
+            "valid": valid,
+            "expected_sha256": mfile.sha256,
+            "actual_sha256": actual_hash,
+            "error": error,
+        }));
+
+        if !json_output {
+            let status = if valid {
+                "✓".green().to_string()
+            } else {
+                "✗".red().to_string()
+            };
+            println!("  {} {}", status, mfile.name);
+            if let Some(ref err) = error {
+                println!("      Error: {}", err);
+            } else if !valid {
+                println!(
+                    "      Expected: {}",
+                    mfile.sha256.get(..16).unwrap_or(&mfile.sha256)
+                );
+                if let Some(ref actual) = actual_hash {
+                    println!("      Got:      {}", actual.get(..16).unwrap_or(actual));
+                }
+            }
+        }
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "model_dir": model_dir.display().to_string(),
+                "all_valid": all_valid,
+                "files": results,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!();
+        if all_valid {
+            println!("{} All model files verified successfully.", "✓".green());
+        } else {
+            println!(
+                "{} {} file(s) failed verification.",
+                "✗".red(),
+                files_to_repair.len()
+            );
+            if repair {
+                println!();
+                println!("Repairing by re-downloading model files...");
+                println!();
+                // Actually perform the repair by re-running install
+                return run_models_install("all-minilm-l6-v2", None, None, true, data_dir_override);
+            } else {
+                println!();
+                println!("To repair corrupted files, run:");
+                println!("  cass models verify --repair");
+                println!("Or reinstall:");
+                println!("  cass models install -y");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove model files
+fn run_models_remove(
+    model_name: &str,
+    skip_confirm: bool,
+    data_dir_override: Option<PathBuf>,
+) -> CliResult<()> {
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use colored::Colorize;
+
+    // Only support the default model for now
+    if model_name != "all-minilm-l6-v2" {
+        return Err(CliError {
+            code: 20,
+            kind: "model",
+            message: format!(
+                "Unknown model '{}'. Only 'all-minilm-l6-v2' is supported.",
+                model_name
+            ),
+            hint: Some("Use 'cass models status' to see available models".into()),
+            retryable: false,
+        });
+    }
+
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let model_dir = FastEmbedder::default_model_dir(&data_dir);
+
+    if !model_dir.is_dir() {
+        println!("{} Model is not installed.", "✗".yellow());
+        println!("  Expected location: {}", model_dir.display());
+        return Ok(());
+    }
+
+    // Calculate size
+    let mut total_size: u64 = 0;
+    if let Ok(entries) = std::fs::read_dir(&model_dir) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                total_size += metadata.len();
+            }
+        }
+    }
+    let size_mb = total_size as f64 / 1_048_576.0;
+
+    if !skip_confirm {
+        println!("Remove Semantic Search Model");
+        println!("============================");
+        println!();
+        println!("Model:    {}", model_name);
+        println!("Location: {}", model_dir.display());
+        println!("Size:     {:.1} MB", size_mb);
+        println!();
+        println!("This will remove all model files. Semantic search will be unavailable");
+        println!("until the model is reinstalled.");
+        print!("Continue? [y/N] ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if !input.trim().eq_ignore_ascii_case("y") && !input.trim().eq_ignore_ascii_case("yes") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Remove the directory
+    std::fs::remove_dir_all(&model_dir).map_err(|e| CliError {
+        code: 24,
+        kind: "io",
+        message: format!("Failed to remove model directory: {}", e),
+        hint: Some("Check file permissions".into()),
+        retryable: false,
+    })?;
+
+    println!();
+    println!("{} Model removed successfully.", "✓".green());
+    println!("  Freed {:.1} MB", size_mb);
+    println!();
+    println!("To reinstall, run:");
+    println!("  cass models install");
+
+    Ok(())
+}
+
+/// Check for model updates
+fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>) -> CliResult<()> {
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use crate::search::model_download::{
+        ModelManifest, ModelState, check_model_installed, check_version_mismatch,
+    };
+    use colored::Colorize;
+
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let model_dir = FastEmbedder::default_model_dir(&data_dir);
+    let manifest = ModelManifest::minilm_v2();
+
+    let state = check_model_installed(&model_dir);
+
+    if !state.is_ready() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "update_available": false,
+                    "reason": "model_not_installed",
+                    "current_revision": null,
+                    "latest_revision": manifest.revision,
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!("{} Model is not installed.", "✗".yellow());
+            println!(
+                "  Latest revision: {}",
+                manifest.revision.get(..12).unwrap_or(&manifest.revision)
+            );
+            println!();
+            println!("To install, run:");
+            println!("  cass models install");
+        }
+        return Ok(());
+    }
+
+    // Check for version mismatch
+    let update_info = check_version_mismatch(&model_dir, &manifest);
+
+    if let Some(ModelState::UpdateAvailable {
+        current_revision,
+        latest_revision,
+    }) = update_info
+    {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "update_available": true,
+                    "current_revision": current_revision,
+                    "latest_revision": latest_revision,
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            println!("{} Update available!", "⚠".yellow());
+            println!(
+                "  Current: {}",
+                current_revision.get(..12).unwrap_or(&current_revision)
+            );
+            println!(
+                "  Latest:  {}",
+                latest_revision.get(..12).unwrap_or(&latest_revision)
+            );
+            println!();
+            println!("To update, run:");
+            println!("  cass models install");
+        }
+    } else if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "update_available": false,
+                "current_revision": manifest.revision,
+                "latest_revision": manifest.revision,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!("{} Model is up to date.", "✓".green());
+        println!(
+            "  Revision: {}",
+            manifest.revision.get(..12).unwrap_or(&manifest.revision)
+        );
     }
 
     Ok(())

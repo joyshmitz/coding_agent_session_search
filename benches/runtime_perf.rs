@@ -317,6 +317,137 @@ fn bench_wildcard_large_dataset(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================
+// Concurrent & Scaling Benchmarks
+// ============================================================
+
+/// Benchmark parallel data generation throughput using rayon.
+///
+/// Note: SearchClient contains rusqlite::Connection which is !Send/!Sync,
+/// so we can't share it across threads for concurrent search. Instead we
+/// measure parallel data generation which tests rayon integration and
+/// throughput of the conversation generation infrastructure.
+fn bench_concurrent_indexing(c: &mut Criterion) {
+    use rayon::prelude::*;
+
+    let mut group = c.benchmark_group("concurrent_indexing");
+
+    // Benchmark parallel conversation generation (simulates concurrent workload)
+    group.bench_function("generate_100_convs_parallel", |b| {
+        b.iter(|| {
+            let convs: Vec<_> = (0..100i64)
+                .into_par_iter()
+                .map(|i| sample_conv(i, 10))
+                .collect();
+            black_box(convs.len())
+        })
+    });
+
+    // Benchmark sequential for comparison
+    group.bench_function("generate_100_convs_sequential", |b| {
+        b.iter(|| {
+            let convs: Vec<_> = (0..100i64).map(|i| sample_conv(i, 10)).collect();
+            black_box(convs.len())
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmark rapid sequential searches (simulates interactive use)
+fn bench_rapid_sequential_search(c: &mut Criterion) {
+    let (_tmp, client) = seed_index(200, 15);
+    let filters = coding_agent_search::search::query::SearchFilters::default();
+
+    let mut group = c.benchmark_group("rapid_sequential");
+
+    // Simulate rapid user typing - many queries in sequence
+    group.bench_function("10_queries_sequential", |b| {
+        let queries = [
+            "lorem",
+            "ipsum",
+            "dolor",
+            "sit",
+            "amet",
+            "consectetur",
+            "adipiscing",
+            "elit",
+            "sed",
+            "do",
+        ];
+        b.iter(|| {
+            for q in &queries {
+                let hits = client
+                    .search(black_box(*q), filters.clone(), 20, 0)
+                    .unwrap();
+                black_box(hits.len());
+            }
+        })
+    });
+
+    // Simulate search refinement - increasingly specific queries
+    group.bench_function("refinement_sequence", |b| {
+        let queries = ["l", "lo", "lor", "lore", "lorem"];
+        b.iter(|| {
+            for q in &queries {
+                let hits = client
+                    .search(black_box(*q), filters.clone(), 20, 0)
+                    .unwrap();
+                black_box(hits.len());
+            }
+        })
+    });
+
+    group.finish();
+}
+
+// ============================================================
+// Scaling Benchmarks
+// ============================================================
+
+/// Benchmark search latency at different index sizes
+fn bench_search_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("search_scaling");
+    group.sample_size(20); // Fewer samples for larger datasets
+
+    // Small: 50 conversations
+    let (_tmp_small, client_small) = seed_index(50, 10);
+    let filters = coding_agent_search::search::query::SearchFilters::default();
+
+    group.bench_function("50_convs", |b| {
+        b.iter(|| {
+            let hits = client_small
+                .search(black_box("lorem"), filters.clone(), 20, 0)
+                .unwrap();
+            black_box(hits.len())
+        })
+    });
+
+    // Medium: 200 conversations
+    let (_tmp_med, client_med) = seed_index(200, 10);
+    group.bench_function("200_convs", |b| {
+        b.iter(|| {
+            let hits = client_med
+                .search(black_box("lorem"), filters.clone(), 20, 0)
+                .unwrap();
+            black_box(hits.len())
+        })
+    });
+
+    // Large: 500 conversations
+    let (_tmp_large, client_large) = seed_index(500, 10);
+    group.bench_function("500_convs", |b| {
+        b.iter(|| {
+            let hits = client_large
+                .search(black_box("lorem"), filters.clone(), 20, 0)
+                .unwrap();
+            black_box(hits.len())
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     runtime_perf,
     bench_indexing,
@@ -327,5 +458,8 @@ criterion_group!(
     bench_wildcard_substring,
     bench_wildcard_suffix_common,
     bench_wildcard_large_dataset,
+    bench_concurrent_indexing,
+    bench_rapid_sequential_search,
+    bench_search_scaling,
 );
 criterion_main!(runtime_perf);

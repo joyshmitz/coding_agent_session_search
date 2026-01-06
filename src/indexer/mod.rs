@@ -13,8 +13,8 @@ use crate::connectors::NormalizedConversation;
 use crate::connectors::{
     Connector, ScanRoot, aider::AiderConnector, amp::AmpConnector, chatgpt::ChatGptConnector,
     claude_code::ClaudeCodeConnector, cline::ClineConnector, codex::CodexConnector,
-    cursor::CursorConnector, gemini::GeminiConnector, opencode::OpenCodeConnector,
-    pi_agent::PiAgentConnector,
+    cursor::CursorConnector, factory::FactoryConnector, gemini::GeminiConnector,
+    opencode::OpenCodeConnector, pi_agent::PiAgentConnector,
 };
 use crate::search::tantivy::{TantivyIndex, index_dir};
 use crate::sources::config::{Platform, SourcesConfig};
@@ -44,6 +44,8 @@ pub struct IndexingProgress {
     pub discovered_agents: AtomicUsize,
     /// Names of discovered agents (protected by mutex for concurrent access)
     pub discovered_agent_names: Mutex<Vec<String>>,
+    /// Last error message from background indexer, if any
+    pub last_error: Mutex<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -65,9 +67,11 @@ pub fn run_index(
     let mut storage = SqliteStorage::open(&opts.db_path)?;
     let index_path = index_dir(&opts.data_dir)?;
 
-    // Detect if we are rebuilding due to missing meta/schema mismatch
-    let schema_matches = index_path.join("schema_hash.json").exists()
-        && std::fs::read_to_string(index_path.join("schema_hash.json"))
+    // Detect if we are rebuilding due to missing meta/schema mismatch/index corruption.
+    // IMPORTANT: This must stay aligned with TantivyIndex::open_or_create() rebuild triggers.
+    let schema_hash_path = index_path.join("schema_hash.json");
+    let schema_matches = schema_hash_path.exists()
+        && std::fs::read_to_string(&schema_hash_path)
             .ok()
             .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
             .and_then(|json| {
@@ -77,20 +81,31 @@ pub fn run_index(
             })
             .as_deref()
             == Some(crate::search::tantivy::SCHEMA_HASH);
-    let needs_rebuild = opts.force_rebuild
-        || !index_path.join("meta.json").exists()
-        || (index_path.join("schema_hash.json").exists() && !schema_matches);
+
+    // Treat missing schema hash as rebuild (open_or_create will wipe/recreate).
+    let mut needs_rebuild =
+        opts.force_rebuild || !index_path.join("meta.json").exists() || !schema_matches;
+
+    // Preflight open: if Tantivy can't open, force a rebuild so we do a full scan and
+    // reindex messages into the new Tantivy index (SQLite is incremental-only by default).
+    if !needs_rebuild && let Err(e) = tantivy::Index::open_in_dir(&index_path) {
+        tracing::warn!(
+            error = %e,
+            path = %index_path.display(),
+            "tantivy open preflight failed; forcing rebuild"
+        );
+        needs_rebuild = true;
+    }
 
     if needs_rebuild && let Some(p) = &opts.progress {
         p.is_rebuilding.store(true, Ordering::Relaxed);
     }
 
-    let mut t_index = if needs_rebuild {
-        std::fs::remove_dir_all(&index_path).ok();
-        TantivyIndex::open_or_create(&index_path)?
-    } else {
-        TantivyIndex::open_or_create(&index_path)?
-    };
+    if needs_rebuild {
+        // Clean slate: avoid stale lock files and ensure a fresh Tantivy index.
+        let _ = std::fs::remove_dir_all(&index_path);
+    }
+    let mut t_index = TantivyIndex::open_or_create(&index_path)?;
 
     if opts.full {
         reset_storage(&mut storage)?;
@@ -118,6 +133,24 @@ pub fn run_index(
     // Record scan start time before scanning
     let scan_start_ts = SqliteStorage::now_millis();
 
+    let connector_factories = get_connector_factories();
+
+    // First pass: Scan all to get counts if we have progress tracker
+    // Use parallel iteration for faster agent discovery
+    if let Some(p) = &opts.progress {
+        p.phase.store(1, Ordering::Relaxed); // Scanning
+        // Track connector scan progress during discovery.
+        p.total.store(connector_factories.len(), Ordering::Relaxed);
+        p.current.store(0, Ordering::Relaxed);
+        p.discovered_agents.store(0, Ordering::Relaxed);
+        if let Ok(mut names) = p.discovered_agent_names.lock() {
+            names.clear();
+        }
+        if let Ok(mut last_error) = p.last_error.lock() {
+            *last_error = None;
+        }
+    }
+
     // Keep sources table in sync with sources.toml for provenance integrity.
     sync_sources_config_to_db(&storage);
 
@@ -128,26 +161,11 @@ pub fn run_index(
         .cloned()
         .collect();
 
-    // First pass: Scan all to get counts if we have progress tracker
-    // Use parallel iteration for faster agent discovery
-    if let Some(p) = &opts.progress {
-        p.phase.store(1, Ordering::Relaxed); // Scanning
-        // Reset; totals will be populated during scanning.
-        p.total.store(0, Ordering::Relaxed);
-        p.current.store(0, Ordering::Relaxed);
-        p.discovered_agents.store(0, Ordering::Relaxed);
-        if let Ok(mut names) = p.discovered_agent_names.lock() {
-            names.clear();
-        }
-    }
-
     // Run connector detection and scanning in parallel using rayon
     use rayon::prelude::*;
 
     let progress_ref = opts.progress.as_ref();
     let data_dir = opts.data_dir.clone();
-
-    let connector_factories = get_connector_factories();
 
     let pending_batches: Vec<(&'static str, Vec<NormalizedConversation>)> = connector_factories
         .into_par_iter()
@@ -210,10 +228,6 @@ pub fn run_index(
                 }
             }
 
-            if convs.is_empty() {
-                return None;
-            }
-
             if !was_detected && let Some(p) = progress_ref {
                 p.discovered_agents.fetch_add(1, Ordering::Relaxed);
                 if let Ok(mut names) = p.discovered_agent_names.lock() {
@@ -221,9 +235,15 @@ pub fn run_index(
                 }
             }
 
+            // Mark this connector as scanned for discovery progress.
             if let Some(p) = progress_ref {
-                p.total.fetch_add(convs.len(), Ordering::Relaxed);
+                p.current.fetch_add(1, Ordering::Relaxed);
             }
+
+            if convs.is_empty() {
+                return None;
+            }
+
             tracing::info!(
                 connector = name,
                 conversations = convs.len(),
@@ -234,11 +254,20 @@ pub fn run_index(
         .collect();
 
     if let Some(p) = &opts.progress {
+        let total_conversations: usize = pending_batches.iter().map(|(_, convs)| convs.len()).sum();
         p.phase.store(2, Ordering::Relaxed); // Indexing
+        p.total.store(total_conversations, Ordering::Relaxed);
+        p.current.store(0, Ordering::Relaxed);
     }
 
     for (name, convs) in pending_batches {
-        ingest_batch(&mut storage, &mut t_index, &convs, &opts.progress)?;
+        ingest_batch(
+            &mut storage,
+            &mut t_index,
+            &convs,
+            &opts.progress,
+            needs_rebuild,
+        )?;
         tracing::info!(
             connector = name,
             conversations = convs.len(),
@@ -314,12 +343,14 @@ fn ingest_batch(
     t_index: &mut TantivyIndex,
     convs: &[NormalizedConversation],
     progress: &Option<Arc<IndexingProgress>>,
+    force_tantivy_reindex: bool,
 ) -> Result<()> {
-    for conv in convs {
-        persist::persist_conversation(storage, t_index, conv)?;
-        if let Some(p) = progress {
-            p.current.fetch_add(1, Ordering::Relaxed);
-        }
+    // Use batched insert for better SQLite performance (single transaction)
+    persist::persist_conversations_batched(storage, t_index, convs, force_tantivy_reindex)?;
+
+    // Update progress counter for all conversations at once
+    if let Some(p) = progress {
+        p.current.fetch_add(convs.len(), Ordering::Relaxed);
     }
     Ok(())
 }
@@ -338,6 +369,7 @@ pub fn get_connector_factories() -> Vec<(&'static str, fn() -> Box<dyn Connector
         ("cursor", || Box::new(CursorConnector::new())),
         ("chatgpt", || Box::new(ChatGptConnector::new())),
         ("pi_agent", || Box::new(PiAgentConnector::new())),
+        ("factory", || Box::new(FactoryConnector::new())),
     ]
 }
 
@@ -373,7 +405,26 @@ impl ConnectorKind {
             "cursor" => Some(Self::Cursor),
             "chatgpt" => Some(Self::ChatGpt),
             "pi_agent" => Some(Self::PiAgent),
+            "factory" => Some(Self::Factory),
             _ => None,
+        }
+    }
+
+    /// Create a boxed connector instance for this kind.
+    /// Centralizes connector instantiation to avoid duplicate match arms.
+    fn create_connector(&self) -> Box<dyn Connector + Send> {
+        match self {
+            Self::Codex => Box::new(CodexConnector::new()),
+            Self::Cline => Box::new(ClineConnector::new()),
+            Self::Gemini => Box::new(GeminiConnector::new()),
+            Self::Claude => Box::new(ClaudeCodeConnector::new()),
+            Self::Amp => Box::new(AmpConnector::new()),
+            Self::OpenCode => Box::new(OpenCodeConnector::new()),
+            Self::Aider => Box::new(AiderConnector::new()),
+            Self::Cursor => Box::new(CursorConnector::new()),
+            Self::ChatGpt => Box::new(ChatGptConnector::new()),
+            Self::PiAgent => Box::new(PiAgentConnector::new()),
+            Self::Factory => Box::new(FactoryConnector::new()),
         }
     }
 }
@@ -439,7 +490,7 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, PathBuf)], bool) + Send +
                 continue;
             }
 
-            let remaining = max_wait.checked_sub(elapsed).unwrap();
+            let remaining = max_wait.saturating_sub(elapsed);
             let wait = debounce.min(remaining);
 
             match rx.recv_timeout(wait) {
@@ -504,18 +555,7 @@ fn reindex_paths(
     }
 
     for (kind, ts) in triggers {
-        let conn: Box<dyn Connector> = match kind {
-            ConnectorKind::Codex => Box::new(CodexConnector::new()),
-            ConnectorKind::Cline => Box::new(ClineConnector::new()),
-            ConnectorKind::Gemini => Box::new(GeminiConnector::new()),
-            ConnectorKind::Claude => Box::new(ClaudeCodeConnector::new()),
-            ConnectorKind::Amp => Box::new(AmpConnector::new()),
-            ConnectorKind::OpenCode => Box::new(OpenCodeConnector::new()),
-            ConnectorKind::Aider => Box::new(AiderConnector::new()),
-            ConnectorKind::Cursor => Box::new(CursorConnector::new()),
-            ConnectorKind::ChatGpt => Box::new(ChatGptConnector::new()),
-            ConnectorKind::PiAgent => Box::new(PiAgentConnector::new()),
-        };
+        let conn = kind.create_connector();
         let detect = conn.detect();
         if !detect.detected {
             continue;
@@ -566,7 +606,7 @@ fn reindex_paths(
                 .lock()
                 .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
 
-            ingest_batch(&mut storage, &mut t_index, &convs, &opts.progress)?;
+            ingest_batch(&mut storage, &mut t_index, &convs, &opts.progress, false)?;
 
             // Commit to Tantivy immediately to ensure index consistency before advancing watch state.
             t_index.commit()?;
@@ -602,6 +642,7 @@ enum ConnectorKind {
     Cursor,
     ChatGpt,
     PiAgent,
+    Factory,
 }
 
 fn state_path(data_dir: &Path) -> PathBuf {
@@ -661,7 +702,7 @@ fn classify_paths(
 }
 
 fn sync_sources_config_to_db(storage: &SqliteStorage) {
-    if std::env::var("CASS_IGNORE_SOURCES_CONFIG").is_ok() {
+    if dotenvy::var("CASS_IGNORE_SOURCES_CONFIG").is_ok() {
         return;
     }
     let config = match SourcesConfig::load() {
@@ -721,7 +762,7 @@ pub fn build_scan_roots(storage: &SqliteStorage, data_dir: &Path) -> Vec<ScanRoo
     // For explicit multi-root support, we add the local root.
     roots.push(ScanRoot::local(data_dir.to_path_buf()));
 
-    if std::env::var("CASS_IGNORE_SOURCES_CONFIG").is_err()
+    if dotenvy::var("CASS_IGNORE_SOURCES_CONFIG").is_err()
         && let Ok(config) = SourcesConfig::load()
     {
         let remotes: Vec<_> = config.remote_sources().collect();
@@ -881,16 +922,19 @@ fn inject_provenance(conv: &mut NormalizedConversation, origin: &Origin) {
 
     // Add cass.origin provenance
     if let Some(obj) = conv.metadata.as_object_mut() {
-        obj.insert(
-            "cass".to_string(),
-            serde_json::json!({
-                "origin": {
+        let cass = obj
+            .entry("cass".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(cass_obj) = cass.as_object_mut() {
+            cass_obj.insert(
+                "origin".to_string(),
+                serde_json::json!({
                     "source_id": origin.source_id,
                     "kind": origin.kind.as_str(),
                     "host": origin.host
-                }
-            }),
-        );
+                }),
+            );
+        }
     }
 }
 
@@ -1087,6 +1131,67 @@ pub mod persist {
         Ok(())
     }
 
+    /// Persist multiple conversations in a single database transaction for better performance.
+    /// This reduces SQLite transaction overhead when indexing many conversations at once.
+    pub fn persist_conversations_batched(
+        storage: &mut SqliteStorage,
+        t_index: &mut TantivyIndex,
+        convs: &[NormalizedConversation],
+        force_tantivy_reindex: bool,
+    ) -> Result<()> {
+        if convs.is_empty() {
+            return Ok(());
+        }
+
+        // Prepare data for batched insert: (agent_id, workspace_id, Conversation)
+        let mut prepared: Vec<(i64, Option<i64>, Conversation)> = Vec::with_capacity(convs.len());
+
+        for conv in convs {
+            let agent = Agent {
+                id: None,
+                slug: conv.agent_slug.clone(),
+                name: conv.agent_slug.clone(),
+                version: None,
+                kind: AgentKind::Cli,
+            };
+            let agent_id = storage.ensure_agent(&agent)?;
+
+            let workspace_id = if let Some(ws) = &conv.workspace {
+                Some(storage.ensure_workspace(ws, None)?)
+            } else {
+                None
+            };
+
+            let internal_conv = map_to_internal(conv);
+            prepared.push((agent_id, workspace_id, internal_conv));
+        }
+
+        // Build references for the batched call
+        let refs: Vec<(i64, Option<i64>, &Conversation)> =
+            prepared.iter().map(|(a, w, c)| (*a, *w, c)).collect();
+
+        // Execute batched insert (single transaction)
+        let outcomes = storage.insert_conversations_batched(&refs)?;
+
+        // Add newly inserted messages to Tantivy index
+        for (conv, outcome) in convs.iter().zip(outcomes.iter()) {
+            if force_tantivy_reindex {
+                // Rebuild path: the Tantivy index is known-empty, so index all messages.
+                t_index.add_messages(conv, &conv.messages)?;
+            } else if !outcome.inserted_indices.is_empty() {
+                let new_msgs: Vec<_> = conv
+                    .messages
+                    .iter()
+                    .filter(|m| outcome.inserted_indices.contains(&m.idx))
+                    .cloned()
+                    .collect();
+                t_index.add_messages(conv, &new_msgs)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn map_role(role: &str) -> MessageRole {
         match role {
             "user" => MessageRole::User,
@@ -1130,7 +1235,7 @@ mod tests {
 
     fn ignore_sources_config() -> EnvGuard {
         let key = "CASS_IGNORE_SOURCES_CONFIG";
-        let previous = std::env::var(key).ok();
+        let previous = dotenvy::var(key).ok();
         // SAFETY: test helper toggles a process-local env var for isolation.
         unsafe {
             std::env::set_var(key, "1");
@@ -1342,7 +1447,7 @@ mod tests {
         // Use unique subdirectory to avoid conflicts with other tests
         let xdg = tmp.path().join("xdg_watch_state");
         std::fs::create_dir_all(&xdg).unwrap();
-        let prev = std::env::var("XDG_DATA_HOME").ok();
+        let prev = dotenvy::var("XDG_DATA_HOME").ok();
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
 
         // Use xdg directly (not dirs::data_dir() which doesn't respect XDG_DATA_HOME on macOS)
@@ -1451,7 +1556,7 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         // Use unique subdirectory to avoid conflicts with other tests
         let xdg = tmp.path().join("xdg_progress");
         std::fs::create_dir_all(&xdg).unwrap();
-        let prev = std::env::var("XDG_DATA_HOME").ok();
+        let prev = dotenvy::var("XDG_DATA_HOME").ok();
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
 
         // Prepare amp fixture using temp directory directly (not dirs::data_dir()

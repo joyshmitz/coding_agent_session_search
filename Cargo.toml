@@ -1,6 +1,6 @@
 [package]
 name = "coding-agent-search"
-version = "0.1.48"
+version = "0.1.55"
 edition = "2024"
 authors = ["Jeffrey Emanuel"]
 description = "Unified TUI search over local coding agent histories"
@@ -51,6 +51,7 @@ syntect = "*"
 itertools = "*"
 crc32fast = "*"
 unicode-normalization = "*"
+urlencoding = "*"
 half = "*"
 memmap2 = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries"] }
@@ -58,6 +59,16 @@ fastembed = { version = "*", default-features = false, features = ["ort-download
 # Crypto for ChatGPT encrypted conversations
 aes-gcm = "0.10"
 ring = "0.17"
+
+# SHA256 hashing for model verification
+sha2 = "*"
+hex = "*"
+
+# Interactive terminal prompts for setup wizard
+dialoguer = "*"
+
+# SFTP fallback for sync when rsync is unavailable
+ssh2 = "*"
 
 # macOS keychain access (optional, for ChatGPT decryption)
 [target.'cfg(target_os = "macos")'.dependencies]

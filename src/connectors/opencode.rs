@@ -35,7 +35,7 @@ impl OpenCodeConnector {
     /// OpenCode stores sessions in ~/.local/share/opencode/storage/
     fn storage_root() -> Option<PathBuf> {
         // Check for env override first (useful for testing)
-        if let Ok(path) = std::env::var("OPENCODE_STORAGE_ROOT") {
+        if let Ok(path) = dotenvy::var("OPENCODE_STORAGE_ROOT") {
             let p = PathBuf::from(path);
             if p.exists() {
                 return Some(p);
@@ -373,9 +373,7 @@ fn load_messages(session_msg_dir: &PathBuf, part_dir: &PathBuf) -> Result<Vec<No
 
     // Sort by timestamp and assign indices
     messages.sort_by_key(|m| m.created_at.unwrap_or(i64::MAX));
-    for (i, msg) in messages.iter_mut().enumerate() {
-        msg.idx = i as i64;
-    }
+    super::reindex_messages(&mut messages);
 
     Ok(messages)
 }

@@ -1,0 +1,102 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  coverage:
+    name: Test Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-
+            ${{ runner.os }}-cargo-
+
+      - name: Generate coverage report
+        run: |
+          cargo llvm-cov --workspace \
+            --ignore-filename-regex "tests/" \
+            --ignore-filename-regex "benches/" \
+            --codecov \
+            --output-path codecov.json
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: codecov.json
+          fail_ci_if_error: false
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Generate coverage summary
+        run: |
+          cargo llvm-cov --workspace \
+            --ignore-filename-regex "tests/" \
+            --ignore-filename-regex "benches/" \
+            --json \
+            --output-path coverage.json
+
+          # Extract coverage percentage
+          COVERAGE=$(jq -r '.data[0].totals.lines.percent // 0' coverage.json)
+          echo "## Test Coverage: ${COVERAGE}%" >> $GITHUB_STEP_SUMMARY
+
+          # Add badge-style indicator
+          if (( $(echo "$COVERAGE >= 80" | bc -l) )); then
+            echo "Status: :white_check_mark: Meets 80% threshold" >> $GITHUB_STEP_SUMMARY
+          elif (( $(echo "$COVERAGE >= 60" | bc -l) )); then
+            echo "Status: :warning: Below 80% threshold" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Status: :x: Needs improvement" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check coverage threshold
+        if: github.event_name == 'pull_request'
+        run: |
+          COVERAGE=$(jq -r '.data[0].totals.lines.percent // 0' coverage.json)
+          THRESHOLD=60
+
+          echo "Coverage: ${COVERAGE}%"
+          echo "Threshold: ${THRESHOLD}%"
+
+          if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+            echo "::warning::Coverage ${COVERAGE}% is below ${THRESHOLD}% threshold"
+            # Note: Not failing the build yet, just warning
+            # To enforce: change to exit 1
+          fi
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            codecov.json
+            coverage.json
+          retention-days: 14

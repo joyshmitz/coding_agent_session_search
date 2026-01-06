@@ -12,6 +12,7 @@ pub mod claude_code;
 pub mod cline;
 pub mod codex;
 pub mod cursor;
+pub mod factory;
 pub mod gemini;
 pub mod opencode;
 pub mod pi_agent;
@@ -197,6 +198,15 @@ pub trait Connector {
     fn scan(&self, ctx: &ScanContext) -> anyhow::Result<Vec<NormalizedConversation>>;
 }
 
+/// Re-assign sequential indices to messages starting from 0.
+/// Use this after filtering or sorting messages to ensure idx values are contiguous.
+#[inline]
+pub fn reindex_messages(messages: &mut [NormalizedMessage]) {
+    for (i, msg) in messages.iter_mut().enumerate() {
+        msg.idx = i as i64;
+    }
+}
+
 /// Check if a file was modified since the given timestamp.
 /// Returns true if file should be processed (modified since timestamp or no timestamp given).
 /// Uses file modification time (mtime) for comparison.
@@ -264,57 +274,65 @@ pub fn flatten_content(val: &serde_json::Value) -> String {
     }
 
     // Array of content blocks (assistant messages)
+    // Use single String with push_str to avoid intermediate Vec allocation
     if let Some(arr) = val.as_array() {
-        let parts: Vec<String> = arr
-            .iter()
-            .filter_map(|item| {
-                // Handle plain strings in array (e.g., ["Hello", "World"])
-                if let Some(text) = item.as_str() {
-                    return Some(text.to_string());
+        let mut result = String::new();
+        for item in arr {
+            let part = extract_content_part(item);
+            if let Some(text) = part {
+                if !result.is_empty() {
+                    result.push('\n');
                 }
-
-                let item_type = item.get("type").and_then(|v| v.as_str());
-
-                // Standard text block: {"type": "text", "text": "..."}
-                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                    // Only include if it's a text type or has no type (plain text)
-                    if item_type.is_none()
-                        || item_type == Some("text")
-                        || item_type == Some("input_text")
-                    {
-                        return Some(text.to_string());
-                    }
-                }
-
-                // Tool use block - include tool name for searchability
-                if item_type == Some("tool_use") {
-                    let name = item
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let desc = item
-                        .get("input")
-                        .and_then(|i| i.get("description"))
-                        .and_then(|v| v.as_str())
-                        .or_else(|| {
-                            item.get("input")
-                                .and_then(|i| i.get("file_path"))
-                                .and_then(|v| v.as_str())
-                        })
-                        .unwrap_or("");
-                    if desc.is_empty() {
-                        return Some(format!("[Tool: {name}]"));
-                    }
-                    return Some(format!("[Tool: {name} - {desc}]"));
-                }
-
-                None
-            })
-            .collect();
-        return parts.join("\n");
+                result.push_str(&text);
+            }
+        }
+        return result;
     }
 
     String::new()
+}
+
+/// Extract text content from a single content block item.
+/// Returns None if the item doesn't contain extractable text.
+fn extract_content_part(item: &serde_json::Value) -> Option<String> {
+    // Handle plain strings in array (e.g., ["Hello", "World"])
+    if let Some(text) = item.as_str() {
+        return Some(text.to_string());
+    }
+
+    let item_type = item.get("type").and_then(|v| v.as_str());
+
+    // Standard text block: {"type": "text", "text": "..."}
+    if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+        // Only include if it's a text type or has no type (plain text)
+        if item_type.is_none() || item_type == Some("text") || item_type == Some("input_text") {
+            return Some(text.to_string());
+        }
+    }
+
+    // Tool use block - include tool name for searchability
+    if item_type == Some("tool_use") {
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let desc = item
+            .get("input")
+            .and_then(|i| i.get("description"))
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                item.get("input")
+                    .and_then(|i| i.get("file_path"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("");
+        if desc.is_empty() {
+            return Some(format!("[Tool: {name}]"));
+        }
+        return Some(format!("[Tool: {name} - {desc}]"));
+    }
+
+    None
 }
 
 #[cfg(test)]

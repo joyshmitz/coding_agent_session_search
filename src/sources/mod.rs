@@ -69,12 +69,19 @@
 //! ```
 
 pub mod config;
+pub mod index;
+pub mod install;
+pub mod interactive;
+pub mod probe;
 pub mod provenance;
+pub mod setup;
 pub mod sync;
 
 // Re-export commonly used config types
 pub use config::{
-    ConfigError, Platform, SourceDefinition, SourcesConfig, SyncSchedule, get_preset_paths,
+    BackupInfo, ConfigError, ConfigPreview, DiscoveredHost, MergeResult, PathMapping, Platform,
+    SkipReason, SourceConfigGenerator, SourceDefinition, SourcesConfig, SyncSchedule,
+    discover_ssh_hosts, get_preset_paths,
 };
 
 // Re-export commonly used provenance types
@@ -85,3 +92,27 @@ pub use sync::{
     PathSyncResult, SourceSyncInfo, SyncEngine, SyncError, SyncMethod, SyncReport, SyncResult,
     SyncStatus,
 };
+
+// Re-export commonly used probe types
+pub use probe::{
+    CassStatus, DetectedAgent, HostProbeResult, ProbeCache, ResourceInfo, SystemInfo, probe_host,
+    probe_hosts_parallel,
+};
+
+// Re-export commonly used install types
+pub use install::{
+    InstallError, InstallMethod, InstallProgress, InstallResult, InstallStage, RemoteInstaller,
+};
+
+// Re-export commonly used index types
+pub use index::{IndexError, IndexProgress, IndexResult, IndexStage, RemoteIndexer};
+
+// Re-export commonly used interactive types
+pub use interactive::{
+    CassStatusDisplay, HostDisplayInfo, HostSelectionResult, HostSelector, HostState,
+    InteractiveError, confirm_action, confirm_with_details, probe_to_display_info,
+    run_host_selection,
+};
+
+// Re-export commonly used setup types
+pub use setup::{SetupError, SetupOptions, SetupResult, SetupState, run_setup};

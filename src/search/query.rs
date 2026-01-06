@@ -45,12 +45,15 @@ pub struct SearchFilters {
     pub session_paths: HashSet<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchMode {
+    /// Lexical (BM25) search - keyword matching
     #[default]
     Lexical,
+    /// Semantic search - embedding similarity
     Semantic,
+    /// Hybrid search - RRF fusion of lexical and semantic
     Hybrid,
 }
 
@@ -438,10 +441,13 @@ impl QueryExplanation {
         }
 
         // Warn about narrow filters that might miss results
-        if filters.agents.len() == 1 && filters.workspaces.is_empty() {
+        if let Some(agent) = filters.agents.iter().next()
+            && filters.agents.len() == 1
+            && filters.workspaces.is_empty()
+        {
             warnings.push(format!(
                 "Searching only in agent '{}' - results from other agents will be excluded",
-                filters.agents.iter().next().unwrap()
+                agent
             ));
         }
 
@@ -841,7 +847,7 @@ pub struct CacheStats {
 // Cache tuning: read from env to allow runtime override without recompiling.
 // CASS_CACHE_SHARD_CAP controls per-shard entries; default 256.
 static CACHE_SHARD_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("CASS_CACHE_SHARD_CAP")
+    dotenvy::var("CASS_CACHE_SHARD_CAP")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
@@ -850,7 +856,7 @@ static CACHE_SHARD_CAP: Lazy<usize> = Lazy::new(|| {
 
 // Total cache cost across all shards; approximate "~2k entries" default.
 static CACHE_TOTAL_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("CASS_CACHE_TOTAL_CAP")
+    dotenvy::var("CASS_CACHE_TOTAL_CAP")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
@@ -858,7 +864,7 @@ static CACHE_TOTAL_CAP: Lazy<usize> = Lazy::new(|| {
 });
 
 static CACHE_DEBUG_ENABLED: Lazy<bool> = Lazy::new(|| {
-    std::env::var("CASS_DEBUG_CACHE_METRICS")
+    dotenvy::var("CASS_DEBUG_CACHE_METRICS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 });
@@ -867,7 +873,7 @@ static CACHE_DEBUG_ENABLED: Lazy<bool> = Lazy::new(|| {
 // Approximate sizing: ~500 bytes per cached hit typical (content/title/snippets).
 // Example: CASS_CACHE_BYTE_CAP=10485760 for approx 10MB limit.
 static CACHE_BYTE_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("CASS_CACHE_BYTE_CAP")
+    dotenvy::var("CASS_CACHE_BYTE_CAP")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0) // 0 = disabled (entry-based cap only)
@@ -877,7 +883,7 @@ const CACHE_KEY_VERSION: &str = "1";
 
 // Warm debounce (ms) for background reload/warm jobs; default 120ms.
 static WARM_DEBOUNCE_MS: Lazy<u64> = Lazy::new(|| {
-    std::env::var("CASS_WARM_DEBOUNCE_MS")
+    dotenvy::var("CASS_WARM_DEBOUNCE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
@@ -1189,7 +1195,9 @@ fn parse_boolean_query(query: &str) -> Vec<QueryToken> {
                         chars.next();
                         break;
                     }
-                    phrase.push(chars.next().unwrap());
+                    if let Some(c) = chars.next() {
+                        phrase.push(c);
+                    }
                 }
                 if !phrase.is_empty() {
                     tokens.push(QueryToken::Phrase(phrase));
@@ -2149,7 +2157,10 @@ impl SearchClient {
     }
 
     fn track_generation(&self, generation: u64) {
-        let mut guard = self.last_generation.lock().unwrap();
+        let mut guard = self
+            .last_generation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(prev) = *guard
             && prev != generation
             && let Ok(mut cache) = self.prefix_cache.lock()
@@ -2787,7 +2798,7 @@ impl SearchClient {
     fn maybe_reload_reader(&self, reader: &IndexReader) -> Result<()> {
         const MIN_RELOAD_INTERVAL: Duration = Duration::from_millis(300);
         let now = Instant::now();
-        let mut guard = self.last_reload.lock().unwrap();
+        let mut guard = self.last_reload.lock().unwrap_or_else(|e| e.into_inner());
         if guard
             .map(|t| now.duration_since(t) >= MIN_RELOAD_INTERVAL)
             .unwrap_or(true)
@@ -6392,5 +6403,181 @@ mod tests {
         assert_eq!(hits.len(), 1);
 
         Ok(())
+    }
+
+    // =============================================================================
+    // RRF (Reciprocal Rank Fusion) Tests
+    // =============================================================================
+
+    fn make_test_hit(id: &str, score: f32) -> SearchHit {
+        SearchHit {
+            title: id.to_string(),
+            snippet: String::new(),
+            content: id.to_string(),
+            score,
+            source_path: format!("/path/{}.jsonl", id),
+            agent: "test".to_string(),
+            workspace: "/workspace".to_string(),
+            workspace_original: None,
+            created_at: Some(1_700_000_000_000),
+            line_number: Some(1),
+            match_type: MatchType::Exact,
+            source_id: "local".to_string(),
+            origin_kind: "local".to_string(),
+            origin_host: None,
+        }
+    }
+
+    #[test]
+    fn test_rrf_fusion_ordering() {
+        // Test that RRF correctly combines rankings from both lists
+        // Higher ranks in both lists should result in higher final ranking
+        let lexical = vec![
+            make_test_hit("A", 10.0),
+            make_test_hit("B", 8.0),
+            make_test_hit("C", 6.0),
+        ];
+        let semantic = vec![
+            make_test_hit("A", 0.9),
+            make_test_hit("B", 0.7),
+            make_test_hit("D", 0.5),
+        ];
+
+        let fused = rrf_fuse_hits(&lexical, &semantic, 10, 0);
+
+        // A and B should be top (in both lists), A first (rank 0 in both)
+        assert_eq!(fused.len(), 4);
+        assert_eq!(fused[0].title, "A"); // Rank 0 in both
+        assert_eq!(fused[1].title, "B"); // Rank 1 in both
+        // C and D are in only one list each, order depends on their ranks
+    }
+
+    #[test]
+    fn test_rrf_handles_disjoint_sets() {
+        // Test with no overlap between lexical and semantic results
+        let lexical = vec![make_test_hit("A", 10.0), make_test_hit("B", 8.0)];
+        let semantic = vec![make_test_hit("C", 0.9), make_test_hit("D", 0.7)];
+
+        let fused = rrf_fuse_hits(&lexical, &semantic, 10, 0);
+
+        // All 4 items should be present
+        assert_eq!(fused.len(), 4);
+        let titles: Vec<&str> = fused.iter().map(|h| h.title.as_str()).collect();
+        assert!(titles.contains(&"A"));
+        assert!(titles.contains(&"B"));
+        assert!(titles.contains(&"C"));
+        assert!(titles.contains(&"D"));
+    }
+
+    #[test]
+    fn test_rrf_tie_breaking_deterministic() {
+        // Test that results are deterministic - same input always produces same output
+        let lexical = vec![
+            make_test_hit("X", 5.0),
+            make_test_hit("Y", 5.0),
+            make_test_hit("Z", 5.0),
+        ];
+        let semantic = vec![]; // Empty semantic list
+
+        // Run multiple times and verify same order
+        let fused1 = rrf_fuse_hits(&lexical, &semantic, 10, 0);
+        let fused2 = rrf_fuse_hits(&lexical, &semantic, 10, 0);
+        let fused3 = rrf_fuse_hits(&lexical, &semantic, 10, 0);
+
+        // Order should be deterministic based on key comparison
+        assert_eq!(fused1.len(), fused2.len());
+        assert_eq!(fused2.len(), fused3.len());
+
+        for i in 0..fused1.len() {
+            assert_eq!(fused1[i].title, fused2[i].title, "Mismatch at index {}", i);
+            assert_eq!(fused2[i].title, fused3[i].title, "Mismatch at index {}", i);
+        }
+    }
+
+    #[test]
+    fn test_rrf_both_lists_bonus() {
+        // Documents appearing in both lists should rank higher than those in only one
+        // Even if their individual ranks are lower
+        let lexical = vec![
+            make_test_hit("solo_lex", 10.0), // Rank 0 lexical only
+            make_test_hit("both", 5.0),      // Rank 1 lexical
+        ];
+        let semantic = vec![
+            make_test_hit("solo_sem", 0.9), // Rank 0 semantic only
+            make_test_hit("both", 0.5),     // Rank 1 semantic
+        ];
+
+        let fused = rrf_fuse_hits(&lexical, &semantic, 10, 0);
+
+        // "both" should be first due to appearing in both lists
+        // It gets RRF score from rank 1 in both lists = 1/(60+2) * 2 = 0.0322
+        // vs solo items get 1/(60+1) = 0.0164 each
+        assert_eq!(
+            fused[0].title, "both",
+            "Doc in both lists should rank first"
+        );
+    }
+
+    #[test]
+    fn test_rrf_respects_limit_and_offset() {
+        let lexical = vec![
+            make_test_hit("A", 10.0),
+            make_test_hit("B", 8.0),
+            make_test_hit("C", 6.0),
+        ];
+        let semantic = vec![];
+
+        // Test limit
+        let fused = rrf_fuse_hits(&lexical, &semantic, 2, 0);
+        assert_eq!(fused.len(), 2);
+
+        // Test offset
+        let fused_offset = rrf_fuse_hits(&lexical, &semantic, 10, 1);
+        assert_eq!(fused_offset.len(), 2); // Skipped first one
+
+        // Test limit 0
+        let fused_empty = rrf_fuse_hits(&lexical, &semantic, 0, 0);
+        assert!(fused_empty.is_empty());
+    }
+
+    #[test]
+    fn test_rrf_empty_inputs() {
+        let empty: Vec<SearchHit> = vec![];
+        let non_empty = vec![make_test_hit("A", 10.0)];
+
+        // Both empty
+        assert!(rrf_fuse_hits(&empty, &empty, 10, 0).is_empty());
+
+        // Lexical empty
+        let fused = rrf_fuse_hits(&empty, &non_empty, 10, 0);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].title, "A");
+
+        // Semantic empty
+        let fused = rrf_fuse_hits(&non_empty, &empty, 10, 0);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].title, "A");
+    }
+
+    #[test]
+    fn test_rrf_candidate_depth() {
+        // Test with many candidates to ensure proper fusion
+        let lexical: Vec<_> = (0..50)
+            .map(|i| make_test_hit(&format!("L{}", i), 100.0 - i as f32))
+            .collect();
+        let semantic: Vec<_> = (0..50)
+            .map(|i| make_test_hit(&format!("S{}", i), 1.0 - 0.01 * i as f32))
+            .collect();
+
+        let fused = rrf_fuse_hits(&lexical, &semantic, 20, 0);
+
+        // Should return 20 items
+        assert_eq!(fused.len(), 20);
+
+        // All items should be unique
+        let mut seen = std::collections::HashSet::new();
+        for hit in &fused {
+            assert!(seen.insert(&hit.title), "Duplicate hit: {}", hit.title);
+        }
     }
 }

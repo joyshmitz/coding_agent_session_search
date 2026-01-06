@@ -133,7 +133,7 @@ impl Connector for AiderConnector {
             };
         }
 
-        if let Some(override_root) = std::env::var_os("CASS_AIDER_DATA_ROOT") {
+        if let Ok(override_root) = dotenvy::var("CASS_AIDER_DATA_ROOT") {
             let override_path = std::path::PathBuf::from(&override_root);
             let override_history = override_path.join(".aider.chat.history.md");
             if override_history.exists() {
@@ -181,7 +181,7 @@ impl Connector for AiderConnector {
 
         if ctx.use_default_detection() {
             // Check for override env var first
-            if let Some(override_root) = std::env::var_os("CASS_AIDER_DATA_ROOT") {
+            if let Ok(override_root) = dotenvy::var("CASS_AIDER_DATA_ROOT") {
                 add_root(PathBuf::from(override_root));
             } else if data_root.exists() && data_root.is_dir() {
                 // Use data_root for recursive search (will find history files in subdirs)
