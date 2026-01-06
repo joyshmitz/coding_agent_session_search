@@ -49,7 +49,7 @@ resolve_version() {
         return 0
       fi
     fi
-    VERSION="v0.1.51"
+    VERSION="v0.1.52"
     warn "Could not resolve latest version; defaulting to $VERSION"
   fi
 }
