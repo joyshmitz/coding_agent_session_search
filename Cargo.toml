@@ -67,6 +67,9 @@ hex = "*"
 # Interactive terminal prompts for setup wizard
 dialoguer = "*"
 
+# SFTP fallback for sync when rsync is unavailable
+ssh2 = "*"
+
 # macOS keychain access (optional, for ChatGPT decryption)
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2.11"
