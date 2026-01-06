@@ -4797,9 +4797,19 @@ fn run_doctor(
             .map(|m| !m.permissions().readonly())
             .unwrap_or(false)
         {
-            add_check!("data_directory", "pass", format!("Data directory exists: {}", data_dir.display()), false);
+            add_check!(
+                "data_directory",
+                "pass",
+                format!("Data directory exists: {}", data_dir.display()),
+                false
+            );
         } else {
-            add_check!("data_directory", "fail", format!("Data directory not writable: {}", data_dir.display()), false);
+            add_check!(
+                "data_directory",
+                "fail",
+                format!("Data directory not writable: {}", data_dir.display()),
+                false
+            );
         }
     } else {
         if fix && std::fs::create_dir_all(&data_dir).is_ok() {
@@ -4811,7 +4821,12 @@ fn run_doctor(
                 fix_applied: true,
             });
         } else {
-            add_check!("data_directory", "fail", format!("Data directory missing: {}", data_dir.display()), true);
+            add_check!(
+                "data_directory",
+                "fail",
+                format!("Data directory missing: {}", data_dir.display()),
+                true
+            );
         }
     }
 
@@ -4833,10 +4848,20 @@ fn run_doctor(
                     fix_applied: true,
                 });
             } else {
-                add_check!("lock_file", "warn", "Stale lock file found (older than 1 hour)", true);
+                add_check!(
+                    "lock_file",
+                    "warn",
+                    "Stale lock file found (older than 1 hour)",
+                    true
+                );
             }
         } else {
-            add_check!("lock_file", "warn", "Active lock file found - another process may be indexing", false);
+            add_check!(
+                "lock_file",
+                "warn",
+                "Active lock file found - another process may be indexing",
+                false
+            );
         }
     } else {
         add_check!("lock_file", "pass", "No stale lock files", false);
@@ -4846,18 +4871,35 @@ fn run_doctor(
     if db_path.exists() {
         match rusqlite::Connection::open(&db_path) {
             Ok(conn) => {
-                match conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get::<_, i64>(0)) {
+                match conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| {
+                    r.get::<_, i64>(0)
+                }) {
                     Ok(count) => {
-                        add_check!("database", "pass", format!("Database OK ({} conversations)", count), false);
+                        add_check!(
+                            "database",
+                            "pass",
+                            format!("Database OK ({} conversations)", count),
+                            false
+                        );
                     }
                     Err(e) => {
-                        add_check!("database", "fail", format!("Database corrupted: {}", e), true);
+                        add_check!(
+                            "database",
+                            "fail",
+                            format!("Database corrupted: {}", e),
+                            true
+                        );
                         needs_rebuild = true;
                     }
                 }
             }
             Err(e) => {
-                add_check!("database", "fail", format!("Cannot open database: {}", e), true);
+                add_check!(
+                    "database",
+                    "fail",
+                    format!("Cannot open database: {}", e),
+                    true
+                );
                 needs_rebuild = true;
             }
         }
@@ -4874,21 +4916,31 @@ fn run_doctor(
                     Ok(reader) => {
                         let searcher = reader.searcher();
                         let num_docs = searcher.num_docs();
-                        add_check!("index", "pass", format!("Search index OK ({} documents)", num_docs), false);
+                        add_check!(
+                            "index",
+                            "pass",
+                            format!("Search index OK ({} documents)", num_docs),
+                            false
+                        );
 
                         // Check if index is empty but database has data
                         if num_docs == 0 && db_path.exists() {
                             if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                                if let Ok(msg_count) = conn.query_row(
-                                    "SELECT COUNT(*) FROM messages",
-                                    [],
-                                    |r| r.get::<_, i64>(0),
-                                ) {
+                                if let Ok(msg_count) =
+                                    conn.query_row("SELECT COUNT(*) FROM messages", [], |r| {
+                                        r.get::<_, i64>(0)
+                                    })
+                                {
                                     if msg_count > 0 {
-                                        add_check!("index_sync", "warn", format!(
-                                            "Index is empty but database has {} messages",
-                                            msg_count
-                                        ), true);
+                                        add_check!(
+                                            "index_sync",
+                                            "warn",
+                                            format!(
+                                                "Index is empty but database has {} messages",
+                                                msg_count
+                                            ),
+                                            true
+                                        );
                                         needs_rebuild = true;
                                     }
                                 }
@@ -4915,13 +4967,27 @@ fn run_doctor(
     let config_path = data_dir.join("config.toml");
     if config_path.exists() {
         match std::fs::read_to_string(&config_path) {
-            Ok(content) => {
-                match toml::from_str::<toml::Value>(&content) {
-                    Ok(_) => { add_check!("config", "pass", "Config file valid", false); }
-                    Err(e) => { add_check!("config", "warn", format!("Config parse error: {}", e), false); }
+            Ok(content) => match toml::from_str::<toml::Value>(&content) {
+                Ok(_) => {
+                    add_check!("config", "pass", "Config file valid", false);
                 }
+                Err(e) => {
+                    add_check!(
+                        "config",
+                        "warn",
+                        format!("Config parse error: {}", e),
+                        false
+                    );
+                }
+            },
+            Err(e) => {
+                add_check!(
+                    "config",
+                    "warn",
+                    format!("Cannot read config: {}", e),
+                    false
+                );
             }
-            Err(e) => { add_check!("config", "warn", format!("Cannot read config: {}", e), false); }
         }
     } else {
         add_check!("config", "pass", "No config file (using defaults)", false);
@@ -4934,16 +5000,35 @@ fn run_doctor(
         .join("sources.toml");
     if sources_path.exists() {
         match std::fs::read_to_string(&sources_path) {
-            Ok(content) => {
-                match toml::from_str::<toml::Value>(&content) {
-                    Ok(_) => { add_check!("sources_config", "pass", "Sources config valid", false); }
-                    Err(e) => { add_check!("sources_config", "warn", format!("Sources config parse error: {}", e), false); }
+            Ok(content) => match toml::from_str::<toml::Value>(&content) {
+                Ok(_) => {
+                    add_check!("sources_config", "pass", "Sources config valid", false);
                 }
+                Err(e) => {
+                    add_check!(
+                        "sources_config",
+                        "warn",
+                        format!("Sources config parse error: {}", e),
+                        false
+                    );
+                }
+            },
+            Err(e) => {
+                add_check!(
+                    "sources_config",
+                    "warn",
+                    format!("Cannot read sources config: {}", e),
+                    false
+                );
             }
-            Err(e) => { add_check!("sources_config", "warn", format!("Cannot read sources config: {}", e), false); }
         }
     } else {
-        add_check!("sources_config", "pass", "No remote sources configured", false);
+        add_check!(
+            "sources_config",
+            "pass",
+            "No remote sources configured",
+            false
+        );
     }
 
     // 7. Check common session directories exist
@@ -4963,20 +5048,38 @@ fn run_doctor(
         }
     }
     if session_dirs_found > 0 {
-        add_check!("sessions", "pass", format!("Found {} agent session directories", session_dirs_found), false);
+        add_check!(
+            "sessions",
+            "pass",
+            format!("Found {} agent session directories", session_dirs_found),
+            false
+        );
     } else {
-        add_check!("sessions", "warn", "No agent session directories found", false);
+        add_check!(
+            "sessions",
+            "warn",
+            "No agent session directories found",
+            false
+        );
     }
 
     // Apply fix: rebuild index if needed
     if fix && needs_rebuild {
         // Note: We don't actually run the rebuild here - that would take too long.
         // Instead we inform the user to run `cass index --full`
-        add_check!("rebuild", "warn", "Run 'cass index --full' to rebuild (preserves all source data)", false);
+        add_check!(
+            "rebuild",
+            "warn",
+            "Run 'cass index --full' to rebuild (preserves all source data)",
+            false
+        );
     }
 
     // Count issues
-    let issues_found = checks.iter().filter(|c| c.status == "fail" || c.status == "warn").count();
+    let issues_found = checks
+        .iter()
+        .filter(|c| c.status == "fail" || c.status == "warn")
+        .count();
     let issues_fixed = checks.iter().filter(|c| c.fix_applied).count();
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -4997,7 +5100,10 @@ fn run_doctor(
                 "fix_mode": fix,
             }
         });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
     } else {
         // Human-readable output
         println!("{}", "CASS Doctor".bold());
@@ -5024,7 +5130,13 @@ fn run_doctor(
                 String::new()
             };
 
-            println!("{} {}: {}{}", icon, check.name.bold(), check.message, fix_indicator);
+            println!(
+                "{} {}: {}{}",
+                icon,
+                check.name.bold(),
+                check.message,
+                fix_indicator
+            );
         }
 
         println!();
@@ -5033,7 +5145,11 @@ fn run_doctor(
         } else {
             println!(
                 "{} {} issue(s) found, {} fixed ({elapsed_ms}ms)",
-                if issues_found > issues_fixed { "✗".red() } else { "⚠".yellow() },
+                if issues_found > issues_fixed {
+                    "✗".red()
+                } else {
+                    "⚠".yellow()
+                },
                 issues_found,
                 issues_fixed
             );
@@ -5056,7 +5172,10 @@ fn run_doctor(
             code: 5, // Data corruption code
             kind: "doctor",
             message: format!("{} issue(s) found", issues_found - issues_fixed),
-            hint: Some("Run 'cass doctor --fix' to apply safe fixes, then 'cass index --full' to rebuild.".to_string()),
+            hint: Some(
+                "Run 'cass doctor --fix' to apply safe fixes, then 'cass index --full' to rebuild."
+                    .to_string(),
+            ),
             retryable: true,
         })
     }
