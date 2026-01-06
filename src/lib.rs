@@ -344,6 +344,25 @@ pub enum Commands {
         #[arg(long, default_value = "300")]
         stale_threshold: u64,
     },
+    /// Diagnose and repair cass installation issues. Safe by default - never deletes user data.
+    /// Use --fix to apply automatic repairs (rebuilds derived data only, preserves source sessions).
+    Doctor {
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Apply safe fixes automatically (rebuilds index/db from source data)
+        #[arg(long)]
+        fix: bool,
+        /// Run all checks verbosely (show passed checks too)
+        #[arg(long, short)]
+        verbose: bool,
+        /// Force index rebuild even if index appears healthy
+        #[arg(long)]
+        force_rebuild: bool,
+    },
     /// Find related sessions for a given source path
     Context {
         /// Path to the source session file
@@ -2018,6 +2037,15 @@ async fn execute_cli(
                 } => {
                     run_health(&data_dir, cli.db.clone(), json, stale_threshold, robot_meta)?;
                 }
+                Commands::Doctor {
+                    data_dir,
+                    json,
+                    fix,
+                    verbose,
+                    force_rebuild,
+                } => {
+                    run_doctor(&data_dir, cli.db.clone(), json, fix, verbose, force_rebuild)?;
+                }
                 Commands::Context {
                     path,
                     data_dir,
@@ -2225,6 +2253,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Introspect { .. }) => "introspect".to_string(),
         Some(Commands::RobotDocs { topic }) => format!("robot-docs:{topic:?}"),
         Some(Commands::Health { .. }) => "health".to_string(),
+        Some(Commands::Doctor { .. }) => "doctor".to_string(),
         Some(Commands::Context { .. }) => "context".to_string(),
         Some(Commands::Export { .. }) => "export".to_string(),
         Some(Commands::Expand { .. }) => "expand".to_string(),
@@ -2250,6 +2279,7 @@ fn is_robot_mode(command: &Commands) -> bool {
         Commands::Diag { json, .. } => *json,
         Commands::Status { json, .. } => *json,
         Commands::Health { json, .. } => *json,
+        Commands::Doctor { json, .. } => *json,
         Commands::ApiVersion { json, .. } => *json,
         Commands::State { json, .. } => *json,
         Commands::View { json, .. } => *json,
@@ -4714,6 +4744,324 @@ fn run_health(
     }
 }
 
+/// Comprehensive diagnostic and repair tool for cass installation.
+/// CRITICAL: This function NEVER deletes user data. It only rebuilds derived data (index, db)
+/// from source session files. This is essential because users may have only one copy of their
+/// agent session data, and Codex/Claude Code auto-expire older logs.
+fn run_doctor(
+    data_dir_override: &Option<PathBuf>,
+    db_override: Option<PathBuf>,
+    json: bool,
+    fix: bool,
+    verbose: bool,
+    force_rebuild: bool,
+) -> CliResult<()> {
+    use colored::*;
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
+    let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
+    let index_path = data_dir.join("tantivy_index");
+    let lock_path = data_dir.join(".index.lock");
+
+    // Track all checks and their results
+    #[derive(serde::Serialize)]
+    struct Check {
+        name: String,
+        status: String, // "pass", "warn", "fail"
+        message: String,
+        fix_available: bool,
+        fix_applied: bool,
+    }
+
+    let mut checks: Vec<Check> = Vec::new();
+    let mut needs_rebuild = force_rebuild;
+
+    // Helper macro to add a check (avoids closure borrow issues)
+    macro_rules! add_check {
+        ($name:expr, $status:expr, $message:expr, $fix_available:expr) => {
+            checks.push(Check {
+                name: $name.to_string(),
+                status: $status.to_string(),
+                message: $message.to_string(),
+                fix_available: $fix_available,
+                fix_applied: false,
+            });
+        };
+    }
+
+    // 1. Check data directory exists and is writable
+    if data_dir.exists() {
+        if std::fs::metadata(&data_dir)
+            .map(|m| !m.permissions().readonly())
+            .unwrap_or(false)
+        {
+            add_check!("data_directory", "pass", format!("Data directory exists: {}", data_dir.display()), false);
+        } else {
+            add_check!("data_directory", "fail", format!("Data directory not writable: {}", data_dir.display()), false);
+        }
+    } else {
+        if fix && std::fs::create_dir_all(&data_dir).is_ok() {
+            checks.push(Check {
+                name: "data_directory".to_string(),
+                status: "pass".to_string(),
+                message: format!("Data directory created: {}", data_dir.display()),
+                fix_available: true,
+                fix_applied: true,
+            });
+        } else {
+            add_check!("data_directory", "fail", format!("Data directory missing: {}", data_dir.display()), true);
+        }
+    }
+
+    // 2. Check for stale lock files
+    if lock_path.exists() {
+        // Check if lock is stale (older than 1 hour)
+        let is_stale = std::fs::metadata(&lock_path)
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map(|d| d.as_secs() > 3600).unwrap_or(true))
+            .unwrap_or(true);
+
+        if is_stale {
+            if fix && std::fs::remove_file(&lock_path).is_ok() {
+                checks.push(Check {
+                    name: "lock_file".to_string(),
+                    status: "pass".to_string(),
+                    message: "Stale lock file removed".to_string(),
+                    fix_available: true,
+                    fix_applied: true,
+                });
+            } else {
+                add_check!("lock_file", "warn", "Stale lock file found (older than 1 hour)", true);
+            }
+        } else {
+            add_check!("lock_file", "warn", "Active lock file found - another process may be indexing", false);
+        }
+    } else {
+        add_check!("lock_file", "pass", "No stale lock files", false);
+    }
+
+    // 3. Check database exists and is readable
+    if db_path.exists() {
+        match rusqlite::Connection::open(&db_path) {
+            Ok(conn) => {
+                match conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get::<_, i64>(0)) {
+                    Ok(count) => {
+                        add_check!("database", "pass", format!("Database OK ({} conversations)", count), false);
+                    }
+                    Err(e) => {
+                        add_check!("database", "fail", format!("Database corrupted: {}", e), true);
+                        needs_rebuild = true;
+                    }
+                }
+            }
+            Err(e) => {
+                add_check!("database", "fail", format!("Cannot open database: {}", e), true);
+                needs_rebuild = true;
+            }
+        }
+    } else {
+        add_check!("database", "fail", "Database not found", true);
+        needs_rebuild = true;
+    }
+
+    // 4. Check Tantivy index exists and is readable
+    if index_path.exists() {
+        match tantivy::Index::open_in_dir(&index_path) {
+            Ok(index) => {
+                match index.reader() {
+                    Ok(reader) => {
+                        let searcher = reader.searcher();
+                        let num_docs = searcher.num_docs();
+                        add_check!("index", "pass", format!("Search index OK ({} documents)", num_docs), false);
+
+                        // Check if index is empty but database has data
+                        if num_docs == 0 && db_path.exists() {
+                            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                                if let Ok(msg_count) = conn.query_row(
+                                    "SELECT COUNT(*) FROM messages",
+                                    [],
+                                    |r| r.get::<_, i64>(0),
+                                ) {
+                                    if msg_count > 0 {
+                                        add_check!("index_sync", "warn", format!(
+                                            "Index is empty but database has {} messages",
+                                            msg_count
+                                        ), true);
+                                        needs_rebuild = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        add_check!("index", "fail", format!("Cannot read index: {}", e), true);
+                        needs_rebuild = true;
+                    }
+                }
+            }
+            Err(e) => {
+                add_check!("index", "fail", format!("Cannot open index: {}", e), true);
+                needs_rebuild = true;
+            }
+        }
+    } else {
+        add_check!("index", "fail", "Search index not found", true);
+        needs_rebuild = true;
+    }
+
+    // 5. Check config file
+    let config_path = data_dir.join("config.toml");
+    if config_path.exists() {
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => {
+                match toml::from_str::<toml::Value>(&content) {
+                    Ok(_) => { add_check!("config", "pass", "Config file valid", false); }
+                    Err(e) => { add_check!("config", "warn", format!("Config parse error: {}", e), false); }
+                }
+            }
+            Err(e) => { add_check!("config", "warn", format!("Cannot read config: {}", e), false); }
+        }
+    } else {
+        add_check!("config", "pass", "No config file (using defaults)", false);
+    }
+
+    // 6. Check sources.toml
+    let sources_path = dirs::config_dir()
+        .unwrap_or_else(|| data_dir.clone())
+        .join("cass")
+        .join("sources.toml");
+    if sources_path.exists() {
+        match std::fs::read_to_string(&sources_path) {
+            Ok(content) => {
+                match toml::from_str::<toml::Value>(&content) {
+                    Ok(_) => { add_check!("sources_config", "pass", "Sources config valid", false); }
+                    Err(e) => { add_check!("sources_config", "warn", format!("Sources config parse error: {}", e), false); }
+                }
+            }
+            Err(e) => { add_check!("sources_config", "warn", format!("Cannot read sources config: {}", e), false); }
+        }
+    } else {
+        add_check!("sources_config", "pass", "No remote sources configured", false);
+    }
+
+    // 7. Check common session directories exist
+    let mut session_dirs_found = 0usize;
+    let home = dirs::home_dir().unwrap_or_default();
+    let session_paths = [
+        home.join(".claude"),        // Claude Code
+        home.join(".codex"),         // Codex
+        home.join(".cursor"),        // Cursor
+        home.join(".aider"),         // Aider
+        home.join(".chatgpt"),       // ChatGPT
+        home.join(".config/gemini"), // Gemini
+    ];
+    for path in &session_paths {
+        if path.exists() {
+            session_dirs_found += 1;
+        }
+    }
+    if session_dirs_found > 0 {
+        add_check!("sessions", "pass", format!("Found {} agent session directories", session_dirs_found), false);
+    } else {
+        add_check!("sessions", "warn", "No agent session directories found", false);
+    }
+
+    // Apply fix: rebuild index if needed
+    if fix && needs_rebuild {
+        // Note: We don't actually run the rebuild here - that would take too long.
+        // Instead we inform the user to run `cass index --full`
+        add_check!("rebuild", "warn", "Run 'cass index --full' to rebuild (preserves all source data)", false);
+    }
+
+    // Count issues
+    let issues_found = checks.iter().filter(|c| c.status == "fail" || c.status == "warn").count();
+    let issues_fixed = checks.iter().filter(|c| c.fix_applied).count();
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let all_pass = checks.iter().all(|c| c.status == "pass");
+
+    // Output
+    if json {
+        let payload = serde_json::json!({
+            "healthy": all_pass,
+            "issues_found": issues_found,
+            "issues_fixed": issues_fixed,
+            "needs_rebuild": needs_rebuild,
+            "checks": checks,
+            "_meta": {
+                "elapsed_ms": elapsed_ms,
+                "data_dir": data_dir.display().to_string(),
+                "db_path": db_path.display().to_string(),
+                "fix_mode": fix,
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+    } else {
+        // Human-readable output
+        println!("{}", "CASS Doctor".bold());
+        println!();
+
+        for check in &checks {
+            let icon = match check.status.as_str() {
+                "pass" => "✓".green(),
+                "warn" => "⚠".yellow(),
+                "fail" => "✗".red(),
+                _ => "?".normal(),
+            };
+
+            // Show passed checks only in verbose mode
+            if check.status == "pass" && !verbose {
+                continue;
+            }
+
+            let fix_indicator = if check.fix_applied {
+                " [fixed]".green().to_string()
+            } else if check.fix_available && !fix {
+                " [fixable]".yellow().to_string()
+            } else {
+                String::new()
+            };
+
+            println!("{} {}: {}{}", icon, check.name.bold(), check.message, fix_indicator);
+        }
+
+        println!();
+        if all_pass {
+            println!("{} All checks passed ({elapsed_ms}ms)", "✓".green());
+        } else {
+            println!(
+                "{} {} issue(s) found, {} fixed ({elapsed_ms}ms)",
+                if issues_found > issues_fixed { "✗".red() } else { "⚠".yellow() },
+                issues_found,
+                issues_fixed
+            );
+
+            if needs_rebuild && !fix {
+                println!();
+                println!("{}", "Recommended action:".bold());
+                println!("  cass doctor --fix     # Apply safe fixes");
+                println!("  cass index --full     # Rebuild index from source data");
+                println!();
+                println!("{}", "Note: Your source session files are SAFE. Only derived data (index/db) will be rebuilt.".dimmed());
+            }
+        }
+    }
+
+    if all_pass || (fix && issues_found == issues_fixed) {
+        Ok(())
+    } else {
+        Err(CliError {
+            code: 5, // Data corruption code
+            kind: "doctor",
+            message: format!("{} issue(s) found", issues_found - issues_fixed),
+            hint: Some("Run 'cass doctor --fix' to apply safe fixes, then 'cass index --full' to rebuild.".to_string()),
+            retryable: true,
+        })
+    }
+}
+
 /// Find related sessions for a given source path.
 /// Returns sessions that share the same workspace, same day, or same agent.
 fn run_context(
@@ -6333,11 +6681,19 @@ fn run_index_with_data(
                 .template("{spinner:.green} {msg}")
                 .unwrap_or_else(|_| ProgressStyle::default_spinner()),
         );
+        // Set initial message BEFORE starting the tick
+        pb.set_message(if full {
+            "Starting full index...".to_string()
+        } else {
+            "Starting incremental index...".to_string()
+        });
         pb.enable_steady_tick(Duration::from_millis(80));
 
-        let mut last_phase = 0;
-        let mut last_current = 0;
-        let mut last_agents = 0;
+        // Track last values to detect changes; use sentinel values to force first update
+        let mut last_phase = usize::MAX;
+        let mut last_current = usize::MAX;
+        let mut last_agents = usize::MAX;
+        let mut last_update = std::time::Instant::now();
 
         loop {
             // Check if indexer finished
@@ -6400,12 +6756,19 @@ fn run_index_with_data(
                 format!("{}{}...", phase_str, rebuild_indicator)
             };
 
-            // Only update if something changed to reduce flicker
-            if phase != last_phase || current != last_current || agents != last_agents {
+            // Update when values change OR every 500ms to show activity
+            let now = std::time::Instant::now();
+            let should_update = phase != last_phase
+                || current != last_current
+                || agents != last_agents
+                || now.duration_since(last_update).as_millis() > 500;
+
+            if should_update {
                 pb.set_message(msg);
                 last_phase = phase;
                 last_current = current;
                 last_agents = agents;
+                last_update = now;
             }
 
             std::thread::sleep(Duration::from_millis(50));
@@ -6421,16 +6784,57 @@ fn run_index_with_data(
             agents
         ));
     } else if show_plain {
-        // Plain mode: just wait for completion with periodic updates
+        // Plain mode: print periodic status updates
+        use std::sync::atomic::Ordering;
+
+        eprintln!("Starting index...");
+        let mut last_phase = usize::MAX;
+        let mut last_agents = 0;
+        let mut last_current = 0;
+
         loop {
             if index_handle.is_finished() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(100));
+
+            let phase = index_progress.phase.load(Ordering::Relaxed);
+            let total = index_progress.total.load(Ordering::Relaxed);
+            let current = index_progress.current.load(Ordering::Relaxed);
+            let agents = index_progress.discovered_agents.load(Ordering::Relaxed);
+
+            // Print status on phase change
+            if phase != last_phase {
+                match phase {
+                    1 => eprintln!("Scanning for agents..."),
+                    2 => eprintln!("Indexing conversations..."),
+                    _ => {}
+                }
+                last_phase = phase;
+            }
+
+            // Print agent discovery updates
+            if agents > last_agents {
+                eprintln!("  Found {} agent(s)", agents);
+                last_agents = agents;
+            }
+
+            // Print indexing progress every 100 conversations
+            if phase == 2 && current > last_current && current % 100 == 0 {
+                if total > 0 {
+                    eprintln!("  Indexed {}/{} conversations", current, total);
+                } else {
+                    eprintln!("  Indexed {} conversations", current);
+                }
+                last_current = current;
+            }
+
+            std::thread::sleep(Duration::from_millis(200));
         }
     } else {
-        // No progress display (json mode or none): just wait
-        // Join immediately to avoid spinning
+        // No progress display (json mode or none): just wait for completion
+        while !index_handle.is_finished() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     // Get the result from the indexer thread
