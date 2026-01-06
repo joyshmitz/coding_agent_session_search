@@ -11,7 +11,7 @@ Param(
 )
 
 $ErrorActionPreference = "Stop"
-$FallbackVersion = "v0.1.52"
+$FallbackVersion = "v0.1.53"
 
 # Resolve latest version if not specified
 if (-not $Version) {
