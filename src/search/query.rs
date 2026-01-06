@@ -441,10 +441,13 @@ impl QueryExplanation {
         }
 
         // Warn about narrow filters that might miss results
-        if filters.agents.len() == 1 && filters.workspaces.is_empty() {
+        if let Some(agent) = filters.agents.iter().next()
+            && filters.agents.len() == 1
+            && filters.workspaces.is_empty()
+        {
             warnings.push(format!(
                 "Searching only in agent '{}' - results from other agents will be excluded",
-                filters.agents.iter().next().unwrap()
+                agent
             ));
         }
 
@@ -1192,7 +1195,9 @@ fn parse_boolean_query(query: &str) -> Vec<QueryToken> {
                         chars.next();
                         break;
                     }
-                    phrase.push(chars.next().unwrap());
+                    if let Some(c) = chars.next() {
+                        phrase.push(c);
+                    }
                 }
                 if !phrase.is_empty() {
                     tokens.push(QueryToken::Phrase(phrase));
@@ -2152,7 +2157,7 @@ impl SearchClient {
     }
 
     fn track_generation(&self, generation: u64) {
-        let mut guard = self.last_generation.lock().unwrap();
+        let mut guard = self.last_generation.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(prev) = *guard
             && prev != generation
             && let Ok(mut cache) = self.prefix_cache.lock()
@@ -2790,7 +2795,7 @@ impl SearchClient {
     fn maybe_reload_reader(&self, reader: &IndexReader) -> Result<()> {
         const MIN_RELOAD_INTERVAL: Duration = Duration::from_millis(300);
         let now = Instant::now();
-        let mut guard = self.last_reload.lock().unwrap();
+        let mut guard = self.last_reload.lock().unwrap_or_else(|e| e.into_inner());
         if guard
             .map(|t| now.duration_since(t) >= MIN_RELOAD_INTERVAL)
             .unwrap_or(true)

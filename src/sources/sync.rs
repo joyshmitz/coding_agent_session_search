@@ -30,16 +30,9 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use super::config::SourceDefinition;
-
-// Imports for future SFTP implementation (TODO)
-#[allow(unused_imports)]
-use super::config::discover_ssh_hosts;
-#[allow(unused_imports)]
+use super::config::{discover_ssh_hosts, SourceDefinition};
 use ssh2::{Session, Sftp};
-#[allow(unused_imports)]
 use std::io::{Read as IoRead, Write as IoWrite};
-#[allow(unused_imports)]
 use std::net::TcpStream;
 
 /// Errors that can occur during sync operations.
@@ -782,8 +775,8 @@ impl SyncEngine {
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
 
-                // Skip . and ..
-                if file_name == "." || file_name == ".." {
+                // Skip . and .. and empty/invalid filenames
+                if file_name.is_empty() || file_name == "." || file_name == ".." {
                     continue;
                 }
 
@@ -819,6 +812,12 @@ impl SyncEngine {
 
             self.sftp_download_file(sftp, remote_path, &local_file, bytes_transferred)?;
             *files_transferred += 1;
+        } else {
+            // Not a regular file or directory (symlink, socket, etc.) - skip with warning
+            tracing::warn!(
+                path = %remote_path.display(),
+                "Skipping remote path: not a regular file or directory"
+            );
         }
 
         Ok(())
