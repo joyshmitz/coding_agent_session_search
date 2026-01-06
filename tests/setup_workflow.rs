@@ -10,6 +10,9 @@
 //! Note: Tests requiring actual SSH connectivity are not included here.
 //! The setup wizard's full integration would require mock SSH infrastructure.
 
+// Allow field reassignment in tests - we deliberately test has_progress() by setting individual fields
+#![allow(clippy::field_reassign_with_default)]
+
 use coding_agent_search::sources::probe::{CassStatus, HostProbeResult};
 use coding_agent_search::sources::setup::{SetupError, SetupOptions, SetupResult, SetupState};
 
@@ -104,8 +107,10 @@ fn setup_state_has_progress_empty() {
 /// Test SetupState::has_progress() returns true when discovery is complete.
 #[test]
 fn setup_state_has_progress_discovery() {
-    let mut state = SetupState::default();
-    state.discovery_complete = true;
+    let state = SetupState {
+        discovery_complete: true,
+        ..Default::default()
+    };
     assert!(
         state.has_progress(),
         "State with discovery_complete should have progress"
@@ -115,8 +120,10 @@ fn setup_state_has_progress_discovery() {
 /// Test SetupState::has_progress() returns true when probing is complete.
 #[test]
 fn setup_state_has_progress_probing() {
-    let mut state = SetupState::default();
-    state.probing_complete = true;
+    let state = SetupState {
+        probing_complete: true,
+        ..Default::default()
+    };
     assert!(
         state.has_progress(),
         "State with probing_complete should have progress"
@@ -126,8 +133,10 @@ fn setup_state_has_progress_probing() {
 /// Test SetupState::has_progress() returns true when selection is complete.
 #[test]
 fn setup_state_has_progress_selection() {
-    let mut state = SetupState::default();
-    state.selection_complete = true;
+    let state = SetupState {
+        selection_complete: true,
+        ..Default::default()
+    };
     assert!(
         state.has_progress(),
         "State with selection_complete should have progress"
@@ -137,8 +146,10 @@ fn setup_state_has_progress_selection() {
 /// Test SetupState::has_progress() returns true when installation is complete.
 #[test]
 fn setup_state_has_progress_installation() {
-    let mut state = SetupState::default();
-    state.installation_complete = true;
+    let state = SetupState {
+        installation_complete: true,
+        ..Default::default()
+    };
     assert!(
         state.has_progress(),
         "State with installation_complete should have progress"
@@ -148,8 +159,10 @@ fn setup_state_has_progress_installation() {
 /// Test SetupState::has_progress() returns true when indexing is complete.
 #[test]
 fn setup_state_has_progress_indexing() {
-    let mut state = SetupState::default();
-    state.indexing_complete = true;
+    let state = SetupState {
+        indexing_complete: true,
+        ..Default::default()
+    };
     assert!(
         state.has_progress(),
         "State with indexing_complete should have progress"
@@ -159,8 +172,10 @@ fn setup_state_has_progress_indexing() {
 /// Test SetupState::has_progress() returns true when configuration is complete.
 #[test]
 fn setup_state_has_progress_configuration() {
-    let mut state = SetupState::default();
-    state.configuration_complete = true;
+    let state = SetupState {
+        configuration_complete: true,
+        ..Default::default()
+    };
     assert!(
         state.has_progress(),
         "State with configuration_complete should have progress"
@@ -170,17 +185,19 @@ fn setup_state_has_progress_configuration() {
 /// Test SetupState serialization and deserialization roundtrip.
 #[test]
 fn setup_state_serde_roundtrip() {
-    let mut state = SetupState::default();
-    state.discovery_complete = true;
-    state.discovered_hosts = 5;
-    state.discovered_host_names = vec!["host1".to_string(), "host2".to_string()];
-    state.probing_complete = true;
-    state.selection_complete = true;
-    state.selected_host_names = vec!["host1".to_string()];
-    state.installation_complete = true;
-    state.completed_installs = vec!["host1".to_string()];
-    state.started_at = Some("2025-01-01T00:00:00Z".to_string());
-    state.current_operation = Some("Testing".to_string());
+    let state = SetupState {
+        discovery_complete: true,
+        discovered_hosts: 5,
+        discovered_host_names: vec!["host1".to_string(), "host2".to_string()],
+        probing_complete: true,
+        selection_complete: true,
+        selected_host_names: vec!["host1".to_string()],
+        installation_complete: true,
+        completed_installs: vec!["host1".to_string()],
+        started_at: Some("2025-01-01T00:00:00Z".to_string()),
+        current_operation: Some("Testing".to_string()),
+        ..Default::default()
+    };
 
     // Serialize to JSON
     let json = serde_json::to_string(&state).expect("Failed to serialize SetupState");
@@ -210,9 +227,11 @@ fn setup_state_serde_roundtrip() {
 /// Test SetupState serialization produces valid JSON.
 #[test]
 fn setup_state_json_format() {
-    let mut state = SetupState::default();
-    state.discovery_complete = true;
-    state.discovered_hosts = 3;
+    let state = SetupState {
+        discovery_complete: true,
+        discovered_hosts: 3,
+        ..Default::default()
+    };
 
     let json = serde_json::to_string_pretty(&state).expect("Failed to serialize SetupState");
 
@@ -237,9 +256,11 @@ fn setup_state_with_probe_results() {
         error: None,
     };
 
-    let mut state = SetupState::default();
-    state.probed_hosts = vec![probe];
-    state.probing_complete = true;
+    let state = SetupState {
+        probed_hosts: vec![probe],
+        probing_complete: true,
+        ..Default::default()
+    };
 
     // Serialize and deserialize
     let json = serde_json::to_string(&state).expect("Failed to serialize");

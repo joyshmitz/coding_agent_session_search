@@ -80,6 +80,9 @@ pub enum InstallError {
     #[error("Verification failed: {0}")]
     VerificationFailed(String),
 
+    #[error("Checksum mismatch: expected {expected}, got {actual}")]
+    ChecksumMismatch { expected: String, actual: String },
+
     #[error("Missing system dependency: {dep}. Fix: {fix}")]
     MissingDependency { dep: String, fix: String },
 
@@ -302,10 +305,10 @@ impl RemoteInstaller {
 
         // 2. Try pre-built binary if available for this arch
         if let Some(url) = self.get_prebuilt_url() {
-            return Some(InstallMethod::PrebuiltBinary {
-                url,
-                checksum: None, // TODO: Add checksum support
-            });
+            // Attempt to fetch checksum (non-blocking - proceed without if unavailable)
+            let checksum_url = Self::get_checksum_url(&url);
+            let checksum = self.fetch_remote_checksum(&checksum_url);
+            return Some(InstallMethod::PrebuiltBinary { url, checksum });
         }
 
         // 3. Try cargo install if cargo is available and we have resources
@@ -347,6 +350,42 @@ impl RemoteInstaller {
             "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v{}/cass-{}-{}",
             self.target_version, os, arch
         ))
+    }
+
+    /// Get checksum URL for a pre-built binary (binary_url + ".sha256").
+    fn get_checksum_url(binary_url: &str) -> String {
+        format!("{}.sha256", binary_url)
+    }
+
+    /// Fetch checksum from remote URL via SSH.
+    ///
+    /// Returns the SHA256 hex string if successful, None if checksum unavailable.
+    /// This is non-blocking - if checksum can't be fetched, installation proceeds without verification.
+    fn fetch_remote_checksum(&self, checksum_url: &str) -> Option<String> {
+        // Use curl or wget to fetch the checksum file
+        let fetch_cmd = if self.system_info.has_curl {
+            format!(r#"curl -fsSL "{}" 2>/dev/null | head -1"#, checksum_url)
+        } else if self.system_info.has_wget {
+            format!(r#"wget -qO- "{}" 2>/dev/null | head -1"#, checksum_url)
+        } else {
+            return None;
+        };
+
+        match self.run_ssh_command(&fetch_cmd, Duration::from_secs(10)) {
+            Ok(output) => {
+                // Parse checksum - format is either just the hash or "hash  filename"
+                let line = output.trim();
+                let checksum = line.split_whitespace().next().unwrap_or(line);
+
+                // Validate it looks like a SHA256 hex string (64 chars, all hex)
+                if checksum.len() == 64 && checksum.chars().all(|c| c.is_ascii_hexdigit()) {
+                    Some(checksum.to_lowercase())
+                } else {
+                    None
+                }
+            }
+            Err(_) => None, // Checksum unavailable - proceed without verification
+        }
     }
 
     /// Install cass on the remote host.
@@ -457,7 +496,7 @@ impl RemoteInstaller {
     fn install_via_binary<F>(
         &self,
         url: &str,
-        _checksum: Option<&str>,
+        checksum: Option<&str>,
         on_progress: &F,
         start: Instant,
     ) -> Result<InstallResult, InstallError>
@@ -498,9 +537,34 @@ grep -q '.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bi
 
         self.run_ssh_command(&download_cmd, Duration::from_secs(60))?;
 
+        // Verify SHA256 checksum if provided
+        let verified_checksum = if let Some(expected) = checksum {
+            on_progress(InstallProgress {
+                stage: InstallStage::Verifying,
+                message: "Verifying binary checksum...".into(),
+                percent: Some(70),
+                elapsed: start.elapsed(),
+            });
+
+            let actual = self.compute_remote_checksum("~/.local/bin/cass")?;
+            if actual.to_lowercase() != expected.to_lowercase() {
+                return Err(InstallError::ChecksumMismatch {
+                    expected: expected.to_string(),
+                    actual,
+                });
+            }
+            Some(expected.to_string())
+        } else {
+            None
+        };
+
         on_progress(InstallProgress {
             stage: InstallStage::Installing,
-            message: "Binary installed to ~/.local/bin/cass".into(),
+            message: if verified_checksum.is_some() {
+                "Binary installed and verified at ~/.local/bin/cass".into()
+            } else {
+                "Binary installed to ~/.local/bin/cass (checksum not available)".into()
+            },
             percent: Some(80),
             elapsed: start.elapsed(),
         });
@@ -511,12 +575,49 @@ grep -q '.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bi
         Ok(InstallResult {
             method: InstallMethod::PrebuiltBinary {
                 url: url.to_string(),
-                checksum: None,
+                checksum: verified_checksum,
             },
             version: self.target_version.clone(),
             duration: start.elapsed(),
             install_path: Some("~/.local/bin/cass".into()),
         })
+    }
+
+    /// Compute SHA256 checksum of a file on the remote host.
+    fn compute_remote_checksum(&self, remote_path: &str) -> Result<String, InstallError> {
+        // Try sha256sum (Linux) first, fall back to shasum -a 256 (macOS)
+        let checksum_cmd = format!(
+            r#"
+if command -v sha256sum &>/dev/null; then
+    sha256sum "{}" 2>/dev/null | cut -d' ' -f1
+elif command -v shasum &>/dev/null; then
+    shasum -a 256 "{}" 2>/dev/null | cut -d' ' -f1
+else
+    echo "NO_CHECKSUM_TOOL"
+fi
+"#,
+            remote_path, remote_path
+        );
+
+        let output = self.run_ssh_command(&checksum_cmd, Duration::from_secs(30))?;
+        let checksum = output.trim();
+
+        if checksum == "NO_CHECKSUM_TOOL" {
+            return Err(InstallError::MissingDependency {
+                dep: "sha256sum or shasum".into(),
+                fix: "Install coreutils (Linux) or use macOS with built-in shasum".into(),
+            });
+        }
+
+        // Validate it looks like a SHA256 hex string
+        if checksum.len() == 64 && checksum.chars().all(|c| c.is_ascii_hexdigit()) {
+            Ok(checksum.to_lowercase())
+        } else {
+            Err(InstallError::VerificationFailed(format!(
+                "Invalid checksum output: {}",
+                checksum
+            )))
+        }
     }
 
     /// Install via cargo install (compilation).
