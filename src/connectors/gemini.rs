@@ -135,7 +135,7 @@ impl GeminiConnector {
     }
 
     fn root() -> PathBuf {
-        std::env::var("GEMINI_HOME").map_or_else(
+        dotenvy::var("GEMINI_HOME").map_or_else(
             |_| dirs::home_dir().unwrap_or_default().join(".gemini/tmp"),
             PathBuf::from,
         )

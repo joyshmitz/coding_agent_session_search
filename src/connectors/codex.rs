@@ -22,7 +22,7 @@ impl CodexConnector {
     }
 
     fn home() -> PathBuf {
-        std::env::var("CODEX_HOME").map_or_else(
+        dotenvy::var("CODEX_HOME").map_or_else(
             |_| dirs::home_dir().unwrap_or_default().join(".codex"),
             PathBuf::from,
         )

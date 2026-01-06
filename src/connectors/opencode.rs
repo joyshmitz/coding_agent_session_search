@@ -35,7 +35,7 @@ impl OpenCodeConnector {
     /// OpenCode stores sessions in ~/.local/share/opencode/storage/
     fn storage_root() -> Option<PathBuf> {
         // Check for env override first (useful for testing)
-        if let Ok(path) = std::env::var("OPENCODE_STORAGE_ROOT") {
+        if let Ok(path) = dotenvy::var("OPENCODE_STORAGE_ROOT") {
             let p = PathBuf::from(path);
             if p.exists() {
                 return Some(p);

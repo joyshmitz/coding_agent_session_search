@@ -38,7 +38,7 @@ impl PiAgentConnector {
     /// Get the pi-agent home directory.
     /// Checks PI_CODING_AGENT_DIR env var, falls back to ~/.pi/agent/
     fn home() -> PathBuf {
-        std::env::var("PI_CODING_AGENT_DIR").map_or_else(
+        dotenvy::var("PI_CODING_AGENT_DIR").map_or_else(
             |_| dirs::home_dir().unwrap_or_default().join(".pi/agent"),
             PathBuf::from,
         )
