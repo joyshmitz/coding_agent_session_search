@@ -287,7 +287,7 @@ cass sources setup --resume
 cass sources setup --non-interactive --hosts myserver --skip-install
 ```
 
-**Resumable state:** If setup is interrupted (Ctrl+C, connection lost), state is saved to `~/.config/cass/setup_state.json`. Resume with `--resume`.
+**Resumable state:** If setup is interrupted (Ctrl+C, connection lost), state is saved to the cache directory (`~/.cache/cass/setup_state.json` on Linux). Resume with `--resume`.
 
 #### Remote Installation Methods
 
@@ -325,7 +325,7 @@ Use `--skip-install` if you prefer to install manually on remotes.
 The setup wizard automatically discovers SSH hosts from your configuration:
 
 **Discovery Sources**:
-- `~/.ssh/config` (Host entries with HostName)
+- `~/.ssh/config` (parses Host entries)
 - Hosts with wildcards (`*`, `?`) are automatically excluded
 
 **Probe Results** (for each discovered host):
@@ -451,10 +451,12 @@ Where `-avz` = archive mode + verbose + compression.
 ```
 Remote: ~/.claude/projects/
     ↓ (rsync over SSH)
-Local: ~/.local/share/coding-agent-search/remotes/<source>/claude/
+Local: ~/.local/share/coding-agent-search/remotes/<source>/<path>/
     ↓ (connector scan)
 Index: agent_search.db + tantivy_index/
 ```
+
+Where `<path>` is a filesystem-safe version of the remote path (e.g., `.claude_projects`).
 
 Sessions from remotes are indexed alongside local sessions, with provenance tracking to identify origin.
 
