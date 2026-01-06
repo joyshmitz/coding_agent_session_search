@@ -938,7 +938,9 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
             "F11 cycle source filter: all → local → remote → all".to_string(),
             "Shift+F11 opens source filter menu (select specific sources)".to_string(),
             "Remote sessions show [source-name] in results list".to_string(),
+            "Setup: cass sources setup (interactive wizard with SSH discovery)".to_string(),
             "CLI: cass sources add|list|doctor|sync|mappings".to_string(),
+            "Sync: rsync over SSH (delta transfers, additive-only for safety)".to_string(),
             "Config: ~/.config/cass/sources.toml".to_string(),
         ],
     ));

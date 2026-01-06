@@ -289,6 +289,56 @@ cass sources setup --non-interactive --hosts myserver --skip-install
 
 **Resumable state:** If setup is interrupted (Ctrl+C, connection lost), state is saved to `~/.config/cass/setup_state.json`. Resume with `--resume`.
 
+#### Remote Installation Methods
+
+When the wizard installs `cass` on remote machines, it uses an intelligent fallback chain:
+
+| Priority | Method | Speed | Requirements |
+|----------|--------|-------|--------------|
+| 1 | **cargo-binstall** | ~30s | `cargo-binstall` pre-installed |
+| 2 | **Pre-built binary** | ~60s | curl/wget, GitHub access |
+| 3 | **cargo install** | 3-5min | Rust toolchain, 2GB disk |
+| 4 | **Full bootstrap** | 5-10min | curl/wget only (installs rustup) |
+
+**Resource Requirements**:
+- Minimum 2GB disk space
+- Recommended 1GB RAM for compilation
+- SSH access with key-based authentication
+
+**What Gets Installed**:
+- The `cass` binary to `~/.cargo/bin/cass`
+- No daemon, no background services—just the binary
+
+**Installation Progress**: The wizard shows real-time progress for each stage:
+```
+Installing cass on laptop...
+  [1/4] Checking environment...     ✓
+  [2/4] Downloading binary...       ████████░░ 80%
+  [3/4] Verifying checksum...       ✓
+  [4/4] Setting up PATH...          ✓
+```
+
+Use `--skip-install` if you prefer to install manually on remotes.
+
+#### Host Discovery & Probing
+
+The setup wizard automatically discovers SSH hosts from your configuration:
+
+**Discovery Sources**:
+- `~/.ssh/config` (Host entries with HostName)
+- Hosts are filtered to exclude wildcards (`*`) and jump hosts
+
+**Probe Results** (for each discovered host):
+| Check | Purpose |
+|-------|---------|
+| **Connectivity** | Can we establish SSH connection? |
+| **cass Version** | Is cass already installed? What version? |
+| **Agent Data** | Which agents have session data? |
+| **Session Count** | How many conversations exist? |
+| **System Info** | OS, architecture, disk space, memory |
+
+**Probe Caching**: Results are cached for 5 minutes to speed up repeated setup attempts. Clear with `cass sources setup --no-cache`.
+
 #### Manual Setup
 
 For manual configuration without the wizard:
@@ -366,6 +416,45 @@ cass sources doctor [--source <name>] [--json]
 # Sync sessions
 cass sources sync [--source <name>] [--no-index] [--verbose] [--dry-run] [--json]
 ```
+
+#### Sync Engine Internals
+
+The sync engine uses rsync over SSH for efficient delta transfers, with automatic SFTP fallback:
+
+**Transfer Methods** (auto-detected):
+| Method | When Used | Characteristics |
+|--------|-----------|-----------------|
+| **rsync** | rsync available on both ends | Delta transfers, compression, progress stats |
+| **SFTP** | rsync unavailable | Full file transfers via SSH native protocol |
+
+**Safety Guarantees**:
+- **Additive-only syncs**: rsync runs WITHOUT `--delete` flag—remote deletions never propagate locally
+- **No overwrite risk**: Existing local files are only updated if remote is newer
+- **Atomic operations**: Failed transfers don't leave partial files
+
+**Transfer Configuration**:
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| Connection timeout | 30s | Fail fast on unreachable hosts |
+| Transfer timeout | 5 min | Allow large initial syncs |
+| Compression | Enabled | Reduce bandwidth for text-heavy sessions |
+| Partial transfers | Enabled | Resume interrupted syncs |
+
+**rsync Flags Used**:
+```
+-avz --compress --partial --timeout=300 --contimeout=30 -e ssh
+```
+
+**Data Flow**:
+```
+Remote: ~/.claude/projects/
+    ↓ (rsync over SSH)
+Local: ~/.local/share/coding-agent-search/remotes/<source>/claude/
+    ↓ (connector scan)
+Index: agent_search.db + tantivy_index/
+```
+
+Sessions from remotes are indexed alongside local sessions, with provenance tracking to identify origin.
 
 #### Path Mappings
 
