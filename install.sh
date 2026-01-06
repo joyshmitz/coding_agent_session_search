@@ -42,7 +42,8 @@ resolve_version() {
     # Try redirect-based resolution as fallback
     local redirect_url="https://github.com/${OWNER}/${REPO}/releases/latest"
     if tag=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$redirect_url" 2>/dev/null | sed -E 's|.*/tag/||'); then
-      if [ -n "$tag" ] && [ "$tag" != "latest" ]; then
+      # Validate: tag must be non-empty, start with 'v', and not contain URL chars
+      if [ -n "$tag" ] && [[ "$tag" == v* ]] && [[ "$tag" != *"/"* ]]; then
         VERSION="$tag"
         info "Resolved latest version via redirect: $VERSION"
         return 0

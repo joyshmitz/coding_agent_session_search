@@ -31,8 +31,12 @@ if (-not $Version) {
     } catch {
       if ($_.Exception.Response.Headers.Location) {
         $location = $_.Exception.Response.Headers.Location.ToString()
-        $Version = $location -replace ".*/tag/", ""
-        Write-Host "Resolved latest version via redirect: $Version"
+        $extracted = $location -replace ".*/tag/", ""
+        # Validate: must start with 'v' and not contain URL chars (/) to be a valid version
+        if ($extracted -match "^v[0-9]" -and $extracted -notmatch "/") {
+          $Version = $extracted
+          Write-Host "Resolved latest version via redirect: $Version"
+        }
       }
     }
     if (-not $Version) {
