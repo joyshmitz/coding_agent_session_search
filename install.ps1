@@ -26,7 +26,8 @@ if (-not $Version) {
     # Fallback: try redirect-based resolution
     try {
       $redirectUrl = "https://github.com/$Owner/$Repo/releases/latest"
-      $response = Invoke-WebRequest -Uri $redirectUrl -MaximumRedirection 0 -ErrorAction SilentlyContinue
+      # MaximumRedirection 0 causes error on redirect; we catch it to extract Location header
+      $response = Invoke-WebRequest -Uri $redirectUrl -MaximumRedirection 0 -ErrorAction Stop
     } catch {
       if ($_.Exception.Response.Headers.Location) {
         $location = $_.Exception.Response.Headers.Location.ToString()
