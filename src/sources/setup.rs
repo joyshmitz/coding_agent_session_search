@@ -921,54 +921,68 @@ mod tests {
 
     #[test]
     fn test_setup_state_has_progress_discovery() {
-        let mut state = SetupState::default();
-        state.discovery_complete = true;
+        let state = SetupState {
+            discovery_complete: true,
+            ..Default::default()
+        };
         assert!(state.has_progress());
     }
 
     #[test]
     fn test_setup_state_has_progress_probing() {
-        let mut state = SetupState::default();
-        state.probing_complete = true;
+        let state = SetupState {
+            probing_complete: true,
+            ..Default::default()
+        };
         assert!(state.has_progress());
     }
 
     #[test]
     fn test_setup_state_has_progress_selection() {
-        let mut state = SetupState::default();
-        state.selection_complete = true;
+        let state = SetupState {
+            selection_complete: true,
+            ..Default::default()
+        };
         assert!(state.has_progress());
     }
 
     #[test]
     fn test_setup_state_has_progress_installation() {
-        let mut state = SetupState::default();
-        state.installation_complete = true;
+        let state = SetupState {
+            installation_complete: true,
+            ..Default::default()
+        };
         assert!(state.has_progress());
     }
 
     #[test]
     fn test_setup_state_has_progress_indexing() {
-        let mut state = SetupState::default();
-        state.indexing_complete = true;
+        let state = SetupState {
+            indexing_complete: true,
+            ..Default::default()
+        };
         assert!(state.has_progress());
     }
 
     #[test]
     fn test_setup_state_has_progress_configuration() {
-        let mut state = SetupState::default();
-        state.configuration_complete = true;
+        let state = SetupState {
+            configuration_complete: true,
+            ..Default::default()
+        };
         assert!(state.has_progress());
     }
 
     #[test]
     fn test_setup_state_serde_roundtrip() {
-        let mut state = SetupState::default();
-        state.discovery_complete = true;
-        state.discovered_hosts = 5;
-        state.discovered_host_names = vec!["host1".to_string(), "host2".to_string()];
-        state.selected_host_names = vec!["host1".to_string()];
-        state.started_at = Some("2025-01-01T00:00:00Z".to_string());
+        let state = SetupState {
+            discovery_complete: true,
+            discovered_hosts: 5,
+            discovered_host_names: vec!["host1".to_string(), "host2".to_string()],
+            selected_host_names: vec!["host1".to_string()],
+            started_at: Some("2025-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
 
         let json = serde_json::to_string(&state).unwrap();
         let deserialized: SetupState = serde_json::from_str(&json).unwrap();

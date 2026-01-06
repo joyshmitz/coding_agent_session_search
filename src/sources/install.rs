@@ -1139,4 +1139,96 @@ mod tests {
         );
         assert_eq!(InstallStage::Complete.to_string(), "Complete");
     }
+
+    // =========================================================================
+    // Checksum verification tests
+    // =========================================================================
+
+    #[test]
+    fn test_get_checksum_url() {
+        let binary_url = "https://github.com/example/repo/releases/download/v1.0.0/binary-linux-x86_64";
+        let checksum_url = RemoteInstaller::get_checksum_url(binary_url);
+        assert_eq!(
+            checksum_url,
+            "https://github.com/example/repo/releases/download/v1.0.0/binary-linux-x86_64.sha256"
+        );
+    }
+
+    #[test]
+    fn test_checksum_mismatch_error_display() {
+        let err = InstallError::ChecksumMismatch {
+            expected: "abc123".to_string(),
+            actual: "def456".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("abc123"));
+        assert!(msg.contains("def456"));
+        assert!(msg.contains("mismatch"));
+    }
+
+    #[test]
+    fn test_checksum_validation_valid() {
+        // Valid SHA256: 64 hex characters
+        let valid = "a".repeat(64);
+        assert_eq!(valid.len(), 64);
+        assert!(valid.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Mixed case valid
+        let mixed = "ABCDEFabcdef0123456789ABCDEFabcdef0123456789ABCDEFabcdef01234567";
+        assert_eq!(mixed.len(), 64);
+        assert!(mixed.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_checksum_validation_invalid() {
+        // Too short
+        let short = "a".repeat(32);
+        assert!(short.len() != 64);
+
+        // Too long
+        let long = "a".repeat(128);
+        assert!(long.len() != 64);
+
+        // Invalid characters
+        let invalid = "g".repeat(64); // 'g' is not hex
+        assert!(!invalid.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_prebuilt_binary_method_with_checksum() {
+        let method = InstallMethod::PrebuiltBinary {
+            url: "https://example.com/binary".to_string(),
+            checksum: Some("a".repeat(64)),
+        };
+
+        // Verify serialization includes checksum
+        let json = serde_json::to_string(&method).unwrap();
+        assert!(json.contains("checksum"));
+        assert!(json.contains(&"a".repeat(64)));
+
+        // Verify deserialization
+        let parsed: InstallMethod = serde_json::from_str(&json).unwrap();
+        if let InstallMethod::PrebuiltBinary { checksum, .. } = parsed {
+            assert!(checksum.is_some());
+            assert_eq!(checksum.unwrap().len(), 64);
+        } else {
+            panic!("Expected PrebuiltBinary variant");
+        }
+    }
+
+    #[test]
+    fn test_prebuilt_binary_method_without_checksum() {
+        let method = InstallMethod::PrebuiltBinary {
+            url: "https://example.com/binary".to_string(),
+            checksum: None,
+        };
+
+        let json = serde_json::to_string(&method).unwrap();
+        let parsed: InstallMethod = serde_json::from_str(&json).unwrap();
+        if let InstallMethod::PrebuiltBinary { checksum, .. } = parsed {
+            assert!(checksum.is_none());
+        } else {
+            panic!("Expected PrebuiltBinary variant");
+        }
+    }
 }

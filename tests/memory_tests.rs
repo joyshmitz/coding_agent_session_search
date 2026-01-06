@@ -91,18 +91,18 @@ fn get_process_memory_bytes() -> usize {
     {
         use std::process::Command;
         // Use ps to get RSS in KB
-        if let Ok(output) = Command::new("ps")
+        Command::new("ps")
             .args(["-o", "rss=", "-p", &std::process::id().to_string()])
             .output()
-        {
-            if let Ok(rss_kb) = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .parse::<usize>()
-            {
-                return rss_kb * 1024;
-            }
-        }
-        0
+            .ok()
+            .and_then(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            })
+            .map(|rss_kb| rss_kb * 1024)
+            .unwrap_or(0)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -148,11 +148,7 @@ fn test_search_memory_no_leak() {
     }
 
     let after = get_process_memory_bytes();
-    let growth = if after > baseline {
-        after - baseline
-    } else {
-        0
-    };
+    let growth = after.saturating_sub(baseline);
 
     // Allow up to 50MB growth (for caches, etc.)
     // This is generous but catches true leaks
@@ -212,11 +208,7 @@ fn test_indexing_memory_no_leak() {
     t_index.commit().unwrap();
 
     let after = get_process_memory_bytes();
-    let growth = if after > baseline {
-        after - baseline
-    } else {
-        0
-    };
+    let growth = after.saturating_sub(baseline);
 
     // Allow up to 100MB growth for indexing (more data = more legitimate memory use)
     let max_allowed_growth = 100 * 1024 * 1024; // 100MB
@@ -297,11 +289,7 @@ fn test_vector_search_memory_no_leak() {
     }
 
     let after = get_process_memory_bytes();
-    let growth = if after > baseline {
-        after - baseline
-    } else {
-        0
-    };
+    let growth = after.saturating_sub(baseline);
 
     // Allow up to 20MB growth (vector search should be very memory-stable)
     let max_allowed_growth = 20 * 1024 * 1024; // 20MB
