@@ -79,7 +79,8 @@ jobs:
 
       - name: Run memory tests
         run: |
-          cargo test --test memory_tests --release -- --nocapture 2>&1 | tee memory-output.txt
+          # Memory tests must run sequentially to avoid measurement interference
+          cargo test --test memory_tests --release -- --nocapture --test-threads=1 2>&1 | tee memory-output.txt
 
           # Add to summary
           echo "## Memory Test Results" >> $GITHUB_STEP_SUMMARY

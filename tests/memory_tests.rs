@@ -1,7 +1,9 @@
 //! Memory profiling tests for cass.
 //!
 //! These tests verify that repeated operations don't leak memory.
-//! Run with: cargo test --test memory_tests --release
+//!
+//! IMPORTANT: Run with --test-threads=1 to avoid measurement interference:
+//!   cargo test --test memory_tests --release -- --nocapture --test-threads=1
 //!
 //! For detailed profiling, use heaptrack:
 //!   heaptrack cargo test --test memory_tests --release
