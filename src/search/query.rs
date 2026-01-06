@@ -2157,7 +2157,10 @@ impl SearchClient {
     }
 
     fn track_generation(&self, generation: u64) {
-        let mut guard = self.last_generation.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .last_generation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(prev) = *guard
             && prev != generation
             && let Ok(mut cache) = self.prefix_cache.lock()
