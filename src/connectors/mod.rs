@@ -240,10 +240,32 @@ pub fn file_modified_since(path: &std::path::Path, since_ts: Option<i64>) -> boo
 pub fn parse_timestamp(val: &serde_json::Value) -> Option<i64> {
     // Try direct i64 first (legacy format)
     if let Some(ts) = val.as_i64() {
+        let ts = if ts < 10_000_000_000 {
+            ts.saturating_mul(1000)
+        } else {
+            ts
+        };
         return Some(ts);
     }
     // Try ISO-8601 string (modern format)
     if let Some(s) = val.as_str() {
+        // Numeric strings (seconds or milliseconds)
+        if let Ok(num) = s.parse::<i64>() {
+            let ts = if num < 10_000_000_000 {
+                num.saturating_mul(1000)
+            } else {
+                num
+            };
+            return Some(ts);
+        }
+        if let Ok(num) = s.parse::<f64>() {
+            let ts = if num < 10_000_000_000.0 {
+                (num * 1000.0).round() as i64
+            } else {
+                num.round() as i64
+            };
+            return Some(ts);
+        }
         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
             return Some(dt.timestamp_millis());
         }
@@ -444,6 +466,26 @@ mod tests {
     fn parse_timestamp_i64_milliseconds() {
         let val = serde_json::json!(1700000000000_i64);
         assert_eq!(super::parse_timestamp(&val), Some(1700000000000));
+    }
+
+    #[test]
+    fn parse_timestamp_i64_seconds() {
+        let val = serde_json::json!(1700000000_i64);
+        assert_eq!(super::parse_timestamp(&val), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn parse_timestamp_numeric_string_seconds() {
+        let val = serde_json::json!("1700000000");
+        let result = super::parse_timestamp(&val);
+        assert_eq!(result, Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn parse_timestamp_numeric_string_millis() {
+        let val = serde_json::json!("1700000000000");
+        let result = super::parse_timestamp(&val);
+        assert_eq!(result, Some(1_700_000_000_000));
     }
 
     #[test]

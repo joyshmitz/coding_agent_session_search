@@ -109,6 +109,10 @@ impl Connector for CodexConnector {
 
         for file in files {
             let source_path = file.clone();
+            // Skip files not modified since last scan (incremental indexing)
+            if !crate::connectors::file_modified_since(&file, ctx.since_ts) {
+                continue;
+            }
             // Use relative path from sessions dir as external_id for uniqueness
             // e.g., "2025/11/20/rollout-1" instead of just "rollout-1"
             let sessions_dir = Self::sessions_dir(&home);

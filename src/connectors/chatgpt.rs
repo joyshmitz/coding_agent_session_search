@@ -458,16 +458,22 @@ impl Connector for ChatGptConnector {
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Determine base directory
+        let has_conversation_dirs = |path: &PathBuf| {
+            fs::read_dir(path)
+                .map(|entries| {
+                    entries.flatten().any(|entry| {
+                        entry.file_name().to_str().is_some_and(|name| {
+                            name.starts_with("conversations-") && entry.path().is_dir()
+                        })
+                    })
+                })
+                .unwrap_or(false)
+        };
+
         let looks_like_base = |path: &PathBuf| {
             path.file_name()
                 .is_some_and(|n| n.to_str().unwrap_or("").contains("openai"))
-                || path.read_dir().ok().is_some_and(|entries| {
-                    entries.flatten().any(|e| {
-                        e.file_name()
-                            .to_str()
-                            .is_some_and(|n| n.starts_with("conversations-"))
-                    })
-                })
+                || has_conversation_dirs(path)
         };
 
         let base = if ctx.use_default_detection() {
@@ -1293,5 +1299,40 @@ mod tests {
         let convs = result.unwrap();
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].title, Some("Test Title".to_string()));
+    }
+
+    #[test]
+    fn scan_accepts_base_with_conversations_dir() {
+        let dir = TempDir::new().unwrap();
+
+        let conv_dir = dir.path().join("conversations-uuid123");
+        fs::create_dir_all(&conv_dir).unwrap();
+
+        let conv_json = json!( {
+            "id": "test-conv",
+            "title": "Direct Base",
+            "mapping": {
+                "node1": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "content": {"parts": ["Hello!"]},
+                        "create_time": 1700000000.0
+                    }
+                }
+            }
+        });
+        fs::write(conv_dir.join("conv.json"), conv_json.to_string()).unwrap();
+
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok());
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].title, Some("Direct Base".to_string()));
     }
 }

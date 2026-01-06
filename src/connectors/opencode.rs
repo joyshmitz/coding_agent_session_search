@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -190,8 +190,7 @@ impl Connector for OpenCodeConnector {
         let mut seen_ids = std::collections::HashSet::new();
 
         for session_file in session_files {
-            // Skip files not modified since last scan
-            if !crate::connectors::file_modified_since(&session_file, ctx.since_ts) {
+            if !session_has_updates(&session_file, &message_dir, &part_dir, ctx.since_ts) {
                 continue;
             }
 
@@ -271,6 +270,72 @@ fn looks_like_opencode_storage(path: &std::path::Path) -> bool {
         || path.join("session").exists()
         || path.join("message").exists()
         || path.join("part").exists()
+}
+
+fn session_has_updates(
+    session_file: &Path,
+    message_root: &Path,
+    part_root: &Path,
+    since_ts: Option<i64>,
+) -> bool {
+    if since_ts.is_none() {
+        return true;
+    }
+
+    if crate::connectors::file_modified_since(session_file, since_ts) {
+        return true;
+    }
+
+    let session_id = session_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string);
+    let Some(session_id) = session_id else {
+        return true;
+    };
+
+    let session_msg_dir = message_root.join(&session_id);
+    if !session_msg_dir.exists() {
+        return false;
+    }
+
+    let mut message_ids = Vec::new();
+    if let Ok(entries) = fs::read_dir(&session_msg_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().map(|ext| ext == "json").unwrap_or(false) {
+                if crate::connectors::file_modified_since(&path, since_ts) {
+                    return true;
+                }
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    message_ids.push(stem.to_string());
+                }
+            }
+        }
+    }
+
+    for message_id in message_ids {
+        let part_dir = part_root.join(&message_id);
+        if !part_dir.exists() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(&part_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                if crate::connectors::file_modified_since(&path, since_ts) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Parse a session JSON file
@@ -484,6 +549,80 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join("random")).unwrap();
         assert!(!looks_like_opencode_storage(dir.path()));
+    }
+
+    // =====================================================
+    // session_has_updates() Tests
+    // =====================================================
+
+    #[test]
+    fn session_has_updates_detects_message_file_change() {
+        let dir = TempDir::new().unwrap();
+        let storage = dir.path();
+        let session_dir = storage.join("session/proj");
+        let message_dir = storage.join("message/session-1");
+        let part_dir = storage.join("part");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::create_dir_all(&message_dir).unwrap();
+        fs::create_dir_all(&part_dir).unwrap();
+
+        let session_file = session_dir.join("session-1.json");
+        fs::write(&session_file, r#"{"id":"session-1"}"#).unwrap();
+
+        let message_file = message_dir.join("msg-1.json");
+        fs::write(&message_file, r#"{"id":"msg-1","role":"user"}"#).unwrap();
+
+        let since_ts = file_mtime_ms(&message_file);
+
+        let updated_message_file = message_dir.join("msg-2.json");
+        fs::write(&updated_message_file, r#"{"id":"msg-2","role":"user"}"#).unwrap();
+
+        assert!(session_has_updates(
+            &session_file,
+            &storage.join("message"),
+            &storage.join("part"),
+            Some(since_ts)
+        ));
+    }
+
+    #[test]
+    fn session_has_updates_detects_part_file_change() {
+        let dir = TempDir::new().unwrap();
+        let storage = dir.path();
+        let session_dir = storage.join("session/proj");
+        let message_dir = storage.join("message/session-1");
+        let part_dir = storage.join("part");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::create_dir_all(&message_dir).unwrap();
+        fs::create_dir_all(&part_dir).unwrap();
+
+        let session_file = session_dir.join("session-1.json");
+        fs::write(&session_file, r#"{"id":"session-1"}"#).unwrap();
+
+        let message_file = message_dir.join("msg-1.json");
+        fs::write(&message_file, r#"{"id":"msg-1","role":"assistant"}"#).unwrap();
+
+        let since_ts = file_mtime_ms(&message_file);
+
+        let part_dir_for_message = part_dir.join("msg-1");
+        fs::create_dir_all(&part_dir_for_message).unwrap();
+        fs::write(part_dir_for_message.join("part-1.json"), r#"{"text":"hi"}"#).unwrap();
+
+        assert!(session_has_updates(
+            &session_file,
+            &storage.join("message"),
+            &storage.join("part"),
+            Some(since_ts)
+        ));
+    }
+
+    fn file_mtime_ms(path: &Path) -> i64 {
+        std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
     }
 
     // =====================================================

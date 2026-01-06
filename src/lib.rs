@@ -2317,6 +2317,52 @@ fn apply_wrap(line: &str, wrap: WrapConfig) -> String {
     out
 }
 
+fn lowercase_with_map(text: &str) -> (String, Vec<usize>, Vec<(usize, usize)>) {
+    let mut lower = String::with_capacity(text.len());
+    let mut lower_starts = Vec::new();
+    let mut orig_ranges = Vec::new();
+
+    for (orig_idx, ch) in text.char_indices() {
+        let orig_end = orig_idx + ch.len_utf8();
+        for lower_ch in ch.to_lowercase() {
+            lower_starts.push(lower.len());
+            lower.push(lower_ch);
+            orig_ranges.push((orig_idx, orig_end));
+        }
+    }
+
+    (lower, lower_starts, orig_ranges)
+}
+
+fn lower_char_index(lower_starts: &[usize], lower_len: usize, byte_idx: usize) -> Option<usize> {
+    if byte_idx == lower_len {
+        return Some(lower_starts.len());
+    }
+    let idx = lower_starts.partition_point(|&b| b < byte_idx);
+    if idx < lower_starts.len() && lower_starts[idx] == byte_idx {
+        Some(idx)
+    } else {
+        None
+    }
+}
+
+fn map_lower_range(
+    lower_starts: &[usize],
+    lower_len: usize,
+    orig_ranges: &[(usize, usize)],
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    let start_idx = lower_char_index(lower_starts, lower_len, start)?;
+    let end_idx = lower_char_index(lower_starts, lower_len, end)?;
+    if start_idx >= end_idx {
+        return None;
+    }
+    let orig_start = orig_ranges.get(start_idx)?.0;
+    let orig_end = orig_ranges.get(end_idx - 1)?.1;
+    Some((orig_start, orig_end))
+}
+
 /// Highlight matching search terms in text
 ///
 /// Extracts query terms and wraps matches with the specified markers.
@@ -2344,27 +2390,32 @@ fn highlight_matches(text: &str, query: &str, start_mark: &str, end_mark: &str) 
             continue;
         }
         // Case-insensitive replacement
-        // Note: We lowercase both and find matches in the lowercased version,
-        // but the matched substring length in the original might differ from term.len()
-        // for certain Unicode characters. We use the actual matched length from lower_result.
-        let lower_result = result.to_lowercase();
+        // Build a lowercase copy with a byte-level map back to original indices to
+        // avoid slicing bugs when Unicode case-folding changes string length.
+        let (lower_result, lower_starts, orig_ranges) = lowercase_with_map(&result);
         let lower_term = term.to_lowercase();
         let mut new_result = String::new();
         let mut last_end = 0;
 
         for (idx, matched_str) in lower_result.match_indices(&lower_term) {
+            let end = idx + matched_str.len();
+            let Some((orig_start, orig_end)) =
+                map_lower_range(&lower_starts, lower_result.len(), &orig_ranges, idx, end)
+            else {
+                continue;
+            };
+
             // Skip if this overlaps with a previous highlight (from a longer term)
-            if idx < last_end {
+            if orig_start < last_end {
                 continue;
             }
             // Append text before this match
-            new_result.push_str(&result[last_end..idx]);
+            new_result.push_str(&result[last_end..orig_start]);
             // Append highlighted match (preserve original case)
-            // Use matched_str.len() which is the actual byte length in the lowercased string
             new_result.push_str(start_mark);
-            new_result.push_str(&result[idx..idx + matched_str.len()]);
+            new_result.push_str(&result[orig_start..orig_end]);
             new_result.push_str(end_mark);
-            last_end = idx + matched_str.len();
+            last_end = orig_end;
         }
         // Append remaining text
         new_result.push_str(&result[last_end..]);

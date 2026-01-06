@@ -207,7 +207,7 @@ pub fn run_index(
                     let ctx = crate::connectors::ScanContext::with_roots(
                         root.path.clone(),
                         vec![root.clone()],
-                        None,
+                        since_ts,
                     );
                     match conn.scan(&ctx) {
                         Ok(mut remote_convs) => {

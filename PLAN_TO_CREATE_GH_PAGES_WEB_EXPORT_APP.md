@@ -1,0 +1,1638 @@
+# Proposal: Encrypted GitHub Pages Web Export for cass
+
+**Document Version:** 1.0
+**Date:** January 2026
+**Status:** PROPOSAL - Awaiting Review
+
+---
+
+## Table of Contents
+
+1. [Executive Summary](#1-executive-summary)
+2. [Background: What is cass?](#2-background-what-is-cass)
+3. [Background: What is bv and its Pages Export?](#3-background-what-is-bv-and-its-pages-export)
+4. [Problem Statement](#4-problem-statement)
+5. [Requirements](#5-requirements)
+6. [Proposed Architecture](#6-proposed-architecture)
+7. [Security Model](#7-security-model)
+8. [User Experience Flow](#8-user-experience-flow)
+9. [Technical Implementation Plan](#9-technical-implementation-plan)
+10. [File Structure & Bundle Contents](#10-file-structure--bundle-contents)
+11. [Frontend Technology Stack](#11-frontend-technology-stack)
+12. [CLI Interface Design](#12-cli-interface-design)
+13. [Encryption Implementation Details](#13-encryption-implementation-details)
+14. [Safety Guardrails](#14-safety-guardrails)
+15. [Migration Path & Compatibility](#15-migration-path--compatibility)
+16. [Risk Analysis](#16-risk-analysis)
+17. [Implementation Phases](#17-implementation-phases)
+18. [Open Questions](#18-open-questions)
+19. [Appendix: Original Requirements](#19-appendix-original-requirements)
+
+---
+
+## 1. Executive Summary
+
+This proposal describes adding a **secure, encrypted static website export feature** to `cass` (coding-agent-search), enabling users to publish their AI coding agent conversation history to GitHub Pages while protecting sensitive content with client-side encryption.
+
+### Key Innovation
+
+Unlike bv's existing Pages export (which publishes data in plaintext), cass's implementation will use **AES-256-GCM encryption** with password or QR code authentication. The static site will be completely opaque until decrypted in the browser—no conversation content, agent names, project paths, or search indexes will be visible to anyone without the decryption key.
+
+### Why This Matters
+
+AI coding agent logs often contain:
+- API keys and secrets (accidentally pasted or logged)
+- Internal codenames and architecture details
+- Debugging sessions with sensitive data
+- Proprietary algorithms and business logic
+
+GitHub Pages **only works with public repositories**, making encryption essential for any real-world use of this feature.
+
+---
+
+## 2. Background: What is cass?
+
+### Overview
+
+**cass** (coding-agent-search) is a high-performance Rust application that indexes and searches conversations from 10+ AI coding agents:
+
+| Agent | Storage Format | Location |
+|-------|---------------|----------|
+| Claude Code | JSONL | `~/.claude/projects` |
+| Codex | JSONL (Rollout) | `~/.codex/sessions` |
+| Cursor | SQLite + JSONL | `~/Library/Application Support/Cursor/` |
+| ChatGPT | JSON (encrypted v2/v3) | `~/Library/Application Support/com.openai.chat` |
+| Gemini CLI | JSON | `~/.gemini/tmp` |
+| Aider | Markdown | `~/.aider.chat.history.md` |
+| Cline | JSON | VS Code global storage |
+| OpenCode | SQLite | `.opencode/` directories |
+| Pi-Agent | JSONL | `~/.pi/agent/sessions` |
+| Amp | SQLite + JSON | `~/.local/share/amp` |
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Agent Files (10+ formats)                │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│           Connectors (parallel via rayon)                    │
+│   Normalize to: NormalizedConversation → NormalizedMessage   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Dual Storage Layer                        │
+│  ┌─────────────────────┐    ┌─────────────────────────────┐ │
+│  │   SQLite (v5)       │    │   Tantivy Index             │ │
+│  │   - Relational data │    │   - Full-text search        │ │
+│  │   - Source of truth │    │   - Edge N-grams            │ │
+│  │   - Schema migrations│   │   - BM25 ranking            │ │
+│  └─────────────────────┘    └─────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Presentation Layer                        │
+│  ┌─────────────────────┐    ┌─────────────────────────────┐ │
+│  │   TUI (ratatui)     │    │   Robot Mode (JSON)         │ │
+│  │   - Three-pane UI   │    │   - AI agent consumption    │ │
+│  │   - Interactive     │    │   - Automation pipelines    │ │
+│  └─────────────────────┘    └─────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key Data Structures
+
+```rust
+pub struct NormalizedConversation {
+    pub agent_slug: String,           // "claude-code", "codex", etc.
+    pub workspace: Option<PathBuf>,   // Project directory
+    pub source_path: PathBuf,         // Original file location
+    pub started_at: Option<i64>,      // Milliseconds since epoch
+    pub messages: Vec<NormalizedMessage>,
+    pub source_id: String,            // Provenance: "local", "laptop"
+}
+
+pub struct NormalizedMessage {
+    pub idx: i64,
+    pub role: String,                 // "user", "assistant", "tool", "system"
+    pub content: String,
+    pub created_at: Option<i64>,
+    pub snippets: Vec<NormalizedSnippet>,
+}
+```
+
+### Current Capabilities
+
+- **Sub-60ms search latency** via edge N-gram indexing
+- **Hybrid search**: Lexical (Tantivy) + optional Semantic (MiniLM embeddings)
+- **Multi-machine sync**: SSH/rsync with provenance tracking
+- **Robot mode**: JSON output for AI agent consumption
+- **Export**: Markdown/JSON/plaintext conversation export
+
+### What cass Does NOT Have (Yet)
+
+- Static website generation
+- Client-side search capability
+- Encrypted data export
+- GitHub Pages deployment
+
+---
+
+## 3. Background: What is bv and its Pages Export?
+
+### Overview
+
+**bv** (Beads Viewer) is a Go-based TUI application for the Beads issue tracking system. It provides:
+
+- Multi-view interface (List, Kanban, Graph, Insights, History)
+- Graph analysis engine (PageRank, Betweenness, HITS, Critical Path, etc.)
+- AI-ready JSON outputs (`--robot-*` commands)
+- **Static site export to GitHub Pages or Cloudflare Pages**
+
+### How bv's Pages Export Works
+
+#### CLI Interface
+
+```bash
+# Interactive wizard (recommended)
+bv --pages
+
+# Direct export
+bv --export-pages ./output-dir \
+   --pages-title "My Project" \
+   --pages-include-history
+
+# Preview locally
+bv --preview-pages ./output-dir
+
+# Interactive graph only
+bv --export-graph graph.html
+```
+
+#### The --pages Wizard Flow
+
+1. **Configuration**: Include closed issues? Include git history? Site title?
+2. **Target Selection**: GitHub Pages / Cloudflare Pages / Local export
+3. **Target Config**: Repo name, visibility, description
+4. **Prerequisites Check**: Verify `gh` or `wrangler` CLI, authentication
+5. **Export Bundle**: Generate database + assets
+6. **Preview**: Optional local HTTP server
+7. **Deploy**: Push to hosting platform
+
+#### Generated Bundle Structure
+
+```
+output-dir/
+├── index.html              # Main entry point
+├── beads.sqlite3           # Client-side SQLite database
+├── beads.sqlite3.0         # (chunked if large)
+├── beads.sqlite3.1
+├── data/
+│   ├── triage.json         # Precomputed recommendations
+│   ├── insights.json       # Graph metrics
+│   ├── history.json        # Git correlations
+│   └── graph-layout.json   # Force-directed positions
+├── viewer.js               # Main application (100KB)
+├── graph.js                # Graph rendering (121KB)
+├── charts.js               # Dashboard charts
+├── styles.css              # Tailwind CSS
+├── vendor/
+│   ├── sql-wasm.js         # SQLite WASM loader
+│   ├── sql-wasm.wasm       # SQLite WASM binary (640KB)
+│   ├── alpine.min.js       # UI framework
+│   ├── d3.v7.min.js        # Visualization
+│   ├── force-graph.min.js  # Interactive graphs
+│   ├── marked.min.js       # Markdown parsing
+│   └── mermaid.min.js      # Diagram rendering
+└── README.md               # Project overview
+```
+
+#### Frontend Technology Stack
+
+| Purpose | Library | Size |
+|---------|---------|------|
+| Database | sql.js (SQLite WASM) | 640KB |
+| UI Framework | Alpine.js | 44KB |
+| CSS | Tailwind (JIT) | 398KB |
+| Visualization | D3.js v7 | 273KB |
+| Graphs | Force-Graph | 194KB |
+| Markdown | Marked.js | 36KB |
+| Diagrams | Mermaid | 3.2MB |
+| Sanitization | DOMPurify | 20KB |
+
+#### Key Implementation Files (Go)
+
+| File | Purpose | Lines |
+|------|---------|-------|
+| `pkg/export/wizard.go` | Interactive wizard | 850 |
+| `pkg/export/sqlite_export.go` | Database generation | 600+ |
+| `pkg/export/github.go` | GitHub Pages deployment | 400+ |
+| `pkg/export/cloudflare.go` | Cloudflare deployment | 300+ |
+| `pkg/export/viewer_embed.go` | Asset embedding | 200+ |
+
+#### How Data is Embedded
+
+1. **SQLite Database**: Issues, dependencies, metrics exported to `beads.sqlite3`
+2. **JSON Precomputation**: Triage, insights, history computed server-side
+3. **Asset Embedding**: Go's `//go:embed` includes all frontend files in binary
+4. **Title Injection**: `index.html` template has `{{.Title}}` placeholder
+
+#### Deployment Flow (GitHub Pages)
+
+```go
+// Simplified flow from github.go
+func deployToGitHub(config Config) error {
+    // 1. Create repository (if needed)
+    gh repo create <name> --public --description "..."
+
+    // 2. Clone locally
+    git clone <repo-url> temp-dir
+
+    // 3. Copy bundle contents
+    cp -r bundle/* temp-dir/
+
+    // 4. Commit and push
+    git add -A && git commit -m "Deploy" && git push
+
+    // 5. Enable GitHub Pages
+    gh api repos/<owner>/<repo>/pages -X POST \
+       -f source.branch=main -f source.path=/
+
+    return nil
+}
+```
+
+### Critical Limitation of bv's Approach
+
+**bv exports data in PLAINTEXT**. This works for issue trackers (which are typically not sensitive), but is **completely inappropriate for AI coding agent logs**.
+
+---
+
+## 4. Problem Statement
+
+### The Core Challenge
+
+Users want to share their AI coding agent history for:
+- **Collaboration**: Team members reviewing debugging approaches
+- **Learning**: Building searchable knowledge bases
+- **Documentation**: Preserving institutional knowledge
+- **Archival**: Long-term storage with easy access
+
+### Why GitHub Pages is Attractive
+
+- **Free hosting** for public repositories
+- **Easy deployment** via git push
+- **Global CDN** for fast access
+- **Custom domains** supported
+- **No server maintenance** required
+
+### Why GitHub Pages is Dangerous for Agent Logs
+
+GitHub Pages **requires public repositories**. AI coding agent logs often contain:
+
+| Risk Category | Examples |
+|--------------|----------|
+| **Secrets** | API keys, tokens, passwords (accidentally logged) |
+| **Internal Architecture** | Database schemas, service endpoints, auth flows |
+| **Proprietary Code** | Algorithms, business logic, unreleased features |
+| **Personal Data** | Usernames, emails, file paths with names |
+| **Security Vulnerabilities** | Bug discussions, security fixes before deployment |
+
+### The Solution
+
+**Client-side encryption** that makes the exported data completely opaque:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Public GitHub Repository                  │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │ index.html (auth page only)                             ││
+│  │ encrypted.bin (AES-256-GCM encrypted database)          ││
+│  │ viewer.js (decryption + UI logic)                       ││
+│  │ vendor/* (libraries)                                     ││
+│  └─────────────────────────────────────────────────────────┘│
+│                                                              │
+│  Without password: See only "Enter password" prompt          │
+│  With password: Full search + browsing capability            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 5. Requirements
+
+### 5.1 Functional Requirements
+
+#### FR-1: Content Selection (Interactive + CLI)
+
+| Filter | Default | CLI Flag | Interactive |
+|--------|---------|----------|-------------|
+| Agents | ALL | `--agents claude-code,codex` | Multi-select checkbox |
+| Time Range | ALL | `--since 2024-01-01 --until 2024-12-31` | Date pickers |
+| Projects | ALL | `--workspaces /path/one,/path/two` | Multi-select with search |
+
+#### FR-2: Encryption
+
+- **Algorithm**: AES-256-GCM (authenticated encryption)
+- **Key Derivation**: Argon2id (memory-hard, GPU-resistant)
+- **Authentication Methods**:
+  - Password entry
+  - QR code scan (encodes password or key)
+- **Scope**: ALL data encrypted (database, metadata, search index)
+
+#### FR-3: Static Site Generation
+
+- Self-contained bundle (works offline after initial load)
+- Client-side SQLite via sql.js (WASM)
+- Full-text search capability
+- Responsive UI (desktop + mobile)
+
+#### FR-4: Deployment Options
+
+- GitHub Pages (primary target)
+- Cloudflare Pages (secondary)
+- Local export (manual deployment)
+
+#### FR-5: Safety Guardrails
+
+- Unencrypted export requires typing: `I UNDERSTAND AND ACCEPT THE RISKS`
+- Pre-publish summary shows: agents, workspaces, time range, message count
+- Confirmation prompt before any deployment
+
+### 5.2 Non-Functional Requirements
+
+#### NFR-1: Security
+
+- Zero plaintext content in public repository
+- No metadata leakage (file names, sizes reveal nothing)
+- Forward secrecy considerations (optional key rotation)
+
+#### NFR-2: Performance
+
+- Initial page load: < 3 seconds on 3G
+- Search latency: < 100ms after decryption
+- Database size: Efficient chunking for large exports
+
+#### NFR-3: Usability
+
+- Wizard experience matching bv's polish
+- Clear error messages for auth failures
+- Progress indicators for long operations
+
+#### NFR-4: Compatibility
+
+- Modern browsers (Chrome 90+, Firefox 88+, Safari 14+)
+- WASM support required
+- JavaScript required (no graceful degradation)
+
+---
+
+## 6. Proposed Architecture
+
+### High-Level Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    cass CLI (Rust)                           │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │ 1. User invokes: cass pages (interactive)               ││
+│  │    or: cass export-pages --agents=... --password=...    ││
+│  │                                                          ││
+│  │ 2. Content Selection:                                    ││
+│  │    - Query SQLite for matching conversations             ││
+│  │    - Apply agent/time/workspace filters                  ││
+│  │    - Build export manifest                               ││
+│  │                                                          ││
+│  │ 3. Export Database:                                      ││
+│  │    - Create new SQLite with filtered content             ││
+│  │    - Build FTS5 search index                             ││
+│  │    - Compute statistics and metadata                     ││
+│  │                                                          ││
+│  │ 4. Encrypt:                                              ││
+│  │    - Derive key via Argon2id(password, salt)             ││
+│  │    - Encrypt database with AES-256-GCM                   ││
+│  │    - Generate QR code (optional)                         ││
+│  │                                                          ││
+│  │ 5. Bundle:                                               ││
+│  │    - Copy viewer assets                                  ││
+│  │    - Inject configuration (salt, nonce, auth hints)      ││
+│  │    - Generate README                                     ││
+│  │                                                          ││
+│  │ 6. Deploy (optional):                                    ││
+│  │    - GitHub Pages via gh CLI                             ││
+│  │    - Cloudflare Pages via wrangler                       ││
+│  └─────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 Generated Static Site                        │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │ User visits site:                                        ││
+│  │   1. index.html loads (minimal, no sensitive data)       ││
+│  │   2. Auth modal appears (password or QR scan)            ││
+│  │   3. On success:                                         ││
+│  │      - Derive key in browser (Argon2id via WASM)         ││
+│  │      - Decrypt encrypted.bin → SQLite database           ││
+│  │      - Initialize sql.js with decrypted data             ││
+│  │      - Render full search UI                             ││
+│  │   4. On failure:                                         ││
+│  │      - Show error, remain on auth screen                 ││
+│  │      - No data exposed                                   ││
+│  └─────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Component Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Rust CLI (cass)                         │
+├─────────────────────────────────────────────────────────────┤
+│ ┌───────────────┐ ┌───────────────┐ ┌─────────────────────┐ │
+│ │ PagesWizard   │ │ ExportEngine  │ │ EncryptionModule    │ │
+│ │               │ │               │ │                     │ │
+│ │ - Interactive │ │ - Filter data │ │ - Argon2id KDF      │ │
+│ │ - CLI args    │ │ - Build SQLite│ │ - AES-256-GCM       │ │
+│ │ - Validation  │ │ - FTS5 index  │ │ - QR generation     │ │
+│ └───────────────┘ └───────────────┘ └─────────────────────┘ │
+│ ┌───────────────┐ ┌───────────────┐ ┌─────────────────────┐ │
+│ │ BundleBuilder │ │ Deployer      │ │ AssetEmbed          │ │
+│ │               │ │               │ │                     │ │
+│ │ - Copy assets │ │ - GitHub      │ │ - HTML templates    │ │
+│ │ - Inject conf │ │ - Cloudflare  │ │ - JS/CSS/WASM       │ │
+│ │ - Generate QR │ │ - Local       │ │ - Vendor libs       │ │
+│ └───────────────┘ └───────────────┘ └─────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                    Browser Runtime                           │
+├─────────────────────────────────────────────────────────────┤
+│ ┌───────────────┐ ┌───────────────┐ ┌─────────────────────┐ │
+│ │ AuthModule    │ │ CryptoModule  │ │ DatabaseModule      │ │
+│ │               │ │               │ │                     │ │
+│ │ - Password UI │ │ - Argon2 WASM │ │ - sql.js WASM       │ │
+│ │ - QR scanner  │ │ - AES-GCM     │ │ - FTS5 queries      │ │
+│ │ - Session mgmt│ │ - Key storage │ │ - Result rendering  │ │
+│ └───────────────┘ └───────────────┘ └─────────────────────┘ │
+│ ┌───────────────┐ ┌───────────────┐ ┌─────────────────────┐ │
+│ │ SearchUI      │ │ ConversationUI│ │ ExportUI            │ │
+│ │               │ │               │ │                     │ │
+│ │ - Query input │ │ - Message list│ │ - Copy/download     │ │
+│ │ - Filters     │ │ - Syntax hl   │ │ - Share links       │ │
+│ │ - Results     │ │ - Navigation  │ │ - Print view        │ │
+│ └───────────────┘ └───────────────┘ └─────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 7. Security Model
+
+### 7.1 Threat Model
+
+#### Assets to Protect
+
+1. **Conversation content**: User prompts, assistant responses
+2. **Metadata**: Agent names, workspace paths, timestamps
+3. **Search index**: Terms, frequencies, positions
+4. **Statistics**: Counts, distributions, patterns
+
+#### Adversaries
+
+| Adversary | Capability | Mitigation |
+|-----------|------------|------------|
+| **Casual Observer** | Views public repo | All data encrypted |
+| **GitHub Employee** | Access to repo storage | Encryption at rest |
+| **Network Attacker** | MITM on HTTPS | HTTPS + SRI hashes |
+| **Browser Extension** | DOM access post-auth | Content Security Policy |
+| **Shoulder Surfer** | Sees password entry | QR code alternative |
+
+#### Out of Scope
+
+- Keyloggers on user's machine
+- Malicious browser extensions with full DOM access
+- Targeted attacks with physical access
+- Quantum computing attacks (future consideration)
+
+### 7.2 Cryptographic Design
+
+#### Key Derivation
+
+```
+Password → Argon2id → 256-bit Key
+           ├─ Memory: 64 MB
+           ├─ Iterations: 3
+           ├─ Parallelism: 4
+           └─ Salt: 16 bytes (random, stored in bundle)
+```
+
+**Why Argon2id?**
+- Memory-hard (resists GPU/ASIC attacks)
+- Hybrid design (resists side-channel + time-memory tradeoffs)
+- Winner of Password Hashing Competition (2015)
+- OWASP recommended
+
+#### Encryption
+
+```
+Key + Nonce + Plaintext → AES-256-GCM → Ciphertext + AuthTag
+                          ├─ Key: 256 bits (from Argon2id)
+                          ├─ Nonce: 96 bits (random, unique per export)
+                          └─ AuthTag: 128 bits (integrity verification)
+```
+
+**Why AES-256-GCM?**
+- Authenticated encryption (integrity + confidentiality)
+- Hardware acceleration (AES-NI)
+- Widely audited and deployed
+- NIST approved
+
+#### QR Code Authentication
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Option A: QR encodes password                                │
+│   QR → Base64(password) → Argon2id → Key                    │
+│   Pro: Simple, password recoverable                          │
+│   Con: QR can be photographed                                │
+│                                                              │
+│ Option B: QR encodes derived key directly                    │
+│   QR → Base64(256-bit key)                                   │
+│   Pro: Faster auth (skip Argon2id)                           │
+│   Con: Key not recoverable from password                     │
+│                                                              │
+│ Recommendation: Option A with clear warnings                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 7.3 What Remains Visible
+
+Even with encryption, some information is observable:
+
+| Observable | Mitigation |
+|------------|------------|
+| Bundle exists | Unavoidable (GitHub repo is public) |
+| Approximate size | Pad to fixed sizes (optional) |
+| Last update time | Unavoidable (git history) |
+| That cass was used | Consider generic filenames |
+
+### 7.4 Session Management
+
+```javascript
+// After successful decryption:
+const SESSION_DURATION = 4 * 60 * 60 * 1000; // 4 hours
+
+// Option 1: Keep key in memory only (most secure)
+window.sessionKey = derivedKey; // Lost on refresh
+
+// Option 2: SessionStorage (survives refresh, not tabs)
+sessionStorage.setItem('cass_session', encryptedKeyBlob);
+
+// Option 3: "Remember me" with localStorage (least secure)
+// NOT RECOMMENDED for sensitive data
+```
+
+---
+
+## 8. User Experience Flow
+
+### 8.1 Export Wizard (Interactive Mode)
+
+```
+$ cass pages
+
+╭─────────────────────────────────────────────────────────────╮
+│           🔐 cass Pages Export Wizard                        │
+│                                                              │
+│   Create an encrypted, searchable web archive of your       │
+│   AI coding agent conversations.                            │
+╰─────────────────────────────────────────────────────────────╯
+
+Step 1 of 7: Content Selection
+
+? Which agents would you like to include?
+  ◉ Claude Code (1,234 conversations)
+  ◉ Codex (567 conversations)
+  ◎ Cursor (89 conversations)
+  ◉ Gemini (234 conversations)
+  ◎ Aider (45 conversations)
+  [Select all] [Select none]
+
+? Time range:
+  ◉ All time (2,169 conversations)
+  ◎ Last 30 days (342 conversations)
+  ◎ Last 90 days (891 conversations)
+  ◎ Custom range...
+
+? Which workspaces/projects?
+  ◉ All workspaces (47 projects)
+  ◎ Select specific...
+
+──────────────────────────────────────────────────────────────
+
+Step 2 of 7: Security Configuration
+
+? Set a password for encryption:
+  > ••••••••••••••••
+
+  ℹ Password strength: Strong ████████░░
+  ℹ This password will be required to view the exported site
+
+? Generate QR code for easy access?
+  ◉ Yes (will be saved as qr-code.png)
+  ◎ No
+
+──────────────────────────────────────────────────────────────
+
+Step 3 of 7: Site Configuration
+
+? Site title: My Agent Archive
+? Site description: Searchable archive of my AI coding sessions
+
+──────────────────────────────────────────────────────────────
+
+Step 4 of 7: Deployment Target
+
+? Where would you like to deploy?
+  ◉ GitHub Pages (requires gh CLI)
+  ◎ Cloudflare Pages (requires wrangler)
+  ◎ Local export only
+
+? Repository name: my-agent-archive
+? Repository visibility:
+  ◉ Public (required for free GitHub Pages)
+  ◎ Private (requires GitHub Pro/Team/Enterprise)
+
+──────────────────────────────────────────────────────────────
+
+Step 5 of 7: Pre-Publish Summary
+
+╭─────────────────────────────────────────────────────────────╮
+│                    ⚠️  REVIEW CAREFULLY                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Agents included:                                            │
+│    • Claude Code (1,234 conversations, 45,678 messages)      │
+│    • Codex (567 conversations, 12,345 messages)              │
+│    • Gemini (234 conversations, 5,678 messages)              │
+│                                                              │
+│  Time range: 2023-06-15 to 2025-01-06                       │
+│                                                              │
+│  Workspaces included:                                        │
+│    • /home/user/projects/webapp (423 conversations)          │
+│    • /home/user/projects/api (312 conversations)             │
+│    • /home/user/projects/ml-pipeline (156 conversations)     │
+│    • ... and 44 more                                         │
+│                                                              │
+│  Total: 2,035 conversations, 63,701 messages                 │
+│  Estimated bundle size: 24.5 MB (encrypted)                  │
+│                                                              │
+│  Encryption: AES-256-GCM with Argon2id key derivation        │
+│  Password: Set ✓                                             │
+│  QR Code: Will be generated                                  │
+│                                                              │
+│  Deployment: GitHub Pages (public repository)                │
+│  URL: https://username.github.io/my-agent-archive            │
+│                                                              │
+╰─────────────────────────────────────────────────────────────╯
+
+? Proceed with export and deployment? (y/N)
+
+──────────────────────────────────────────────────────────────
+
+Step 6 of 7: Export Progress
+
+  Filtering conversations... ████████████████████ 100%
+  Building search index... ████████████████████ 100%
+  Encrypting database... ████████████████████ 100%
+  Generating QR code... ████████████████████ 100%
+  Bundling assets... ████████████████████ 100%
+
+  ✓ Export complete: ./cass-pages-export/
+
+──────────────────────────────────────────────────────────────
+
+Step 7 of 7: Deployment
+
+  Creating repository... ✓
+  Pushing files... ████████████████████ 100%
+  Enabling GitHub Pages... ✓
+
+╭─────────────────────────────────────────────────────────────╮
+│                        🎉 Success!                           │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Your encrypted archive is now live at:                      │
+│  https://username.github.io/my-agent-archive                 │
+│                                                              │
+│  QR code saved to: ./qr-code.png                             │
+│                                                              │
+│  ⚠️  Keep your password safe! Without it, the archive        │
+│     cannot be decrypted.                                     │
+│                                                              │
+╰─────────────────────────────────────────────────────────────╯
+```
+
+### 8.2 Unencrypted Export (Requires Explicit Acknowledgment)
+
+```
+$ cass pages --no-encryption
+
+╭─────────────────────────────────────────────────────────────╮
+│                    ⚠️  SECURITY WARNING                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  You are about to export your AI coding agent conversations  │
+│  WITHOUT ENCRYPTION to a PUBLIC GitHub repository.           │
+│                                                              │
+│  This means ANYONE ON THE INTERNET can view:                 │
+│    • All your prompts and AI responses                       │
+│    • File paths and project names                            │
+│    • Any secrets accidentally included in conversations      │
+│    • Your coding patterns and debugging approaches           │
+│                                                              │
+│  This data CANNOT be made private after publishing.          │
+│                                                              │
+╰─────────────────────────────────────────────────────────────╯
+
+? To proceed, type exactly: I UNDERSTAND AND ACCEPT THE RISKS
+  > _
+```
+
+### 8.3 Web UI Authentication Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                                                              │
+│                    🔐 cass Archive                           │
+│                                                              │
+│         This archive is encrypted for your privacy.          │
+│                                                              │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │                                                          ││
+│  │  Password: [••••••••••••••]                              ││
+│  │                                                          ││
+│  │            [ Unlock Archive ]                            ││
+│  │                                                          ││
+│  │  ─────────────── or ───────────────                      ││
+│  │                                                          ││
+│  │            [ 📷 Scan QR Code ]                           ││
+│  │                                                          ││
+│  └─────────────────────────────────────────────────────────┘│
+│                                                              │
+│  ℹ️ Don't have the password? Contact the archive owner.      │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+           ↓ (after successful authentication)
+
+┌─────────────────────────────────────────────────────────────┐
+│  🔍 Search: [authentication bug fix____________] [🔎]       │
+│                                                              │
+│  Filters: [Claude Code ▼] [All Time ▼] [All Projects ▼]    │
+│                                                              │
+├──────────────────────────┬──────────────────────────────────┤
+│ Results (47 matches)     │ Conversation Detail              │
+│                          │                                  │
+│ ┌──────────────────────┐ │ 📅 2024-12-15 14:32              │
+│ │ Fix JWT validation   │ │ 🤖 Claude Code                   │
+│ │ Claude • 2024-12-15  │ │ 📁 /projects/auth-service        │
+│ │ Score: 9.2           │ │                                  │
+│ └──────────────────────┘ │ ─────────────────────────────────│
+│ ┌──────────────────────┐ │                                  │
+│ │ OAuth flow debugging │ │ 👤 User:                         │
+│ │ Codex • 2024-12-10   │ │ I'm getting an authentication    │
+│ │ Score: 8.7           │ │ error when...                    │
+│ └──────────────────────┘ │                                  │
+│ ┌──────────────────────┐ │ 🤖 Assistant:                    │
+│ │ Session management   │ │ Let me help debug this. First,   │
+│ │ Gemini • 2024-12-08  │ │ let's check the JWT token...     │
+│ │ Score: 8.1           │ │                                  │
+│ └──────────────────────┘ │ ```javascript                    │
+│                          │ const decoded = jwt.verify(...   │
+│ [Load more...]           │ ```                              │
+└──────────────────────────┴──────────────────────────────────┘
+```
+
+---
+
+## 9. Technical Implementation Plan
+
+### 9.1 Rust CLI Components
+
+#### New Modules
+
+```
+src/
+├── pages/
+│   ├── mod.rs              # Module exports
+│   ├── wizard.rs           # Interactive wizard (TUI-based)
+│   ├── export.rs           # Database export with filters
+│   ├── encrypt.rs          # Argon2id + AES-256-GCM
+│   ├── bundle.rs           # Asset bundling
+│   ├── deploy_github.rs    # GitHub Pages deployment
+│   ├── deploy_cloudflare.rs # Cloudflare deployment
+│   └── qr.rs               # QR code generation
+├── pages_assets/           # Embedded web assets
+│   ├── index.html
+│   ├── viewer.js
+│   ├── auth.js
+│   ├── styles.css
+│   └── vendor/
+│       ├── sql-wasm.js
+│       ├── sql-wasm.wasm
+│       ├── argon2-wasm.js
+│       ├── argon2-wasm.wasm
+│       └── alpine.min.js
+```
+
+#### New Dependencies
+
+```toml
+# Cargo.toml additions
+[dependencies]
+argon2 = "0.5"              # Key derivation
+aes-gcm = "0.10"            # Authenticated encryption
+qrcode = "0.14"             # QR code generation
+image = "0.25"              # Image processing for QR
+dialoguer = "0.11"          # Interactive prompts
+indicatif = "0.17"          # Progress bars
+include_dir = "0.7"         # Asset embedding
+```
+
+### 9.2 Database Export Schema
+
+```sql
+-- Filtered export database schema
+CREATE TABLE conversations (
+    id INTEGER PRIMARY KEY,
+    agent TEXT NOT NULL,
+    workspace TEXT,
+    title TEXT,
+    source_path TEXT NOT NULL,
+    started_at INTEGER,
+    ended_at INTEGER,
+    message_count INTEGER,
+    metadata_json TEXT
+);
+
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY,
+    conversation_id INTEGER NOT NULL,
+    idx INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at INTEGER,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+);
+
+-- Full-text search index
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+    content,
+    content='messages',
+    content_rowid='id'
+);
+
+-- Triggers to keep FTS in sync
+CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+-- Metadata
+CREATE TABLE export_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+INSERT INTO export_meta (key, value) VALUES
+    ('schema_version', '1'),
+    ('exported_at', datetime('now')),
+    ('cass_version', '0.1.48'),
+    ('agents', '["claude-code","codex","gemini"]'),
+    ('time_range', '{"from":null,"to":null}'),
+    ('encryption', 'aes-256-gcm'),
+    ('kdf', 'argon2id');
+```
+
+### 9.3 Encryption Implementation
+
+```rust
+// src/pages/encrypt.rs
+
+use argon2::{Argon2, Params, Version};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, KeyInit};
+use rand::RngCore;
+
+pub struct EncryptionConfig {
+    pub argon2_memory_kb: u32,      // 65536 (64 MB)
+    pub argon2_iterations: u32,     // 3
+    pub argon2_parallelism: u32,    // 4
+}
+
+impl Default for EncryptionConfig {
+    fn default() -> Self {
+        Self {
+            argon2_memory_kb: 65536,
+            argon2_iterations: 3,
+            argon2_parallelism: 4,
+        }
+    }
+}
+
+pub struct EncryptionResult {
+    pub ciphertext: Vec<u8>,
+    pub salt: [u8; 16],
+    pub nonce: [u8; 12],
+}
+
+pub fn encrypt_database(
+    plaintext: &[u8],
+    password: &str,
+    config: &EncryptionConfig,
+) -> Result<EncryptionResult, EncryptError> {
+    // Generate random salt and nonce
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut salt);
+    rand::thread_rng().fill_bytes(&mut nonce);
+
+    // Derive key using Argon2id
+    let params = Params::new(
+        config.argon2_memory_kb,
+        config.argon2_iterations,
+        config.argon2_parallelism,
+        Some(32), // 256-bit output
+    )?;
+
+    let argon2 = Argon2::new(
+        argon2::Algorithm::Argon2id,
+        Version::V0x13,
+        params,
+    );
+
+    let mut key = [0u8; 32];
+    argon2.hash_password_into(
+        password.as_bytes(),
+        &salt,
+        &mut key,
+    )?;
+
+    // Encrypt with AES-256-GCM
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let nonce = Nonce::from_slice(&nonce);
+    let ciphertext = cipher.encrypt(nonce, plaintext)?;
+
+    Ok(EncryptionResult {
+        ciphertext,
+        salt,
+        nonce: nonce.into(),
+    })
+}
+```
+
+### 9.4 Browser Decryption
+
+```javascript
+// viewer.js - Browser-side decryption
+
+async function decryptArchive(password, encryptedData, salt, nonce) {
+    // Load Argon2 WASM
+    const argon2 = await loadArgon2();
+
+    // Derive key (matching Rust parameters)
+    const key = await argon2.hash({
+        pass: password,
+        salt: salt,
+        time: 3,
+        mem: 65536,
+        parallelism: 4,
+        hashLen: 32,
+        type: argon2.ArgonType.Argon2id,
+    });
+
+    // Import key for Web Crypto API
+    const cryptoKey = await crypto.subtle.importKey(
+        'raw',
+        key.hash,
+        { name: 'AES-GCM' },
+        false,
+        ['decrypt']
+    );
+
+    // Decrypt
+    try {
+        const plaintext = await crypto.subtle.decrypt(
+            {
+                name: 'AES-GCM',
+                iv: nonce,
+            },
+            cryptoKey,
+            encryptedData
+        );
+        return new Uint8Array(plaintext);
+    } catch (e) {
+        throw new Error('Invalid password');
+    }
+}
+
+async function initializeDatabase(decryptedData) {
+    // Load sql.js
+    const SQL = await initSqlJs({
+        locateFile: file => `vendor/${file}`
+    });
+
+    // Create database from decrypted bytes
+    const db = new SQL.Database(decryptedData);
+
+    // Verify schema
+    const meta = db.exec("SELECT value FROM export_meta WHERE key='schema_version'");
+    if (meta[0]?.values[0]?.[0] !== '1') {
+        throw new Error('Incompatible archive version');
+    }
+
+    return db;
+}
+```
+
+---
+
+## 10. File Structure & Bundle Contents
+
+### Generated Bundle
+
+```
+cass-pages-export/
+├── index.html              # Entry point (auth UI + app shell)
+├── encrypted.bin           # AES-256-GCM encrypted database
+├── config.json             # Salt, nonce (NOT the key!)
+├── qr-code.png             # Optional: QR for password
+├── viewer.js               # Main application logic
+├── auth.js                 # Authentication module
+├── search.js               # Search UI components
+├── conversation.js         # Conversation renderer
+├── styles.css              # Tailwind-based styles
+├── vendor/
+│   ├── sql-wasm.js         # SQLite WASM loader
+│   ├── sql-wasm.wasm       # SQLite WASM binary
+│   ├── argon2-wasm.js      # Argon2 WASM loader
+│   ├── argon2-wasm.wasm    # Argon2 WASM binary
+│   ├── alpine.min.js       # UI framework
+│   ├── marked.min.js       # Markdown rendering
+│   └── prism.min.js        # Syntax highlighting
+├── assets/
+│   ├── logo.svg            # cass logo
+│   └── icons.svg           # UI icons
+└── README.md               # Archive description
+```
+
+### config.json (Public)
+
+```json
+{
+    "version": 1,
+    "encrypted": true,
+    "algorithm": "aes-256-gcm",
+    "kdf": "argon2id",
+    "kdf_params": {
+        "memory_kb": 65536,
+        "iterations": 3,
+        "parallelism": 4
+    },
+    "salt": "base64-encoded-salt",
+    "nonce": "base64-encoded-nonce",
+    "exported_at": "2025-01-06T12:34:56Z",
+    "cass_version": "0.1.48"
+}
+```
+
+**Note**: This file is intentionally public. It contains no secret data—only parameters needed for key derivation. The actual key is derived from the password, which is never stored.
+
+---
+
+## 11. Frontend Technology Stack
+
+### Required Libraries
+
+| Library | Version | Size | Purpose |
+|---------|---------|------|---------|
+| **sql.js** | 1.10+ | 640KB | SQLite in browser |
+| **argon2-browser** | 1.18+ | 200KB | Password hashing |
+| **Alpine.js** | 3.14+ | 44KB | Reactive UI |
+| **Tailwind CSS** | 3.4+ | 50KB (JIT) | Styling |
+| **Marked.js** | 12.0+ | 36KB | Markdown rendering |
+| **Prism.js** | 1.29+ | 30KB | Syntax highlighting |
+| **html5-qrcode** | 2.3+ | 40KB | QR code scanning |
+
+### Total Bundle Size
+
+| Component | Uncompressed | Gzipped |
+|-----------|--------------|---------|
+| HTML/JS/CSS | ~400KB | ~100KB |
+| WASM (sql.js) | 640KB | ~300KB |
+| WASM (argon2) | 200KB | ~80KB |
+| Vendor libs | ~200KB | ~60KB |
+| **Total (code)** | **~1.4MB** | **~540KB** |
+| Encrypted data | Variable | Variable |
+
+### Browser Compatibility
+
+| Browser | Minimum Version | Notes |
+|---------|-----------------|-------|
+| Chrome | 90+ | Full support |
+| Firefox | 88+ | Full support |
+| Safari | 14+ | Full support |
+| Edge | 90+ | Full support |
+| Mobile Chrome | 90+ | Full support |
+| Mobile Safari | 14+ | Full support |
+
+**Requirements**:
+- WebAssembly
+- Web Crypto API
+- ES2020+ JavaScript
+- CSS Grid/Flexbox
+
+---
+
+## 12. CLI Interface Design
+
+### New Subcommand: `cass pages`
+
+```
+USAGE:
+    cass pages [OPTIONS]
+    cass pages --export-only <DIR>
+    cass pages --preview <DIR>
+
+DESCRIPTION:
+    Export and deploy an encrypted, searchable web archive of your
+    AI coding agent conversations.
+
+OPTIONS:
+    Content Selection:
+        --agents <LIST>         Comma-separated agent slugs to include
+                                [default: all]
+        --workspaces <LIST>     Comma-separated workspace paths to include
+                                [default: all]
+        --since <DATE>          Only include conversations after this date
+                                [format: YYYY-MM-DD or "30 days ago"]
+        --until <DATE>          Only include conversations before this date
+                                [format: YYYY-MM-DD or "today"]
+
+    Security:
+        --password <PASS>       Encryption password (prompted if not provided)
+        --password-file <FILE>  Read password from file
+        --no-encryption         Export without encryption (DANGEROUS)
+        --generate-qr           Generate QR code for password
+
+    Site Configuration:
+        --title <TEXT>          Site title [default: "cass Archive"]
+        --description <TEXT>    Site description
+
+    Deployment:
+        --target <TARGET>       Deployment target: github, cloudflare, local
+                                [default: github]
+        --repo <NAME>           Repository name (GitHub/Cloudflare)
+        --private               Create private repository (requires paid plan)
+
+    Other:
+        --export-only <DIR>     Export bundle without deploying
+        --preview <DIR>         Start local preview server
+        --dry-run               Show what would be exported, don't export
+        --json                  Output progress as JSON (for automation)
+        --yes                   Skip confirmation prompts (except safety)
+
+EXAMPLES:
+    # Interactive wizard (recommended)
+    cass pages
+
+    # Export Claude Code conversations from last 30 days
+    cass pages --agents claude-code --since "30 days ago" \
+               --title "Recent Claude Sessions"
+
+    # Export specific project
+    cass pages --workspaces /home/user/myproject \
+               --generate-qr --export-only ./my-export
+
+    # Preview existing export locally
+    cass pages --preview ./my-export
+
+    # Robot mode for CI/CD
+    cass pages --json --password-file /secrets/pw.txt \
+               --target github --repo my-archive --yes
+
+EXIT CODES:
+    0   Success
+    1   General error
+    2   Invalid arguments
+    3   Authentication required (--no-encryption without confirmation)
+    4   Deployment failed
+    5   User cancelled
+```
+
+### Robot Mode Output
+
+```json
+{
+    "status": "success",
+    "export": {
+        "agents": ["claude-code", "codex"],
+        "workspaces": ["/home/user/project1", "/home/user/project2"],
+        "time_range": {
+            "from": "2024-01-01T00:00:00Z",
+            "to": "2025-01-06T23:59:59Z"
+        },
+        "conversations": 1234,
+        "messages": 56789,
+        "bundle_size_bytes": 25678901,
+        "encrypted": true
+    },
+    "deployment": {
+        "target": "github",
+        "repository": "username/my-archive",
+        "url": "https://username.github.io/my-archive",
+        "deployed_at": "2025-01-06T12:34:56Z"
+    },
+    "qr_code": "./qr-code.png"
+}
+```
+
+---
+
+## 13. Encryption Implementation Details
+
+### Key Derivation Parameters
+
+```
+Algorithm: Argon2id v1.3
+Memory:    64 MB (65536 KB)
+Time:      3 iterations
+Threads:   4 parallel lanes
+Salt:      16 bytes (cryptographically random)
+Output:    32 bytes (256 bits)
+```
+
+**Rationale**:
+- 64 MB memory makes GPU attacks expensive (~100x slower than CPU)
+- 3 iterations balance security vs. UX (2-3 second derivation)
+- 4 threads utilize modern multi-core CPUs
+- Matches OWASP recommendations for password storage
+
+### Encryption Parameters
+
+```
+Algorithm:  AES-256-GCM
+Key:        256 bits (from Argon2id)
+Nonce:      96 bits (cryptographically random, unique per export)
+Auth Tag:   128 bits (integrity verification)
+```
+
+### Binary Format
+
+```
+encrypted.bin structure:
+┌────────────────────────────────────────────────────────────┐
+│ Magic: "CASS" (4 bytes)                                    │
+│ Version: 1 (2 bytes, little-endian)                        │
+│ Reserved: 0 (2 bytes)                                      │
+│ Ciphertext length: N (8 bytes, little-endian)              │
+│ Ciphertext: (N bytes, includes 16-byte auth tag at end)    │
+└────────────────────────────────────────────────────────────┘
+
+config.json (separate file, plaintext):
+{
+    "salt": "base64...",    // 16 bytes
+    "nonce": "base64...",   // 12 bytes
+    "kdf_params": {...}
+}
+```
+
+### Password Strength Validation
+
+```rust
+fn validate_password(password: &str) -> PasswordStrength {
+    let length = password.len();
+    let has_upper = password.chars().any(|c| c.is_uppercase());
+    let has_lower = password.chars().any(|c| c.is_lowercase());
+    let has_digit = password.chars().any(|c| c.is_numeric());
+    let has_special = password.chars().any(|c| !c.is_alphanumeric());
+
+    let score = match length {
+        0..=7 => 0,
+        8..=11 => 1,
+        12..=15 => 2,
+        _ => 3,
+    } + has_upper as u8 + has_lower as u8 + has_digit as u8 + has_special as u8;
+
+    match score {
+        0..=2 => PasswordStrength::Weak,
+        3..=4 => PasswordStrength::Fair,
+        5..=6 => PasswordStrength::Good,
+        _ => PasswordStrength::Strong,
+    }
+}
+```
+
+---
+
+## 14. Safety Guardrails
+
+### Guardrail 1: Encryption Required by Default
+
+```rust
+// Encryption is mandatory unless explicitly disabled
+if !config.encryption_enabled {
+    eprintln!("⚠️  SECURITY WARNING");
+    eprintln!("You are about to export WITHOUT ENCRYPTION.");
+    eprintln!();
+    eprintln!("Type exactly: I UNDERSTAND AND ACCEPT THE RISKS");
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+
+    if input.trim() != "I UNDERSTAND AND ACCEPT THE RISKS" {
+        return Err(ExportError::UnencryptedNotConfirmed);
+    }
+}
+```
+
+### Guardrail 2: Pre-Publish Summary
+
+Always shown before any deployment:
+
+```
+╭─────────────────────────────────────────────────────────────╮
+│                    📋 EXPORT SUMMARY                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Agents:                                                     │
+│    ✓ Claude Code    1,234 conversations   45,678 messages   │
+│    ✓ Codex            567 conversations   12,345 messages   │
+│    ✓ Gemini           234 conversations    5,678 messages   │
+│    ✗ Cursor            89 conversations    (excluded)       │
+│    ✗ Aider             45 conversations    (excluded)       │
+│                                                              │
+│  Time Range:                                                 │
+│    From: 2024-01-01 00:00:00 UTC                            │
+│    To:   2025-01-06 23:59:59 UTC                            │
+│    Duration: 371 days                                        │
+│                                                              │
+│  Workspaces:                                                 │
+│    • /home/user/projects/webapp         423 conversations   │
+│    • /home/user/projects/api            312 conversations   │
+│    • /home/user/projects/ml-pipeline    156 conversations   │
+│    • ... and 12 more workspaces                             │
+│                                                              │
+│  Totals:                                                     │
+│    Conversations: 2,035                                      │
+│    Messages:      63,701                                     │
+│    Est. Size:     24.5 MB (encrypted)                       │
+│                                                              │
+│  Security:                                                   │
+│    Encryption: AES-256-GCM ✓                                │
+│    Password:   Set ✓                                        │
+│    QR Code:    Will be generated                            │
+│                                                              │
+│  Deployment:                                                 │
+│    Target:     GitHub Pages                                  │
+│    Repository: username/my-agent-archive (PUBLIC)            │
+│    URL:        https://username.github.io/my-agent-archive   │
+│                                                              │
+╰─────────────────────────────────────────────────────────────╯
+```
+
+### Guardrail 3: Secret Detection
+
+Before export, scan for potential secrets:
+
+```rust
+const SECRET_PATTERNS: &[(&str, &str)] = &[
+    (r"(?i)api[_-]?key\s*[:=]\s*['\"]?[\w-]{20,}", "API Key"),
+    (r"(?i)secret\s*[:=]\s*['\"]?[\w-]{20,}", "Secret"),
+    (r"(?i)password\s*[:=]\s*['\"]?[^\s'\"]{8,}", "Password"),
+    (r"ghp_[a-zA-Z0-9]{36}", "GitHub PAT"),
+    (r"sk-[a-zA-Z0-9]{48}", "OpenAI API Key"),
+    (r"-----BEGIN (RSA |EC |)PRIVATE KEY-----", "Private Key"),
+];
+
+fn scan_for_secrets(content: &str) -> Vec<SecretMatch> {
+    // Returns list of potential secrets with line numbers
+    // User can review before proceeding
+}
+```
+
+If secrets detected:
+
+```
+⚠️  POTENTIAL SECRETS DETECTED
+
+The following conversations may contain sensitive data:
+
+  1. /projects/api/.claude/messages.jsonl:1234
+     Possible: OpenAI API Key
+     Context: "...set OPENAI_API_KEY=sk-abc123..."
+
+  2. /projects/webapp/.claude/messages.jsonl:5678
+     Possible: Password
+     Context: "...password=SuperSecret123..."
+
+Options:
+  [1] Exclude these conversations and continue
+  [2] Review each match individually
+  [3] Continue anyway (secrets will be encrypted)
+  [4] Cancel export
+```
+
+### Guardrail 4: Confirmation for Destructive Operations
+
+```rust
+// Before overwriting existing export
+if output_dir.exists() && !output_dir.read_dir()?.next().is_none() {
+    eprintln!("Directory {} already exists and is not empty.", output_dir.display());
+    eprintln!("Contents will be DELETED and replaced.");
+
+    if !confirm("Proceed?")? {
+        return Err(ExportError::Cancelled);
+    }
+}
+
+// Before deploying to existing repository
+if repo_exists {
+    eprintln!("Repository {} already exists.", repo_name);
+    eprintln!("This will REPLACE all existing content.");
+
+    if !confirm("Proceed?")? {
+        return Err(ExportError::Cancelled);
+    }
+}
+```
+
+---
+
+## 15. Migration Path & Compatibility
+
+### cass Version Compatibility
+
+| cass Version | Export Format | Notes |
+|--------------|---------------|-------|
+| 0.2.0+ | v1 | Initial release |
+| Future | v2+ | Backward compatible |
+
+### Export Format Versioning
+
+```json
+// config.json
+{
+    "version": 1,
+    "min_viewer_version": "1.0.0",
+    "cass_version": "0.2.0"
+}
+```
+
+### Upgrade Path
+
+1. **Viewer updates**: Deploy new viewer.js to existing archive
+2. **Re-export**: Generate new archive with same password
+3. **No data migration**: Encrypted blobs are immutable
+
+---
+
+## 16. Risk Analysis
+
+### Technical Risks
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+| WASM not supported | Low | High | Fallback error message |
+| Large databases slow | Medium | Medium | Chunking, lazy loading |
+| Browser memory limits | Low | Medium | Streaming decryption |
+| Argon2 too slow on mobile | Medium | Low | Reduced parameters option |
+
+### Security Risks
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+| Weak password chosen | Medium | High | Strength meter, warnings |
+| Password shared insecurely | Medium | High | QR code alternative |
+| Key logged by extension | Low | High | CSP headers |
+| Side-channel attack | Very Low | Medium | Standard crypto libs |
+
+### Usability Risks
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+| Password forgotten | Medium | High | QR backup, clear warnings |
+| Wizard too complex | Low | Medium | Sensible defaults |
+| Export takes too long | Low | Low | Progress indicators |
+
+---
+
+## 17. Implementation Phases
+
+### Phase 1: Core Export (2-3 weeks)
+
+- [ ] Database export with filters (agents, time, workspaces)
+- [ ] SQLite schema for web consumption
+- [ ] FTS5 index generation
+- [ ] Basic CLI interface (`cass pages --export-only`)
+
+### Phase 2: Encryption (1-2 weeks)
+
+- [ ] Argon2id key derivation
+- [ ] AES-256-GCM encryption
+- [ ] QR code generation
+- [ ] Password strength validation
+
+### Phase 3: Web Viewer (2-3 weeks)
+
+- [ ] Authentication UI (password + QR)
+- [ ] Decryption module (Argon2 WASM + Web Crypto)
+- [ ] sql.js integration
+- [ ] Search UI
+- [ ] Conversation viewer
+
+### Phase 4: Wizard & Deployment (1-2 weeks)
+
+- [ ] Interactive wizard (TUI-based)
+- [ ] GitHub Pages deployment
+- [ ] Cloudflare Pages deployment
+- [ ] Local preview server
+
+### Phase 5: Polish & Safety (1 week)
+
+- [ ] Secret detection
+- [ ] Pre-publish summary
+- [ ] Safety confirmations
+- [ ] Documentation
+
+### Phase 6: Testing & Hardening (1 week)
+
+- [ ] Cross-browser testing
+- [ ] Performance optimization
+- [ ] Security audit
+- [ ] Edge case handling
+
+**Estimated Total: 8-12 weeks**
+
+---
+
+## 18. Open Questions
+
+### Design Decisions Needed
+
+1. **Session persistence**: Should decryption key be kept in sessionStorage (survives refresh) or memory only (maximum security)?
+
+2. **Multiple passwords**: Should we support multiple passwords with different access levels (e.g., "viewer" vs "admin")?
+
+3. **Expiring links**: Should we support time-limited access (e.g., "this link expires in 30 days")?
+
+4. **Offline mode**: After initial decryption, should the viewer work offline? (Service Worker caching)
+
+5. **Search index encryption**: Should we pre-build an encrypted search index, or build it client-side after decryption?
+
+6. **Mobile optimization**: Should we have a separate mobile-optimized viewer, or responsive design only?
+
+7. **Partial decryption**: Should we support decrypting individual conversations (granular encryption)?
+
+8. **Key rotation**: Should we support changing the password without re-exporting?
+
+### Technical Decisions Needed
+
+1. **Argon2 WASM library**: Use `argon2-browser` (established) or `argon2-wasm` (lighter)?
+
+2. **Chunking strategy**: Fixed-size chunks or semantic chunking (per-conversation)?
+
+3. **Compression**: Compress before encryption (saves space) or not (simpler)?
+
+4. **Asset embedding**: Embed all assets in Rust binary or keep separate for easier updates?
+
+---
+
+## 19. Appendix: Original Requirements
+
+The following is the original prompt that initiated this proposal:
+
+> Carefully study the /data/projects/beads_viewer (also known as "bv") repo as it pertains to the web export feature that lets you make a version of the system that can go on gh pages as a static website. We would like to do something like that for cass, but with some major changes:
+>
+> * It needs to be very quick and easy to interactively (or via the command line using a robot mode input) to select which of the available indexed agents to include (default is ALL agents); the time range (default is ALL logs); which project folders you want to include (default is ALL).
+>
+> * Because these logs can easily include secret information you wouldn't want to release publicly on a public gh pages site (and because gh pages ONLY works with public repos), we need to have a rock solid encryption system that uses a password or qr code via webcam to unlock to allow the user in the web browser to view and search and see ANYTHING about the exported indexes. The public link to the static site on gh pages should go to an authentication page first, and the user must enter the right password or use the qr code; if they do, it would decrypt the contents and show the static web app; otherwise it wouldn't work at all and would reveal nothing.
+>
+> * Aside from that, we'd want to use a very similar stack, with sqlite.js (wasm) and other similar libraries and techniques that allow us to compile a modular, complex web app into a few files that "just work" in a secure, performant, way on gh pages with a stunning UI/UX. And also a very similar workflow in terms of the `bv -pages` wizard, with the same conveniences and details/polish, but with the difference that it has more emphasis of security and making it hard to accidentally publish to gh pages something without a password set (this should be possible but it should require the user to literally type: "I UNDERSTAND AND ACCEPT THE RISKS" to proceed with the final publishing step; we want to help users avoid shooting themselves in the foot. We should also, just prior to publishing, show the user the full list of coding agents, project folders, and time period included in the exported sqlite db file so there are no surprises!)
+
+---
+
+## Document History
+
+| Version | Date | Author | Changes |
+|---------|------|--------|---------|
+| 1.0 | 2026-01-06 | Claude (Opus 4.5) | Initial proposal |
+
+---
+
+*End of Proposal Document*

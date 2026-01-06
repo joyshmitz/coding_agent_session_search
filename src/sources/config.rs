@@ -110,8 +110,19 @@ impl PathMapping {
     /// Returns `Some(rewritten_path)` if the path starts with `from` prefix,
     /// `None` otherwise.
     pub fn apply(&self, path: &str) -> Option<String> {
-        if path.starts_with(&self.from) {
-            Some(path.replacen(&self.from, &self.to, 1))
+        if path == self.from {
+            return Some(self.to.clone());
+        }
+
+        if !path.starts_with(&self.from) {
+            return None;
+        }
+
+        let rest = &path[self.from.len()..];
+        let boundary_ok =
+            self.from.ends_with('/') || self.from.ends_with('\\') || rest.starts_with(['/', '\\']);
+        if boundary_ok {
+            Some(format!("{}{}", self.to, rest))
         } else {
             None
         }
