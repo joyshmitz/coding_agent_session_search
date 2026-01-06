@@ -30,7 +30,7 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use super::config::{discover_ssh_hosts, SourceDefinition};
+use super::config::{SourceDefinition, discover_ssh_hosts};
 use ssh2::{Session, Sftp};
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::net::TcpStream;
