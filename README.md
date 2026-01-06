@@ -100,6 +100,89 @@ AI coding agents are transforming how we write software. Claude Code, Codex, Cur
   - `tokenizer_config.json`
 - **Vector index**: Stored as `vector_index/index-minilm-384.cvvi` in the data directory.
 
+#### Hash Embedder Fallback
+
+When ML model files are not installed, `cass` uses a deterministic hash-based embedder as a fallback. While not "truly" semantic (it captures lexical overlap rather than meaning), it provides useful functionality:
+
+| Feature | ML Model (MiniLM) | Hash Embedder (FNV-1a) |
+|---------|-------------------|------------------------|
+| **Meaning Understanding** | ✅ "car" ≈ "automobile" | ❌ Exact tokens only |
+| **Initialization Time** | ~500ms (model loading) | <1ms (instant) |
+| **Network Dependency** | None (after install) | None |
+| **Disk Footprint** | ~90MB model files | 0 bytes |
+| **Deterministic** | ✅ Same input = same output | ✅ Same input = same output |
+
+**Algorithm**:
+1. **Tokenize**: Lowercase, split on non-alphanumeric, filter tokens <2 characters
+2. **Hash**: Apply FNV-1a to each token
+3. **Project**: Use hash to determine dimension index and sign (+1 or -1) in a 384-dimensional vector
+4. **Normalize**: L2 normalize to unit length for cosine similarity
+
+**When to Use**:
+- Quick setup without downloading model files
+- Environments where ML inference overhead is unwanted
+- Fallback when ML model fails to load
+
+**Override**: Set `CASS_SEMANTIC_EMBEDDER=hash` to force hash mode even when ML model is available.
+
+#### CVVI Vector Index Format
+
+`cass` uses a custom binary format (`.cvvi` - Cass Vector Index) for storing semantic embeddings:
+
+```
+┌─────────────────────────────────────────────────┐
+│ Header (32 bytes)                               │
+│ ├─ Magic: "CVVI" (4 bytes)                      │
+│ ├─ Version: u8                                   │
+│ ├─ Precision: F32 or F16 (1 byte)               │
+│ ├─ Dimension: u16 (e.g., 384)                   │
+│ ├─ Entry count: u64                             │
+│ └─ CRC32 checksum                               │
+├─────────────────────────────────────────────────┤
+│ Entries                                         │
+│ ├─ content_hash: [u8; 32] (SHA-256)             │
+│ ├─ source_id: varint                            │
+│ ├─ agent: u8 (enum)                             │
+│ ├─ timestamp: i64                               │
+│ └─ vector: [f32|f16; dimension]                 │
+└─────────────────────────────────────────────────┘
+```
+
+**Features**:
+- **Precision Options**: F32 (full precision) or F16 (half, ~50% smaller, slight accuracy loss)
+- **Memory-Mapped Loading**: Large indexes load efficiently without copying into RAM
+- **CRC32 Validation**: Detects corruption on load
+- **Content Deduplication**: Messages are hashed; identical content shares one vector
+
+**Index Location**: `~/.local/share/coding-agent-search/vector_index/index-<embedder>-<dim>.cvvi`
+
+#### Search Modes
+
+`cass` supports three search modes, selectable via `--mode` flag or `Alt+S` in the TUI:
+
+| Mode | Algorithm | Best For |
+|------|-----------|----------|
+| **Lexical** (default) | BM25 full-text | Exact term matching, code searches |
+| **Semantic** | Vector similarity | Conceptual queries, "find similar" |
+| **Hybrid** | Reciprocal Rank Fusion | Balanced precision and recall |
+
+**Lexical Search**: Uses Tantivy's BM25 implementation with edge n-grams for prefix matching. Best when you know the exact terms you're looking for.
+
+**Semantic Search**: Computes vector similarity between query and indexed message embeddings. Finds conceptually related content even without exact term overlap. Requires either the ML model (MiniLM) or falls back to hash embedder.
+
+**Hybrid Search**: Combines lexical and semantic results using Reciprocal Rank Fusion (RRF):
+```
+RRF_score = Σ 1 / (K + rank_i)
+```
+Where K=60 (tuning constant) and rank_i is the position in each result list. This balances the precision of lexical search with the recall of semantic search.
+
+```bash
+# CLI examples
+cass search "authentication" --mode lexical --robot
+cass search "how to handle user login" --mode semantic --robot
+cass search "auth error handling" --mode hybrid --robot
+```
+
 ### 🎯 Advanced Search Features
 - **Wildcard Patterns**: Full glob-style pattern support:
   - `foo*` - Prefix match (finds "foobar", "foo123")
@@ -415,6 +498,71 @@ cass timeline --since 7d --agent claude --json
 # → Grouped activity counts, useful for understanding work patterns
 ```
 
+### Aggregation & Analytics
+
+Aggregate search results server-side to get counts and distributions without transferring full result data:
+
+```bash
+# Count results by agent
+cass search "error" --robot --aggregate agent
+# → { "aggregations": { "agent": { "buckets": [{"key": "claude_code", "count": 45}, ...] } } }
+
+# Multi-field aggregation
+cass search "bug" --robot --aggregate agent,workspace,date
+
+# Combine with filters
+cass search "TODO" --agent claude --robot --aggregate workspace
+```
+
+**Aggregation Fields**:
+| Field | Description |
+|-------|-------------|
+| `agent` | Group by agent type (claude_code, codex, cursor, etc.) |
+| `workspace` | Group by workspace/project path |
+| `date` | Group by date (YYYY-MM-DD) |
+| `match_type` | Group by match quality (exact, prefix, fuzzy) |
+
+**Response Format**:
+```json
+{
+  "aggregations": {
+    "agent": {
+      "buckets": [
+        {"key": "claude_code", "count": 120},
+        {"key": "codex", "count": 85}
+      ],
+      "other_count": 15
+    }
+  }
+}
+```
+
+Top 10 buckets are returned per field, with `other_count` for remaining items.
+
+### Chained Search (Pipeline Mode)
+
+Chain multiple searches together by piping session paths from one search to another:
+
+```bash
+# Find sessions mentioning "auth", then search within those for "token"
+cass search "authentication" --robot-format sessions | \
+  cass search "refresh token" --sessions-from - --robot
+
+# Build a filtered corpus from today's work
+cass search --today --robot-format sessions > today_sessions.txt
+cass search "bug fix" --sessions-from today_sessions.txt --robot
+```
+
+**How It Works**:
+1. First search with `--robot-format sessions` outputs one session path per line
+2. Second search with `--sessions-from <file>` restricts search to those sessions
+3. Use `-` to read from stdin for true piping
+
+**Use Cases**:
+- **Drill-down**: Broad search → narrow within results
+- **Cross-reference**: Find sessions with term A, then find term B within them
+- **Corpus building**: Save session lists for repeated searches
+
 ### Match Highlighting
 
 The `--highlight` flag wraps matching terms for visual/programmatic identification:
@@ -507,6 +655,52 @@ cass search "error" --robot --trace-file /tmp/cass-trace.json
 | `--idempotency-key KEY` | Safe retries: same key + params returns cached result (24h TTL) |
 | `--json` | JSON output with stats |
 
+### Robot Documentation System
+
+For machine-readable documentation, use `cass robot-docs <topic>`:
+
+| Topic | Content |
+|-------|---------|
+| `commands` | Full command reference with all flags |
+| `env` | Environment variables and defaults |
+| `paths` | Data directory locations per platform |
+| `guide` | Quick start guide for automation |
+| `schemas` | JSON response schemas |
+| `exit-codes` | Exit code meanings and retry guidance |
+| `examples` | Copy-paste usage examples |
+| `contracts` | API contract version and stability |
+| `sources` | Remote sources configuration guide |
+
+```bash
+# Get documentation programmatically
+cass robot-docs guide
+cass robot-docs schemas
+cass robot-docs exit-codes
+
+# Machine-first help (wide output, no TUI assumptions)
+cass --robot-help
+```
+
+### API Contract & Versioning
+
+`cass` maintains a stable API contract for automation:
+
+```bash
+cass api-version --json
+# → { "version": "0.4.0", "contract_version": "1", "breaking_changes": [] }
+
+cass introspect --json
+# → Full schema: all commands, arguments, response types
+```
+
+**Contract Version**: Currently `1`. Increments only on breaking changes.
+
+**Guaranteed Stable**:
+- Exit codes and their meanings
+- JSON response structure for `--robot` output
+- Flag names and behaviors
+- `_meta` block format
+
 ### Ready-to-paste blurb for AGENTS.md / CLAUDE.md
 
 ```
@@ -568,6 +762,42 @@ cass search "error" --robot --trace-file /tmp/cass-trace.json
 | `"authentication failed"` | Exact phrase match |
 | `auth fail` | Both terms, in any order |
 
+### Boolean Operators
+
+Combine terms with explicit operators for complex queries:
+
+| Operator | Example | Meaning |
+|----------|---------|---------|
+| `AND` | `python AND error` | Both terms required (default) |
+| `OR` | `error OR warning` | Either term matches |
+| `NOT` | `error NOT test` | First term, excluding second |
+| `-` | `error -test` | Shorthand for NOT |
+
+**Operator Precedence**: NOT binds tightest, then AND, then OR. Use parentheses (in robot mode) for explicit grouping.
+
+```bash
+# Complex boolean query
+cass search "authentication AND (error OR failure) NOT test" --robot
+
+# Exclude test files
+cass search "bug fix -test -spec" --robot
+
+# Either error type
+cass search "TypeError OR ValueError" --robot
+```
+
+### Phrase Queries
+
+Wrap terms in double quotes for exact phrase matching:
+
+| Query | Matches |
+|-------|---------|
+| `"file not found"` | Exact sequence "file not found" |
+| `"cannot read property"` | Exact JavaScript error message |
+| `"def test_"` | Function definitions starting with test_ |
+
+Phrases respect word order and proximity. Useful for error messages, code patterns, and specific terminology.
+
 ### Wildcard Patterns
 
 | Pattern | Type | Matches | Performance |
@@ -592,6 +822,37 @@ cass search "bug" --days 7
 
 # Combined filters
 cass search "authentication" --agent codex --workspace myproject --week
+```
+
+### Flexible Time Input
+
+`cass` accepts a wide variety of time/date formats for filtering:
+
+| Format | Examples | Description |
+|--------|----------|-------------|
+| **Relative** | `-7d`, `-24h`, `-30m`, `-1w` | Days, hours, minutes, weeks ago |
+| **Keywords** | `now`, `today`, `yesterday` | Named reference points |
+| **ISO 8601** | `2024-11-25`, `2024-11-25T14:30:00Z` | Standard datetime |
+| **US Dates** | `11/25/2024`, `11-25-2024` | Month/Day/Year |
+| **Unix Timestamp** | `1732579200` | Seconds since epoch |
+| **Unix Millis** | `1732579200000` | Milliseconds (auto-detected) |
+
+**Intelligent Heuristics**:
+- Numbers >10 digits are treated as milliseconds, otherwise seconds
+- Two-digit years are expanded (24 → 2024)
+- Date-only inputs default to midnight start or 23:59:59 end
+
+```bash
+# All equivalent for "last week"
+cass search "bug" --since -7d
+cass search "bug" --since "-1w"
+cass search "bug" --days 7
+
+# Date range
+cass search "feature" --since 2024-01-01 --until 2024-01-31
+
+# Mix formats
+cass search "error" --since yesterday --until now
 ```
 
 ### Match Types
@@ -697,6 +958,32 @@ When an exact query returns fewer than 3 results, `cass` automatically retries w
 | `G` | Scroll to bottom (in full-screen) |
 | `c` | Copy visible content |
 | `o` | Open in external viewer |
+| `[` / `]` | Switch detail tabs (Messages/Snippets/Raw) |
+| `F7` | Cycle context window size |
+| `Ctrl+Space` | Momentary "peek" to XL context |
+
+### Detail Tabs
+
+The detail pane has three tabs, switchable with `[` and `]`:
+
+| Tab | Content | Best For |
+|-----|---------|----------|
+| **Messages** | Full conversation with markdown rendering | Reading full context |
+| **Snippets** | Keyword-extracted summaries | Quick scanning |
+| **Raw** | Unformatted JSON/text | Debugging, copying exact content |
+
+### Context Window Sizing
+
+Control how much content shows in the detail preview. Cycle with `F7`:
+
+| Size | Characters | Use Case |
+|------|------------|----------|
+| **Small** | ~200 | Quick scanning, narrow terminals |
+| **Medium** | ~400 | Default balanced view |
+| **Large** | ~800 | Reading longer passages |
+| **XLarge** | ~1600 | Full context, code review |
+
+**Peek Mode** (`Ctrl+Space`): Temporarily expand to XL context. Press again to restore previous size. Useful for quick deep-dives without changing your preferred default.
 
 ### Mouse Support
 
@@ -704,6 +991,35 @@ When an exact query returns fewer than 3 results, `cass` automatically retries w
 - **Click** on filter chip to edit/remove
 - **Scroll** in any pane
 - **Double-click** to open result
+
+### Bulk Operations
+
+Efficiently work with multiple search results at once:
+
+**Multi-Select Mode**:
+1. Press `m` to toggle selection on current result (checkbox appears)
+2. Navigate to other results and press `m` again
+3. Press `Ctrl+A` to select/deselect all visible results
+4. Selected count shown in footer: "3 selected"
+
+**Bulk Actions Menu** (`A` when items selected):
+| Action | Description |
+|--------|-------------|
+| **Open All** | Open all selected files in editor |
+| **Copy Paths** | Copy all file paths to clipboard |
+| **Export** | Export selected results to file |
+| **Clear Selection** | Deselect all items |
+
+**Multi-Open Queue**:
+For opening many files without navigating away:
+1. Press `Ctrl+Enter` to add current result to queue
+2. Continue searching and adding more results
+3. Press `Ctrl+O` to open all queued items
+4. Confirmation prompt appears for 12+ items
+
+**Clipboard Operations**:
+- `y` - Copy current item (cycles: path → snippet → full content)
+- `Ctrl+Y` - Copy all selected items (paths on separate lines)
 
 ---
 
@@ -754,6 +1070,36 @@ Cycle through modes with `F12`:
   - Prefix match: 0.8
   - Suffix/Substring: 0.5
   - Fuzzy fallback: 0.3
+
+### Blended Scoring Formula
+
+The final score combines all components using mode-specific weights:
+
+```
+Final_Score = BM25_Score × Match_Quality + α × Recency_Factor
+```
+
+**Alpha (α) by Ranking Mode**:
+| Mode | α Value | Effect |
+|------|---------|--------|
+| Recent Heavy | 1.0 | Recency dominates |
+| Balanced | 0.4 | Moderate recency boost |
+| Relevance Heavy | 0.1 | BM25 dominates |
+| Match Quality | 0.0 | Pure text matching |
+| Date Newest/Oldest | N/A | Pure chronological sort |
+
+**Match Quality Factors**:
+| Match Type | Factor | Applied When |
+|------------|--------|--------------|
+| Exact | 1.0 | `"exact phrase"` |
+| Prefix | 0.9 | `auth*` |
+| Suffix | 0.8 | `*tion` |
+| Substring | 0.6 | `*config*` |
+| Implicit Wildcard | 0.4 | Auto-fallback expansion |
+
+**Recency Factor**: `timestamp / max_timestamp` normalized to [0, 1].
+
+This formula ensures that "Recent Heavy" mode (default) surfaces your most recent work, while "Relevance Heavy" finds the best explanations regardless of age.
 
 ---
 
@@ -976,6 +1322,60 @@ The pane automatically adjusts how many results fit based on terminal height and
 
 ---
 
+## 🎨 Theme System
+
+`cass` includes a sophisticated theming system with multiple presets, accessibility-aware color choices, and adaptive styling.
+
+### Theme Presets
+
+Cycle through 6 built-in theme presets with `F2`:
+
+| Theme | Description | Best For |
+|-------|-------------|----------|
+| **Dark** (default) | Tokyo Night-inspired deep blues | Low-light environments, extended sessions |
+| **Light** | High-contrast light background | Bright environments, presentations |
+| **Catppuccin** | Warm pastels, reduced eye strain | All-day coding, aesthetic preference |
+| **Dracula** | Purple-accented dark theme | Popular among developers, familiar feel |
+| **Nord** | Arctic-inspired cool tones | Calm, focused work sessions |
+| **High Contrast** | Maximum readability | Accessibility needs, bright monitors |
+
+### WCAG Accessibility
+
+All theme colors are validated against WCAG (Web Content Accessibility Guidelines) contrast requirements:
+
+- **Text on backgrounds**: Minimum 4.5:1 contrast ratio (AA standard)
+- **Large text/headers**: Minimum 3:1 contrast ratio
+- **Interactive elements**: Clear visual distinction from content
+
+The theming engine calculates relative luminance and contrast ratios at runtime to ensure readability across all color combinations.
+
+### Role-Aware Message Styling
+
+Conversation messages are color-coded by role for quick visual parsing:
+
+| Role | Visual Treatment | Purpose |
+|------|------------------|---------|
+| **User** | Blue-tinted background, bold | Your input, easy to scan |
+| **Assistant** | Green-tinted background | AI responses |
+| **System** | Gray/muted background | Context, instructions |
+| **Tool** | Orange-tinted background | Tool calls, file operations |
+
+Each agent type (Claude, Codex, Cursor, etc.) also receives a subtle tint, making multi-agent result lists instantly scannable.
+
+### Adaptive Borders
+
+Border decorations automatically adapt to terminal width:
+
+| Width | Style | Example |
+|-------|-------|---------|
+| **Narrow** (<80 cols) | Minimal Unicode | `│ content │` |
+| **Normal** (80-120) | Rounded corners | `╭─ content ─╮` |
+| **Wide** (>120) | Full decorations | Double-line headers |
+
+Toggle between rounded Unicode and plain ASCII borders with `Ctrl+B`.
+
+---
+
 ## 🔖 Bookmark System
 
 Save important search results with notes and tags for later reference.
@@ -1010,6 +1410,47 @@ Bookmarks are stored separately from the main index:
 - Linux: `~/.local/share/coding-agent-search/bookmarks.db`
 - macOS: `~/Library/Application Support/coding-agent-search/bookmarks.db`
 - Windows: `%APPDATA%\coding-agent-search\bookmarks.db`
+
+---
+
+## 🔔 Toast Notification System
+
+`cass` uses a non-intrusive toast notification system for transient feedback—operations complete, errors occur, or state changes without modal dialogs interrupting your workflow.
+
+### Notification Types
+
+| Type | Icon | Auto-Dismiss | Use Case |
+|------|------|--------------|----------|
+| **Info** | ℹ️ | 3 seconds | Status updates, tips |
+| **Success** | ✓ | 2 seconds | Operations completed |
+| **Warning** | ⚠ | 4 seconds | Non-critical issues |
+| **Error** | ✗ | 6 seconds | Failures requiring attention |
+
+### Behavior
+
+- **Non-Blocking**: Toasts appear in a corner without stealing focus
+- **Auto-Dismiss**: Each type has an appropriate display duration
+- **Message Coalescing**: Duplicate messages show a count badge instead of stacking
+- **Configurable Position**: Toasts can appear in any corner (default: top-right)
+- **Maximum Visible**: Limited to 3-5 visible toasts to prevent screen clutter
+
+### Visual Design
+
+Toasts feature:
+- **Color-coded borders**: Matches notification type (blue/green/yellow/red)
+- **Theme-aware**: Adapts to current dark/light theme
+- **Subtle animation**: Fade in/out for smooth appearance
+
+### Common Toast Messages
+
+| Trigger | Toast |
+|---------|-------|
+| Index rebuild complete | ✓ "Index rebuilt: 2,500 conversations" |
+| Export complete | ✓ "Exported to conversation.md" |
+| Copy to clipboard | ✓ "Copied to clipboard" |
+| Search timeout | ⚠ "Search timed out, showing partial results" |
+| Connector error | ✗ "Failed to scan ChatGPT: encrypted files" |
+| Update available | ℹ️ "Version 0.5.0 available" |
 
 ---
 
@@ -1218,6 +1659,32 @@ cass diag --verbose
 3. **Atomic commits**: Index writes are transactional
 4. **Graceful degradation**: Search falls back to SQLite if Tantivy fails
 
+### Database Schema Migrations
+
+The SQLite database uses versioned schema migrations:
+
+| Version | Changes |
+|---------|---------|
+| v1 | Initial schema: agents, conversations, messages |
+| v2 | Added FTS5 full-text search |
+| v3 | Added source provenance tracking |
+| v4 | Added vector embeddings support |
+| v5 | Current: Added remote sources |
+
+**Migration Process**:
+1. On startup, `cass` checks `schema_version` in the database
+2. If version < current, migrations run automatically
+3. Migrations are incremental and non-destructive
+4. User data (bookmarks, TUI state, sources.toml) is always preserved
+
+**Safe Files** (never deleted during rebuild):
+- `bookmarks.db` - Your saved bookmarks
+- `tui_state.json` - UI preferences
+- `sources.toml` - Remote source configuration
+- `.env` - Environment configuration
+
+**Backup Policy**: Up to 3 backups retained during major rebuilds. Older backups are automatically cleaned.
+
 ---
 
 ## ⏱️ Watch Mode Internals
@@ -1420,6 +1887,76 @@ cass completions bash > ~/.bash_completion.d/cass
 | `timeline` | Activity timeline with grouping by hour/day |
 | `sources` | Manage remote sources: add/list/remove/doctor/sync/mappings |
 
+### Diagnostic Commands
+
+Commands for troubleshooting, debugging, and understanding system state:
+
+```bash
+# Health check (fast, <50ms)
+cass health --json
+# → { "healthy": true, "index_age_seconds": 120, "message_count": 5000 }
+
+# Detailed status with recommendations
+cass status --json
+# → Includes index freshness, staleness threshold, recommended action
+
+# System diagnostics
+cass diag --verbose --json
+# → Database stats, index info, connector status, environment
+
+# Query explanation (debug why results are what they are)
+cass search "auth" --explain --dry-run --robot
+# → Shows parsed query, index strategy, cost estimate without executing
+
+# Find related sessions
+cass context /path/to/session.jsonl --json
+# → Sessions from same workspace, same day, or same agent
+```
+
+**Diagnostic Flags**:
+| Flag | Available On | Effect |
+|------|--------------|--------|
+| `--explain` | search | Show query parsing and strategy |
+| `--dry-run` | search | Validate without executing |
+| `--verbose` | most commands | Extra detail in output |
+| `--trace-file` | all | Append execution trace to file |
+
+### Model Management
+
+Commands for managing the semantic search ML model:
+
+```bash
+# Check current model status
+cass models status --json
+# → { "installed": true, "model": "all-MiniLM-L6-v2", "size_bytes": 91234567 }
+
+# Install model (downloads ~90MB)
+cass models install
+# → Downloads from Hugging Face, verifies checksum
+
+# Install from local file (air-gapped environments)
+cass models install --from-file /path/to/model.tar.gz
+
+# Verify model integrity
+cass models verify --json
+# → Checks all required files exist with correct checksums
+
+# Repair corrupted installation
+cass models verify --repair
+# → Re-downloads missing or corrupted files
+
+# Check for model updates
+cass models check-update --json
+# → Compares local version with latest available
+```
+
+**Model Files** (stored in `$CASS_DATA_DIR/models/all-MiniLM-L6-v2/`):
+- `model.onnx` - The neural network weights (~90MB)
+- `tokenizer.json` - Vocabulary and tokenization rules
+- `config.json` - Model configuration
+- `special_tokens_map.json` - Special token definitions
+- `tokenizer_config.json` - Tokenizer settings
+
 ---
 
 ## 🔒 Integrity & Safety
@@ -1446,6 +1983,67 @@ The project ships with a robust installer (`install.sh` / `install.ps1`) designe
 
 
 
+## 🔄 Automatic Update Checking
+
+`cass` includes a built-in update checker that notifies you when new versions are available, without interrupting your workflow.
+
+### How It Works
+
+1. **Background Check**: On TUI startup, a background thread queries GitHub releases
+2. **Rate Limiting**: Checks run at most once per hour to avoid API rate limits
+3. **Non-Blocking**: Update checks never slow down TUI startup or search operations
+4. **Offline-Safe**: Failed network requests are silently ignored
+
+### Update Notifications
+
+When a new version is available, a notification appears in the TUI with:
+- Current version vs. available version
+- Release highlights (from GitHub release notes)
+- Options: **Update Now** | **Skip This Version** | **Remind Later**
+
+### Self-Update Installation
+
+Selecting "Update Now" runs the same verified installer used for initial installation:
+
+```bash
+# macOS/Linux: Downloads and verifies via curl
+curl -fsSL https://...install.sh | bash -s -- --easy-mode --verify
+
+# Windows: PowerShell equivalent
+irm https://...install.ps1 | iex
+```
+
+The update process:
+1. Downloads the new binary with SHA256 verification
+2. Backs up the current binary
+3. Replaces with the new version
+4. Prompts to restart `cass`
+
+### Skip Version
+
+If you're not ready to update, "Skip This Version" records the skipped version in persistent state. That specific version won't trigger notifications again, but future versions will.
+
+### Disable Update Checks
+
+For automated environments or personal preference:
+
+```bash
+# Environment variable
+export CODING_AGENT_SEARCH_NO_UPDATE_PROMPT=1
+
+# Or for fully headless operation
+export TUI_HEADLESS=1
+```
+
+### State Persistence
+
+Update check state is stored in the data directory:
+- `last_update_check`: Timestamp of last check (for rate limiting)
+- `skipped_version`: Version user chose to skip
+- Both are reset on manual update or by deleting `tui_state.json`
+
+---
+
 ## ⚙️ Environment
 
 - **Config**: Loads `.env` via `dotenvy::dotenv().ok()`; configure API/base paths there. Do not overwrite `.env`.
@@ -1468,7 +2066,39 @@ The project ships with a robust installer (`install.sh` / `install.ps1`) designe
 
 - **Watch testing (dev only)**: `cass index --watch --watch-once path1,path2` triggers a single reindex without filesystem notify (also respects `CASS_TEST_WATCH_PATHS` for backward compatibility); useful for deterministic tests/smoke runs.
 
+### Complete Environment Variable Reference
 
+| Variable | Default | Description |
+|----------|---------|-------------|
+| **Core** | | |
+| `CASS_DATA_DIR` | Platform default | Override data directory |
+| `CASS_DB_PATH` | `$CASS_DATA_DIR/agent_search.db` | Override database path |
+| `NO_COLOR` / `CASS_NO_COLOR` | unset | Disable ANSI color output |
+| **Search & Cache** | | |
+| `CASS_CACHE_SHARD_CAP` | 256 | Per-shard LRU cache entries |
+| `CASS_CACHE_TOTAL_CAP` | 2048 | Total cached search hits |
+| `CASS_CACHE_BYTE_CAP` | 10485760 | Cache byte limit (10MB) |
+| `CASS_WARM_DEBOUNCE_MS` | 120 | Warm-up search debounce |
+| `CASS_DEBUG_CACHE_METRICS` | unset | Enable cache hit/miss logging |
+| **Semantic Search** | | |
+| `CASS_SEMANTIC_EMBEDDER` | auto | Force embedder: `hash` or `minilm` |
+| **TUI** | | |
+| `TUI_HEADLESS` | unset | Disable interactive features |
+| `CASS_UI_METRICS` | unset | Enable UI interaction tracing |
+| `CASS_DISABLE_ANIMATIONS` | unset | Disable UI animations |
+| `EDITOR` | `$VISUAL` or `vi` | External editor command |
+| `EDITOR_LINE_FLAG` | `+` | Line number flag (e.g., `+42`) |
+| **Updates** | | |
+| `CODING_AGENT_SEARCH_NO_UPDATE_PROMPT` | unset | Disable update notifications |
+| **Connector Overrides** | | |
+| `CASS_AIDER_DATA_ROOT` | `~/.aider.chat.history.md` | Aider history location |
+| `PI_CODING_AGENT_DIR` | `~/.pi/agent/sessions` | Pi-Agent sessions |
+| `CODEX_HOME` | `~/.codex` | Codex data directory |
+| `GEMINI_HOME` | `~/.gemini` | Gemini CLI directory |
+| `OPENCODE_STORAGE_ROOT` | (scans home) | OpenCode storage |
+| `CHATGPT_ENCRYPTION_KEY` | unset | Base64-encoded AES key for ChatGPT v2/v3 |
+
+---
 
 ## 🩺 Troubleshooting
 
