@@ -102,10 +102,11 @@ if [ -f "$JUNIT_PATH" ]; then
 
     # Parse basic stats from JUnit XML
     if command -v xmllint &> /dev/null; then
-        TESTS=$(xmllint --xpath 'string(//testsuite/@tests)' "$JUNIT_PATH" 2>/dev/null || echo "?")
-        FAILURES=$(xmllint --xpath 'string(//testsuite/@failures)' "$JUNIT_PATH" 2>/dev/null || echo "?")
-        ERRORS=$(xmllint --xpath 'string(//testsuite/@errors)' "$JUNIT_PATH" 2>/dev/null || echo "?")
-        TIME=$(xmllint --xpath 'string(//testsuite/@time)' "$JUNIT_PATH" 2>/dev/null || echo "?")
+        # Use /testsuites for aggregate stats (nextest puts totals on root element)
+        TESTS=$(xmllint --xpath 'string(/testsuites/@tests)' "$JUNIT_PATH" 2>/dev/null || echo "?")
+        FAILURES=$(xmllint --xpath 'string(/testsuites/@failures)' "$JUNIT_PATH" 2>/dev/null || echo "?")
+        ERRORS=$(xmllint --xpath 'string(/testsuites/@errors)' "$JUNIT_PATH" 2>/dev/null || echo "?")
+        TIME=$(xmllint --xpath 'string(/testsuites/@time)' "$JUNIT_PATH" 2>/dev/null || echo "?")
 
         echo ""
         echo "Summary:"
