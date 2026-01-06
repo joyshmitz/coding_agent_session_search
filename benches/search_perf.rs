@@ -3,7 +3,7 @@ use coding_agent_search::search::canonicalize::canonicalize_for_embedding;
 use coding_agent_search::search::embedder::Embedder;
 use coding_agent_search::search::hash_embedder::HashEmbedder;
 use coding_agent_search::search::query::{
-    rrf_fuse_hits, MatchType, SearchClient, SearchFilters, SearchHit,
+    MatchType, SearchClient, SearchFilters, SearchHit, rrf_fuse_hits,
 };
 use coding_agent_search::search::tantivy::index_dir;
 use coding_agent_search::search::vector_index::{
@@ -171,12 +171,14 @@ fn bench_empty_search(c: &mut Criterion) {
     let data_dir = default_data_dir();
     let index_path = index_dir(&data_dir).unwrap();
     let client = SearchClient::open(&index_path, None).unwrap();
+    // Note: This benchmark requires a real index to exist; skipped if not present
     if let Some(client) = client {
         c.bench_function("search_empty_query", |b| {
             b.iter(|| {
-                client
+                let result = client
                     .search("", SearchFilters::default(), 10, 0)
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                black_box(result)
             })
         });
     }
