@@ -536,14 +536,11 @@ impl SyncEngine {
         // Look up host in SSH config for connection details
         // First try matching by SSH config alias (Host line), then by actual hostname
         let ssh_config = discover_ssh_hosts();
-        let host_config = ssh_config
-            .iter()
-            .find(|h| h.name == ssh_host)
-            .or_else(|| {
-                ssh_config
-                    .iter()
-                    .find(|h| h.hostname.as_deref() == Some(ssh_host))
-            });
+        let host_config = ssh_config.iter().find(|h| h.name == ssh_host).or_else(|| {
+            ssh_config
+                .iter()
+                .find(|h| h.hostname.as_deref() == Some(ssh_host))
+        });
 
         // Determine connection parameters
         let hostname = host_config
