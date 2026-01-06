@@ -296,9 +296,9 @@ When the wizard installs `cass` on remote machines, it uses an intelligent fallb
 | Priority | Method | Speed | Requirements |
 |----------|--------|-------|--------------|
 | 1 | **cargo-binstall** | ~30s | `cargo-binstall` pre-installed |
-| 2 | **Pre-built binary** | ~60s | curl/wget, GitHub access |
-| 3 | **cargo install** | 3-5min | Rust toolchain, 2GB disk |
-| 4 | **Full bootstrap** | 5-10min | curl/wget only (installs rustup) |
+| 2 | **Pre-built binary** | ~10s | curl/wget, GitHub access |
+| 3 | **cargo install** | ~5min | Rust toolchain, 2GB disk |
+| 4 | **Full bootstrap** | ~10min | curl/wget only (installs rustup) |
 
 **Resource Requirements**:
 - Minimum 2GB disk space
@@ -326,7 +326,7 @@ The setup wizard automatically discovers SSH hosts from your configuration:
 
 **Discovery Sources**:
 - `~/.ssh/config` (Host entries with HostName)
-- Hosts are filtered to exclude wildcards (`*`) and jump hosts
+- Hosts with wildcards (`*`, `?`) are automatically excluded
 
 **Probe Results** (for each discovered host):
 | Check | Purpose |
@@ -337,7 +337,7 @@ The setup wizard automatically discovers SSH hosts from your configuration:
 | **Session Count** | How many conversations exist? |
 | **System Info** | OS, architecture, disk space, memory |
 
-**Probe Caching**: Results are cached for 5 minutes to speed up repeated setup attempts. Clear with `cass sources setup --no-cache`.
+**Probe Caching**: Results are cached for 5 minutes to speed up repeated setup attempts. Cache clears automatically on expiry.
 
 #### Manual Setup
 
@@ -442,8 +442,10 @@ The sync engine uses rsync over SSH for efficient delta transfers, with automati
 
 **rsync Flags Used**:
 ```
--avz --compress --partial --timeout=300 --contimeout=30 -e ssh
+-avz --stats --partial --protect-args --timeout=300 \
+  -e "ssh -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new"
 ```
+Where `-avz` = archive mode + verbose + compression.
 
 **Data Flow**:
 ```
