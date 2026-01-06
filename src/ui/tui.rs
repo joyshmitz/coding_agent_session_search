@@ -2186,7 +2186,11 @@ fn load_state(path: &std::path::Path) -> TuiStatePersisted {
 
 fn save_state(path: &std::path::Path, state: &TuiStatePersisted) {
     if let Ok(body) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(path, body);
+        // Use atomic write: temp file + rename to prevent corruption on crash
+        let temp_path = path.with_extension("json.tmp");
+        if std::fs::write(&temp_path, &body).is_ok() {
+            let _ = std::fs::rename(&temp_path, path);
+        }
     }
 }
 
@@ -2532,6 +2536,8 @@ pub fn run_tui(
             "Index ready at {} - type to search (Esc/F10 quit, F1 help)",
             index_path.display()
         )
+    } else if progress.is_some() {
+        "Index not ready yet. Background indexing is running...".to_string()
     } else {
         format!(
             "Index not present at {}. Run `cass index --full` then reopen TUI.",
@@ -2757,6 +2763,8 @@ pub fn run_tui(
     // Track last indexing state to detect changes and trigger redraw
     // Tuple: (phase, current, total, is_rebuild, discovered_agents)
     let mut last_indexing_state: Option<(usize, usize, usize, bool, usize)> = None;
+    let mut last_index_error: Option<String> = None;
+    let mut last_index_redraw = Instant::now();
 
     // Helper to get indexing phase info (returns phase, current, total, is_rebuild, pct, discovered_agents)
     let get_indexing_state = |progress: &std::sync::Arc<crate::indexer::IndexingProgress>| -> (usize, usize, usize, bool, usize, usize) {
@@ -2833,7 +2841,11 @@ pub fn run_tui(
             DensityMode::Compact => {
                 // Compact: minimal - just icon + percentage or agent count
                 if phase == 1 {
-                    format!(" | {icon} {discovered} agents")
+                    if total > 0 {
+                        format!(" | {icon} {current}/{total} · {discovered} agents")
+                    } else {
+                        format!(" | {icon} {discovered} agents")
+                    }
                 } else if is_rebuild {
                     format!(" | {icon} {pct}% ⚠")
                 } else {
@@ -2850,7 +2862,13 @@ pub fn run_tui(
                 let tput_spark = render_throughput_sparkline(tput_history);
 
                 let mut s = if phase == 1 {
-                    format!(" | {icon} {phase_str} ({discovered} agents)")
+                    if total > 0 {
+                        format!(
+                            " | {icon} {phase_str} {current}/{total} {bar} ({discovered} agents)"
+                        )
+                    } else {
+                        format!(" | {icon} {phase_str} ({discovered} agents)")
+                    }
                 } else {
                     format!(" | {icon} {current}/{total} ({pct}%) {bar}")
                 };
@@ -2877,7 +2895,13 @@ pub fn run_tui(
                 let current_tput = tput_history.back().copied().unwrap_or(0);
 
                 let mut s = if phase == 1 {
-                    format!(" | {icon} {phase_str} ({discovered} agents found)")
+                    if total > 0 {
+                        format!(
+                            " | {icon} {phase_str} {current}/{total} {bar} ({discovered} agents)"
+                        )
+                    } else {
+                        format!(" | {icon} {phase_str} ({discovered} agents found)")
+                    }
                 } else {
                     let tput_str = if current_tput > 0 {
                         format!(" ~{current_tput}/s")
@@ -3120,6 +3144,18 @@ pub fn run_tui(
 
                             if phase == 1 {
                                 // Discovery phase - show agents found count
+                                if total > 0 {
+                                    lines.push(Line::from(Span::styled(
+                                        format!("  Scanned {current}/{total} connectors"),
+                                        Style::default().fg(palette.hint),
+                                    )));
+                                } else {
+                                    lines.push(Line::from(Span::styled(
+                                        "  Scanning connectors...",
+                                        Style::default().fg(palette.hint),
+                                    )));
+                                }
+                                lines.push(Line::from(""));
                                 lines.push(Line::from(Span::styled(
                                     format!("  Found {discovered} coding agent(s) so far..."),
                                     Style::default().fg(palette.hint),
@@ -3157,6 +3193,30 @@ pub fn run_tui(
                                 Style::default().fg(palette.hint),
                             )));
                         }
+                        lines.push(Line::from(""));
+                    }
+
+                    if indexing_active.is_none_or(|(phase, _, _, _, _, _)| phase == 0)
+                        && let Some(err) = last_index_error.as_ref()
+                    {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(vec![
+                            Span::styled("  ⚠ ", Style::default().fg(palette.system)),
+                            Span::styled(
+                                "Indexer error",
+                                Style::default()
+                                    .fg(palette.system)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                        lines.push(Line::from(Span::styled(
+                            format!("  {err}"),
+                            Style::default().fg(palette.hint),
+                        )));
+                        lines.push(Line::from(Span::styled(
+                            "  See cass.log for details, or run `cass index --full`.",
+                            Style::default().fg(palette.hint),
+                        )));
                         lines.push(Line::from(""));
                     }
 
@@ -7402,6 +7462,23 @@ pub fn run_tui(
                     }
                     last_indexing_state = Some(current_state);
                     needs_draw = true;
+                }
+
+                // Surface background indexer errors to the UI
+                let index_err = p.last_error.lock().ok().and_then(|err| err.clone());
+                if index_err != last_index_error {
+                    if let Some(ref err) = index_err {
+                        status = format!("Indexer error: {err} (see cass.log)");
+                        toast_manager.push(Toast::error("Indexer failed (see cass.log)"));
+                        needs_draw = true;
+                    }
+                    last_index_error = index_err;
+                }
+
+                // Heartbeat redraw while indexing is active (keeps HUD responsive)
+                if phase > 0 && last_index_redraw.elapsed() >= Duration::from_millis(500) {
+                    needs_draw = true;
+                    last_index_redraw = Instant::now();
                 }
             }
             last_tick = Instant::now();

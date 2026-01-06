@@ -562,14 +562,43 @@ impl ModelDownloader {
     }
 
     /// Atomically install downloaded files.
+    ///
+    /// Uses a backup-rename-cleanup pattern to minimize the window where no model exists:
+    /// 1. Move existing target to backup (if present)
+    /// 2. Rename temp to target
+    /// 3. Remove backup on success, or restore on failure
     fn atomic_install(&self) -> Result<(), DownloadError> {
-        // Remove existing target if present
-        if self.target_dir.exists() {
-            fs::remove_dir_all(&self.target_dir)?;
+        let backup_dir = self.target_dir.with_extension("bak");
+
+        // Clean up any stale backup from previous failed install
+        if backup_dir.exists() {
+            let _ = fs::remove_dir_all(&backup_dir);
         }
 
-        // Atomic rename
-        fs::rename(&self.temp_dir, &self.target_dir)?;
+        // Move existing target to backup (preserves it until new install succeeds)
+        let had_existing = if self.target_dir.exists() {
+            fs::rename(&self.target_dir, &backup_dir)?;
+            true
+        } else {
+            false
+        };
+
+        // Rename temp to target
+        match fs::rename(&self.temp_dir, &self.target_dir) {
+            Ok(()) => {
+                // Success: remove backup
+                if had_existing {
+                    let _ = fs::remove_dir_all(&backup_dir);
+                }
+            }
+            Err(e) => {
+                // Failed: try to restore from backup
+                if had_existing && backup_dir.exists() {
+                    let _ = fs::rename(&backup_dir, &self.target_dir);
+                }
+                return Err(e.into());
+            }
+        }
 
         // Sync directory
         if let Some(parent) = self.target_dir.parent()

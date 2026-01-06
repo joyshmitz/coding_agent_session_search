@@ -1716,6 +1716,36 @@ cass diag --verbose
 3. **Atomic commits**: Index writes are transactional
 4. **Graceful degradation**: Search falls back to SQLite if Tantivy fails
 
+### Index Recovery & Self-Healing
+
+`cass` maintains multiple layers of redundancy to recover from corruption or schema changes:
+
+**Schema Hash Versioning**:
+Each Tantivy index stores a `schema_hash.json` file containing a hash of the current schema definition. On startup:
+1. If hash matches → open existing index
+2. If hash differs → schema changed, trigger rebuild
+3. If file missing/corrupted → assume stale, trigger rebuild
+
+This ensures that version upgrades with schema changes automatically rebuild the index without user intervention.
+
+**Automatic Rebuild Triggers**:
+| Condition | Detection | Action |
+|-----------|-----------|--------|
+| Schema version change | Hash mismatch in `schema_hash.json` | Full rebuild |
+| Missing `meta.json` | Tantivy can't open index | Recreate index directory |
+| Corrupted index files | `Index::open_in_dir()` fails | Delete and recreate |
+| Explicit request | `--force-rebuild` flag | Clean slate rebuild |
+
+**SQLite as Ground Truth**:
+The SQLite database serves as the authoritative data store. The `rebuild_tantivy_from_db()` function can reconstruct the entire Tantivy index from SQLite:
+```rust
+// Iterate all conversations from SQLite
+// Re-index each message into fresh Tantivy index
+// Progress tracked via IndexingProgress for UI feedback
+```
+
+This means users can always recover from Tantivy corruption by running `cass doctor --fix` or `cass index --full --force-rebuild`.
+
 ### Database Schema Migrations
 
 The SQLite database uses versioned schema migrations:
@@ -2081,6 +2111,37 @@ cass models check-update --json
 
 - **Read-Only Source**: `cass` *never* modifies your agent log files. It only reads them.
 
+### Atomic File Operations
+
+`cass` uses crash-safe atomic write patterns throughout to prevent data corruption:
+
+**TUI State Persistence** (`tui_state.json`):
+```
+1. Serialize state to JSON
+2. Write to temporary file (tui_state.json.tmp)
+3. Atomic rename: temp → final
+```
+If a crash occurs during step 2, the original file is untouched. The rename operation (step 3) is atomic on all modern filesystems—it either completes fully or not at all.
+
+**ML Model Installation** (`models/all-MiniLM-L6-v2/`):
+```
+1. Download to temp directory (models/all-MiniLM-L6-v2.tmp/)
+2. Verify all checksums
+3. If existing model present: rename to backup (models/all-MiniLM-L6-v2.bak/)
+4. Atomic rename: temp → final
+5. On success: remove backup
+6. On failure: restore from backup
+```
+This backup-rename-cleanup pattern ensures that either the old model or new model is always available—never a half-installed state.
+
+**Configuration Files** (`sources.toml`, `watch_state.json`):
+All configuration writes follow the same temp-file-then-rename pattern, ensuring consistency even during power loss or unexpected termination.
+
+**Why This Matters**:
+- System crashes mid-write won't corrupt your preferences
+- Network interruptions during model download won't leave broken installations
+- Concurrent processes won't see partially-written files
+
 
 
 ## 📦 Installer Strategy
@@ -2318,6 +2379,10 @@ The TUI automatically saves your preferences to `tui_state.json` in the data dir
 - macOS: `~/Library/Application Support/coding-agent-search/tui_state.json`
 - Windows: `%APPDATA%\coding-agent-search\tui_state.json`
 
+### Crash-Safe Persistence
+
+State is saved using atomic file operations: data is first written to a temporary file (`tui_state.json.tmp`), then atomically renamed to the final location. This prevents corruption if the application crashes mid-save or during unexpected termination. See [Atomic File Operations](#atomic-file-operations) for technical details.
+
 ### Resetting State
 
 ```bash
@@ -2347,6 +2412,38 @@ This deletes `tui_state.json` and restores all defaults.
 ### Indexer (src/indexer/mod.rs)
 - Opens SQLite + Tantivy; `--full` clears tables/FTS and wipes Tantivy docs; `--force-rebuild` recreates index dir when schema changes.
 - Parallel connector loop: detect → scan runs concurrently across all connectors using rayon's parallel iterator, with atomic progress counters updating discovered agent count and conversation totals in real-time. Ingestion into SQLite and Tantivy happens sequentially after all scans complete. Watch mode: debounced filesystem watcher, path classification per connector, since_ts tracked in `watch_state.json`, incremental reindex of touched sources. TUI startup spawns a background indexer with watch enabled.
+
+#### Real-Time Progress Visualization
+
+The TUI footer displays live indexing progress through the `IndexingProgress` struct:
+
+**Phase Indicators**:
+| Phase | Display | Meaning |
+|-------|---------|---------|
+| 0 (Idle) | No indicator | Indexer idle or complete |
+| 1 (Scanning) | `🔍 Scanning...` | Discovering agents and files |
+| 2 (Indexing) | `📦 Indexing N/M (X%)` | Processing conversations |
+
+**Progress Components**:
+- **Agent Discovery**: During scanning, shows which agents were found (e.g., "Found: claude_code, codex, cursor")
+- **Conversation Count**: Total conversations discovered across all agents
+- **Sparkline Visualization**: Mini bar chart showing indexing velocity (`▁▂▄▆█`)
+- **Rebuild Indicator**: Special badge when performing full schema rebuild vs. incremental update
+
+**Implementation Details**:
+```rust
+pub struct IndexingProgress {
+    pub total: AtomicUsize,              // Total items to process
+    pub current: AtomicUsize,            // Items processed so far
+    pub phase: AtomicUsize,              // 0=Idle, 1=Scanning, 2=Indexing
+    pub is_rebuilding: AtomicBool,       // Full rebuild vs incremental
+    pub discovered_agents: AtomicUsize,  // Count of agents found
+    pub discovered_agent_names: Mutex<Vec<String>>,  // Agent names for display
+    pub last_error: Mutex<Option<String>>,  // Background indexer errors
+}
+```
+
+All counters use `AtomicUsize` with relaxed ordering for lock-free updates from the background indexer thread. The TUI polls these at ~10Hz for smooth progress display without synchronization overhead.
 
 ### Storage (src/storage/sqlite.rs)
 - Normalized relational model (agents, workspaces, conversations, messages, snippets, tags) with FTS mirror on messages. Single-transaction insert/upsert, append-only unless `--full`. `schema_version` guard; bundled modern SQLite.
