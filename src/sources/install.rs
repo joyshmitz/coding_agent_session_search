@@ -1146,7 +1146,8 @@ mod tests {
 
     #[test]
     fn test_get_checksum_url() {
-        let binary_url = "https://github.com/example/repo/releases/download/v1.0.0/binary-linux-x86_64";
+        let binary_url =
+            "https://github.com/example/repo/releases/download/v1.0.0/binary-linux-x86_64";
         let checksum_url = RemoteInstaller::get_checksum_url(binary_url);
         assert_eq!(
             checksum_url,

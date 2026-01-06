@@ -32,6 +32,16 @@ use thiserror::Error;
 
 use super::config::SourceDefinition;
 
+// Imports for future SFTP implementation (TODO)
+#[allow(unused_imports)]
+use super::config::discover_ssh_hosts;
+#[allow(unused_imports)]
+use ssh2::{Session, Sftp};
+#[allow(unused_imports)]
+use std::io::{Read as IoRead, Write as IoWrite};
+#[allow(unused_imports)]
+use std::net::TcpStream;
+
 /// Errors that can occur during sync operations.
 #[derive(Error, Debug)]
 pub enum SyncError {
@@ -329,7 +339,9 @@ impl SyncEngine {
                 SyncMethod::Rsync => {
                     self.sync_path_rsync(host, remote_path, &mirror_dir, remote_home.as_deref())
                 }
-                SyncMethod::Sftp => self.sync_path_sftp(host, remote_path, &mirror_dir),
+                SyncMethod::Sftp => {
+                    self.sync_path_sftp(host, remote_path, &mirror_dir, remote_home.as_deref())
+                }
             };
             report.add_path_result(result);
         }
@@ -500,24 +512,390 @@ impl SyncEngine {
 
     /// Sync a single path using SFTP (fallback when rsync unavailable).
     ///
-    /// This is a placeholder for Windows/no-rsync environments.
-    /// TODO: Implement using ssh2 or russh crate.
-    fn sync_path_sftp(&self, host: &str, remote_path: &str, dest_dir: &Path) -> PathSyncResult {
+    /// Uses the ssh2 crate for SFTP transfers. Authenticates via SSH agent
+    /// or key file from SSH config.
+    fn sync_path_sftp(
+        &self,
+        host: &str,
+        remote_path: &str,
+        dest_dir: &Path,
+        remote_home: Option<&str>,
+    ) -> PathSyncResult {
         let start = Instant::now();
+        let expanded_path = Self::expand_tilde_with_home(remote_path, remote_home);
+        let local_path = dest_dir.join(path_to_safe_dirname(&expanded_path));
 
-        // For now, return an error indicating SFTP is not yet implemented
+        // Create local directory
+        if let Err(e) = std::fs::create_dir_all(&local_path) {
+            return PathSyncResult {
+                remote_path: remote_path.to_string(),
+                local_path,
+                success: false,
+                error: Some(format!("Failed to create directory: {}", e)),
+                duration_ms: start.elapsed().as_millis() as u64,
+                ..Default::default()
+            };
+        }
+
+        // Parse host to extract user if present (user@host format)
+        let (ssh_user, ssh_host) = parse_ssh_host(host);
+
+        // Look up host in SSH config for connection details
+        let ssh_config = discover_ssh_hosts();
+        let host_config = ssh_config.iter().find(|h| h.name == ssh_host);
+
+        // Determine connection parameters
+        let hostname = host_config
+            .and_then(|h| h.hostname.as_deref())
+            .unwrap_or(ssh_host);
+        let port = host_config.and_then(|h| h.port).unwrap_or(22);
+        let default_user = dotenvy::var("USER").unwrap_or_else(|_| "root".to_string());
+        let username = ssh_user
+            .map(|s| s.to_string())
+            .or_else(|| host_config.and_then(|h| h.user.clone()))
+            .unwrap_or(default_user);
+        let identity_file = host_config.and_then(|h| h.identity_file.as_deref());
+
+        tracing::debug!(
+            hostname = %hostname,
+            port,
+            username = %username,
+            identity_file = ?identity_file,
+            remote_path = %expanded_path,
+            "SFTP connection parameters"
+        );
+
+        // Connect via TCP
+        let tcp = match TcpStream::connect((hostname, port)) {
+            Ok(t) => t,
+            Err(e) => {
+                return PathSyncResult {
+                    remote_path: remote_path.to_string(),
+                    local_path,
+                    success: false,
+                    error: Some(format!(
+                        "TCP connection failed to {}:{}: {}",
+                        hostname, port, e
+                    )),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    ..Default::default()
+                };
+            }
+        };
+
+        // Set TCP timeout
+        let timeout = std::time::Duration::from_secs(self.connection_timeout);
+        let _ = tcp.set_read_timeout(Some(timeout));
+        let _ = tcp.set_write_timeout(Some(timeout));
+
+        // Create SSH session
+        let mut session = match Session::new() {
+            Ok(s) => s,
+            Err(e) => {
+                return PathSyncResult {
+                    remote_path: remote_path.to_string(),
+                    local_path,
+                    success: false,
+                    error: Some(format!("Failed to create SSH session: {}", e)),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    ..Default::default()
+                };
+            }
+        };
+
+        session.set_tcp_stream(tcp);
+
+        if let Err(e) = session.handshake() {
+            return PathSyncResult {
+                remote_path: remote_path.to_string(),
+                local_path,
+                success: false,
+                error: Some(format!("SSH handshake failed: {}", e)),
+                duration_ms: start.elapsed().as_millis() as u64,
+                ..Default::default()
+            };
+        }
+
+        // Authenticate - try agent first, then key file
+        if let Err(e) = self.authenticate_ssh(&session, &username, identity_file) {
+            return PathSyncResult {
+                remote_path: remote_path.to_string(),
+                local_path,
+                success: false,
+                error: Some(format!("SSH authentication failed: {}", e)),
+                duration_ms: start.elapsed().as_millis() as u64,
+                ..Default::default()
+            };
+        }
+
+        // Open SFTP session
+        let sftp = match session.sftp() {
+            Ok(s) => s,
+            Err(e) => {
+                return PathSyncResult {
+                    remote_path: remote_path.to_string(),
+                    local_path,
+                    success: false,
+                    error: Some(format!("Failed to open SFTP session: {}", e)),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    ..Default::default()
+                };
+            }
+        };
+
+        tracing::info!(
+            host = %host,
+            remote_path = %expanded_path,
+            local_path = %local_path.display(),
+            "starting SFTP sync"
+        );
+
+        // Recursively download the remote path
+        let mut files_transferred = 0u64;
+        let mut bytes_transferred = 0u64;
+
+        if let Err(e) = self.sftp_download_recursive(
+            &sftp,
+            Path::new(&expanded_path),
+            &local_path,
+            &mut files_transferred,
+            &mut bytes_transferred,
+        ) {
+            return PathSyncResult {
+                remote_path: remote_path.to_string(),
+                local_path,
+                files_transferred,
+                bytes_transferred,
+                success: false,
+                error: Some(format!("SFTP download failed: {}", e)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        tracing::info!(
+            host = %host,
+            remote_path = %expanded_path,
+            files = files_transferred,
+            bytes = bytes_transferred,
+            duration_ms,
+            "SFTP sync completed"
+        );
+
         PathSyncResult {
             remote_path: remote_path.to_string(),
-            local_path: dest_dir.join(path_to_safe_dirname(remote_path)),
-            success: false,
-            error: Some(format!(
-                "SFTP fallback not yet implemented. Install rsync to sync from {}",
-                host
-            )),
-            duration_ms: start.elapsed().as_millis() as u64,
-            ..Default::default()
+            local_path,
+            files_transferred,
+            bytes_transferred,
+            success: true,
+            error: None,
+            duration_ms,
         }
     }
+
+    /// Authenticate SSH session using agent or key file.
+    fn authenticate_ssh(
+        &self,
+        session: &Session,
+        username: &str,
+        identity_file: Option<&str>,
+    ) -> Result<(), String> {
+        // Try SSH agent first
+        if let Ok(mut agent) = session.agent()
+            && agent.connect().is_ok()
+            && agent.list_identities().is_ok()
+        {
+            for identity in agent.identities().unwrap_or_default() {
+                if agent.userauth(username, &identity).is_ok() && session.authenticated() {
+                    tracing::debug!("Authenticated via SSH agent");
+                    return Ok(());
+                }
+            }
+        }
+
+        // Try key file if specified
+        if let Some(key_path) = identity_file {
+            let key_path_expanded = expand_tilde_local(key_path);
+            let key_path_buf = Path::new(&key_path_expanded);
+
+            if key_path_buf.exists()
+                && session
+                    .userauth_pubkey_file(username, None, key_path_buf, None)
+                    .is_ok()
+                && session.authenticated()
+            {
+                tracing::debug!(key = %key_path_buf.display(), "Authenticated via key file");
+                return Ok(());
+            }
+        }
+
+        // Try default key locations
+        if let Some(home) = dirs::home_dir() {
+            for key_name in ["id_ed25519", "id_rsa", "id_ecdsa"] {
+                let key_path = home.join(".ssh").join(key_name);
+                if key_path.exists()
+                    && session
+                        .userauth_pubkey_file(username, None, &key_path, None)
+                        .is_ok()
+                    && session.authenticated()
+                {
+                    tracing::debug!(key = %key_path.display(), "Authenticated via default key");
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(format!(
+            "No valid authentication method found for user '{}'",
+            username
+        ))
+    }
+
+    /// Recursively download a remote path via SFTP.
+    fn sftp_download_recursive(
+        &self,
+        sftp: &Sftp,
+        remote_path: &Path,
+        local_path: &Path,
+        files_transferred: &mut u64,
+        bytes_transferred: &mut u64,
+    ) -> Result<(), String> {
+        // Check if remote path is a directory or file
+        let stat = sftp
+            .stat(remote_path)
+            .map_err(|e| format!("Failed to stat {}: {}", remote_path.display(), e))?;
+
+        if stat.is_dir() {
+            // Create local directory
+            std::fs::create_dir_all(local_path)
+                .map_err(|e| format!("Failed to create {}: {}", local_path.display(), e))?;
+
+            // List directory contents
+            let entries = sftp
+                .readdir(remote_path)
+                .map_err(|e| format!("Failed to list {}: {}", remote_path.display(), e))?;
+
+            for (entry_path, entry_stat) in entries {
+                let file_name = entry_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+
+                // Skip . and ..
+                if file_name == "." || file_name == ".." {
+                    continue;
+                }
+
+                let local_entry = local_path.join(file_name);
+
+                if entry_stat.is_dir() {
+                    // Recurse into subdirectory
+                    self.sftp_download_recursive(
+                        sftp,
+                        &entry_path,
+                        &local_entry,
+                        files_transferred,
+                        bytes_transferred,
+                    )?;
+                } else if entry_stat.is_file() {
+                    // Download file
+                    self.sftp_download_file(sftp, &entry_path, &local_entry, bytes_transferred)?;
+                    *files_transferred += 1;
+                }
+                // Skip symlinks and other types for safety
+            }
+        } else if stat.is_file() {
+            // Single file - download to local path
+            std::fs::create_dir_all(local_path.parent().unwrap_or(local_path))
+                .map_err(|e| format!("Failed to create parent dir: {}", e))?;
+
+            // For single files, use the file name from remote path
+            let file_name = remote_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file");
+            let local_file = local_path.join(file_name);
+
+            self.sftp_download_file(sftp, remote_path, &local_file, bytes_transferred)?;
+            *files_transferred += 1;
+        }
+
+        Ok(())
+    }
+
+    /// Download a single file via SFTP.
+    fn sftp_download_file(
+        &self,
+        sftp: &Sftp,
+        remote_path: &Path,
+        local_path: &Path,
+        bytes_transferred: &mut u64,
+    ) -> Result<(), String> {
+        // Open remote file
+        let mut remote_file = sftp
+            .open(remote_path)
+            .map_err(|e| format!("Failed to open {}: {}", remote_path.display(), e))?;
+
+        // Create local file
+        let mut local_file = std::fs::File::create(local_path)
+            .map_err(|e| format!("Failed to create {}: {}", local_path.display(), e))?;
+
+        // Transfer in chunks
+        let mut buffer = [0u8; 32768]; // 32KB chunks
+        loop {
+            let bytes_read = remote_file
+                .read(&mut buffer)
+                .map_err(|e| format!("Failed to read {}: {}", remote_path.display(), e))?;
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            local_file
+                .write_all(&buffer[..bytes_read])
+                .map_err(|e| format!("Failed to write {}: {}", local_path.display(), e))?;
+
+            *bytes_transferred += bytes_read as u64;
+        }
+
+        tracing::trace!(
+            remote = %remote_path.display(),
+            local = %local_path.display(),
+            "downloaded file"
+        );
+
+        Ok(())
+    }
+}
+
+/// Parse SSH host string into (optional_user, host).
+///
+/// Examples:
+/// - "myserver" -> (None, "myserver")
+/// - "user@myserver" -> (Some("user"), "myserver")
+fn parse_ssh_host(host: &str) -> (Option<&str>, &str) {
+    if let Some(at_pos) = host.find('@') {
+        let user = &host[..at_pos];
+        let hostname = &host[at_pos + 1..];
+        (Some(user), hostname)
+    } else {
+        (None, host)
+    }
+}
+
+/// Expand tilde in local paths.
+fn expand_tilde_local(path: &str) -> String {
+    if let Some(stripped) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return format!("{}/{}", home.display(), stripped);
+    } else if path == "~"
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.display().to_string();
+    }
+    path.to_string()
 }
 
 /// Convert a remote path to a safe directory name.
