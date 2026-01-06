@@ -1,8 +1,8 @@
 # Proposal: Encrypted GitHub Pages Web Export for cass
 
-**Document Version:** 1.1
+**Document Version:** 1.2
 **Date:** January 2026
-**Status:** PROPOSAL - Enhanced with bv Insights
+**Status:** PROPOSAL - Revised for Security + Robustness
 
 ---
 
@@ -36,7 +36,11 @@ This proposal describes adding a **secure, encrypted static website export featu
 
 ### Key Innovation
 
-Unlike bv's existing Pages export (which publishes data in plaintext), cass's implementation will use **AES-256-GCM encryption** with password or QR code authentication. The static site will be completely opaque until decrypted in the browser—no conversation content, agent names, project paths, or search indexes will be visible to anyone without the decryption key.
+Unlike bv's existing Pages export (which publishes data in plaintext), cass's implementation will use **envelope encryption**:
+- A random **Data Encryption Key (DEK)** encrypts the archive payload (AES-256-GCM)
+- One or more **Key Encryption Keys (KEKs)** derived via Argon2id wrap the DEK for password + recovery unlock
+
+The static site will be completely opaque until decrypted in the browser—no conversation content, agent names, project paths, or search indexes will be visible to anyone without the decryption key.
 
 ### Why This Matters
 
@@ -46,7 +50,7 @@ AI coding agent logs often contain:
 - Debugging sessions with sensitive data
 - Proprietary algorithms and business logic
 
-GitHub Pages **only works with public repositories**, making encryption essential for any real-world use of this feature.
+GitHub Pages is commonly published from public repositories (GitHub Free), and can also be published from private repositories on paid plans. Either way, encryption provides defense-in-depth and enables safe sharing of sensitive archives.
 
 ---
 
@@ -292,7 +296,7 @@ Users want to share their AI coding agent history for:
 
 ### Why GitHub Pages is Dangerous for Agent Logs
 
-GitHub Pages **requires public repositories**. AI coding agent logs often contain:
+GitHub Pages is commonly published from public repositories (GitHub Free), and can also be published from private repositories on paid plans. Either way, AI coding agent logs often contain:
 
 | Risk Category | Examples |
 |--------------|----------|
@@ -335,27 +339,47 @@ GitHub Pages **requires public repositories**. AI coding agent logs often contai
 | Time Range | ALL | `--since 2024-01-01 --until 2024-12-31` | Date pickers |
 | Projects | ALL | `--workspaces /path/one,/path/two` | Multi-select with search |
 
-#### FR-2: Encryption
+#### FR-1.1: Path Privacy Controls
 
-- **Algorithm**: AES-256-GCM (authenticated encryption)
-- **Key Derivation**: Argon2id (memory-hard, GPU-resistant)
+- Default export MUST avoid embedding absolute local paths unless explicitly requested
+- Support: `--path-mode relative|basename|full|hash` (default: `relative`)
+  - `relative`: Store paths relative to workspace root
+  - `basename`: Store only the filename
+  - `full`: Store absolute paths (with warning)
+  - `hash`: Store opaque SHA256 identifiers
+
+#### FR-2: Encryption (Envelope Encryption)
+
+- **Payload Encryption**: AES-256-GCM using a random per-export DEK (Data Encryption Key)
+- **Key Derivation**: Argon2id (memory-hard, GPU-resistant) to derive KEKs that wrap the DEK
 - **Authentication Methods**:
-  - Password entry
-  - QR code scan (encodes password or key)
-- **Scope**: ALL data encrypted (database, metadata, search index)
+  - Password entry (derives KEK that unwraps DEK)
+  - QR code scan of high-entropy recovery secret (creates additional key slot; NOT published with site)
+- **Scope**: ALL data encrypted (database, metadata, search index, pre-computed analytics)
+- **Key Slots**: Support multiple passwords/recovery secrets via envelope encryption
 
 #### FR-3: Static Site Generation
 
 - Self-contained bundle (works offline after initial load)
-- Client-side SQLite via sql.js (WASM)
-- Full-text search capability
+- Client-side SQLite via sqlite-wasm (worker + OPFS preferred), sql.js fallback
+- Full-text search capability (dual FTS: natural language + code/path tokenizers)
 - Responsive UI (desktop + mobile)
+- Virtualized rendering for large archives
 
 #### FR-4: Deployment Options
 
-- GitHub Pages (primary target)
-- Cloudflare Pages (secondary)
+- GitHub Pages (primary target, defaults to `gh-pages` branch)
+- Cloudflare Pages (secondary, supports COOP/COEP headers)
 - Local export (manual deployment)
+
+#### FR-4.1: Hosting Limits & Guardrails
+
+Because encrypted archives are not CDN-compressible, we must respect hosting limits:
+- GitHub Pages site size limit: 1 GB (soft), recommended repo size ≤ 1 GB
+- GitHub repository file size limit: 100 MiB hard block per file
+- Payload compression (deflate/gzip) BEFORE encryption to minimize transfer size
+- Automatic chunking when archive exceeds 50 MB (configurable)
+- Wizard warns and/or forces chunking when limits are approached
 
 #### FR-5: Safety Guardrails
 
@@ -376,6 +400,8 @@ GitHub Pages **requires public repositories**. AI coding agent logs often contai
 - Initial page load: < 3 seconds on 3G
 - Search latency: < 100ms after decryption
 - Database size: Efficient chunking for large exports
+- Download size: Payload is compacted (SQLite VACUUM) + compressed (deflate) BEFORE encryption
+- OPFS persistence: Decrypted database stored in OPFS for instant subsequent loads
 
 #### NFR-3: Usability
 
@@ -519,16 +545,47 @@ GitHub Pages **requires public repositories**. AI coding agent logs often contai
 - Targeted attacks with physical access
 - Quantum computing attacks (future consideration)
 
-### 7.2 Cryptographic Design
+#### Additional Explicit Risk: Bundle Tampering / Repo Compromise
 
-#### Key Derivation
+If an attacker can modify the deployed static assets (viewer.js/index.html), they can potentially steal passwords during unlock. Mitigations are limited on static hosting; we implement:
+- **TOFU asset-hash warnings**: Store hash of critical assets after first successful unlock; warn loudly if assets change on subsequent visits before accepting a password
+- **Commit-pinned URLs**: Guidance to share commit-pinned URLs/hashes out-of-band for high-trust sharing
+
+### 7.2 Cryptographic Design (Envelope Encryption)
+
+We use **envelope encryption** to separate the data key from the user's password:
 
 ```
-Password → Argon2id → 256-bit Key
-           ├─ Memory: 64 MB
-           ├─ Iterations: 3
-           ├─ Parallelism: 4
-           └─ Salt: 16 bytes (random, stored in bundle)
+┌─────────────────────────────────────────────────────────────┐
+│                   Envelope Encryption Model                   │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  DEK (Data Encryption Key):                                  │
+│    - Random 256-bit key generated per export                 │
+│    - Encrypts the compressed archive payload                 │
+│    - Never stored in plaintext                               │
+│                                                              │
+│  KEK (Key Encryption Key):                                   │
+│    - Derived from password/recovery-secret via Argon2id      │
+│    - Wraps (encrypts) the DEK                               │
+│    - Multiple KEKs = multiple "key slots"                   │
+│                                                              │
+│  Benefits:                                                   │
+│    ✓ Password rotation without re-encrypting payload         │
+│    ✓ Multiple passwords (key slots, like LUKS)              │
+│    ✓ Separate recovery secret (QR) from user password       │
+│                                                              │
+╰─────────────────────────────────────────────────────────────╯
+```
+
+#### Key Derivation (KEK)
+
+```
+Password/RecoverySecret → Argon2id → 256-bit KEK
+                          ├─ Memory: 64 MB (65536 KB)
+                          ├─ Iterations: 3
+                          ├─ Parallelism: 4
+                          └─ Salt: 16 bytes (random, per key slot)
 ```
 
 **Why Argon2id?**
@@ -537,37 +594,49 @@ Password → Argon2id → 256-bit Key
 - Winner of Password Hashing Competition (2015)
 - OWASP recommended
 
-#### Encryption
+#### Data Encryption (DEK → Payload)
 
 ```
-Key + Nonce + Plaintext → AES-256-GCM → Ciphertext + AuthTag
-                          ├─ Key: 256 bits (from Argon2id)
-                          ├─ Nonce: 96 bits (random, unique per export)
-                          └─ AuthTag: 128 bits (integrity verification)
+DEK + Nonce + CompressedPayload → AES-256-GCM → Ciphertext + AuthTag
+                                  ├─ DEK: 256 bits (random per export)
+                                  ├─ Nonce: 96 bits (random, unique)
+                                  └─ AuthTag: 128 bits (integrity)
 ```
 
-**Why AES-256-GCM?**
+#### Key Wrapping (KEK → DEK)
+
+```
+KEK + Nonce + DEK → AES-256-GCM → WrappedDEK + AuthTag
+                    ├─ KEK: 256 bits (from Argon2id)
+                    ├─ Nonce: 96 bits (random, per slot)
+                    └─ AuthTag: 128 bits (integrity)
+```
+
+**Why AES-256-GCM for both?**
 - Authenticated encryption (integrity + confidentiality)
 - Hardware acceleration (AES-NI)
 - Widely audited and deployed
 - NIST approved
 
-#### QR Code Authentication
+#### QR Code Authentication (Local-Only Artifact)
+
+**CRITICAL RULE:** The QR image MUST NOT be included in the deployed GitHub Pages bundle. It is a convenience unlock factor that must remain out-of-band (e.g., printed, stored in a password manager, or shown on a second device).
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Option A: QR encodes password                                │
-│   QR → Base64(password) → Argon2id → Key                    │
-│   Pro: Simple, password recoverable                          │
-│   Con: QR can be photographed                                │
+│  Recovery Secret (QR) creates an additional key slot:        │
 │                                                              │
-│ Option B: QR encodes derived key directly                    │
-│   QR → Base64(256-bit key)                                   │
-│   Pro: Faster auth (skip Argon2id)                           │
-│   Con: Key not recoverable from password                     │
+│  QR encodes → High-entropy recovery secret (base64)          │
+│            → Argon2id → KEK (recovery slot)                  │
+│            → Unwraps DEK → Decrypts payload                  │
 │                                                              │
-│ Recommendation: Option A with clear warnings                 │
-└─────────────────────────────────────────────────────────────┘
+│  The recovery secret is NOT the user's password.             │
+│  This allows separate rotation/revocation.                   │
+│                                                              │
+│  Export output is split into:                                │
+│    - site/    → safe to deploy publicly                     │
+│    - private/ → never deployed (QR image + recovery text)   │
+╰─────────────────────────────────────────────────────────────╯
 ```
 
 ### 7.3 What Remains Visible
@@ -664,57 +733,94 @@ function renderMessage(content) {
 }
 ```
 
-### 7.6 Service Worker for CORS Isolation
+### 7.6 Service Worker for Cross-Origin Isolation + Offline Caching
 
-For enhanced security, use a service worker to enforce same-origin restrictions:
+GitHub Pages does not allow configuring arbitrary response headers directly, but **COOP/COEP can be applied via a Service Worker** on subsequent loads, enabling cross-origin isolation (SharedArrayBuffer / WASM threads) even on static hosting.
+
+We adopt the **coi-serviceworker** approach:
 
 ```javascript
-// sw.js - Service Worker
+// sw.js - Cross-Origin Isolation + Offline Caching Service Worker
+const CACHE_NAME = 'cass-archive-v1';
+const IMMUTABLE_ASSETS = [
+    './vendor/sqlite3.wasm',
+    './vendor/argon2-wasm.wasm',
+    './vendor/alpine.min.js',
+    './styles.css'
+];
+
+self.addEventListener('install', (event) => {
+    event.waitUntil(
+        caches.open(CACHE_NAME).then(cache => cache.addAll(IMMUTABLE_ASSETS))
+    );
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+    event.waitUntil(self.clients.claim());
+});
+
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
     // Only handle same-origin requests
     if (url.origin !== location.origin) {
-        event.respondWith(new Response('Cross-origin request blocked', {
-            status: 403,
-            statusText: 'Forbidden'
-        }));
+        return; // Let browser handle cross-origin
+    }
+
+    // For navigation requests, inject COOP/COEP headers
+    if (event.request.mode === 'navigate') {
+        event.respondWith(
+            fetch(event.request).then(response => {
+                const headers = new Headers(response.headers);
+                headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+                headers.set('Cross-Origin-Embedder-Policy', 'require-corp');
+                return new Response(response.body, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers
+                });
+            })
+        );
         return;
     }
 
-    // For same-origin, pass through normally
-    event.respondWith(fetch(event.request));
-});
-
-// Prevent the page from being embedded
-self.addEventListener('install', () => {
-    self.skipWaiting();
+    // Cache-first for immutable assets
+    event.respondWith(
+        caches.match(event.request).then(cached => {
+            return cached || fetch(event.request);
+        })
+    );
 });
 ```
 
 #### Registration (in viewer.js)
 
 ```javascript
-// Register service worker early
+// Register service worker early (relative path for GitHub project pages)
 if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    navigator.serviceWorker.register('./sw.js', { scope: './' })
         .then(reg => console.log('SW registered:', reg.scope))
         .catch(err => console.warn('SW registration failed:', err));
 }
 ```
 
-#### Cross-Origin Isolation Headers (for SharedArrayBuffer)
+#### Important UX Note: Two-Load Pattern
 
-If we want to use SharedArrayBuffer for faster Argon2 parallelism, we need COOP/COEP headers. These require server configuration on GitHub Pages (via `_headers` file for Cloudflare, not available on GitHub Pages):
+Cross-origin isolation via Service Worker requires a page reload:
+- **First visit**: Installs Service Worker (no COI yet)
+- **Second load** (automatic or prompted refresh): Cross-origin isolated, SharedArrayBuffer available
 
-```
-# Cloudflare Pages _headers file
-/*
-  Cross-Origin-Opener-Policy: same-origin
-  Cross-Origin-Embedder-Policy: require-corp
-```
+The viewer should detect this and prompt for a one-time refresh on first visit.
 
-**Note**: GitHub Pages doesn't support custom headers, so SharedArrayBuffer won't be available there. Argon2 will fall back to single-threaded execution, which is ~3x slower but still acceptable (3-9 seconds vs 1-3 seconds).
+#### Benefits of COI Service Worker
+
+| Feature | Without COI | With COI |
+|---------|-------------|----------|
+| Argon2 parallelism | Single-threaded (~3-9s) | Multi-threaded (~1-3s) |
+| SharedArrayBuffer | Not available | Available |
+| sqlite-wasm OPFS | Limited | Full support |
+| Offline unlock | Not available | Cached assets work offline |
 
 ---
 
@@ -762,8 +868,8 @@ Step 2 of 7: Security Configuration
   ℹ Password strength: Strong ████████░░
   ℹ This password will be required to view the exported site
 
-? Generate QR code for easy access?
-  ◉ Yes (will be saved as qr-code.png)
+? Generate recovery QR code?
+  ◉ Yes (saved locally to private/ - NOT deployed to site)
   ◎ No
 
 ──────────────────────────────────────────────────────────────
@@ -849,10 +955,12 @@ Step 7 of 7: Deployment
 │  Your encrypted archive is now live at:                      │
 │  https://username.github.io/my-agent-archive                 │
 │                                                              │
-│  QR code saved to: ./qr-code.png                             │
+│  Output directories:                                         │
+│    • site/    → deployed (safe to publish)                  │
+│    • private/ → NOT deployed (QR code, recovery secrets)    │
 │                                                              │
-│  ⚠️  Keep your password safe! Without it, the archive        │
-│     cannot be decrypted.                                     │
+│  ⚠️  Keep your password AND private/ folder safe!            │
+│     Without them, the archive cannot be decrypted.          │
 │                                                              │
 ╰─────────────────────────────────────────────────────────────╯
 ```
@@ -1194,7 +1302,7 @@ include_dir = "0.7"         # Asset embedding
 
 ### 9.2 Database Export Schema
 
-**Learned from bv:** Use FTS5 with Porter stemmer and Unicode61 tokenizer for optimal search quality.
+**Learned from bv:** Use FTS5 with Porter stemmer for natural language, plus a separate FTS for code/path search.
 
 ```sql
 -- Filtered export database schema
@@ -1220,9 +1328,14 @@ CREATE TABLE messages (
     FOREIGN KEY (conversation_id) REFERENCES conversations(id)
 );
 
--- Full-text search index with Porter stemmer (learned from bv)
--- Porter stemmer: "running" matches "run", "runs", "runner"
--- Unicode61: proper Unicode normalization and case folding
+-- ═══════════════════════════════════════════════════════════════════════════
+-- DUAL FTS STRATEGY: Natural Language vs Code/Path Search
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- FTS5 Index #1: Natural Language Search (porter stemmer)
+-- - "running" matches "run", "runs", "runner"
+-- - Good for: English prose, documentation, explanations
+-- - Unicode61: proper normalization and case folding
 CREATE VIRTUAL TABLE messages_fts USING fts5(
     content,
     content='messages',
@@ -1230,10 +1343,30 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
     tokenize='porter unicode61'
 );
 
--- Triggers to keep FTS in sync
+-- FTS5 Index #2: Code/Path Search (unicode61 tokenchars)
+-- - Preserves snake_case, camelCase, file.extensions as searchable tokens
+-- - "my_function" is a single token (not split on underscore)
+-- - "AuthController.ts" matches exact filename
+-- - Good for: function names, paths, identifiers, error messages
+CREATE VIRTUAL TABLE messages_code_fts USING fts5(
+    content,
+    content='messages',
+    content_rowid='id',
+    tokenize="unicode61 tokenchars '_./\\'"
+);
+
+-- Triggers to keep BOTH FTS indexes in sync
 CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+    INSERT INTO messages_code_fts(rowid, content) VALUES (new.id, new.content);
 END;
+
+CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+    INSERT INTO messages_code_fts(messages_code_fts, rowid, content) VALUES ('delete', old.id, old.content);
+END;
+
+-- ═══════════════════════════════════════════════════════════════════════════
 
 -- Indexes for common query patterns
 CREATE INDEX idx_messages_conversation ON messages(conversation_id);
@@ -1256,6 +1389,36 @@ INSERT INTO export_meta (key, value) VALUES
     ('time_range', '{"from":null,"to":null}'),
     ('encryption', 'aes-256-gcm'),
     ('kdf', 'argon2id');
+```
+
+#### Choosing Which FTS to Query
+
+```javascript
+// In viewer.js - route queries to appropriate FTS
+function searchMessages(query, searchMode = 'auto') {
+    // Auto-detect: if query looks like code (has underscores, dots, camelCase)
+    const isCodeQuery = /[_.]|[a-z][A-Z]/.test(query);
+
+    if (searchMode === 'code' || (searchMode === 'auto' && isCodeQuery)) {
+        return db.exec(`
+            SELECT m.*, bm25(messages_code_fts) AS score
+            FROM messages_code_fts
+            JOIN messages m ON messages_code_fts.rowid = m.id
+            WHERE messages_code_fts MATCH ?
+            ORDER BY score
+            LIMIT 100
+        `, [query]);
+    } else {
+        return db.exec(`
+            SELECT m.*, bm25(messages_fts) AS score
+            FROM messages_fts
+            JOIN messages m ON messages_fts.rowid = m.id
+            WHERE messages_fts MATCH ?
+            ORDER BY score
+            LIMIT 100
+        `, [query]);
+    }
+}
 ```
 
 ### 9.2.1 Pre-Computed Data Files (Learned from bv)
@@ -1792,43 +1955,179 @@ function checkMemoryPressure() {
 }
 ```
 
+### 9.7 Viewer Scaling: Virtualization & Deep Links
+
+For archives with 100K+ messages, the viewer must efficiently render large result sets and support direct linking to specific content.
+
+#### Virtual Scrolling for Large Result Sets
+
+```javascript
+// Use a virtual list for search results (only render visible items)
+import { VirtualList } from './virtual-list.js';
+
+const ITEM_HEIGHT = 80; // px per search result row
+const BUFFER_ITEMS = 5; // extra items above/below viewport
+
+class VirtualSearchResults {
+    constructor(container) {
+        this.container = container;
+        this.allResults = [];
+        this.virtualList = new VirtualList({
+            container,
+            itemHeight: ITEM_HEIGHT,
+            buffer: BUFFER_ITEMS,
+            renderItem: (item, index) => this.renderResultRow(item, index)
+        });
+    }
+
+    setResults(results) {
+        this.allResults = results;
+        this.virtualList.setItems(results);
+    }
+
+    renderResultRow(result, index) {
+        // Only called for visible items
+        return `
+            <div class="result-row" data-id="${result.id}">
+                <div class="result-title">${escapeHtml(result.title)}</div>
+                <div class="result-meta">${result.agent} • ${formatDate(result.created_at)}</div>
+                <div class="result-snippet">${highlightMatches(result.snippet)}</div>
+            </div>
+        `;
+    }
+}
+```
+
+#### Deep Links with Hash-Based Routing
+
+Support direct links to specific conversations and messages:
+
+```
+https://user.github.io/archive/#/c/12345          → conversation 12345
+https://user.github.io/archive/#/c/12345/m/67    → message 67 in conversation 12345
+https://user.github.io/archive/#/search/auth+bug → search for "auth bug"
+```
+
+```javascript
+// Hash-based router (works without server-side config)
+class ArchiveRouter {
+    constructor(app) {
+        this.app = app;
+        window.addEventListener('hashchange', () => this.route());
+        this.route(); // Handle initial load
+    }
+
+    route() {
+        const hash = window.location.hash.slice(1); // Remove leading #
+        const parts = hash.split('/').filter(Boolean);
+
+        if (parts[0] === 'c' && parts[1]) {
+            const convId = parseInt(parts[1], 10);
+            const msgId = parts[2] === 'm' ? parseInt(parts[3], 10) : null;
+            this.app.openConversation(convId, msgId);
+        } else if (parts[0] === 'search' && parts[1]) {
+            const query = decodeURIComponent(parts[1]);
+            this.app.search(query);
+        } else {
+            this.app.showHome();
+        }
+    }
+
+    navigate(path) {
+        window.location.hash = path;
+    }
+}
+
+// Generate shareable links
+function getShareLink(conversationId, messageId = null) {
+    const base = window.location.href.split('#')[0];
+    const path = messageId
+        ? `/c/${conversationId}/m/${messageId}`
+        : `/c/${conversationId}`;
+    return `${base}#${path}`;
+}
+```
+
+#### Lazy Conversation Loading
+
+Don't load full conversation content until needed:
+
+```javascript
+// Conversation list shows only metadata (fast)
+async function loadConversationList() {
+    return db.exec(`
+        SELECT id, title, agent, started_at, message_count
+        FROM conversations
+        ORDER BY started_at DESC
+        LIMIT 1000
+    `);
+}
+
+// Full messages loaded only when viewing (on-demand)
+async function loadConversationMessages(convId) {
+    return db.exec(`
+        SELECT id, role, content, created_at
+        FROM messages
+        WHERE conversation_id = ?
+        ORDER BY idx ASC
+    `, [convId]);
+}
+```
+
 ---
 
 ## 10. File Structure & Bundle Contents
 
-### Generated Bundle
+### Generated Bundle (Split Output)
+
+**CRITICAL:** Export produces two directories to prevent accidental secret exposure:
 
 ```
 cass-pages-export/
-├── index.html              # Entry point (auth UI + app shell)
-├── encrypted.bin           # AES-256-GCM encrypted database
-├── config.json             # Salt, nonce (NOT the key!)
-├── qr-code.png             # Optional: QR for password
-├── viewer.js               # Main application logic
-├── auth.js                 # Authentication module
-├── search.js               # Search UI components
-├── conversation.js         # Conversation renderer
-├── styles.css              # Tailwind-based styles
-├── vendor/
-│   ├── sql-wasm.js         # SQLite WASM loader
-│   ├── sql-wasm.wasm       # SQLite WASM binary
-│   ├── argon2-wasm.js      # Argon2 WASM loader
-│   ├── argon2-wasm.wasm    # Argon2 WASM binary
-│   ├── alpine.min.js       # UI framework
-│   ├── marked.min.js       # Markdown rendering
-│   └── prism.min.js        # Syntax highlighting
-├── assets/
-│   ├── logo.svg            # cass logo
-│   └── icons.svg           # UI icons
-└── README.md               # Archive description
+├── site/                   # ← DEPLOY THIS (safe for public hosting)
+│   ├── index.html          # Entry point (auth UI + app shell)
+│   ├── encrypted.bin       # AES-256-GCM encrypted database
+│   ├── config.json         # Salt, nonce, key slots (NOT secrets!)
+│   ├── sw.js               # COI service worker
+│   ├── viewer.js           # Main application logic
+│   ├── auth.js             # Authentication module
+│   ├── search.js           # Search UI components
+│   ├── conversation.js     # Conversation renderer
+│   ├── styles.css          # Tailwind-based styles
+│   ├── vendor/
+│   │   ├── sqlite3.js      # Official sqlite-wasm loader
+│   │   ├── sqlite3.wasm    # SQLite WASM binary
+│   │   ├── sqlite3-opfs.js # OPFS worker helper
+│   │   ├── argon2-wasm.js  # Argon2 WASM loader
+│   │   ├── argon2-wasm.wasm # Argon2 WASM binary
+│   │   ├── alpine.min.js   # UI framework
+│   │   ├── marked.min.js   # Markdown rendering
+│   │   └── prism.min.js    # Syntax highlighting
+│   ├── assets/
+│   │   ├── logo.svg        # cass logo
+│   │   └── icons.svg       # UI icons
+│   └── README.md           # Archive description (no secrets)
+│
+└── private/                # ← NEVER DEPLOY (keep offline/secure)
+    ├── recovery-secret.txt # High-entropy recovery passphrase
+    ├── qr-code.png         # QR-encoded recovery secret
+    └── master-key.json     # Optional: encrypted DEK backup
 ```
 
-### config.json (Public)
+### Why Two Directories?
+
+| Directory | Contents | Who Sees It |
+|-----------|----------|-------------|
+| `site/` | Encrypted archive + viewer code | Public (anyone with URL) |
+| `private/` | Recovery secrets, QR code, key backup | Only you (offline storage) |
+
+**Deployment copies ONLY `site/`** to GitHub Pages. The `private/` directory should be stored securely (password manager, encrypted USB, safe deposit box for critical archives).
+
+### config.json (Public) — Envelope Encryption Format
 
 ```json
 {
-    "version": 1,
-    "encrypted": true,
+    "version": 2,
     "algorithm": "aes-256-gcm",
     "kdf": "argon2id",
     "kdf_params": {
@@ -1836,14 +2135,27 @@ cass-pages-export/
         "iterations": 3,
         "parallelism": 4
     },
-    "salt": "base64-encoded-salt",
-    "nonce": "base64-encoded-nonce",
+    "compression": "deflate",
+    "key_slots": [
+        {
+            "id": 0,
+            "label": "password",
+            "salt": "base64-encoded-16-bytes",
+            "nonce": "base64-encoded-12-bytes",
+            "wrapped_dek": "base64-encoded-48-bytes"
+        }
+    ],
     "exported_at": "2025-01-06T12:34:56Z",
-    "cass_version": "0.1.48"
+    "cass_version": "0.2.0"
 }
 ```
 
-**Note**: This file is intentionally public. It contains no secret data—only parameters needed for key derivation. The actual key is derived from the password, which is never stored.
+**Security note**: This file is intentionally public. It contains:
+- **Public parameters**: algorithm, KDF settings, compression method
+- **Wrapped DEK**: Encrypted form of the Data Encryption Key (requires password to unwrap)
+- **NOT secret**: The wrapped_dek cannot be decrypted without the correct password
+
+The actual DEK is only recoverable by deriving the KEK from password + salt, then unwrapping the DEK.
 
 ---
 
@@ -1974,6 +2286,7 @@ USAGE:
     cass pages [OPTIONS]
     cass pages --export-only <DIR>
     cass pages --preview <DIR>
+    cass pages --verify <DIR>
 
 DESCRIPTION:
     Export and deploy an encrypted, searchable web archive of your
@@ -1990,11 +2303,22 @@ OPTIONS:
         --until <DATE>          Only include conversations before this date
                                 [format: YYYY-MM-DD or "today"]
 
+    Privacy Controls:
+        --path-mode <MODE>      How to store file paths in export:
+                                  relative  - paths relative to workspace (default)
+                                  basename  - filename only, no directory info
+                                  full      - absolute paths (with warning)
+                                  hash      - SHA256 of path (for stealth mode)
+        --stealth               Alias for --path-mode hash; also strips
+                                hostnames, usernames from all metadata
+
     Security:
         --password <PASS>       Encryption password (prompted if not provided)
         --password-file <FILE>  Read password from file
+        --recovery-secret       Generate additional recovery key slot
         --no-encryption         Export without encryption (DANGEROUS)
-        --generate-qr           Generate QR code for password
+        --generate-qr           Generate QR code for recovery secret
+                                (saved to private/ - NEVER deployed)
 
     Site Configuration:
         --title <TEXT>          Site title [default: "cass Archive"]
@@ -2004,11 +2328,15 @@ OPTIONS:
         --target <TARGET>       Deployment target: github, cloudflare, local
                                 [default: github]
         --repo <NAME>           Repository name (GitHub/Cloudflare)
+        --branch <BRANCH>       Git branch [default: gh-pages for GitHub]
         --private               Create private repository (requires paid plan)
+        --base-path <PATH>      Base path for project pages (auto-detected)
+                                e.g., /my-archive for user.github.io/my-archive
 
     Other:
         --export-only <DIR>     Export bundle without deploying
         --preview <DIR>         Start local preview server
+        --verify <DIR>          Verify existing export (for CI pipelines)
         --dry-run               Show what would be exported, don't export
         --json                  Output progress as JSON (for automation)
         --yes                   Skip confirmation prompts (except safety)
@@ -2021,24 +2349,61 @@ EXAMPLES:
     cass pages --agents claude-code --since "30 days ago" \
                --title "Recent Claude Sessions"
 
-    # Export specific project
+    # Privacy-conscious export (no paths or usernames)
+    cass pages --stealth --export-only ./my-export
+
+    # Export specific project with recovery QR
     cass pages --workspaces /home/user/myproject \
-               --generate-qr --export-only ./my-export
+               --recovery-secret --generate-qr --export-only ./my-export
 
     # Preview existing export locally
     cass pages --preview ./my-export
 
-    # Robot mode for CI/CD
+    # CI/CD verification (exits 0 if valid, non-zero otherwise)
+    cass pages --verify ./my-export --json
+
+    # Robot mode for CI/CD deployment
     cass pages --json --password-file /secrets/pw.txt \
-               --target github --repo my-archive --yes
+               --target github --repo my-archive --branch gh-pages --yes
 
 EXIT CODES:
-    0   Success
+    0   Success (or --verify passed)
     1   General error
     2   Invalid arguments
     3   Authentication required (--no-encryption without confirmation)
     4   Deployment failed
     5   User cancelled
+    6   Verification failed (--verify mode)
+```
+
+### Verify Command Details
+
+The `--verify` command checks an existing export for:
+- All required files present (`index.html`, `encrypted.bin`, `config.json`, `sw.js`)
+- config.json schema validity
+- Encrypted blob has valid header magic (`CASS`)
+- File sizes within GitHub Pages limits (100 MB per file)
+- No secrets in site/ directory
+
+```bash
+# CI pipeline usage
+cass pages --verify ./dist/site --json || exit 1
+```
+
+Output:
+```json
+{
+    "status": "valid",
+    "checks": {
+        "required_files": true,
+        "config_schema": true,
+        "encrypted_header": true,
+        "size_limits": true,
+        "no_secrets_in_site": true
+    },
+    "warnings": [],
+    "site_size_bytes": 25678901
+}
 ```
 
 ### Robot Mode Output
@@ -2098,25 +2463,82 @@ Nonce:      96 bits (cryptographically random, unique per export)
 Auth Tag:   128 bits (integrity verification)
 ```
 
-### Binary Format
+### Binary Format (Envelope Encryption with Key Slots)
 
 ```
 encrypted.bin structure:
 ┌────────────────────────────────────────────────────────────┐
 │ Magic: "CASS" (4 bytes)                                    │
-│ Version: 1 (2 bytes, little-endian)                        │
-│ Reserved: 0 (2 bytes)                                      │
+│ Version: 2 (2 bytes, little-endian) ← v2 = envelope enc    │
+│ Flags: 0 (2 bytes, reserved for future compression etc.)   │
+│ Payload nonce: 12 bytes (for DEK → payload encryption)     │
 │ Ciphertext length: N (8 bytes, little-endian)              │
-│ Ciphertext: (N bytes, includes 16-byte auth tag at end)    │
+│ Ciphertext: (N bytes, compressed + encrypted payload)      │
+│ Auth tag: 16 bytes (GCM tag, already included in above)    │
 └────────────────────────────────────────────────────────────┘
 
-config.json (separate file, plaintext):
+config.json (separate file, plaintext) — now includes key slots:
 {
-    "salt": "base64...",    // 16 bytes
-    "nonce": "base64...",   // 12 bytes
-    "kdf_params": {...}
+    "version": 2,
+    "algorithm": "aes-256-gcm",
+    "kdf": "argon2id",
+    "kdf_params": {
+        "memory_kb": 65536,
+        "iterations": 3,
+        "parallelism": 4
+    },
+    "compression": "deflate",
+    "key_slots": [
+        {
+            "id": 0,
+            "label": "password",
+            "salt": "base64...",       // 16 bytes, unique per slot
+            "nonce": "base64...",      // 12 bytes, for KEK → DEK wrap
+            "wrapped_dek": "base64..." // 48 bytes (32-byte DEK + 16-byte tag)
+        },
+        {
+            "id": 1,
+            "label": "recovery",
+            "salt": "base64...",
+            "nonce": "base64...",
+            "wrapped_dek": "base64..."
+        }
+    ],
+    "exported_at": "2025-01-06T12:34:56Z",
+    "cass_version": "0.2.0"
 }
 ```
+
+### Key Slot Unlock Flow
+
+```
+User provides password or recovery secret
+         │
+         ▼
+┌─────────────────────────────────────────────────────────┐
+│  For each key_slot in config.key_slots:                  │
+│    1. Derive KEK = Argon2id(input, slot.salt)           │
+│    2. Try unwrap: DEK = AES-GCM-Decrypt(                │
+│         KEK, slot.nonce, slot.wrapped_dek)              │
+│    3. If auth tag valid → DEK found, break              │
+│    4. If auth tag invalid → try next slot               │
+└─────────────────────────────────────────────────────────┘
+         │
+         ▼ (DEK successfully unwrapped)
+         │
+┌─────────────────────────────────────────────────────────┐
+│  Decompress + decrypt payload:                           │
+│    plaintext = deflate_decompress(                      │
+│      AES-GCM-Decrypt(DEK, payload_nonce, ciphertext)    │
+│    )                                                     │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Benefits of key slots:**
+- Add new passwords without re-encrypting the payload
+- Revoke a compromised password by regenerating DEK + all slots
+- Recovery secret is independent from user password
+- Future: hardware key support (YubiKey HMAC-SHA1)
 
 ### Password Strength Validation
 
