@@ -6286,6 +6286,10 @@ fn run_index_with_data(
     let watch_once_paths = watch_once
         .filter(|paths| !paths.is_empty())
         .or_else(read_watch_once_paths_env);
+
+    // Create progress tracker for real-time feedback
+    let index_progress = std::sync::Arc::new(indexer::IndexingProgress::default());
+
     let opts = IndexOptions {
         full,
         force_rebuild,
@@ -6293,21 +6297,14 @@ fn run_index_with_data(
         watch_once_paths: watch_once_paths.clone(),
         db_path: db_path.clone(),
         data_dir: data_dir.clone(),
-        progress: None,
+        progress: Some(index_progress.clone()),
     };
-    let spinner = if json {
-        None
-    } else {
-        match progress {
-            ProgressResolved::Bars => Some(indicatif::ProgressBar::new_spinner()),
-            ProgressResolved::Plain => None,
-            ProgressResolved::None => None,
-        }
-    };
-    if let Some(pb) = &spinner {
-        pb.set_message(if full { "index --full" } else { "index" });
-        pb.enable_steady_tick(Duration::from_millis(120));
-    } else if !json && matches!(progress, ProgressResolved::Plain) {
+
+    // Set up progress display
+    let show_progress = !json && matches!(progress, ProgressResolved::Bars);
+    let show_plain = !json && matches!(progress, ProgressResolved::Plain);
+
+    if show_plain {
         eprintln!(
             "index starting (full={}, watch={}, watch_once={})",
             full,
@@ -6320,21 +6317,146 @@ fn run_index_with_data(
     }
 
     let start = Instant::now();
-    // CLI index command doesn't support manual reindex triggering from TUI, so pass None
-    let res = indexer::run_index(opts, None).map_err(|e| {
-        let chain = e
-            .chain()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(" | ");
-        CliError {
+
+    // Run indexer in background thread so we can poll progress
+    let opts_clone = opts.clone();
+    let index_handle = std::thread::spawn(move || indexer::run_index(opts_clone, None));
+
+    // Poll and display progress while indexer runs
+    if show_progress {
+        use indicatif::{ProgressBar, ProgressStyle};
+        use std::sync::atomic::Ordering;
+
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        pb.enable_steady_tick(Duration::from_millis(80));
+
+        let mut last_phase = 0;
+        let mut last_current = 0;
+        let mut last_agents = 0;
+
+        loop {
+            // Check if indexer finished
+            if index_handle.is_finished() {
+                break;
+            }
+
+            let phase = index_progress.phase.load(Ordering::Relaxed);
+            let total = index_progress.total.load(Ordering::Relaxed);
+            let current = index_progress.current.load(Ordering::Relaxed);
+            let agents = index_progress.discovered_agents.load(Ordering::Relaxed);
+            let is_rebuilding = index_progress.is_rebuilding.load(Ordering::Relaxed);
+
+            // Get agent names for display
+            let agent_names: Vec<String> = index_progress
+                .discovered_agent_names
+                .lock()
+                .map(|names| names.clone())
+                .unwrap_or_default();
+
+            let phase_str = match phase {
+                1 => "Scanning",
+                2 => "Indexing",
+                _ => "Preparing",
+            };
+
+            let rebuild_indicator = if is_rebuilding { " (rebuilding)" } else { "" };
+
+            let msg = if phase == 1 {
+                // Scanning phase - show discovered agents
+                if agents > 0 {
+                    let names_preview = if agent_names.len() <= 3 {
+                        agent_names.join(", ")
+                    } else {
+                        format!(
+                            "{}, ... +{} more",
+                            agent_names[..3].join(", "),
+                            agent_names.len() - 3
+                        )
+                    };
+                    format!(
+                        "{}{}: Found {} agent(s): {}",
+                        phase_str, rebuild_indicator, agents, names_preview
+                    )
+                } else {
+                    format!("{}{}: Detecting agents...", phase_str, rebuild_indicator)
+                }
+            } else if phase == 2 {
+                // Indexing phase - show progress
+                if total > 0 {
+                    let pct = (current as f64 / total as f64 * 100.0).min(100.0);
+                    format!(
+                        "{}{}: {}/{} conversations ({:.0}%)",
+                        phase_str, rebuild_indicator, current, total, pct
+                    )
+                } else {
+                    format!("{}{}: Processing...", phase_str, rebuild_indicator)
+                }
+            } else {
+                format!("{}{}...", phase_str, rebuild_indicator)
+            };
+
+            // Only update if something changed to reduce flicker
+            if phase != last_phase || current != last_current || agents != last_agents {
+                pb.set_message(msg);
+                last_phase = phase;
+                last_current = current;
+                last_agents = agents;
+            }
+
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // Final update
+        let total = index_progress.total.load(Ordering::Relaxed);
+        let current = index_progress.current.load(Ordering::Relaxed);
+        let agents = index_progress.discovered_agents.load(Ordering::Relaxed);
+        pb.finish_with_message(format!(
+            "Done: {} conversations from {} agent(s)",
+            current.max(total),
+            agents
+        ));
+    } else if show_plain {
+        // Plain mode: just wait for completion with periodic updates
+        loop {
+            if index_handle.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    } else {
+        // No progress display (json mode or none): just wait
+        // Join immediately to avoid spinning
+    }
+
+    // Get the result from the indexer thread
+    let res = index_handle
+        .join()
+        .map_err(|_| CliError {
             code: 9,
             kind: "index",
-            message: format!("index failed: {chain}"),
+            message: "index thread panicked".to_string(),
             hint: None,
             retryable: true,
-        }
-    });
+        })?
+        .map_err(|e| {
+            let chain = e
+                .chain()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            CliError {
+                code: 9,
+                kind: "index",
+                message: format!("index failed: {chain}"),
+                hint: None,
+                retryable: true,
+            }
+        });
     let elapsed_ms = start.elapsed().as_millis();
 
     if let Err(err) = &res {
@@ -6397,9 +6519,7 @@ fn run_index_with_data(
         );
     }
 
-    if let Some(pb) = spinner {
-        pb.finish_and_clear();
-    } else if !json && matches!(progress, ProgressResolved::Plain) {
+    if show_plain {
         eprintln!("index completed");
     }
 
