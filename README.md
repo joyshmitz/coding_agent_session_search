@@ -234,7 +234,64 @@ Ingests history from all major local agents, normalizing them into a unified `Co
 
 Search across agent sessions from multiple machines—your laptop, desktop, and remote servers—all from a single unified index. `cass` uses SSH/rsync to efficiently sync session data, tracking provenance so you know where each conversation originated.
 
-#### Quick Setup
+#### Interactive Setup Wizard (Recommended)
+
+The easiest way to configure multi-machine search is the interactive setup wizard:
+
+```bash
+cass sources setup
+```
+
+**What the wizard does:**
+
+1. **Discovers** SSH hosts from your `~/.ssh/config`
+2. **Probes** each host to check for:
+   - Existing cass installation (and version)
+   - Agent session data (Claude, Codex, Cursor, Gemini, etc.)
+   - System resources (disk space, memory)
+3. **Lets you select** which hosts to configure
+4. **Installs cass** on remotes that don't have it (optional)
+5. **Indexes** existing sessions on remotes (optional)
+6. **Configures** `sources.toml` with correct paths and mappings
+7. **Syncs** data to your local machine (optional)
+
+**Wizard options:**
+
+| Flag | Purpose |
+|------|---------|
+| `--hosts <names>` | Configure only specific hosts (comma-separated) |
+| `--dry-run` | Preview changes without applying them |
+| `--non-interactive` | Use auto-detected defaults for scripting |
+| `--skip-install` | Don't install cass on remotes |
+| `--skip-index` | Don't run indexing on remotes |
+| `--skip-sync` | Don't sync data after setup |
+| `--resume` | Resume an interrupted setup |
+| `--json` | Output progress as JSON (for automation) |
+
+**Examples:**
+
+```bash
+# Full interactive wizard
+cass sources setup
+
+# Configure specific hosts only
+cass sources setup --hosts css,csd,yto
+
+# Preview without making changes
+cass sources setup --dry-run
+
+# Resume interrupted setup
+cass sources setup --resume
+
+# Non-interactive for CI/CD
+cass sources setup --non-interactive --hosts myserver --skip-install
+```
+
+**Resumable state:** If setup is interrupted (Ctrl+C, connection lost), state is saved to `~/.config/cass/setup_state.json`. Resume with `--resume`.
+
+#### Manual Setup
+
+For manual configuration without the wizard:
 
 ```bash
 # Add a remote machine using platform presets
@@ -1886,6 +1943,7 @@ cass completions bash > ~/.bash_completion.d/cass
 | `expand <path> -n N` | Show messages around a specific line number |
 | `timeline` | Activity timeline with grouping by hour/day |
 | `sources` | Manage remote sources: add/list/remove/doctor/sync/mappings |
+| `doctor` | Diagnose and repair installation issues (safe, never deletes data) |
 
 ### Diagnostic Commands
 
@@ -1911,6 +1969,62 @@ cass search "auth" --explain --dry-run --robot
 # Find related sessions
 cass context /path/to/session.jsonl --json
 # → Sessions from same workspace, same day, or same agent
+
+# Comprehensive diagnostic and repair
+cass doctor --json
+# → Checks data directory, locks, database, index, config files, session sources
+# → Reports issues with severity and recommended fixes
+
+# Auto-fix detected issues (safe - only rebuilds derived data)
+cass doctor --fix
+# → Removes stale locks, rebuilds corrupted index, repairs database
+
+# Force index rebuild even if healthy
+cass doctor --fix --force-rebuild
+# → Nuclear option: complete index rebuild from source sessions
+```
+
+### The Doctor Command
+
+`cass doctor` is a comprehensive diagnostic and repair tool designed for troubleshooting installation and data issues. It follows a strict safety philosophy: **it never deletes user data**.
+
+**What it checks:**
+
+| Check | Description | Auto-Fix Available |
+|-------|-------------|-------------------|
+| `data_directory` | Data dir exists and is writable | ✅ Creates if missing |
+| `lock_file` | No stale indexer locks | ✅ Removes stale locks |
+| `database` | SQLite integrity and accessibility | ✅ Rebuilds if corrupted |
+| `index` | Tantivy index health and schema | ✅ Rebuilds if unhealthy |
+| `config` | Configuration file parsing | ❌ Manual fix required |
+| `sources_config` | sources.toml validity | ❌ Manual fix required |
+| `sessions` | Agent session directories found | ❌ Informational only |
+
+**Safety guarantees:**
+
+- **Never deletes source agent files** - Your Claude, Codex, Cursor sessions are read-only
+- **Never deletes bookmarks** - `bookmarks.db` is preserved
+- **Never deletes UI state** - `tui_state.json` is preserved
+- **Never deletes sources config** - `sources.toml` is preserved
+- **Only rebuilds derived data** - Database and search index can always be regenerated from source sessions
+
+**Example output:**
+
+```bash
+$ cass doctor
+🩺 cass doctor - Installation Diagnostics
+
+✓ data_directory: OK - Data directory exists and is writable
+✓ lock_file: OK - No stale locks found
+✓ database: OK - Database accessible (5,234 messages)
+✗ index: WARN - Index schema outdated (rebuild recommended)
+✓ config: OK - Configuration valid
+✓ sources_config: OK - sources.toml parsed successfully
+✓ sessions: OK - Found sessions: claude_code, codex, cursor
+
+Summary: 6 passed, 1 warning, 0 failed
+
+💡 Run 'cass doctor --fix' to automatically repair detected issues
 ```
 
 **Diagnostic Flags**:
