@@ -306,7 +306,7 @@ When the wizard installs `cass` on remote machines, it uses an intelligent fallb
 - SSH access with key-based authentication
 
 **What Gets Installed**:
-- The `cass` binary to `~/.cargo/bin/cass`
+- The `cass` binary (location depends on method: `~/.cargo/bin/cass` for cargo-based, `~/.local/bin/cass` for pre-built binary)
 - No daemon, no background services—just the binary
 
 **Installation Progress**: The wizard shows real-time progress for each stage:
@@ -435,7 +435,7 @@ The sync engine uses rsync over SSH for efficient delta transfers, with automati
 **Transfer Configuration**:
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| Connection timeout | 30s | Fail fast on unreachable hosts |
+| Connection timeout | 10s | Fail fast on unreachable hosts |
 | Transfer timeout | 5 min | Allow large initial syncs |
 | Compression | Enabled | Reduce bandwidth for text-heavy sessions |
 | Partial transfers | Enabled | Resume interrupted syncs |
@@ -443,7 +443,7 @@ The sync engine uses rsync over SSH for efficient delta transfers, with automati
 **rsync Flags Used**:
 ```
 -avz --stats --partial --protect-args --timeout=300 \
-  -e "ssh -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new"
+  -e "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
 ```
 Where `-avz` = archive mode + verbose + compression.
 
