@@ -1303,4 +1303,68 @@ Total transferred file size: 1,234 bytes
         );
         assert_eq!(SyncError::Cancelled.to_string(), "Sync cancelled");
     }
+
+    // =========================================================================
+    // SFTP helper function tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_ssh_host_simple() {
+        let (user, host) = parse_ssh_host("myserver");
+        assert!(user.is_none());
+        assert_eq!(host, "myserver");
+    }
+
+    #[test]
+    fn test_parse_ssh_host_with_user() {
+        let (user, host) = parse_ssh_host("admin@myserver");
+        assert_eq!(user, Some("admin"));
+        assert_eq!(host, "myserver");
+    }
+
+    #[test]
+    fn test_parse_ssh_host_with_domain() {
+        let (user, host) = parse_ssh_host("deploy@server.example.com");
+        assert_eq!(user, Some("deploy"));
+        assert_eq!(host, "server.example.com");
+    }
+
+    #[test]
+    fn test_parse_ssh_host_email_like() {
+        // Edge case: user looks like email prefix
+        let (user, host) = parse_ssh_host("user@host");
+        assert_eq!(user, Some("user"));
+        assert_eq!(host, "host");
+    }
+
+    #[test]
+    fn test_expand_tilde_local_with_tilde_prefix() {
+        let expanded = expand_tilde_local("~/Documents/file.txt");
+        // Should start with home directory, not tilde
+        assert!(!expanded.starts_with('~'));
+        assert!(expanded.ends_with("/Documents/file.txt"));
+    }
+
+    #[test]
+    fn test_expand_tilde_local_just_tilde() {
+        let expanded = expand_tilde_local("~");
+        // Should be just home directory
+        assert!(!expanded.starts_with('~'));
+        assert!(!expanded.is_empty());
+    }
+
+    #[test]
+    fn test_expand_tilde_local_no_tilde() {
+        let path = "/absolute/path/to/file";
+        let expanded = expand_tilde_local(path);
+        assert_eq!(expanded, path);
+    }
+
+    #[test]
+    fn test_expand_tilde_local_tilde_in_middle() {
+        // Tilde in middle should not be expanded
+        let path = "/path/with/~tilde/inside";
+        let expanded = expand_tilde_local(path);
+        assert_eq!(expanded, path);
+    }
 }
