@@ -77,12 +77,11 @@ fn get_process_memory_bytes() -> usize {
     {
         // Read /proc/self/statm: VmSize VmRSS VmShared ...
         // Second field is RSS in pages
-        if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
-            if let Some(rss_pages) = statm.split_whitespace().nth(1) {
-                if let Ok(pages) = rss_pages.parse::<usize>() {
-                    return pages * 4096; // Assume 4KB pages
-                }
-            }
+        if let Ok(statm) = std::fs::read_to_string("/proc/self/statm")
+            && let Some(rss_pages) = statm.split_whitespace().nth(1)
+            && let Ok(pages) = rss_pages.parse::<usize>()
+        {
+            return pages * 4096; // Assume 4KB pages
         }
         0
     }
