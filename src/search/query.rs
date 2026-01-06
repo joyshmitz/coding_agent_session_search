@@ -844,7 +844,7 @@ pub struct CacheStats {
 // Cache tuning: read from env to allow runtime override without recompiling.
 // CASS_CACHE_SHARD_CAP controls per-shard entries; default 256.
 static CACHE_SHARD_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("CASS_CACHE_SHARD_CAP")
+    dotenvy::var("CASS_CACHE_SHARD_CAP")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
@@ -853,7 +853,7 @@ static CACHE_SHARD_CAP: Lazy<usize> = Lazy::new(|| {
 
 // Total cache cost across all shards; approximate "~2k entries" default.
 static CACHE_TOTAL_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("CASS_CACHE_TOTAL_CAP")
+    dotenvy::var("CASS_CACHE_TOTAL_CAP")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
@@ -861,7 +861,7 @@ static CACHE_TOTAL_CAP: Lazy<usize> = Lazy::new(|| {
 });
 
 static CACHE_DEBUG_ENABLED: Lazy<bool> = Lazy::new(|| {
-    std::env::var("CASS_DEBUG_CACHE_METRICS")
+    dotenvy::var("CASS_DEBUG_CACHE_METRICS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 });
@@ -870,7 +870,7 @@ static CACHE_DEBUG_ENABLED: Lazy<bool> = Lazy::new(|| {
 // Approximate sizing: ~500 bytes per cached hit typical (content/title/snippets).
 // Example: CASS_CACHE_BYTE_CAP=10485760 for approx 10MB limit.
 static CACHE_BYTE_CAP: Lazy<usize> = Lazy::new(|| {
-    std::env::var("CASS_CACHE_BYTE_CAP")
+    dotenvy::var("CASS_CACHE_BYTE_CAP")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0) // 0 = disabled (entry-based cap only)
@@ -880,7 +880,7 @@ const CACHE_KEY_VERSION: &str = "1";
 
 // Warm debounce (ms) for background reload/warm jobs; default 120ms.
 static WARM_DEBOUNCE_MS: Lazy<u64> = Lazy::new(|| {
-    std::env::var("CASS_WARM_DEBOUNCE_MS")
+    dotenvy::var("CASS_WARM_DEBOUNCE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)

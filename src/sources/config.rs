@@ -387,7 +387,7 @@ impl SourcesConfig {
     /// - Fallback: platform-specific config dir (e.g., `~/.config/cass/sources.toml` on Linux)
     pub fn config_path() -> Result<PathBuf, ConfigError> {
         // Respect XDG_CONFIG_HOME first (important for testing and Linux users)
-        if let Ok(xdg_config) = std::env::var("XDG_CONFIG_HOME") {
+        if let Ok(xdg_config) = dotenvy::var("XDG_CONFIG_HOME") {
             return Ok(PathBuf::from(xdg_config).join("cass").join("sources.toml"));
         }
 

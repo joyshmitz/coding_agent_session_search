@@ -28,7 +28,7 @@ const CONTRACT_VERSION: &str = "1";
 const DEFAULT_STALE_THRESHOLD_SECS: u64 = 1800;
 
 fn read_watch_once_paths_env() -> Option<Vec<std::path::PathBuf>> {
-    std::env::var("CASS_TEST_WATCH_PATHS")
+    dotenvy::var("CASS_TEST_WATCH_PATHS")
         .ok()
         .map(|list| {
             list.split(',')
@@ -1729,7 +1729,7 @@ async fn execute_cli(
     // Block TUI in non-TTY contexts unless TUI_HEADLESS is set (for testing)
     if matches!(command, Commands::Tui { .. })
         && !stdout_is_tty
-        && std::env::var("TUI_HEADLESS").is_err()
+        && dotenvy::var("TUI_HEADLESS").is_err()
     {
         return Err(CliError::usage(
             "No subcommand provided; in non-TTY contexts TUI is disabled.",
@@ -6411,7 +6411,7 @@ pub fn default_db_path() -> PathBuf {
 }
 
 pub fn default_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("CASS_DATA_DIR") {
+    if let Ok(dir) = dotenvy::var("CASS_DATA_DIR") {
         let trimmed = dir.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
@@ -6455,9 +6455,9 @@ struct ReleaseInfo {
 
 async fn maybe_prompt_for_update(once: bool) -> Result<()> {
     if once
-        || std::env::var("CI").is_ok()
-        || std::env::var("TUI_HEADLESS").is_ok()
-        || std::env::var("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT").is_ok()
+        || dotenvy::var("CI").is_ok()
+        || dotenvy::var("TUI_HEADLESS").is_ok()
+        || dotenvy::var("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT").is_ok()
         || !io::stdin().is_terminal()
     {
         return Ok(());

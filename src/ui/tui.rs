@@ -2491,7 +2491,7 @@ pub fn run_tui(
     }
 
     if once
-        && std::env::var("TUI_HEADLESS")
+        && dotenvy::var("TUI_HEADLESS")
             .map(|v| v == "1")
             .unwrap_or(false)
     {
@@ -2518,7 +2518,7 @@ pub fn run_tui(
 
     // UI metrics flag (bead 020) - emit privacy-safe local metrics when enabled
     // Set CASS_UI_METRICS=1 to enable tracing of UI interactions
-    let ui_metrics_enabled = std::env::var("CASS_UI_METRICS")
+    let ui_metrics_enabled = dotenvy::var("CASS_UI_METRICS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
@@ -2562,7 +2562,7 @@ pub fn run_tui(
 
     // UI metrics: log session start (bead 020)
     if ui_metrics_enabled {
-        let animations_enabled = !std::env::var("CASS_DISABLE_ANIMATIONS")
+        let animations_enabled = !dotenvy::var("CASS_DISABLE_ANIMATIONS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         tracing::info!(
@@ -2585,7 +2585,7 @@ pub fn run_tui(
     let mut results: Vec<SearchHit> = Vec::new();
     let mut wildcard_fallback: bool = false; // True when search used implicit wildcards
     let mut suggestions: Vec<QuerySuggestion> = Vec::new(); // Did-you-mean suggestions for zero hits
-    let cache_debug = std::env::var("CASS_DEBUG_CACHE_METRICS")
+    let cache_debug = dotenvy::var("CASS_DEBUG_CACHE_METRICS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let mut cache_stats: Option<CacheStats> = None;
@@ -2613,7 +2613,7 @@ pub fn run_tui(
 
     // Staggered reveal animation state (bead 013)
     // Env flag to disable animations for performance-sensitive terminals
-    let animations_enabled = !std::env::var("CASS_DISABLE_ANIMATIONS")
+    let animations_enabled = !dotenvy::var("CASS_DISABLE_ANIMATIONS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     // When new results arrive, we start a staggered reveal animation
@@ -2723,9 +2723,9 @@ pub fn run_tui(
     let mut peek_window_saved: Option<ContextWindow> = None;
     let mut peek_badge_until: Option<Instant> = None;
     let mut help_scroll: u16 = 0;
-    let editor_cmd = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+    let editor_cmd = dotenvy::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let (editor_bin, editor_args) = split_editor_command(&editor_cmd);
-    let editor_line_flag = std::env::var("EDITOR_LINE_FLAG").unwrap_or_else(|_| "+".into());
+    let editor_line_flag = dotenvy::var("EDITOR_LINE_FLAG").unwrap_or_else(|_| "+".into());
     let mut time_preset_idx: usize = 0;
 
     // Mouse support: track layout regions for click/scroll handling
@@ -4901,8 +4901,8 @@ pub fn run_tui(
                         match bulk_action_idx {
                             0 => {
                                 // Open all in editor
-                                let editor = std::env::var("EDITOR")
-                                    .or_else(|_| std::env::var("VISUAL"))
+                                let editor = dotenvy::var("EDITOR")
+                                    .or_else(|_| dotenvy::var("VISUAL"))
                                     .unwrap_or_else(|_| "code".to_string());
                                 let (editor_bin, editor_args) = split_editor_command(&editor);
                                 // Exit raw mode
@@ -5275,8 +5275,8 @@ pub fn run_tui(
                         {
                             let path = &hit.source_path;
                             // Determine editor: $EDITOR, $VISUAL, or fallback chain
-                            let editor = std::env::var("EDITOR")
-                                .or_else(|_| std::env::var("VISUAL"))
+                            let editor = dotenvy::var("EDITOR")
+                                .or_else(|_| dotenvy::var("VISUAL"))
                                 .unwrap_or_else(|_| {
                                     // Try common editors in order of preference
                                     for candidate in ["code", "vim", "nano", "vi"] {
@@ -5847,8 +5847,8 @@ pub fn run_tui(
                                         panes.get(*pane_idx).and_then(|p| p.hits.get(*hit_idx))
                                     })
                                     .collect();
-                                let editor = std::env::var("EDITOR")
-                                    .or_else(|_| std::env::var("VISUAL"))
+                                let editor = dotenvy::var("EDITOR")
+                                    .or_else(|_| dotenvy::var("VISUAL"))
                                     .unwrap_or_else(|_| "code".to_string());
                                 let (editor_bin, editor_args) = split_editor_command(&editor);
                                 // Exit raw mode

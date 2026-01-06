@@ -692,7 +692,7 @@ fn classify_paths(
 }
 
 fn sync_sources_config_to_db(storage: &SqliteStorage) {
-    if std::env::var("CASS_IGNORE_SOURCES_CONFIG").is_ok() {
+    if dotenvy::var("CASS_IGNORE_SOURCES_CONFIG").is_ok() {
         return;
     }
     let config = match SourcesConfig::load() {
@@ -752,7 +752,7 @@ pub fn build_scan_roots(storage: &SqliteStorage, data_dir: &Path) -> Vec<ScanRoo
     // For explicit multi-root support, we add the local root.
     roots.push(ScanRoot::local(data_dir.to_path_buf()));
 
-    if std::env::var("CASS_IGNORE_SOURCES_CONFIG").is_err()
+    if dotenvy::var("CASS_IGNORE_SOURCES_CONFIG").is_err()
         && let Ok(config) = SourcesConfig::load()
     {
         let remotes: Vec<_> = config.remote_sources().collect();
@@ -1225,7 +1225,7 @@ mod tests {
 
     fn ignore_sources_config() -> EnvGuard {
         let key = "CASS_IGNORE_SOURCES_CONFIG";
-        let previous = std::env::var(key).ok();
+        let previous = dotenvy::var(key).ok();
         // SAFETY: test helper toggles a process-local env var for isolation.
         unsafe {
             std::env::set_var(key, "1");
@@ -1437,7 +1437,7 @@ mod tests {
         // Use unique subdirectory to avoid conflicts with other tests
         let xdg = tmp.path().join("xdg_watch_state");
         std::fs::create_dir_all(&xdg).unwrap();
-        let prev = std::env::var("XDG_DATA_HOME").ok();
+        let prev = dotenvy::var("XDG_DATA_HOME").ok();
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
 
         // Use xdg directly (not dirs::data_dir() which doesn't respect XDG_DATA_HOME on macOS)
@@ -1546,7 +1546,7 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         // Use unique subdirectory to avoid conflicts with other tests
         let xdg = tmp.path().join("xdg_progress");
         std::fs::create_dir_all(&xdg).unwrap();
-        let prev = std::env::var("XDG_DATA_HOME").ok();
+        let prev = dotenvy::var("XDG_DATA_HOME").ok();
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
 
         // Prepare amp fixture using temp directory directly (not dirs::data_dir()
