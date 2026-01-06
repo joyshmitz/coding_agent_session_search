@@ -327,7 +327,9 @@ fn export_plain_text(hits: &[SearchHit], options: &ExportOptions) -> String {
     output
 }
 
-/// Truncate text to max length (in characters), adding ellipsis if needed
+/// Truncate text to max length (in characters), adding ellipsis if needed.
+///
+/// When max_len <= 3, truncates without ellipsis to avoid exceeding max_len.
 fn truncate_text(text: &str, max_len: usize) -> String {
     if max_len == 0 {
         return text.to_string();
@@ -338,7 +340,12 @@ fn truncate_text(text: &str, max_len: usize) -> String {
         return text.to_string();
     }
 
-    let mut truncated: String = text.chars().take(max_len.saturating_sub(3)).collect();
+    // For very small max_len (≤3), truncate without ellipsis to avoid exceeding limit
+    if max_len <= 3 {
+        return text.chars().take(max_len).collect();
+    }
+
+    let mut truncated: String = text.chars().take(max_len - 3).collect();
     truncated.push_str("...");
     truncated
 }
@@ -386,6 +393,12 @@ mod tests {
         assert_eq!(truncate_text("short", 100), "short");
         assert_eq!(truncate_text("this is long text", 10), "this is...");
         assert_eq!(truncate_text("any", 0), "any");
+
+        // Edge case: very small max_len should not exceed limit
+        assert_eq!(truncate_text("hello", 3), "hel"); // No ellipsis for max_len <= 3
+        assert_eq!(truncate_text("hello", 2), "he");
+        assert_eq!(truncate_text("hello", 1), "h");
+        assert_eq!(truncate_text("hello", 4), "h..."); // max_len > 3 gets ellipsis
     }
 
     #[test]
