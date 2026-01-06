@@ -27,3 +27,9 @@ Cargo.lock
 # Environment
 .env
 .venv/
+
+# Claude Code artifacts
+.claude/
+
+# Local backup directories
+.local_backup_*/
