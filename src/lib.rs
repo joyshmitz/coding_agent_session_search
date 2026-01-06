@@ -6564,21 +6564,37 @@ fn run_self_update(tag: &str) -> Result<bool> {
 /// Detect if a path points to an OpenCode storage session file.
 /// OpenCode stores sessions in: storage/session/{projectID}/{sessionID}.json
 fn detect_opencode_session(path: &Path) -> bool {
-    // Check path components for opencode storage pattern
-    let path_str = path.to_string_lossy().to_lowercase();
-    if path_str.contains("opencode") && path_str.contains("storage") && path_str.contains("session") {
-        return true;
+    // Must be a JSON file
+    if path.extension().map(|e| e != "json").unwrap_or(true) {
+        return false;
     }
 
-    // Check if sibling message/part directories exist (storage root)
+    // Primary check: verify directory structure
+    // Path should be: {storage_root}/session/{projectID}/{sessionID}.json
+    // with sibling message/ and/or part/ directories
     if let Some(parent) = path.parent()
         && let Some(session_dir) = parent.parent()
-        && session_dir.file_name().map(|n| n == "session").unwrap_or(false)
+        && session_dir
+            .file_name()
+            .map(|n| n == "session")
+            .unwrap_or(false)
         && let Some(storage_root) = session_dir.parent()
     {
         let message_dir = storage_root.join("message");
         let part_dir = storage_root.join("part");
         if message_dir.exists() || part_dir.exists() {
+            return true;
+        }
+    }
+
+    // Fallback: check if path follows opencode naming convention
+    // Pattern: .../opencode/storage/session/...
+    let components: Vec<_> = path.components().map(|c| c.as_os_str()).collect();
+    for window in components.windows(3) {
+        let w0 = window[0].to_string_lossy().to_lowercase();
+        let w1 = window[1].to_string_lossy().to_lowercase();
+        let w2 = window[2].to_string_lossy().to_lowercase();
+        if w0.contains("opencode") && w1 == "storage" && w2 == "session" {
             return true;
         }
     }
@@ -6591,7 +6607,12 @@ fn detect_opencode_session(path: &Path) -> bool {
 #[allow(clippy::type_complexity)]
 fn load_opencode_session_for_export(
     session_path: &Path,
-) -> anyhow::Result<(Option<String>, Option<i64>, Option<i64>, Vec<serde_json::Value>)> {
+) -> anyhow::Result<(
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Vec<serde_json::Value>,
+)> {
     use anyhow::Context;
     use std::collections::HashMap;
     use walkdir::WalkDir;
@@ -6621,10 +6642,7 @@ fn load_opencode_session_for_export(
     let part_dir = storage_root.join("part");
 
     if !message_dir.exists() {
-        anyhow::bail!(
-            "message directory not found: {}",
-            message_dir.display()
-        );
+        anyhow::bail!("message directory not found: {}", message_dir.display());
     }
 
     // Build map of message_id -> parts
@@ -6764,11 +6782,7 @@ fn load_opencode_session_for_export(
             .first()
             .and_then(|m| m["timestamp"].as_i64())
     });
-    let end = session_end.or_else(|| {
-        sorted_messages
-            .last()
-            .and_then(|m| m["timestamp"].as_i64())
-    });
+    let end = session_end.or_else(|| sorted_messages.last().and_then(|m| m["timestamp"].as_i64()));
 
     Ok((session_title, start, end, sorted_messages))
 }
@@ -6818,7 +6832,10 @@ fn run_export(
                     code: 9,
                     kind: "opencode-parse",
                     message: format!("Failed to parse OpenCode session: {e}"),
-                    hint: Some("Ensure the session file is valid and message/part directories exist".into()),
+                    hint: Some(
+                        "Ensure the session file is valid and message/part directories exist"
+                            .into(),
+                    ),
                     retryable: false,
                 });
             }
@@ -6867,22 +6884,24 @@ fn run_export(
         });
     }
 
-    // Find title from first user message
-    for msg in &messages {
-        let role = extract_role(msg);
-        if role == "user" {
-            let content = extract_text_content(msg);
-            if !content.is_empty() {
-                session_title = Some(
-                    content
-                        .lines()
-                        .next()
-                        .unwrap_or("Untitled Session")
-                        .chars()
-                        .take(80)
-                        .collect(),
-                );
-                break;
+    // Find title from first user message (only if no title already set)
+    if session_title.is_none() {
+        for msg in &messages {
+            let role = extract_role(msg);
+            if role == "user" {
+                let content = extract_text_content(msg);
+                if !content.is_empty() {
+                    session_title = Some(
+                        content
+                            .lines()
+                            .next()
+                            .unwrap_or("Untitled Session")
+                            .chars()
+                            .take(80)
+                            .collect(),
+                    );
+                    break;
+                }
             }
         }
     }
