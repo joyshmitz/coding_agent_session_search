@@ -4748,6 +4748,7 @@ fn run_health(
 /// CRITICAL: This function NEVER deletes user data. It only rebuilds derived data (index, db)
 /// from source session files. This is essential because users may have only one copy of their
 /// agent session data, and Codex/Claude Code auto-expire older logs.
+#[allow(clippy::collapsible_if, clippy::collapsible_else_if)]
 fn run_doctor(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
