@@ -1,3 +1,4 @@
+use serial_test::serial;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -7,6 +8,7 @@ fn fixture(path: &str) -> PathBuf {
 }
 
 #[test]
+#[serial]
 #[cfg_attr(not(target_os = "linux"), ignore)]
 fn install_sh_succeeds_with_valid_checksum() {
     // Clean up any stale lock from previous runs (CI race condition mitigation)
@@ -41,6 +43,7 @@ fn install_sh_succeeds_with_valid_checksum() {
 }
 
 #[test]
+#[serial]
 #[cfg_attr(not(target_os = "linux"), ignore)]
 fn install_sh_fails_with_bad_checksum() {
     // Clean up any stale lock from previous runs (CI race condition mitigation)
@@ -176,6 +179,7 @@ fn install_ps1_fails_with_bad_checksum() {
 /// 2. Upgrade to a "new" version
 /// 3. Verify the new version is correctly installed
 #[test]
+#[serial]
 #[cfg_attr(not(target_os = "linux"), ignore)]
 fn upgrade_replaces_existing_binary() {
     // Clean up any stale lock from previous runs
@@ -245,6 +249,7 @@ fn upgrade_replaces_existing_binary() {
 /// Test that the installer correctly handles concurrent upgrade attempts.
 /// The lock mechanism should prevent race conditions.
 #[test]
+#[serial]
 #[cfg_attr(not(target_os = "linux"), ignore)]
 fn concurrent_installs_are_serialized() {
     // Clean up any stale lock
@@ -322,6 +327,7 @@ fn concurrent_installs_are_serialized() {
 
 /// Test that the verify flag actually runs the installed binary.
 #[test]
+#[serial]
 #[cfg_attr(not(target_os = "linux"), ignore)]
 fn verify_flag_runs_self_test() {
     // Clean up any stale lock
