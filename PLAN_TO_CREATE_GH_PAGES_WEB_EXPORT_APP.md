@@ -1,8 +1,8 @@
 # Proposal: Encrypted GitHub Pages Web Export for cass
 
-**Document Version:** 1.0
+**Document Version:** 1.1
 **Date:** January 2026
-**Status:** PROPOSAL - Awaiting Review
+**Status:** PROPOSAL - Enhanced with bv Insights
 
 ---
 
@@ -597,6 +597,125 @@ sessionStorage.setItem('cass_session', encryptedKeyBlob);
 // NOT RECOMMENDED for sensitive data
 ```
 
+### 7.5 Content Security Policy (Learned from bv)
+
+bv implements strict CSP headers to prevent XSS and code injection. We adopt and strengthen this:
+
+#### CSP Meta Tag (index.html)
+
+```html
+<meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' 'wasm-unsafe-eval';
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob:;
+    font-src 'self';
+    connect-src 'self';
+    worker-src 'self' blob:;
+    frame-ancestors 'none';
+    form-action 'none';
+    base-uri 'self';
+    upgrade-insecure-requests;
+">
+```
+
+#### CSP Directives Explained
+
+| Directive | Value | Purpose |
+|-----------|-------|---------|
+| `default-src` | `'self'` | Only load resources from same origin |
+| `script-src` | `'self' 'wasm-unsafe-eval'` | Allow same-origin JS + WASM compilation |
+| `style-src` | `'self' 'unsafe-inline'` | Allow Tailwind's inline styles |
+| `img-src` | `'self' data: blob:` | Allow inline images + QR camera preview |
+| `connect-src` | `'self'` | Only fetch from same origin |
+| `worker-src` | `'self' blob:` | Allow service workers |
+| `frame-ancestors` | `'none'` | Prevent embedding in iframes (clickjacking) |
+| `form-action` | `'none'` | Prevent form submissions (no forms in viewer) |
+
+#### Why `wasm-unsafe-eval` is Required
+
+- sql.js and Argon2 WASM require `WebAssembly.compile()` or `WebAssembly.instantiate()`
+- These functions trigger CSP's `eval` restrictions
+- `wasm-unsafe-eval` is a targeted exception for WASM only (not general JS eval)
+- Available in Chrome 97+, Firefox 102+, Safari 16+
+
+#### Input Sanitization
+
+Despite CSP, we still sanitize all user content before rendering:
+
+```javascript
+import DOMPurify from 'dompurify';
+
+// Configuration matching bv's settings
+const SANITIZE_CONFIG = {
+    ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'code', 'pre', 'ul', 'ol', 'li', 'a', 'h1', 'h2', 'h3', 'h4', 'blockquote'],
+    ALLOWED_ATTR: ['href', 'title', 'class'],
+    ALLOW_DATA_ATTR: false,
+    ADD_ATTR: ['target', 'rel'], // For links
+    FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form'],
+    FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover'],
+};
+
+function renderMessage(content) {
+    // Parse Markdown first
+    const html = marked.parse(content);
+    // Then sanitize
+    return DOMPurify.sanitize(html, SANITIZE_CONFIG);
+}
+```
+
+### 7.6 Service Worker for CORS Isolation
+
+For enhanced security, use a service worker to enforce same-origin restrictions:
+
+```javascript
+// sw.js - Service Worker
+self.addEventListener('fetch', (event) => {
+    const url = new URL(event.request.url);
+
+    // Only handle same-origin requests
+    if (url.origin !== location.origin) {
+        event.respondWith(new Response('Cross-origin request blocked', {
+            status: 403,
+            statusText: 'Forbidden'
+        }));
+        return;
+    }
+
+    // For same-origin, pass through normally
+    event.respondWith(fetch(event.request));
+});
+
+// Prevent the page from being embedded
+self.addEventListener('install', () => {
+    self.skipWaiting();
+});
+```
+
+#### Registration (in viewer.js)
+
+```javascript
+// Register service worker early
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        .then(reg => console.log('SW registered:', reg.scope))
+        .catch(err => console.warn('SW registration failed:', err));
+}
+```
+
+#### Cross-Origin Isolation Headers (for SharedArrayBuffer)
+
+If we want to use SharedArrayBuffer for faster Argon2 parallelism, we need COOP/COEP headers. These require server configuration on GitHub Pages (via `_headers` file for Cloudflare, not available on GitHub Pages):
+
+```
+# Cloudflare Pages _headers file
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+```
+
+**Note**: GitHub Pages doesn't support custom headers, so SharedArrayBuffer won't be available there. Argon2 will fall back to single-threaded execution, which is ~3x slower but still acceptable (3-9 seconds vs 1-3 seconds).
+
 ---
 
 ## 8. User Experience Flow
@@ -738,6 +857,214 @@ Step 7 of 7: Deployment
 ╰─────────────────────────────────────────────────────────────╯
 ```
 
+### 8.1.1 Wizard Implementation Details (Learned from bv)
+
+bv uses the `charmbracelet/huh` Go library for its wizard. For Rust, we use `dialoguer` + `indicatif` + `console` to achieve similar UX:
+
+#### Wizard State Machine
+
+```rust
+use dialoguer::{Confirm, Input, MultiSelect, Password, Select, theme::ColorfulTheme};
+use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
+use console::{style, Term};
+
+#[derive(Debug, Clone)]
+pub struct WizardState {
+    // Step 1: Content Selection
+    pub agents: Vec<String>,
+    pub time_range: TimeRange,
+    pub workspaces: Vec<PathBuf>,
+
+    // Step 2: Security
+    pub password: Option<String>,
+    pub generate_qr: bool,
+
+    // Step 3: Site Config
+    pub title: String,
+    pub description: String,
+
+    // Step 4: Deployment
+    pub target: DeployTarget,
+    pub repo_name: Option<String>,
+
+    // Internal
+    pub current_step: usize,
+    pub total_steps: usize,
+}
+
+impl WizardState {
+    pub fn run_interactive(&mut self) -> Result<(), WizardError> {
+        let term = Term::stdout();
+        let theme = ColorfulTheme::default();
+
+        // Print header
+        self.print_header(&term)?;
+
+        // Step 1: Content Selection
+        self.step_content_selection(&term, &theme)?;
+
+        // Step 2: Security Configuration
+        self.step_security(&term, &theme)?;
+
+        // Step 3: Site Configuration
+        self.step_site_config(&term, &theme)?;
+
+        // Step 4: Deployment Target
+        self.step_deployment(&term, &theme)?;
+
+        // Step 5: Pre-Publish Summary (with confirmation)
+        if !self.step_summary(&term, &theme)? {
+            return Err(WizardError::Cancelled);
+        }
+
+        // Step 6: Export Progress
+        self.step_export(&term)?;
+
+        // Step 7: Deploy
+        self.step_deploy(&term)?;
+
+        Ok(())
+    }
+}
+```
+
+#### Dynamic Content Stats (like bv)
+
+```rust
+/// Fetch live statistics for wizard display
+pub struct ContentStats {
+    pub agents: Vec<AgentStats>,
+    pub total_conversations: usize,
+    pub total_messages: usize,
+    pub time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
+}
+
+impl ContentStats {
+    /// Query the database for current statistics
+    pub fn from_database(db: &Database) -> Result<Self, Error> {
+        // Fast aggregate queries
+        let agents = db.query_all("
+            SELECT agent, COUNT(*) as conv_count,
+                   SUM(message_count) as msg_count
+            FROM conversations
+            GROUP BY agent
+            ORDER BY conv_count DESC
+        ")?;
+
+        // ... build stats
+    }
+
+    /// Format for multi-select display
+    pub fn agent_choices(&self) -> Vec<String> {
+        self.agents.iter().map(|a| {
+            format!("{} ({} conversations)", a.name, a.count)
+        }).collect()
+    }
+}
+```
+
+#### Progress Display (matching bv's style)
+
+```rust
+/// Multi-step progress display
+pub fn create_export_progress() -> MultiProgress {
+    let mp = MultiProgress::new();
+
+    let style = ProgressStyle::default_bar()
+        .template("{prefix:.bold.dim} {bar:40.cyan/blue} {pos}/{len} {msg}")
+        .unwrap()
+        .progress_chars("█▓░");
+
+    // Create progress bars for each phase
+    let pb_filter = mp.add(ProgressBar::new(100));
+    pb_filter.set_prefix("Filtering");
+    pb_filter.set_style(style.clone());
+
+    let pb_index = mp.add(ProgressBar::new(100));
+    pb_index.set_prefix("Indexing");
+    pb_index.set_style(style.clone());
+
+    // ... more progress bars
+
+    mp
+}
+```
+
+#### Prerequisite Checking (from bv)
+
+bv performs prerequisite checks before proceeding. We adopt this pattern:
+
+```rust
+#[derive(Debug)]
+pub struct Prerequisites {
+    pub gh_cli: Option<String>,       // Version if installed
+    pub gh_authenticated: bool,
+    pub wrangler_cli: Option<String>,
+    pub wrangler_authenticated: bool,
+    pub disk_space_mb: u64,
+    pub estimated_size_mb: u64,
+}
+
+impl Prerequisites {
+    pub fn check() -> Self {
+        Self {
+            gh_cli: Self::check_gh_version(),
+            gh_authenticated: Self::check_gh_auth(),
+            wrangler_cli: Self::check_wrangler_version(),
+            wrangler_authenticated: Self::check_wrangler_auth(),
+            disk_space_mb: Self::available_disk_space(),
+            estimated_size_mb: 0, // Calculated after content selection
+        }
+    }
+
+    fn check_gh_version() -> Option<String> {
+        std::process::Command::new("gh")
+            .arg("--version")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.lines().next().unwrap_or("").to_string())
+    }
+
+    fn check_gh_auth() -> bool {
+        std::process::Command::new("gh")
+            .args(["auth", "status"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    pub fn display_status(&self, term: &Term) -> std::io::Result<()> {
+        writeln!(term, "\n{}", style("Prerequisites Check:").bold())?;
+
+        // GitHub CLI
+        match &self.gh_cli {
+            Some(v) => writeln!(term, "  {} gh CLI: {}", style("✓").green(), v)?,
+            None => writeln!(term, "  {} gh CLI: not installed", style("✗").red())?,
+        }
+
+        if self.gh_cli.is_some() {
+            if self.gh_authenticated {
+                writeln!(term, "  {} gh authenticated", style("✓").green())?;
+            } else {
+                writeln!(term, "  {} gh not authenticated (run: gh auth login)", style("✗").red())?;
+            }
+        }
+
+        // Disk space
+        if self.disk_space_mb > self.estimated_size_mb * 2 {
+            writeln!(term, "  {} Disk space: {} MB available",
+                style("✓").green(), self.disk_space_mb)?;
+        } else {
+            writeln!(term, "  {} Low disk space: {} MB (need ~{} MB)",
+                style("⚠").yellow(), self.disk_space_mb, self.estimated_size_mb * 2)?;
+        }
+
+        Ok(())
+    }
+}
+```
+
 ### 8.2 Unencrypted Export (Requires Explicit Acknowledgment)
 
 ```
@@ -867,6 +1194,8 @@ include_dir = "0.7"         # Asset embedding
 
 ### 9.2 Database Export Schema
 
+**Learned from bv:** Use FTS5 with Porter stemmer and Unicode61 tokenizer for optimal search quality.
+
 ```sql
 -- Filtered export database schema
 CREATE TABLE conversations (
@@ -891,17 +1220,27 @@ CREATE TABLE messages (
     FOREIGN KEY (conversation_id) REFERENCES conversations(id)
 );
 
--- Full-text search index
+-- Full-text search index with Porter stemmer (learned from bv)
+-- Porter stemmer: "running" matches "run", "runs", "runner"
+-- Unicode61: proper Unicode normalization and case folding
 CREATE VIRTUAL TABLE messages_fts USING fts5(
     content,
     content='messages',
-    content_rowid='id'
+    content_rowid='id',
+    tokenize='porter unicode61'
 );
 
 -- Triggers to keep FTS in sync
 CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
 END;
+
+-- Indexes for common query patterns
+CREATE INDEX idx_messages_conversation ON messages(conversation_id);
+CREATE INDEX idx_messages_role ON messages(role);
+CREATE INDEX idx_conversations_agent ON conversations(agent);
+CREATE INDEX idx_conversations_workspace ON conversations(workspace);
+CREATE INDEX idx_conversations_started ON conversations(started_at);
 
 -- Metadata
 CREATE TABLE export_meta (
@@ -918,6 +1257,96 @@ INSERT INTO export_meta (key, value) VALUES
     ('encryption', 'aes-256-gcm'),
     ('kdf', 'argon2id');
 ```
+
+### 9.2.1 Pre-Computed Data Files (Learned from bv)
+
+bv pre-computes expensive analytics server-side to avoid client-side computation. We adopt this pattern:
+
+```
+data/
+├── statistics.json        # Pre-computed dashboard metrics
+├── agent_summary.json     # Per-agent statistics
+├── workspace_summary.json # Per-workspace breakdown
+├── timeline.json          # Message counts by day/week/month
+└── top_terms.json         # Most frequent search terms/topics
+```
+
+#### statistics.json
+
+```json
+{
+    "total_conversations": 2035,
+    "total_messages": 63701,
+    "agents": {
+        "claude-code": { "conversations": 1234, "messages": 45678 },
+        "codex": { "conversations": 567, "messages": 12345 },
+        "gemini": { "conversations": 234, "messages": 5678 }
+    },
+    "time_range": {
+        "earliest": "2023-06-15T00:00:00Z",
+        "latest": "2025-01-06T23:59:59Z"
+    },
+    "message_roles": {
+        "user": 31234,
+        "assistant": 32467
+    },
+    "computed_at": "2025-01-06T12:34:56Z"
+}
+```
+
+#### timeline.json (for sparkline charts)
+
+```json
+{
+    "daily": [
+        { "date": "2025-01-01", "messages": 156, "conversations": 12 },
+        { "date": "2025-01-02", "messages": 203, "conversations": 18 }
+    ],
+    "weekly": [...],
+    "monthly": [...]
+}
+```
+
+**Why pre-compute?**
+- Instant dashboard rendering (no SQL aggregation on load)
+- Reduces sql.js memory pressure
+- Enables rich visualizations without client computation
+- Pre-computed data is encrypted alongside the database
+
+### 9.2.2 Materialized Views for Search Performance
+
+For large archives, create materialized views that accelerate common queries:
+
+```sql
+-- Materialized view: Recent conversations per agent
+CREATE TABLE mv_recent_by_agent AS
+SELECT
+    agent,
+    id AS conversation_id,
+    title,
+    started_at,
+    message_count,
+    ROW_NUMBER() OVER (PARTITION BY agent ORDER BY started_at DESC) as rank
+FROM conversations
+WHERE rank <= 50;
+
+CREATE INDEX idx_mv_recent_agent ON mv_recent_by_agent(agent, rank);
+
+-- Materialized view: Search result snippets
+-- Pre-extract the first 200 chars of each message for fast preview
+CREATE TABLE mv_message_snippets AS
+SELECT
+    id,
+    conversation_id,
+    role,
+    SUBSTR(content, 1, 200) AS snippet,
+    LENGTH(content) AS full_length
+FROM messages;
+
+CREATE INDEX idx_mv_snippets_conv ON mv_message_snippets(conversation_id);
+```
+
+**Trade-off**: Increases database size by ~10-15% but dramatically improves search result rendering speed.
 
 ### 9.3 Encryption Implementation
 
@@ -1060,6 +1489,309 @@ async function initializeDatabase(decryptedData) {
 }
 ```
 
+### 9.5 Multi-Tier Database Loading (Learned from bv)
+
+bv implements a sophisticated multi-tier loading strategy that we should adopt:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Database Loading Strategy                   │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Tier 1: OPFS Cache (Origin Private File System)            │
+│  ───────────────────────────────────────────────            │
+│  • Check if decrypted DB exists in OPFS                     │
+│  • Verify integrity via SHA256 hash                         │
+│  • If valid: load instantly (<50ms)                         │
+│  • Survives page refreshes and browser restarts             │
+│                                                              │
+│                          ↓ (cache miss)                     │
+│                                                              │
+│  Tier 2: Chunked Loading (for large databases)              │
+│  ─────────────────────────────────────────────              │
+│  • If database >5MB: split into 1MB chunks                  │
+│  • Download chunks in parallel with progress UI             │
+│  • Verify each chunk with SHA256                            │
+│  • Reassemble and decrypt                                   │
+│  • Store decrypted result in OPFS cache                     │
+│                                                              │
+│                          ↓ (small database)                 │
+│                                                              │
+│  Tier 3: Single-File Loading                                │
+│  ───────────────────────────────                            │
+│  • For databases <5MB: download entire file                 │
+│  • Decrypt in memory                                        │
+│  • Store decrypted result in OPFS cache                     │
+│                                                              │
+╰─────────────────────────────────────────────────────────────╯
+```
+
+#### OPFS Implementation
+
+```javascript
+// OPFS caching for decrypted database
+const OPFS_DIR = 'cass-cache';
+const DB_FILENAME = 'decrypted.sqlite3';
+
+async function getOpfsRoot() {
+    if (!navigator.storage?.getDirectory) {
+        return null; // OPFS not supported
+    }
+    try {
+        const root = await navigator.storage.getDirectory();
+        return await root.getDirectoryHandle(OPFS_DIR, { create: true });
+    } catch (e) {
+        console.warn('OPFS unavailable:', e);
+        return null;
+    }
+}
+
+async function loadFromOpfsCache(expectedHash) {
+    const dir = await getOpfsRoot();
+    if (!dir) return null;
+
+    try {
+        const fileHandle = await dir.getFileHandle(DB_FILENAME);
+        const file = await fileHandle.getFile();
+        const data = new Uint8Array(await file.arrayBuffer());
+
+        // Verify integrity
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        const hashHex = Array.from(new Uint8Array(hashBuffer))
+            .map(b => b.toString(16).padStart(2, '0')).join('');
+
+        if (hashHex === expectedHash) {
+            return data;
+        }
+        console.log('OPFS cache hash mismatch, re-downloading');
+        return null;
+    } catch (e) {
+        return null; // Cache miss
+    }
+}
+
+async function saveToOpfsCache(data) {
+    const dir = await getOpfsRoot();
+    if (!dir) return;
+
+    try {
+        const fileHandle = await dir.getFileHandle(DB_FILENAME, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(data);
+        await writable.close();
+    } catch (e) {
+        console.warn('Failed to cache to OPFS:', e);
+    }
+}
+```
+
+#### Chunked Download for Large Databases
+
+```javascript
+// config.json includes chunk manifest for large databases
+// {
+//   "chunked": true,
+//   "chunk_count": 8,
+//   "chunk_size": 1048576,  // 1MB
+//   "total_size": 7654321,
+//   "chunk_hashes": ["abc123...", "def456...", ...]
+// }
+
+async function downloadChunked(config, onProgress) {
+    const chunks = [];
+    const total = config.chunk_count;
+
+    // Download all chunks in parallel (limit concurrency)
+    const CONCURRENT_LIMIT = 3;
+    for (let i = 0; i < total; i += CONCURRENT_LIMIT) {
+        const batch = [];
+        for (let j = i; j < Math.min(i + CONCURRENT_LIMIT, total); j++) {
+            batch.push(downloadAndVerifyChunk(j, config.chunk_hashes[j]));
+        }
+        const results = await Promise.all(batch);
+        chunks.push(...results);
+        onProgress((i + batch.length) / total);
+    }
+
+    // Reassemble
+    const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
+    const combined = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+    }
+
+    return combined;
+}
+
+async function downloadAndVerifyChunk(index, expectedHash) {
+    const response = await fetch(`encrypted.bin.${index}`);
+    const data = new Uint8Array(await response.arrayBuffer());
+
+    // Verify chunk integrity
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashHex = Array.from(new Uint8Array(hashBuffer))
+        .map(b => b.toString(16).padStart(2, '0')).join('');
+
+    if (hashHex !== expectedHash) {
+        throw new Error(`Chunk ${index} integrity check failed`);
+    }
+
+    return data;
+}
+```
+
+#### Browser Compatibility for OPFS
+
+| Browser | OPFS Support | Notes |
+|---------|--------------|-------|
+| Chrome 102+ | ✅ Full | Recommended |
+| Edge 102+ | ✅ Full | Chromium-based |
+| Firefox 111+ | ✅ Full | Since March 2023 |
+| Safari 15.2+ | ⚠️ Partial | No `createWritable()` |
+| Mobile Chrome | ✅ Full | Android 102+ |
+| Mobile Safari | ⚠️ Limited | iOS 15.2+, limited quota |
+
+**Fallback**: When OPFS is unavailable, the decrypted database is held in memory only. Users will need to re-enter their password on page refresh.
+
+### 9.6 WASM Memory Management (Learned from bv)
+
+bv uses a careful WASM memory management pattern to prevent memory leaks when working with sql.js. We adopt this:
+
+#### The Problem
+
+sql.js allocates memory in the WASM heap that JavaScript's garbage collector cannot see. Prepared statements, result sets, and intermediate data must be explicitly freed.
+
+#### The Solution: Scoped Resource Pattern
+
+```javascript
+/**
+ * Execute a database operation with automatic resource cleanup.
+ * Inspired by bv's withSubgraph() pattern.
+ *
+ * @param {SQL.Database} db - The sql.js database instance
+ * @param {Function} operation - Function receiving (db) => result
+ * @returns {any} - Result of the operation
+ */
+function withDatabaseScope(db, operation) {
+    const statements = [];
+
+    // Proxy to track prepared statements
+    const trackedDb = {
+        prepare: (sql) => {
+            const stmt = db.prepare(sql);
+            statements.push(stmt);
+            return stmt;
+        },
+        exec: (sql) => db.exec(sql),
+        run: (sql, params) => db.run(sql, params),
+        // ... other methods pass through
+    };
+
+    try {
+        return operation(trackedDb);
+    } finally {
+        // Free all tracked statements
+        for (const stmt of statements) {
+            try { stmt.free(); } catch (e) { /* ignore */ }
+        }
+    }
+}
+
+// Usage example
+function searchMessages(db, query, limit = 50) {
+    return withDatabaseScope(db, (scopedDb) => {
+        const stmt = scopedDb.prepare(`
+            SELECT m.id, m.content, m.role, c.title, c.agent
+            FROM messages_fts
+            JOIN messages m ON messages_fts.rowid = m.id
+            JOIN conversations c ON m.conversation_id = c.id
+            WHERE messages_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+        `);
+
+        stmt.bind([query, limit]);
+
+        const results = [];
+        while (stmt.step()) {
+            results.push(stmt.getAsObject());
+        }
+
+        return results;
+        // stmt.free() called automatically when scope exits
+    });
+}
+```
+
+#### Hybrid WASM Scorer Pattern (from bv)
+
+bv implements a hybrid approach where complex scoring runs in Rust/WASM for large datasets but falls back to JS for smaller ones:
+
+```javascript
+// Threshold for when WASM scoring provides benefit
+const WASM_SCORER_THRESHOLD = 5000;
+
+async function scoreResults(results, scorerWasm) {
+    if (results.length < WASM_SCORER_THRESHOLD) {
+        // JS scoring is faster for small datasets (no WASM call overhead)
+        return results.map(r => ({
+            ...r,
+            score: computeScoreJS(r)
+        }));
+    }
+
+    // For large datasets, WASM scoring is significantly faster
+    // Pack data into typed array for efficient WASM transfer
+    const packedData = packResultsForWasm(results);
+
+    // Call WASM scorer (compiled from Rust)
+    const scores = scorerWasm.score_batch(packedData);
+
+    // Unpack and merge
+    return results.map((r, i) => ({
+        ...r,
+        score: scores[i]
+    }));
+}
+
+function computeScoreJS(result) {
+    // Simple BM25-ish scoring in JS
+    const tf = result.matches / result.content_length;
+    const idf = Math.log(1 + result.total_docs / result.doc_freq);
+    return tf * idf;
+}
+```
+
+#### Memory Budget Monitoring
+
+```javascript
+// Monitor WASM memory usage
+function getWasmMemoryUsage() {
+    // sql.js exposes the underlying WASM module
+    if (window.SQL?.Module?.HEAPU8) {
+        const heap = window.SQL.Module.HEAPU8;
+        return {
+            used: heap.length,
+            limit: 256 * 1024 * 1024, // Typical browser limit
+            percentage: (heap.length / (256 * 1024 * 1024)) * 100
+        };
+    }
+    return null;
+}
+
+// Warn if approaching memory limit
+function checkMemoryPressure() {
+    const usage = getWasmMemoryUsage();
+    if (usage && usage.percentage > 80) {
+        console.warn(`WASM memory at ${usage.percentage.toFixed(1)}% - consider reducing result limits`);
+        return true;
+    }
+    return false;
+}
+```
+
 ---
 
 ## 10. File Structure & Bundle Contents
@@ -1117,45 +1849,119 @@ cass-pages-export/
 
 ## 11. Frontend Technology Stack
 
-### Required Libraries
+### Required Libraries (Updated from bv Analysis)
 
-| Library | Version | Size | Purpose |
-|---------|---------|------|---------|
-| **sql.js** | 1.10+ | 640KB | SQLite in browser |
-| **argon2-browser** | 1.18+ | 200KB | Password hashing |
-| **Alpine.js** | 3.14+ | 44KB | Reactive UI |
-| **Tailwind CSS** | 3.4+ | 50KB (JIT) | Styling |
-| **Marked.js** | 12.0+ | 36KB | Markdown rendering |
-| **Prism.js** | 1.29+ | 30KB | Syntax highlighting |
-| **html5-qrcode** | 2.3+ | 40KB | QR code scanning |
+| Library | Version | Uncompressed | Gzipped | Purpose |
+|---------|---------|--------------|---------|---------|
+| **sql.js** | 1.10+ | 640KB | 290KB | SQLite in browser (FTS5 support) |
+| **argon2-browser** | 1.18+ | 200KB | 78KB | Password hashing (WASM) |
+| **Alpine.js** | 3.14+ | 44KB | 16KB | Reactive UI framework |
+| **Tailwind CSS** | 3.4+ | 398KB (full) | 50KB (JIT purged) | Utility-first CSS |
+| **Marked.js** | 14.0+ | 48KB | 18KB | Markdown rendering |
+| **Prism.js** | 1.29+ | 30KB | 11KB | Syntax highlighting |
+| **DOMPurify** | 3.1+ | 20KB | 8KB | XSS sanitization |
+| **html5-qrcode** | 2.3+ | 156KB | 52KB | QR code scanning |
 
-### Total Bundle Size
+### Optional Libraries (Feature-Dependent)
 
-| Component | Uncompressed | Gzipped |
-|-----------|--------------|---------|
-| HTML/JS/CSS | ~400KB | ~100KB |
-| WASM (sql.js) | 640KB | ~300KB |
-| WASM (argon2) | 200KB | ~80KB |
-| Vendor libs | ~200KB | ~60KB |
-| **Total (code)** | **~1.4MB** | **~540KB** |
-| Encrypted data | Variable | Variable |
+| Library | Version | Size | When Needed |
+|---------|---------|------|-------------|
+| **D3.js** | 7.9+ | 273KB (87KB gz) | For timeline/chart visualizations |
+| **Force-Graph** | 1.43+ | 194KB (58KB gz) | For conversation relationship graphs |
+| **Mermaid** | 10.9+ | 3.2MB (800KB gz) | For rendering diagrams in messages |
+
+**Recommendation**: Start with core libraries only. Add D3/Force-Graph/Mermaid as opt-in features.
+
+### Total Bundle Size Analysis
+
+| Component | Uncompressed | Gzipped | Brotli |
+|-----------|--------------|---------|--------|
+| **Core JavaScript** | ~400KB | ~120KB | ~95KB |
+| **sql.js WASM** | 640KB | 290KB | 235KB |
+| **Argon2 WASM** | 200KB | 78KB | 62KB |
+| **Alpine.js** | 44KB | 16KB | 13KB |
+| **Tailwind CSS** | 50KB (purged) | 12KB | 10KB |
+| **Vendor libs** | ~150KB | ~55KB | ~45KB |
+| **Total (code only)** | **~1.5MB** | **~570KB** | **~460KB** |
+
+#### Size by User Journey
+
+| Moment | What Loads | Gzipped Size |
+|--------|------------|--------------|
+| **Initial page** | index.html, auth.js, styles.css, Alpine | ~40KB |
+| **Password entry** | Argon2 WASM (async) | +78KB |
+| **After unlock** | sql.js WASM, viewer.js, Marked, Prism | +400KB |
+| **Encrypted data** | encrypted.bin (varies) | Variable |
+
+### Bundle Optimization Strategies (from bv)
+
+#### 1. Code Splitting
+
+```javascript
+// Load heavy dependencies only when needed
+async function loadSearchUI() {
+    const { SearchModule } = await import('./search.js');
+    const { marked } = await import('./vendor/marked.min.js');
+    const { Prism } = await import('./vendor/prism.min.js');
+    return new SearchModule(marked, Prism);
+}
+```
+
+#### 2. WASM Loading Strategy
+
+```javascript
+// Parallel WASM initialization
+const [argon2Ready, sqlReady] = await Promise.all([
+    initArgon2(),  // Only needed for decryption
+    initSqlJs(),   // Only needed after decryption
+]);
+```
+
+#### 3. Critical CSS Inlining
+
+```html
+<!-- index.html - inline critical CSS for instant render -->
+<style>
+    /* Only auth page styles - 2KB */
+    .auth-container { /* ... */ }
+    .password-input { /* ... */ }
+    .unlock-button { /* ... */ }
+</style>
+<!-- Load full styles async -->
+<link rel="preload" href="styles.css" as="style" onload="this.rel='stylesheet'">
+```
+
+#### 4. Asset Preloading
+
+```html
+<!-- Preload critical resources -->
+<link rel="preload" href="vendor/argon2-wasm.wasm" as="fetch" crossorigin>
+<link rel="preload" href="vendor/sql-wasm.wasm" as="fetch" crossorigin>
+<link rel="preload" href="encrypted.bin" as="fetch" crossorigin>
+```
 
 ### Browser Compatibility
 
-| Browser | Minimum Version | Notes |
-|---------|-----------------|-------|
-| Chrome | 90+ | Full support |
-| Firefox | 88+ | Full support |
-| Safari | 14+ | Full support |
-| Edge | 90+ | Full support |
-| Mobile Chrome | 90+ | Full support |
-| Mobile Safari | 14+ | Full support |
+| Browser | Min Version | WASM | OPFS | Service Worker | Notes |
+|---------|-------------|------|------|----------------|-------|
+| Chrome | 102+ | ✅ | ✅ | ✅ | Full support |
+| Firefox | 111+ | ✅ | ✅ | ✅ | Full support |
+| Safari | 15.2+ | ✅ | ⚠️ | ✅ | OPFS limited |
+| Edge | 102+ | ✅ | ✅ | ✅ | Chromium-based |
+| Mobile Chrome | 102+ | ✅ | ✅ | ✅ | Android |
+| Mobile Safari | 15.2+ | ✅ | ⚠️ | ✅ | iOS, OPFS limited |
 
-**Requirements**:
-- WebAssembly
-- Web Crypto API
-- ES2020+ JavaScript
+**Hard Requirements**:
+- WebAssembly with `wasm-unsafe-eval` CSP support
+- Web Crypto API (SubtleCrypto)
+- ES2020+ JavaScript (async/await, optional chaining)
+- Fetch API with streaming support
 - CSS Grid/Flexbox
+
+**Soft Requirements** (graceful degradation):
+- OPFS (fallback: memory-only)
+- Service Workers (fallback: no offline)
+- SharedArrayBuffer (fallback: single-threaded Argon2)
 
 ---
 
@@ -1632,6 +2438,40 @@ The following is the original prompt that initiated this proposal:
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2026-01-06 | Claude (Opus 4.5) | Initial proposal |
+| 1.1 | 2026-01-06 | Claude (Opus 4.5) | Enhanced with bv deep dive insights (see below) |
+
+### Version 1.1 Changes (bv Deep Dive Enhancements)
+
+Based on a comprehensive analysis of bv's (beads_viewer) web export implementation, the following enhancements were added:
+
+#### New Sections Added:
+- **Section 7.5**: Content Security Policy (CSP) with strict headers and `wasm-unsafe-eval`
+- **Section 7.6**: Service Worker for CORS isolation
+- **Section 9.2.1**: Pre-computed data files pattern (statistics.json, timeline.json)
+- **Section 9.2.2**: Materialized views for search performance
+- **Section 9.5**: Multi-tier database loading (OPFS caching, chunked downloads, SHA256 verification)
+- **Section 9.6**: WASM memory management (scoped resource pattern, hybrid scorer)
+- **Section 8.1.1**: Wizard implementation details (state machine, prerequisites, progress display)
+
+#### Enhanced Existing Sections:
+- **Section 9.2**: FTS5 now uses `porter unicode61` tokenizer for better search
+- **Section 9.2**: Added indexes for common query patterns
+- **Section 11**: Updated library versions with accurate sizes (gzipped and Brotli)
+- **Section 11**: Added optional libraries (D3, Force-Graph, Mermaid)
+- **Section 11**: Added bundle optimization strategies (code splitting, WASM loading, preloading)
+- **Section 11**: Enhanced browser compatibility table with OPFS/SW columns
+
+#### Key Technical Insights Incorporated:
+1. **OPFS caching** survives page refreshes, providing instant database loading on return visits
+2. **Database chunking** for files >5MB with 1MB chunks and SHA256 verification per chunk
+3. **Multi-tier loading strategy** (OPFS cache → chunked → single file)
+4. **FTS5 with Porter stemmer** matches word variants ("running" → "run")
+5. **withDatabaseScope()** pattern for WASM memory management
+6. **Hybrid WASM scorer** falls back to JS for small datasets (<5000 items)
+7. **Pre-computed analytics** (statistics.json, timeline.json) for instant dashboard rendering
+8. **CSP with wasm-unsafe-eval** required for sql.js and Argon2 WASM
+9. **Service Worker** for additional CORS isolation and offline capabilities
+10. **Prerequisite checking** before deployment (gh CLI, authentication, disk space)
 
 ---
 
