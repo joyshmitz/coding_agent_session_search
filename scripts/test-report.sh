@@ -70,10 +70,10 @@ cargo build --tests --quiet
 # Determine filter expression
 FILTER=""
 if [ "$E2E_ONLY" = true ]; then
-    FILTER="-E 'test(install_scripts) | test(e2e_index_tui) | test(e2e_filters) | test(e2e_multi_connector)'"
+    FILTER="-E 'binary(install_scripts) | binary(e2e_index_tui) | binary(e2e_filters) | binary(e2e_multi_connector)'"
     echo "Running: E2E tests only"
 elif [ "$QUICK_MODE" = true ]; then
-    FILTER="-E 'not (test(install_sh) | test(install_ps1) | test(e2e_))'"
+    FILTER="-E 'not (test(install_sh) | test(install_ps1) | binary(~e2e) | binary(install_scripts))'"
     echo "Running: Unit tests (skipping E2E and install script tests)"
 else
     FILTER="-E 'not (test(install_sh) | test(install_ps1))'"

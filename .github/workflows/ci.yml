@@ -70,7 +70,7 @@ jobs:
       - name: e2e tests (with JUnit XML report)
         run: |
           cargo nextest run --profile e2e \
-            -E 'test(install_scripts) | test(e2e_index_tui) | test(e2e_filters) | test(e2e_multi_connector)' \
+            -E 'binary(install_scripts) | binary(e2e_index_tui) | binary(e2e_filters) | binary(e2e_multi_connector)' \
             --no-fail-fast
       - name: Collect trace files
         if: always()
