@@ -1,6 +1,6 @@
-# Proposal: Encrypted GitHub Pages Web Export for cass
+# Proposal: Encrypted GitHub Pages Web Export for cass (Chunked Payload Format)
 
-**Document Version:** 1.4
+**Document Version:** 1.5
 **Date:** January 2026
 **Status:** PROPOSAL - Production-Grade Implementation Design
 
@@ -315,7 +315,10 @@ GitHub Pages is commonly published from public repositories (GitHub Free), and c
 │                    Public GitHub Repository                  │
 │  ┌─────────────────────────────────────────────────────────┐│
 │  │ index.html (auth page only)                             ││
-│  │ encrypted.bin (AES-256-GCM encrypted database)          ││
+│  │ payload/ (chunked AEAD encrypted database stream)       ││
+│  │   ├── chunk-00000.bin                                   ││
+│  │   ├── chunk-00001.bin                                   ││
+│  │   └── ...                                               ││
 │  │ viewer.js (decryption + UI logic)                       ││
 │  │ vendor/* (libraries)                                     ││
 │  └─────────────────────────────────────────────────────────┘│
@@ -361,10 +364,11 @@ GitHub Pages is commonly published from public repositories (GitHub Free), and c
 #### FR-3: Static Site Generation
 
 - Self-contained bundle (works offline after initial load)
-- Client-side SQLite via sqlite-wasm (worker + OPFS preferred), sql.js fallback
+- Client-side SQLite via sqlite-wasm (OPFS preferred, in-memory fallback—same runtime)
 - Full-text search capability (dual FTS: natural language + code/path tokenizers)
 - Responsive UI (desktop + mobile)
 - Virtualized rendering for large archives
+- CSP-safe UI layer (no Alpine.js or eval-dependent frameworks)
 
 #### FR-4: Deployment Options
 
@@ -414,6 +418,25 @@ Encryption protects archives from the public internet—but once you share the p
 - User-provided regex rules (`--redact-regex`, `--redact-replace`)
 - Allowlist/denylist per workspace / agent / conversation
 - Review summary before export (with option to redact, exclude, or continue)
+
+#### FR-7: Attachment Support (Opt-in)
+
+Large assets (images, PDFs, code snapshots) that agents reference can be included in exports:
+
+**Opt-in Behavior:**
+- Disabled by default to minimize export size
+- Enable with `--include-attachments` or wizard checkbox
+- Size limits: 10MB per file, 100MB total (configurable)
+
+**Storage:**
+- Attachments stored as separate encrypted blobs in `blobs/` directory
+- Each blob named by content hash: `blobs/<sha256>.bin`
+- Reference in messages table via `attachment_refs` JSON array
+
+**Viewer Integration:**
+- Lazy-load attachments on demand (not prefetched)
+- Inline preview for images, syntax-highlighted code
+- Download button for non-previewable types
 
 ### 5.2 Non-Functional Requirements
 
@@ -469,7 +492,7 @@ Encryption protects archives from the public internet—but once you share the p
 │  │                                                          ││
 │  │ 4. Encrypt:                                              ││
 │  │    - Derive key via Argon2id(password, salt)             ││
-│  │    - Encrypt database with AES-256-GCM                   ││
+│  │    - Encrypt compressed DB stream as AEAD chunks         ││
 │  │    - Generate QR code (optional)                         ││
 │  │                                                          ││
 │  │ 5. Bundle:                                               ││
@@ -492,8 +515,8 @@ Encryption protects archives from the public internet—but once you share the p
 │  │   2. Auth modal appears (password or QR scan)            ││
 │  │   3. On success:                                         ││
 │  │      - Derive key in browser (Argon2id via WASM)         ││
-│  │      - Decrypt encrypted.bin → SQLite database           ││
-│  │      - Initialize sql.js with decrypted data             ││
+│  │      - Decrypt payload/chunk-*.bin → SQLite database     ││
+│  │      - Initialize sqlite-wasm with decrypted data        ││
 │  │      - Render full search UI                             ││
 │  │   4. On failure:                                         ││
 │  │      - Show error, remain on auth screen                 ││
@@ -580,6 +603,35 @@ If an attacker can modify the deployed static assets (viewer.js/index.html), the
 - **TOFU asset-hash warnings**: Store hash of critical assets after first successful unlock; warn loudly if assets change on subsequent visits before accepting a password
 - **Commit-pinned URLs**: Guidance to share commit-pinned URLs/hashes out-of-band for high-trust sharing
 
+**Integrity Fingerprint (recommended hardening):**
+- Generate `site/integrity.json` containing SHA-256 for all public files (index.html, JS/CSS/WASM, config.json, payload chunks)
+- Generate `private/integrity-fingerprint.txt` containing `SHA-256(integrity.json)`
+- Viewer displays the fingerprint before password entry:
+  "Verify fingerprint matches what the archive owner sent you before unlocking."
+- This provides a practical out-of-band verification path (works even on first visit)
+
+```javascript
+// integrity.json structure
+{
+    "version": 1,
+    "generated_at": "2025-01-06T12:34:56Z",
+    "files": {
+        "index.html": "sha256-abc123...",
+        "viewer.js": "sha256-def456...",
+        "config.json": "sha256-ghi789...",
+        "payload/chunk-00000.bin": "sha256-jkl012...",
+        // ...
+    }
+}
+
+// In auth UI (before password entry)
+function showIntegrityFingerprint() {
+    const fp = document.getElementById('fingerprint');
+    fp.textContent = `Fingerprint: ${shortFingerprint}`;
+    fp.title = 'Verify this matches what the archive owner sent you';
+}
+```
+
 ### 7.2 Cryptographic Design (Envelope Encryption + AAD Binding)
 
 We use **envelope encryption** to separate the data key from the user's password, with **AAD binding** to cryptographically tie all components together:
@@ -615,15 +667,28 @@ We use **envelope encryption** to separate the data key from the user's password
 
 #### Key Derivation (KEK)
 
+**Password slots (human-memorable secrets):**
 ```
-Password/RecoverySecret → Argon2id → 256-bit KEK
-                          ├─ Memory: 64 MB (65536 KB)
-                          ├─ Iterations: 3
-                          ├─ Parallelism: 4
-                          └─ Salt: 16 bytes (random, per key slot)
+Password → Argon2id → 256-bit KEK
+           ├─ Memory: 64 MB (65536 KB)
+           ├─ Iterations: 3
+           ├─ Parallelism: 4
+           └─ Salt: 16 bytes (random, per key slot)
 ```
 
-**Why Argon2id?**
+**Recovery slots (high-entropy secrets):**
+```
+RecoverySecret → HKDF-SHA256 → 256-bit KEK
+                 └─ Salt: 16 bytes (random, per key slot)
+```
+
+**Why two KDFs?**
+- Argon2id is memory-hard (resists GPU/ASIC attacks on weak passwords)
+- Recovery secrets are high-entropy (128+ bits); memory-hard KDF is wasted latency
+- HKDF-SHA256 is fast and sufficient for uniformly random inputs
+- This improves mobile unlock UX when using recovery secrets
+
+**Why Argon2id for passwords?**
 - Memory-hard (resists GPU/ASIC attacks)
 - Hybrid design (resists side-channel + time-memory tradeoffs)
 - Winner of Password Hashing Competition (2015)
@@ -635,10 +700,18 @@ Password/RecoverySecret → Argon2id → 256-bit KEK
 DEK + Nonce + CompressedChunk + AAD(export_id, chunk_index, schema_version)
     → AES-256-GCM → Ciphertext + AuthTag
                     ├─ DEK: 256 bits (random per export)
-                    ├─ Nonce: 96 bits (derived: base_nonce XOR chunk_index)
+                    ├─ Nonce: 96 bits (counter-based; no XOR)
+                    │   base_nonce = 8B random prefix || 4B random counter_start
+                    │   nonce(i)   = prefix || (counter_start + i) mod 2^32
+                    │   ENFORCE: chunk_count < 2^32
                     ├─ AuthTag: 128 bits (integrity)
                     └─ AAD: prevents chunk reorder/swap attacks
 ```
+
+**Why counter-based nonce (not XOR)?**
+- XOR-based derivation is error-prone (endianness, XOR width differ across Rust/JS)
+- Counter-based is simpler to specify and test across implementations
+- AES-GCM is unforgiving: a nonce reuse is catastrophic (key recovery possible)
 
 #### Key Wrapping (KEK → DEK)
 
@@ -714,16 +787,22 @@ bv implements strict CSP headers to prevent XSS and code injection. We adopt and
 <meta http-equiv="Content-Security-Policy" content="
     default-src 'self';
     script-src 'self' 'wasm-unsafe-eval';
-    style-src 'self' 'unsafe-inline';
+    style-src 'self';
     img-src 'self' data: blob:;
     font-src 'self';
     connect-src 'self';
     worker-src 'self' blob:;
+    object-src 'none';
     frame-ancestors 'none';
     form-action 'none';
-    base-uri 'self';
+    base-uri 'none';
     upgrade-insecure-requests;
 ">
+
+<!-- Additional hardening (works as meta in static hosting environments) -->
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Permissions-Policy" content="camera=(self), microphone=()">
+<meta name="robots" content="noindex,nofollow">
 ```
 
 #### CSP Directives Explained
@@ -732,19 +811,28 @@ bv implements strict CSP headers to prevent XSS and code injection. We adopt and
 |-----------|-------|---------|
 | `default-src` | `'self'` | Only load resources from same origin |
 | `script-src` | `'self' 'wasm-unsafe-eval'` | Allow same-origin JS + WASM compilation |
-| `style-src` | `'self' 'unsafe-inline'` | Allow Tailwind's inline styles |
+| `style-src` | `'self'` | Only external stylesheets (no unsafe-inline) |
 | `img-src` | `'self' data: blob:` | Allow inline images + QR camera preview |
 | `connect-src` | `'self'` | Only fetch from same origin |
 | `worker-src` | `'self' blob:` | Allow service workers |
+| `object-src` | `'none'` | Block plugins (Flash, Java, etc.) |
 | `frame-ancestors` | `'none'` | Prevent embedding in iframes (clickjacking) |
 | `form-action` | `'none'` | Prevent form submissions (no forms in viewer) |
+| `base-uri` | `'none'` | Prevent base tag injection attacks |
 
 #### Why `wasm-unsafe-eval` is Required
 
-- sql.js and Argon2 WASM require `WebAssembly.compile()` or `WebAssembly.instantiate()`
+- sqlite-wasm and Argon2 WASM require `WebAssembly.compile()` or `WebAssembly.instantiate()`
 - These functions trigger CSP's `eval` restrictions
 - `wasm-unsafe-eval` is a targeted exception for WASM only (not general JS eval)
 - Available in Chrome 97+, Firefox 102+, Safari 16+
+
+#### Why No `unsafe-inline` in style-src
+
+Alpine.js (removed) required `unsafe-inline` for its reactive expressions. With a CSP-safe UI layer:
+- Styles are in external CSS files (Tailwind JIT purged)
+- No inline style attributes generated by JS
+- This makes XSS substantially harder to exploit
 
 #### Input Sanitization
 
@@ -752,6 +840,11 @@ Despite CSP, we still sanitize all user content before rendering:
 
 ```javascript
 import DOMPurify from 'dompurify';
+
+// Optional but recommended: Trusted Types enforcement (if supported).
+// - Prevents accidental assignment of unsanitized HTML into innerHTML sinks.
+// - DOMPurify can be configured to return TrustedHTML.
+// - If enabled, add: require-trusted-types-for 'script' (supported browsers only)
 
 // Configuration matching bv's settings
 const SANITIZE_CONFIG = {
@@ -771,11 +864,11 @@ function renderMessage(content) {
 }
 ```
 
-### 7.6 Service Worker for Cross-Origin Isolation + Offline Caching
+### 7.6 Service Worker for Cross-Origin Isolation + Offline Caching (Encrypted-Only Payload Cache)
 
 GitHub Pages does not allow configuring arbitrary response headers directly, but **COOP/COEP can be applied via a Service Worker** on subsequent loads, enabling cross-origin isolation (SharedArrayBuffer / WASM threads) even on static hosting.
 
-We adopt the **coi-serviceworker** approach:
+We adopt the **coi-serviceworker** approach with an **encrypted payload cache** for offline capability:
 
 ```javascript
 // sw.js - Cross-Origin Isolation + Offline Caching Service Worker
@@ -783,9 +876,13 @@ const CACHE_NAME = 'cass-archive-v1';
 const IMMUTABLE_ASSETS = [
     './vendor/sqlite3.wasm',
     './vendor/argon2-wasm.wasm',
-    './vendor/alpine.min.js',
+    './vendor/fflate.min.js',
     './styles.css'
 ];
+
+// Encrypted payload can be cached safely (still requires password)
+// Prefetched only when the user opts in ("Make available offline")
+const ENCRYPTED_ASSETS = ['./config.json', './integrity.json'];
 
 self.addEventListener('install', (event) => {
     event.waitUntil(
@@ -830,6 +927,44 @@ self.addEventListener('fetch', (event) => {
         })
     );
 });
+
+// Client → SW message to prefetch encrypted payload for offline use
+self.addEventListener('message', (event) => {
+    if (event.data?.type === 'PREFETCH_ENCRYPTED') {
+        event.waitUntil((async () => {
+            const cache = await caches.open(CACHE_NAME);
+            await cache.addAll(ENCRYPTED_ASSETS);
+            // payload chunk list is discovered from config.json
+            const cfg = await (await fetch('./config.json')).json();
+            await cache.addAll(cfg.payload.files);
+        })());
+    }
+    if (event.data?.type === 'CLEAR_OFFLINE') {
+        event.waitUntil(caches.delete(CACHE_NAME));
+    }
+});
+```
+
+#### Offline Capability via Encrypted Payload Cache
+
+Caching encrypted payload is safe and useful:
+- **Safe**: Encrypted chunks are opaque without the password
+- **Useful**: Enables unlock without network after first download
+- **User-initiated**: Only cached when user clicks "Make available offline"
+
+```javascript
+// In viewer.js - UI action to enable offline mode
+async function enableOfflineMode() {
+    const registration = await navigator.serviceWorker.ready;
+    registration.active.postMessage({ type: 'PREFETCH_ENCRYPTED' });
+    showToast('Downloading for offline access...');
+}
+
+async function clearOfflineData() {
+    const registration = await navigator.serviceWorker.ready;
+    registration.active.postMessage({ type: 'CLEAR_OFFLINE' });
+    showToast('Offline data cleared');
+}
 ```
 
 #### Registration (in viewer.js)
@@ -914,8 +1049,15 @@ Step 2 of 7: Security Configuration
 
 Step 3 of 7: Site Configuration
 
-? Site title: My Agent Archive
-? Site description: Searchable archive of my AI coding sessions
+? Site title (shown AFTER unlock): My Agent Archive
+? Site description (shown AFTER unlock): Searchable archive of my AI coding sessions
+
+? Show title/description on public auth page?
+  ◎ No (recommended: avoids metadata leakage)
+  ◉ Yes (WARNING: becomes visible to anyone)
+
+  ℹ Default: Public page shows "Encrypted cass Archive"
+  ℹ Real title/description stored in encrypted metadata, shown after unlock
 
 ──────────────────────────────────────────────────────────────
 
@@ -1363,7 +1505,19 @@ CREATE TABLE messages (
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     created_at INTEGER,
+    attachment_refs TEXT,  -- JSON array of blob hashes: ["sha256-abc...", "sha256-def..."]
     FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+);
+
+-- Optional: Attachment metadata (only present if --include-attachments)
+CREATE TABLE IF NOT EXISTS attachments (
+    hash TEXT PRIMARY KEY,      -- sha256 of plaintext content
+    filename TEXT NOT NULL,     -- original filename
+    mime_type TEXT NOT NULL,    -- e.g., "image/png", "text/plain"
+    size_bytes INTEGER NOT NULL,
+    message_id INTEGER,         -- which message referenced this
+    created_at INTEGER,
+    FOREIGN KEY (message_id) REFERENCES messages(id)
 );
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -1373,12 +1527,12 @@ CREATE TABLE messages (
 -- FTS5 Index #1: Natural Language Search (porter stemmer)
 -- - "running" matches "run", "runs", "runner"
 -- - Good for: English prose, documentation, explanations
--- - Unicode61: proper normalization and case folding
+-- NOTE: Use ONE tokenizer per FTS table (not both porter AND unicode61)
 CREATE VIRTUAL TABLE messages_fts USING fts5(
     content,
     content='messages',
     content_rowid='id',
-    tokenize='porter unicode61'
+    tokenize='porter'
 );
 
 -- FTS5 Index #2: Code/Path Search (unicode61 tokenchars)
@@ -1392,6 +1546,16 @@ CREATE VIRTUAL TABLE messages_code_fts USING fts5(
     content_rowid='id',
     tokenize="unicode61 tokenchars '_./\\'"
 );
+
+-- OPTIONAL: FTS5 Trigram Index for LIKE-style substring matching
+-- Uncomment if users need arbitrary substring search (e.g., "foo" matches "foobar")
+-- Note: Significantly increases index size (~3x content size)
+-- CREATE VIRTUAL TABLE messages_trigram USING fts5(
+--     content,
+--     content='messages',
+--     content_rowid='id',
+--     tokenize='trigram'
+-- );
 
 -- NOTE: Triggers are NOT needed for static export databases.
 -- FTS5 content tables are populated via INSERT during export.
@@ -1465,9 +1629,13 @@ function searchMessages(rawQuery, searchMode = 'auto') {
     // CRITICAL: Escape the query to prevent FTS5 syntax errors
     const query = escapeFts5Query(rawQuery);
 
+    // Use snippet() for query-aware context extraction (FTS5 built-in)
+    // snippet(table, column_idx, open_tag, close_tag, ellipsis, max_tokens)
     if (searchMode === 'code' || (searchMode === 'auto' && isCodeQuery)) {
         return db.exec(`
-            SELECT m.*, bm25(messages_code_fts) AS score
+            SELECT m.*,
+                   bm25(messages_code_fts) AS score,
+                   snippet(messages_code_fts, 0, '<mark>', '</mark>', '…', 64) AS snippet
             FROM messages_code_fts
             JOIN messages m ON messages_code_fts.rowid = m.id
             WHERE messages_code_fts MATCH ?
@@ -1476,7 +1644,9 @@ function searchMessages(rawQuery, searchMode = 'auto') {
         `, [query]);
     } else {
         return db.exec(`
-            SELECT m.*, bm25(messages_fts) AS score
+            SELECT m.*,
+                   bm25(messages_fts) AS score,
+                   snippet(messages_fts, 0, '<mark>', '</mark>', '…', 64) AS snippet
             FROM messages_fts
             JOIN messages m ON messages_fts.rowid = m.id
             WHERE messages_fts MATCH ?
@@ -1584,19 +1754,32 @@ CREATE INDEX idx_mv_snippets_conv ON mv_message_snippets(conversation_id);
 
 ### 9.3 Encryption Implementation (Envelope Encryption, Key Slots, Chunked AEAD)
 
+#### CLI Encryption Pipeline MUST be Streaming (Production Requirement)
+
+To support archives approaching GitHub Pages limits without excessive memory usage, the CLI MUST
+stream: SQLite → compress → chunk → encrypt → write.
+
+Key properties:
+- O(1) memory with respect to archive size (bounded by a few buffers)
+- Chunks are boundaries in the *compressed stream* (decompress remains streaming in browser)
+- `config.json` is written last (after chunk_count is known)
+
 ```rust
-// src/pages/encrypt.rs — implements the envelope encryption design from §7.2
+// src/pages/encrypt.rs — streaming envelope encryption + chunked AEAD
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use argon2::{Argon2, Params, Version};
 use rand::RngCore;
 use zeroize::Zeroize;
+use std::io::{Read, Write};
 
 /// A single key slot (password or recovery secret)
 pub struct KeySlot {
     pub id: u32,
-    pub label: String,        // "password", "recovery", "alice", ...
-    pub salt: [u8; 16],       // per-slot (for Argon2id)
+    pub slot_type: String,    // "password" or "recovery"
+    pub kdf: String,          // "argon2id" or "hkdf-sha256"
+    pub kdf_params: Option<KdfParams>, // Only for argon2id
+    pub salt: [u8; 16],       // per-slot
     pub nonce: [u8; 12],      // per-slot (for DEK wrapping)
     pub wrapped_dek: Vec<u8>, // 32B DEK + 16B tag (AES-GCM output)
 }
@@ -1604,21 +1787,23 @@ pub struct KeySlot {
 /// Envelope encryption configuration (written to config.json)
 pub struct EnvelopeConfig {
     pub export_id: [u8; 16],     // random per-export; used as AAD binding
-    pub base_nonce: [u8; 12],    // base nonce for chunk encryption (XOR with chunk_index)
-    pub kdf_params: KdfParams,
+    pub base_nonce: [u8; 12],    // base nonce for chunk encryption (counter-based)
+    pub kdf_policy: KdfPolicy,
     pub compression: String,     // "deflate" | "zstd" | "none"
     pub key_slots: Vec<KeySlot>,
     pub chunk_count: u32,
     pub chunk_size: u32,
 }
 
-/// Encrypt a compressed payload using envelope encryption with chunked AEAD
-pub fn encrypt_export_payload(
-    compressed_payload: &[u8],
+/// Encrypt a plaintext SQLite file by streaming compression → chunked AEAD.
+/// Writes chunks directly to `site/payload/` and returns an EnvelopeConfig to be serialized.
+pub fn encrypt_export_sqlite_streaming<R: Read>(
+    mut sqlite_plaintext: R,
     chunk_size: usize,
-    kek_inputs: Vec<(String /*label*/, String /*secret*/)>,
-    kdf: &KdfParams,
-) -> Result<(EnvelopeConfig, Vec<Vec<u8>> /*chunks*/), EncryptError> {
+    out_payload_dir: &std::path::Path,
+    kek_inputs: Vec<(String /*slot_type*/, SecretBytes /*secret*/)>,
+    kdf_policy: &KdfPolicy,
+) -> Result<EnvelopeConfig, EncryptError> {
     // 1) Generate random DEK, export_id, and base_nonce
     let mut export_id = [0u8; 16];
     let mut dek = [0u8; 32];
@@ -1627,32 +1812,69 @@ pub fn encrypt_export_payload(
     rand::thread_rng().fill_bytes(&mut dek);
     rand::thread_rng().fill_bytes(&mut base_nonce);
 
-    // 2) Encrypt payload in chunks (each chunk is independently authenticated)
+    // 2) Stream: plaintext → compressor → chunk buffer → AEAD encrypt → write chunk files
     let payload_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&dek));
-    let mut encrypted_chunks = Vec::new();
+    std::fs::create_dir_all(out_payload_dir)?;
 
-    for (i, chunk) in compressed_payload.chunks(chunk_size).enumerate() {
-        // Derive per-chunk nonce: base_nonce XOR chunk_index
-        let chunk_nonce = derive_chunk_nonce(&base_nonce, i as u64);
-        // AAD = export_id || chunk_index || schema_version
-        let aad = build_chunk_aad(&export_id, i as u32, 2 /*schema_version*/);
+    // Streaming compressor (deflate shown; zstd would be similar)
+    let mut compressor = flate2::read::DeflateEncoder::new(
+        sqlite_plaintext,
+        flate2::Compression::default(),
+    );
 
-        let ciphertext = payload_cipher.encrypt(
-            Nonce::from_slice(&chunk_nonce),
-            Payload { msg: chunk, aad: &aad },
-        )?;
-        encrypted_chunks.push(ciphertext);
+    let mut chunk_index: u32 = 0;
+    let mut buf = vec![0u8; 128 * 1024];
+    let mut chunk = Vec::with_capacity(chunk_size);
+
+    loop {
+        let n = compressor.read(&mut buf)?;
+        if n == 0 { break; }
+        chunk.extend_from_slice(&buf[..n]);
+
+        while chunk.len() >= chunk_size {
+            let plaintext_part: Vec<u8> = chunk.drain(..chunk_size).collect();
+            let nonce = derive_chunk_nonce(&base_nonce, chunk_index);
+            let aad = build_chunk_aad(&export_id, chunk_index, 2);
+            let ciphertext = payload_cipher.encrypt(
+                Nonce::from_slice(&nonce),
+                Payload { msg: &plaintext_part, aad: &aad },
+            )?;
+            write_chunk_file(out_payload_dir, chunk_index, &ciphertext)?;
+            chunk_index += 1;
+        }
     }
 
-    // 3) For each key slot: derive KEK via Argon2id and wrap DEK
+    // Final partial chunk (if any)
+    if !chunk.is_empty() {
+        let nonce = derive_chunk_nonce(&base_nonce, chunk_index);
+        let aad = build_chunk_aad(&export_id, chunk_index, 2);
+        let ciphertext = payload_cipher.encrypt(
+            Nonce::from_slice(&nonce),
+            Payload { msg: &chunk, aad: &aad },
+        )?;
+        write_chunk_file(out_payload_dir, chunk_index, &ciphertext)?;
+        chunk_index += 1;
+    }
+
+    // 3) For each key slot: derive KEK and wrap DEK
     let mut key_slots = Vec::new();
-    for (i, (label, secret)) in kek_inputs.into_iter().enumerate() {
+    for (i, (slot_type, secret)) in kek_inputs.into_iter().enumerate() {
         let mut salt = [0u8; 16];
         let mut wrap_nonce = [0u8; 12];
         rand::thread_rng().fill_bytes(&mut salt);
         rand::thread_rng().fill_bytes(&mut wrap_nonce);
 
-        let mut kek = derive_kek_argon2id(secret.as_bytes(), &salt, kdf)?;
+        // Choose KDF based on slot type
+        let (kdf_name, kdf_params, mut kek) = if slot_type == "recovery" {
+            // Recovery secrets are high-entropy; use fast HKDF-SHA256
+            let kek = derive_kek_hkdf(&secret.0, &salt)?;
+            ("hkdf-sha256".to_string(), None, kek)
+        } else {
+            // Passwords need memory-hard KDF
+            let kek = derive_kek_argon2id(&secret.0, &salt, kdf_policy)?;
+            ("argon2id".to_string(), Some(kdf_policy.argon2id_params.clone()), kek)
+        };
+
         let wrap_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&kek));
 
         // AAD for wrapping = export_id || slot_id
@@ -1666,7 +1888,9 @@ pub fn encrypt_export_payload(
 
         key_slots.push(KeySlot {
             id: i as u32,
-            label,
+            slot_type,
+            kdf: kdf_name,
+            kdf_params,
             salt,
             nonce: wrap_nonce,
             wrapped_dek,
@@ -1676,18 +1900,15 @@ pub fn encrypt_export_payload(
     // 4) Zeroize DEK in memory
     dek.zeroize();
 
-    Ok((
-        EnvelopeConfig {
-            export_id,
-            base_nonce,
-            kdf_params: kdf.clone(),
-            compression: "deflate".to_string(),
-            key_slots,
-            chunk_count: encrypted_chunks.len() as u32,
-            chunk_size: chunk_size as u32,
-        },
-        encrypted_chunks,
-    ))
+    Ok(EnvelopeConfig {
+        export_id,
+        base_nonce,
+        kdf_policy: kdf_policy.clone(),
+        compression: "deflate".to_string(),
+        key_slots,
+        chunk_count: chunk_index,
+        chunk_size: chunk_size as u32,
+    })
 }
 ```
 
@@ -2286,8 +2507,17 @@ async function loadConversationMessages(convId) {
 cass-pages-export/
 ├── site/                   # ← DEPLOY THIS (safe for public hosting)
 │   ├── index.html          # Entry point (auth UI + app shell)
-│   ├── encrypted.bin       # AES-256-GCM encrypted database
+│   ├── .nojekyll           # Disable Jekyll processing on GitHub Pages
+│   ├── robots.txt          # Disallow crawling (auth page is still public)
 │   ├── config.json         # Salt, nonce, key slots (NOT secrets!)
+│   ├── integrity.json      # Hash manifest for all public files (anti-tamper aid)
+│   ├── payload/            # Chunked AEAD ciphertext (ALWAYS used)
+│   │   ├── chunk-00000.bin
+│   │   ├── chunk-00001.bin
+│   │   └── ...
+│   ├── blobs/              # Optional: encrypted attachment blobs (--include-attachments)
+│   │   ├── sha256-abc123.bin
+│   │   └── ...
 │   ├── sw.js               # COI service worker
 │   ├── viewer.js           # Main application logic
 │   ├── auth.js             # Authentication module
@@ -2300,7 +2530,7 @@ cass-pages-export/
 │   │   ├── sqlite3-opfs.js # OPFS worker helper
 │   │   ├── argon2-wasm.js  # Argon2 WASM loader
 │   │   ├── argon2-wasm.wasm # Argon2 WASM binary
-│   │   ├── alpine.min.js   # UI framework
+│   │   ├── fflate.min.js   # Streaming decompression
 │   │   ├── marked.min.js   # Markdown rendering
 │   │   └── prism.min.js    # Syntax highlighting
 │   ├── assets/
@@ -2311,6 +2541,7 @@ cass-pages-export/
 └── private/                # ← NEVER DEPLOY (keep offline/secure)
     ├── recovery-secret.txt # High-entropy recovery passphrase
     ├── qr-code.png         # QR-encoded recovery secret
+    ├── integrity-fingerprint.txt # Verify site integrity out-of-band
     └── master-key.json     # Optional: encrypted DEK backup
 ```
 
@@ -2323,23 +2554,42 @@ cass-pages-export/
 
 **Deployment copies ONLY `site/`** to GitHub Pages. The `private/` directory should be stored securely (password manager, encrypted USB, safe deposit box for critical archives).
 
-### config.json (Public) — Envelope Encryption Format
+### config.json (Public) — Envelope Encryption + Payload Manifest (Single Source of Truth)
 
 ```json
 {
     "version": 2,
+    "export_id": "base64-16-bytes",
     "algorithm": "aes-256-gcm",
-    "kdf": "argon2id",
-    "kdf_params": {
-        "memory_kb": 65536,
-        "iterations": 3,
-        "parallelism": 4
-    },
+    "base_nonce": "base64-12-bytes",
     "compression": "deflate",
+    "kdf_defaults": {
+        "argon2id": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 }
+    },
+    "payload": {
+        "chunk_size": 8388608,
+        "chunk_count": 4,
+        "files": [
+            "payload/chunk-00000.bin",
+            "payload/chunk-00001.bin",
+            "payload/chunk-00002.bin",
+            "payload/chunk-00003.bin"
+        ]
+    },
     "key_slots": [
         {
             "id": 0,
-            "label": "password",
+            "slot_type": "password",
+            "kdf": "argon2id",
+            "kdf_params": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 },
+            "salt": "base64-encoded-16-bytes",
+            "nonce": "base64-encoded-12-bytes",
+            "wrapped_dek": "base64-encoded-48-bytes"
+        },
+        {
+            "id": 1,
+            "slot_type": "recovery",
+            "kdf": "hkdf-sha256",
             "salt": "base64-encoded-16-bytes",
             "nonce": "base64-encoded-12-bytes",
             "wrapped_dek": "base64-encoded-48-bytes"
@@ -2350,12 +2600,15 @@ cass-pages-export/
 }
 ```
 
-**Security note**: This file is intentionally public. It contains:
-- **Public parameters**: algorithm, KDF settings, compression method
-- **Wrapped DEK**: Encrypted form of the Data Encryption Key (requires password to unwrap)
-- **NOT secret**: The wrapped_dek cannot be decrypted without the correct password
+**Security notes**:
+- This file is intentionally public. It contains only public parameters, not secrets.
+- `export_id` and `base_nonce` are unique per export; used as AAD binding.
+- `wrapped_dek` is the encrypted DEK—cannot be decrypted without the correct password/recovery secret.
+- Key slots are self-describing: each has its own `slot_type`, `kdf`, and optional `kdf_params`.
+- **No human labels in public config**: slot labels (if any) live in encrypted metadata to avoid PII leakage.
+- Password slots use Argon2id (memory-hard); recovery slots use HKDF-SHA256 (fast for high-entropy secrets).
 
-The actual DEK is only recoverable by deriving the KEK from password + salt, then unwrapping the DEK.
+The actual DEK is only recoverable by deriving the KEK from password/secret + salt, then unwrapping the DEK.
 
 ---
 
@@ -2365,11 +2618,10 @@ The actual DEK is only recoverable by deriving the KEK from password + salt, the
 
 | Library | Version | Uncompressed | Gzipped | Purpose |
 |---------|---------|--------------|---------|---------|
-| **sqlite-wasm** | 3.46+ | 850KB | 340KB | SQLite in browser (OPFS VFS, FTS5) — **PRIMARY** |
-| **sql.js** | 1.10+ | 640KB | 290KB | SQLite in browser — **FALLBACK** if OPFS unavailable |
+| **sqlite-wasm** | 3.46+ | 850KB | 340KB | SQLite in browser (OPFS VFS, FTS5) — **ONLY RUNTIME** |
 | **fflate** | 0.8+ | 29KB | 9KB | Streaming deflate decompression |
 | **argon2-browser** | 1.18+ | 200KB | 78KB | Password hashing (WASM) |
-| **Alpine.js** | 3.14+ | 44KB | 16KB | Reactive UI framework |
+| **UI layer** | (custom) | ~10–30KB | ~4–12KB | CSP-safe UI (no eval; ES modules; no inline handlers) |
 | **Tailwind CSS** | 3.4+ | 398KB (full) | 50KB (JIT purged) | Utility-first CSS |
 | **Marked.js** | 14.0+ | 48KB | 18KB | Markdown rendering |
 | **Prism.js** | 1.29+ | 30KB | 11KB | Syntax highlighting |
@@ -2377,8 +2629,11 @@ The actual DEK is only recoverable by deriving the KEK from password + salt, the
 | **html5-qrcode** | 2.3+ | 156KB | 52KB | QR code scanning |
 
 **SQLite Runtime Selection:**
-- **sqlite-wasm** (official SQLite build): Preferred. Supports OPFS VFS for direct file access, better memory efficiency for large databases. Required for OPFS persistence opt-in.
-- **sql.js**: Fallback for browsers without OPFS support (older Safari, some mobile browsers). Works purely in memory.
+- **sqlite-wasm** is the only runtime (sql.js removed to eliminate duplicate APIs and bundle weight).
+- When OPFS is unavailable, use sqlite-wasm in-memory mode (deserialize DB bytes into the WASM heap).
+- This keeps the query API and memory model consistent across browsers.
+
+**Note:** Removing sql.js saves bundle size and eliminates a second DB API surface.
 
 ### Optional Libraries (Feature-Dependent)
 
