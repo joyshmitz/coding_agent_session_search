@@ -1,8 +1,8 @@
 # Proposal: Encrypted GitHub Pages Web Export for cass
 
-**Document Version:** 1.2
+**Document Version:** 1.4
 **Date:** January 2026
-**Status:** PROPOSAL - Revised for Security + Robustness
+**Status:** PROPOSAL - Production-Grade Implementation Design
 
 ---
 
@@ -50,7 +50,7 @@ AI coding agent logs often contain:
 - Debugging sessions with sensitive data
 - Proprietary algorithms and business logic
 
-GitHub Pages is commonly published from public repositories (GitHub Free), and can also be published from private repositories on paid plans. Either way, encryption provides defense-in-depth and enables safe sharing of sensitive archives.
+GitHub Pages can use public repos on Free plans and public/private repos on paid plans—but **the resulting Pages site is always publicly accessible on the internet**. Do NOT assume a private repo makes the Pages site private. Encryption is mandatory for safety, not optional.
 
 ---
 
@@ -372,20 +372,48 @@ GitHub Pages is commonly published from public repositories (GitHub Free), and c
 - Cloudflare Pages (secondary, supports COOP/COEP headers)
 - Local export (manual deployment)
 
-#### FR-4.1: Hosting Limits & Guardrails
+#### FR-4.1: Hosting Limits & Guardrails (Chunked AEAD is Primary Format)
 
 Because encrypted archives are not CDN-compressible, we must respect hosting limits:
-- GitHub Pages site size limit: 1 GB (soft), recommended repo size ≤ 1 GB
-- GitHub repository file size limit: 100 MiB hard block per file
-- Payload compression (deflate/gzip) BEFORE encryption to minimize transfer size
-- Automatic chunking when archive exceeds 50 MB (configurable)
-- Wizard warns and/or forces chunking when limits are approached
+
+**GitHub Pages Limits (hard constraints):**
+- Published site size: MUST be ≤ 1 GB
+- Source repo recommended limit: ≤ 1 GB
+- Per-file hard block: 100 MiB; warnings at 50 MiB
+- Soft bandwidth limit: 100 GB/month; deploy timeouts may apply
+
+**Chunked AEAD Architecture:**
+- Payload MUST be stored as independently-authenticated encrypted chunks (chunked AEAD), enabling streaming decryption and bounded memory usage
+- Default chunk size: 8 MiB (configurable). Hard cap: 32 MiB (avoid GitHub >50 MiB warnings)
+- Chunking is ALWAYS used when targeting GitHub Pages (regardless of total size), because it simplifies caching, retries, and file-size compliance
+
+**Compression:**
+- Payload compression BEFORE encryption to minimize transfer size
+- Supported codecs:
+  - `deflate` (default): implemented via streaming JS decompressor (fflate)
+  - `zstd` (optional): better ratio for huge exports, requires wasm decoder loaded post-unlock
+  - `none` (debug/testing only)
 
 #### FR-5: Safety Guardrails
 
 - Unencrypted export requires typing: `I UNDERSTAND AND ACCEPT THE RISKS`
 - Pre-publish summary shows: agents, workspaces, time range, message count
 - Confirmation prompt before any deployment
+
+#### FR-6: Redaction & Share Profiles (NEW)
+
+Encryption protects archives from the public internet—but once you share the password with a teammate, they can see everything. Redaction provides an additional layer of protection for safe sharing:
+
+**Export Profiles:**
+- `private` (default): no redaction; encryption required
+- `team`: redact secrets + usernames + hostnames; keep code/context
+- `public-redacted`: aggressive redaction + path hashing + optional message exclusions
+
+**Redaction Capabilities:**
+- Built-in secret patterns + entropy heuristics (API keys, tokens, passwords)
+- User-provided regex rules (`--redact-regex`, `--redact-replace`)
+- Allowlist/denylist per workspace / agent / conversation
+- Review summary before export (with option to redact, exclude, or continue)
 
 ### 5.2 Non-Functional Requirements
 
@@ -395,13 +423,14 @@ Because encrypted archives are not CDN-compressible, we must respect hosting lim
 - No metadata leakage (file names, sizes reveal nothing)
 - Forward secrecy considerations (optional key rotation)
 
-#### NFR-2: Performance
+#### NFR-2: Performance (with explicit security tradeoff)
 
 - Initial page load: < 3 seconds on 3G
 - Search latency: < 100ms after decryption
 - Database size: Efficient chunking for large exports
 - Download size: Payload is compacted (SQLite VACUUM) + compressed (deflate) BEFORE encryption
-- OPFS persistence: Decrypted database stored in OPFS for instant subsequent loads
+- Streaming decrypt: Chunks decrypted and written to OPFS incrementally (bounded memory)
+- OPFS persistence (OPT-IN): Store decrypted database in OPFS for instant subsequent loads. Default is memory-only session for maximum security.
 
 #### NFR-3: Usability
 
@@ -551,18 +580,23 @@ If an attacker can modify the deployed static assets (viewer.js/index.html), the
 - **TOFU asset-hash warnings**: Store hash of critical assets after first successful unlock; warn loudly if assets change on subsequent visits before accepting a password
 - **Commit-pinned URLs**: Guidance to share commit-pinned URLs/hashes out-of-band for high-trust sharing
 
-### 7.2 Cryptographic Design (Envelope Encryption)
+### 7.2 Cryptographic Design (Envelope Encryption + AAD Binding)
 
-We use **envelope encryption** to separate the data key from the user's password:
+We use **envelope encryption** to separate the data key from the user's password, with **AAD binding** to cryptographically tie all components together:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                   Envelope Encryption Model                   │
+│            Envelope Encryption Model + AAD Binding           │
 ├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  export_id (16 bytes random):                                │
+│    - Unique per export                                       │
+│    - Used as AAD for all AEAD operations                    │
+│    - Binds config.json ↔ payload chunks ↔ key slots         │
 │                                                              │
 │  DEK (Data Encryption Key):                                  │
 │    - Random 256-bit key generated per export                 │
-│    - Encrypts the compressed archive payload                 │
+│    - Encrypts the compressed archive payload chunks          │
 │    - Never stored in plaintext                               │
 │                                                              │
 │  KEK (Key Encryption Key):                                   │
@@ -574,6 +608,7 @@ We use **envelope encryption** to separate the data key from the user's password
 │    ✓ Password rotation without re-encrypting payload         │
 │    ✓ Multiple passwords (key slots, like LUKS)              │
 │    ✓ Separate recovery secret (QR) from user password       │
+│    ✓ AAD prevents chunk swapping/replay attacks             │
 │                                                              │
 ╰─────────────────────────────────────────────────────────────╯
 ```
@@ -594,22 +629,25 @@ Password/RecoverySecret → Argon2id → 256-bit KEK
 - Winner of Password Hashing Competition (2015)
 - OWASP recommended
 
-#### Data Encryption (DEK → Payload)
+#### Chunk Encryption (DEK → Payload Chunks)
 
 ```
-DEK + Nonce + CompressedPayload → AES-256-GCM → Ciphertext + AuthTag
-                                  ├─ DEK: 256 bits (random per export)
-                                  ├─ Nonce: 96 bits (random, unique)
-                                  └─ AuthTag: 128 bits (integrity)
+DEK + Nonce + CompressedChunk + AAD(export_id, chunk_index, schema_version)
+    → AES-256-GCM → Ciphertext + AuthTag
+                    ├─ DEK: 256 bits (random per export)
+                    ├─ Nonce: 96 bits (derived: base_nonce XOR chunk_index)
+                    ├─ AuthTag: 128 bits (integrity)
+                    └─ AAD: prevents chunk reorder/swap attacks
 ```
 
 #### Key Wrapping (KEK → DEK)
 
 ```
-KEK + Nonce + DEK → AES-256-GCM → WrappedDEK + AuthTag
+KEK + Nonce + DEK + AAD(export_id, slot_id) → AES-256-GCM → WrappedDEK + AuthTag
                     ├─ KEK: 256 bits (from Argon2id)
                     ├─ Nonce: 96 bits (random, per slot)
-                    └─ AuthTag: 128 bits (integrity)
+                    ├─ AuthTag: 128 bits (integrity)
+                    └─ AAD: binds slot to this specific export
 ```
 
 **Why AES-256-GCM for both?**
@@ -1355,16 +1393,10 @@ CREATE VIRTUAL TABLE messages_code_fts USING fts5(
     tokenize="unicode61 tokenchars '_./\\'"
 );
 
--- Triggers to keep BOTH FTS indexes in sync
-CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-    INSERT INTO messages_code_fts(rowid, content) VALUES (new.id, new.content);
-END;
-
-CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
-    INSERT INTO messages_code_fts(messages_code_fts, rowid, content) VALUES ('delete', old.id, old.content);
-END;
+-- NOTE: Triggers are NOT needed for static export databases.
+-- FTS5 content tables are populated via INSERT during export.
+-- The exported database is read-only in the browser.
+-- These triggers would only be needed if the database were modified client-side.
 
 -- ═══════════════════════════════════════════════════════════════════════════
 
@@ -1391,13 +1423,47 @@ INSERT INTO export_meta (key, value) VALUES
     ('kdf', 'argon2id');
 ```
 
+#### FTS5 Query Escaping
+
+FTS5 has special characters that must be escaped to prevent syntax errors or injection:
+
+```javascript
+// Escape special FTS5 characters for safe queries
+function escapeFts5Query(query) {
+    // FTS5 special chars: " * ^ - : ( ) AND OR NOT NEAR
+    // For simple search: wrap each term in double-quotes
+    return query
+        .split(/\s+/)
+        .filter(term => term.length > 0)
+        .map(term => {
+            // Escape embedded double-quotes by doubling them
+            const escaped = term.replace(/"/g, '""');
+            return `"${escaped}"`;
+        })
+        .join(' ');
+}
+
+// For prefix search (e.g., autocomplete), append *
+function escapeFts5Prefix(query) {
+    const terms = query.split(/\s+/).filter(t => t.length > 0);
+    if (terms.length === 0) return '';
+    const lastTerm = terms.pop();
+    const escaped = terms.map(t => `"${t.replace(/"/g, '""')}"`);
+    escaped.push(`"${lastTerm.replace(/"/g, '""')}"*`);
+    return escaped.join(' ');
+}
+```
+
 #### Choosing Which FTS to Query
 
 ```javascript
 // In viewer.js - route queries to appropriate FTS
-function searchMessages(query, searchMode = 'auto') {
+function searchMessages(rawQuery, searchMode = 'auto') {
     // Auto-detect: if query looks like code (has underscores, dots, camelCase)
-    const isCodeQuery = /[_.]|[a-z][A-Z]/.test(query);
+    const isCodeQuery = /[_.]|[a-z][A-Z]/.test(rawQuery);
+
+    // CRITICAL: Escape the query to prevent FTS5 syntax errors
+    const query = escapeFts5Query(rawQuery);
 
     if (searchMode === 'code' || (searchMode === 'auto' && isCodeQuery)) {
         return db.exec(`
@@ -1482,15 +1548,20 @@ For large archives, create materialized views that accelerate common queries:
 
 ```sql
 -- Materialized view: Recent conversations per agent
+-- NOTE: Window function results can't be used in WHERE of the same SELECT,
+-- so we use a subquery pattern.
 CREATE TABLE mv_recent_by_agent AS
-SELECT
-    agent,
-    id AS conversation_id,
-    title,
-    started_at,
-    message_count,
-    ROW_NUMBER() OVER (PARTITION BY agent ORDER BY started_at DESC) as rank
-FROM conversations
+SELECT agent, conversation_id, title, started_at, message_count, rank
+FROM (
+    SELECT
+        agent,
+        id AS conversation_id,
+        title,
+        started_at,
+        message_count,
+        ROW_NUMBER() OVER (PARTITION BY agent ORDER BY started_at DESC) as rank
+    FROM conversations
+)
 WHERE rank <= 50;
 
 CREATE INDEX idx_mv_recent_agent ON mv_recent_by_agent(agent, rank);
@@ -1511,190 +1582,329 @@ CREATE INDEX idx_mv_snippets_conv ON mv_message_snippets(conversation_id);
 
 **Trade-off**: Increases database size by ~10-15% but dramatically improves search result rendering speed.
 
-### 9.3 Encryption Implementation
+### 9.3 Encryption Implementation (Envelope Encryption, Key Slots, Chunked AEAD)
 
 ```rust
-// src/pages/encrypt.rs
-
-use argon2::{Argon2, Params, Version};
+// src/pages/encrypt.rs — implements the envelope encryption design from §7.2
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use argon2::{Argon2, Params, Version};
 use rand::RngCore;
+use zeroize::Zeroize;
 
-pub struct EncryptionConfig {
-    pub argon2_memory_kb: u32,      // 65536 (64 MB)
-    pub argon2_iterations: u32,     // 3
-    pub argon2_parallelism: u32,    // 4
+/// A single key slot (password or recovery secret)
+pub struct KeySlot {
+    pub id: u32,
+    pub label: String,        // "password", "recovery", "alice", ...
+    pub salt: [u8; 16],       // per-slot (for Argon2id)
+    pub nonce: [u8; 12],      // per-slot (for DEK wrapping)
+    pub wrapped_dek: Vec<u8>, // 32B DEK + 16B tag (AES-GCM output)
 }
 
-impl Default for EncryptionConfig {
-    fn default() -> Self {
-        Self {
-            argon2_memory_kb: 65536,
-            argon2_iterations: 3,
-            argon2_parallelism: 4,
-        }
+/// Envelope encryption configuration (written to config.json)
+pub struct EnvelopeConfig {
+    pub export_id: [u8; 16],     // random per-export; used as AAD binding
+    pub base_nonce: [u8; 12],    // base nonce for chunk encryption (XOR with chunk_index)
+    pub kdf_params: KdfParams,
+    pub compression: String,     // "deflate" | "zstd" | "none"
+    pub key_slots: Vec<KeySlot>,
+    pub chunk_count: u32,
+    pub chunk_size: u32,
+}
+
+/// Encrypt a compressed payload using envelope encryption with chunked AEAD
+pub fn encrypt_export_payload(
+    compressed_payload: &[u8],
+    chunk_size: usize,
+    kek_inputs: Vec<(String /*label*/, String /*secret*/)>,
+    kdf: &KdfParams,
+) -> Result<(EnvelopeConfig, Vec<Vec<u8>> /*chunks*/), EncryptError> {
+    // 1) Generate random DEK, export_id, and base_nonce
+    let mut export_id = [0u8; 16];
+    let mut dek = [0u8; 32];
+    let mut base_nonce = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut export_id);
+    rand::thread_rng().fill_bytes(&mut dek);
+    rand::thread_rng().fill_bytes(&mut base_nonce);
+
+    // 2) Encrypt payload in chunks (each chunk is independently authenticated)
+    let payload_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&dek));
+    let mut encrypted_chunks = Vec::new();
+
+    for (i, chunk) in compressed_payload.chunks(chunk_size).enumerate() {
+        // Derive per-chunk nonce: base_nonce XOR chunk_index
+        let chunk_nonce = derive_chunk_nonce(&base_nonce, i as u64);
+        // AAD = export_id || chunk_index || schema_version
+        let aad = build_chunk_aad(&export_id, i as u32, 2 /*schema_version*/);
+
+        let ciphertext = payload_cipher.encrypt(
+            Nonce::from_slice(&chunk_nonce),
+            Payload { msg: chunk, aad: &aad },
+        )?;
+        encrypted_chunks.push(ciphertext);
     }
-}
 
-pub struct EncryptionResult {
-    pub ciphertext: Vec<u8>,
-    pub salt: [u8; 16],
-    pub nonce: [u8; 12],
-}
+    // 3) For each key slot: derive KEK via Argon2id and wrap DEK
+    let mut key_slots = Vec::new();
+    for (i, (label, secret)) in kek_inputs.into_iter().enumerate() {
+        let mut salt = [0u8; 16];
+        let mut wrap_nonce = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut salt);
+        rand::thread_rng().fill_bytes(&mut wrap_nonce);
 
-pub fn encrypt_database(
-    plaintext: &[u8],
-    password: &str,
-    config: &EncryptionConfig,
-) -> Result<EncryptionResult, EncryptError> {
-    // Generate random salt and nonce
-    let mut salt = [0u8; 16];
-    let mut nonce = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce);
+        let mut kek = derive_kek_argon2id(secret.as_bytes(), &salt, kdf)?;
+        let wrap_cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&kek));
 
-    // Derive key using Argon2id
-    let params = Params::new(
-        config.argon2_memory_kb,
-        config.argon2_iterations,
-        config.argon2_parallelism,
-        Some(32), // 256-bit output
-    )?;
+        // AAD for wrapping = export_id || slot_id
+        let wrap_aad = build_slot_aad(&export_id, i as u32);
+        let wrapped_dek = wrap_cipher.encrypt(
+            Nonce::from_slice(&wrap_nonce),
+            Payload { msg: &dek, aad: &wrap_aad },
+        )?;
 
-    let argon2 = Argon2::new(
-        argon2::Algorithm::Argon2id,
-        Version::V0x13,
-        params,
-    );
+        kek.zeroize(); // Clear KEK from memory
 
-    let mut key = [0u8; 32];
-    argon2.hash_password_into(
-        password.as_bytes(),
-        &salt,
-        &mut key,
-    )?;
+        key_slots.push(KeySlot {
+            id: i as u32,
+            label,
+            salt,
+            nonce: wrap_nonce,
+            wrapped_dek,
+        });
+    }
 
-    // Encrypt with AES-256-GCM
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
-    let nonce = Nonce::from_slice(&nonce);
-    let ciphertext = cipher.encrypt(nonce, plaintext)?;
+    // 4) Zeroize DEK in memory
+    dek.zeroize();
 
-    Ok(EncryptionResult {
-        ciphertext,
-        salt,
-        nonce: nonce.into(),
-    })
+    Ok((
+        EnvelopeConfig {
+            export_id,
+            base_nonce,
+            kdf_params: kdf.clone(),
+            compression: "deflate".to_string(),
+            key_slots,
+            chunk_count: encrypted_chunks.len() as u32,
+            chunk_size: chunk_size as u32,
+        },
+        encrypted_chunks,
+    ))
 }
 ```
 
-### 9.4 Browser Decryption
-
-```javascript
-// viewer.js - Browser-side decryption
-
-async function decryptArchive(password, encryptedData, salt, nonce) {
-    // Load Argon2 WASM
-    const argon2 = await loadArgon2();
-
-    // Derive key (matching Rust parameters)
-    const key = await argon2.hash({
-        pass: password,
-        salt: salt,
-        time: 3,
-        mem: 65536,
-        parallelism: 4,
-        hashLen: 32,
-        type: argon2.ArgonType.Argon2id,
-    });
-
-    // Import key for Web Crypto API
-    const cryptoKey = await crypto.subtle.importKey(
-        'raw',
-        key.hash,
-        { name: 'AES-GCM' },
-        false,
-        ['decrypt']
-    );
-
-    // Decrypt
-    try {
-        const plaintext = await crypto.subtle.decrypt(
-            {
-                name: 'AES-GCM',
-                iv: nonce,
-            },
-            cryptoKey,
-            encryptedData
-        );
-        return new Uint8Array(plaintext);
-    } catch (e) {
-        throw new Error('Invalid password');
-    }
-}
-
-async function initializeDatabase(decryptedData) {
-    // Load sql.js
-    const SQL = await initSqlJs({
-        locateFile: file => `vendor/${file}`
-    });
-
-    // Create database from decrypted bytes
-    const db = new SQL.Database(decryptedData);
-
-    // Verify schema
-    const meta = db.exec("SELECT value FROM export_meta WHERE key='schema_version'");
-    if (meta[0]?.values[0]?.[0] !== '1') {
-        throw new Error('Incompatible archive version');
-    }
-
-    return db;
-}
+**Cargo.toml additions:**
+```toml
+[dependencies]
+argon2 = "0.5"
+aes-gcm = "0.10"
+zeroize = "1.7"              # Secure memory clearing
+flate2 = "1.0"               # Deflate compression
 ```
 
-### 9.5 Multi-Tier Database Loading (Learned from bv)
+### 9.4 Browser Decryption (Worker-based, Unwrap DEK + Stream Decrypt)
 
-bv implements a sophisticated multi-tier loading strategy that we should adopt:
+All expensive operations run in a dedicated Web Worker for UI responsiveness:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                  Database Loading Strategy                   │
+│                    Worker Architecture                       │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  Tier 1: OPFS Cache (Origin Private File System)            │
-│  ───────────────────────────────────────────────            │
-│  • Check if decrypted DB exists in OPFS                     │
-│  • Verify integrity via SHA256 hash                         │
-│  • If valid: load instantly (<50ms)                         │
-│  • Survives page refreshes and browser restarts             │
+│  main thread:                                                │
+│    - Auth UI (password/QR input)                            │
+│    - Progress display                                        │
+│    - Rendering (search, conversations)                      │
 │                                                              │
-│                          ↓ (cache miss)                     │
-│                                                              │
-│  Tier 2: Chunked Loading (for large databases)              │
-│  ─────────────────────────────────────────────              │
-│  • If database >5MB: split into 1MB chunks                  │
-│  • Download chunks in parallel with progress UI             │
-│  • Verify each chunk with SHA256                            │
-│  • Reassemble and decrypt                                   │
-│  • Store decrypted result in OPFS cache                     │
-│                                                              │
-│                          ↓ (small database)                 │
-│                                                              │
-│  Tier 3: Single-File Loading                                │
-│  ───────────────────────────────                            │
-│  • For databases <5MB: download entire file                 │
-│  • Decrypt in memory                                        │
-│  • Store decrypted result in OPFS cache                     │
+│  crypto_worker.js:                                          │
+│    - Argon2id key derivation                                │
+│    - DEK unwrapping (try each key slot)                     │
+│    - Chunk download + AEAD decrypt                          │
+│    - Streaming decompression (fflate)                       │
+│    - OPFS write (if opted-in)                               │
+│    - sqlite-wasm initialization                             │
 │                                                              │
 ╰─────────────────────────────────────────────────────────────╯
 ```
 
-#### OPFS Implementation
+#### Step 1: Unwrap DEK from Key Slots
 
 ```javascript
-// OPFS caching for decrypted database
+// crypto_worker.js — runs in Web Worker
+async function unlockDEK(secret, config) {
+  const argon2 = await loadArgon2();
+  const exportIdBytes = base64ToBytes(config.export_id);
+
+  for (const slot of config.key_slots) {
+    // Derive KEK using Argon2id
+    const kek = await argon2.hash({
+      pass: secret,
+      salt: base64ToBytes(slot.salt),
+      time: config.kdf_params.iterations,
+      mem:  config.kdf_params.memory_kb,
+      parallelism: config.kdf_params.parallelism,
+      hashLen: 32,
+      type: argon2.ArgonType.Argon2id,
+    });
+
+    try {
+      // Build AAD for unwrapping: export_id || slot_id
+      const unwrapAad = buildSlotAad(exportIdBytes, slot.id);
+      const kekKey = await crypto.subtle.importKey(
+        'raw', kek.hash, { name: 'AES-GCM' }, false, ['decrypt']
+      );
+      const dekBuf = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: base64ToBytes(slot.nonce), additionalData: unwrapAad },
+        kekKey,
+        base64ToBytes(slot.wrapped_dek)
+      );
+      return new Uint8Array(dekBuf); // 32 bytes DEK
+    } catch (_) {
+      // Auth tag mismatch → try next slot
+      continue;
+    }
+  }
+  throw new Error('Invalid password / recovery secret');
+}
+```
+
+#### Step 2: Stream Decrypt Chunks → Decompress → Write OPFS
+
+```javascript
+// crypto_worker.js — streaming decrypt + decompress + OPFS write
+async function downloadDecryptToOPFS(config, dekBytes, onProgress, abortSignal) {
+  const chunkFiles = config.payload.files;
+  const total = chunkFiles.length;
+  const exportIdBytes = base64ToBytes(config.export_id);
+
+  // Open OPFS file for writing
+  const writer = await openOpfsWritable('decrypted.sqlite3');
+
+  // Initialize streaming decompressor (fflate)
+  const { Inflate } = await import('./vendor/fflate.min.js');
+  const inflater = new Inflate((chunk, final) => {
+    writer.write(chunk);
+    if (final) writer.close();
+  });
+
+  // Import DEK for chunk decryption
+  const dekKey = await crypto.subtle.importKey(
+    'raw', dekBytes, { name: 'AES-GCM' }, false, ['decrypt']
+  );
+
+  for (let i = 0; i < total; i++) {
+    if (abortSignal?.aborted) throw new Error('Cancelled');
+
+    // Fetch encrypted chunk
+    const response = await fetch(chunkFiles[i], { signal: abortSignal });
+    const encryptedChunk = new Uint8Array(await response.arrayBuffer());
+
+    // Derive per-chunk nonce and AAD
+    const chunkNonce = deriveChunkNonce(config.base_nonce, i);
+    const chunkAad = buildChunkAad(exportIdBytes, i, config.version);
+
+    // Decrypt chunk (AEAD verifies integrity)
+    const compressedChunk = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: chunkNonce, additionalData: chunkAad },
+      dekKey,
+      encryptedChunk
+    );
+
+    // Feed to streaming decompressor
+    inflater.push(new Uint8Array(compressedChunk), i === total - 1);
+
+    onProgress((i + 1) / total);
+  }
+}
+```
+
+#### Step 3: Initialize SQLite from OPFS
+
+```javascript
+// crypto_worker.js — open database from OPFS
+async function initializeDatabaseFromOPFS() {
+  // Load sqlite-wasm (official SQLite build with OPFS VFS)
+  const sqlite3 = await loadSqliteWasm();
+
+  // Open DB stored in OPFS (written during decrypt pipeline)
+  const db = await sqlite3.oo1.OpfsDb('decrypted.sqlite3');
+
+  // Verify schema version
+  const version = db.selectValue("SELECT value FROM export_meta WHERE key='schema_version'");
+  if (version !== '2') {
+    throw new Error('Incompatible archive version');
+  }
+
+  return db;
+}
+```
+
+### 9.5 Multi-Tier Database Loading (Streamable Chunked AEAD)
+
+We use a streaming architecture that combines encryption, decompression, and persistence in a single pass:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│           Database Loading Strategy (Chunked AEAD)           │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Tier 1: OPFS Cache Check (OPT-IN only)                     │
+│  ───────────────────────────────────────                    │
+│  • Only checked if user enabled "Remember on this device"   │
+│  • Verify fingerprint matches config.json export_id         │
+│  • If valid: open sqlite-wasm directly from OPFS (<50ms)    │
+│  • Includes "Clear cached data" button in UI                │
+│  • Default: SKIP (memory-only for max security)             │
+│                                                              │
+│                          ↓ (no cache or user chose fresh)   │
+│                                                              │
+│  Tier 2: Stream Decrypt → Decompress → Write (ALWAYS)       │
+│  ─────────────────────────────────────────────────          │
+│  • All exports use chunked AEAD (8 MiB chunks default)      │
+│  • Fetch chunk → AEAD decrypt (auth via export_id AAD)      │
+│  • Stream into fflate decompressor                          │
+│  • Write plaintext to OPFS (if opted-in) or memory          │
+│  • Bounded memory: only 1-2 chunks in flight                │
+│  • Progress: (chunks_done / total_chunks) × 100             │
+│                                                              │
+│                          ↓ (all chunks processed)           │
+│                                                              │
+│  Tier 3: Initialize sqlite-wasm                             │
+│  ─────────────────────────────                              │
+│  • Open database from OPFS or memory buffer                 │
+│  • Verify schema_version matches expected                   │
+│  • Ready for queries                                        │
+│                                                              │
+╰─────────────────────────────────────────────────────────────╯
+```
+
+**Key differences from bv's approach:**
+- Chunks are authenticated via AEAD (auth tag), not separate SHA256 hashes
+- Decompression is streaming (fflate), not post-hoc
+- OPFS persistence is OPT-IN (security-first default)
+- AAD binding (export_id) prevents chunk substitution attacks
+
+#### OPFS Implementation (Opt-In with Clear Cache)
+
+```javascript
+// OPFS persistence is OPT-IN for security
+// User must explicitly check "Remember on this device" to enable
 const OPFS_DIR = 'cass-cache';
 const DB_FILENAME = 'decrypted.sqlite3';
+const META_FILENAME = 'cache-meta.json';
+
+// Check if user has opted into OPFS persistence
+function isOpfsPersistenceEnabled() {
+    return localStorage.getItem('cass-opfs-enabled') === 'true';
+}
+
+// UI: checkbox "Remember on this device (stores decrypted data locally)"
+function setOpfsPersistence(enabled) {
+    if (enabled) {
+        localStorage.setItem('cass-opfs-enabled', 'true');
+    } else {
+        localStorage.removeItem('cass-opfs-enabled');
+        clearOpfsCache(); // Clear immediately when disabled
+    }
+}
 
 async function getOpfsRoot() {
     if (!navigator.storage?.getDirectory) {
@@ -1709,100 +1919,90 @@ async function getOpfsRoot() {
     }
 }
 
-async function loadFromOpfsCache(expectedHash) {
+async function loadFromOpfsCache(expectedExportId) {
+    // Only check cache if user opted in
+    if (!isOpfsPersistenceEnabled()) return null;
+
     const dir = await getOpfsRoot();
     if (!dir) return null;
 
     try {
-        const fileHandle = await dir.getFileHandle(DB_FILENAME);
-        const file = await fileHandle.getFile();
-        const data = new Uint8Array(await file.arrayBuffer());
+        // Read cache metadata to verify export_id matches
+        const metaHandle = await dir.getFileHandle(META_FILENAME);
+        const metaFile = await metaHandle.getFile();
+        const meta = JSON.parse(await metaFile.text());
 
-        // Verify integrity
-        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-        const hashHex = Array.from(new Uint8Array(hashBuffer))
-            .map(b => b.toString(16).padStart(2, '0')).join('');
-
-        if (hashHex === expectedHash) {
-            return data;
+        if (meta.export_id !== expectedExportId) {
+            console.log('OPFS cache export_id mismatch, will decrypt fresh');
+            return null;
         }
-        console.log('OPFS cache hash mismatch, re-downloading');
-        return null;
+
+        // Cache is valid - database can be opened directly from OPFS
+        return { cached: true, exportId: meta.export_id };
     } catch (e) {
         return null; // Cache miss
     }
 }
 
-async function saveToOpfsCache(data) {
+async function saveToOpfsCache(exportId) {
+    // Only save if user opted in
+    if (!isOpfsPersistenceEnabled()) return;
+
     const dir = await getOpfsRoot();
     if (!dir) return;
 
     try {
-        const fileHandle = await dir.getFileHandle(DB_FILENAME, { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(data);
+        // Database was already written during streaming decrypt
+        // Just save metadata for future cache validation
+        const metaHandle = await dir.getFileHandle(META_FILENAME, { create: true });
+        const writable = await metaHandle.createWritable();
+        await writable.write(JSON.stringify({
+            export_id: exportId,
+            cached_at: new Date().toISOString()
+        }));
         await writable.close();
     } catch (e) {
-        console.warn('Failed to cache to OPFS:', e);
+        console.warn('Failed to save OPFS metadata:', e);
+    }
+}
+
+// UI: "Clear cached data" button handler
+async function clearOpfsCache() {
+    const dir = await getOpfsRoot();
+    if (!dir) return;
+
+    try {
+        await dir.removeEntry(DB_FILENAME);
+        await dir.removeEntry(META_FILENAME);
+        console.log('OPFS cache cleared');
+    } catch (e) {
+        // Files may not exist, that's OK
     }
 }
 ```
 
-#### Chunked Download for Large Databases
+#### Streaming Decrypt Pipeline (replaces old chunked download)
+
+The chunked download is now integrated into the streaming decrypt pipeline (see Section 9.4). The config.json chunk manifest format:
 
 ```javascript
-// config.json includes chunk manifest for large databases
+// config.json payload section (NEW format - AEAD authenticated chunks)
 // {
-//   "chunked": true,
-//   "chunk_count": 8,
-//   "chunk_size": 1048576,  // 1MB
-//   "total_size": 7654321,
-//   "chunk_hashes": ["abc123...", "def456...", ...]
+//   "export_id": "base64-16-bytes",
+//   "base_nonce": "base64-12-bytes",
+//   "compression": "deflate",
+//   "payload": {
+//     "chunk_size": 8388608,  // 8 MiB default
+//     "chunk_count": 4,
+//     "files": ["payload.0.bin", "payload.1.bin", "payload.2.bin", "payload.3.bin"]
+//   }
 // }
+// NOTE: No chunk_hashes array - each chunk is authenticated via AEAD tag
 
-async function downloadChunked(config, onProgress) {
-    const chunks = [];
-    const total = config.chunk_count;
-
-    // Download all chunks in parallel (limit concurrency)
-    const CONCURRENT_LIMIT = 3;
-    for (let i = 0; i < total; i += CONCURRENT_LIMIT) {
-        const batch = [];
-        for (let j = i; j < Math.min(i + CONCURRENT_LIMIT, total); j++) {
-            batch.push(downloadAndVerifyChunk(j, config.chunk_hashes[j]));
-        }
-        const results = await Promise.all(batch);
-        chunks.push(...results);
-        onProgress((i + batch.length) / total);
-    }
-
-    // Reassemble
-    const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
-    const combined = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-        combined.set(chunk, offset);
-        offset += chunk.length;
-    }
-
-    return combined;
-}
-
-async function downloadAndVerifyChunk(index, expectedHash) {
-    const response = await fetch(`encrypted.bin.${index}`);
-    const data = new Uint8Array(await response.arrayBuffer());
-
-    // Verify chunk integrity
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashHex = Array.from(new Uint8Array(hashBuffer))
-        .map(b => b.toString(16).padStart(2, '0')).join('');
-
-    if (hashHex !== expectedHash) {
-        throw new Error(`Chunk ${index} integrity check failed`);
-    }
-
-    return data;
-}
+// NOTE: Chunk download and verification is now integrated into the
+// streaming decrypt pipeline (downloadDecryptToOPFS in Section 9.4).
+// Each chunk is verified via AEAD auth tag, not separate SHA256 hashes.
+// Concurrency is still limited (1-2 chunks in flight) for bounded memory.
 ```
 
 #### Browser Compatibility for OPFS
@@ -2161,11 +2361,13 @@ The actual DEK is only recoverable by deriving the KEK from password + salt, the
 
 ## 11. Frontend Technology Stack
 
-### Required Libraries (Updated from bv Analysis)
+### Required Libraries (Updated for Chunked AEAD Architecture)
 
 | Library | Version | Uncompressed | Gzipped | Purpose |
 |---------|---------|--------------|---------|---------|
-| **sql.js** | 1.10+ | 640KB | 290KB | SQLite in browser (FTS5 support) |
+| **sqlite-wasm** | 3.46+ | 850KB | 340KB | SQLite in browser (OPFS VFS, FTS5) — **PRIMARY** |
+| **sql.js** | 1.10+ | 640KB | 290KB | SQLite in browser — **FALLBACK** if OPFS unavailable |
+| **fflate** | 0.8+ | 29KB | 9KB | Streaming deflate decompression |
 | **argon2-browser** | 1.18+ | 200KB | 78KB | Password hashing (WASM) |
 | **Alpine.js** | 3.14+ | 44KB | 16KB | Reactive UI framework |
 | **Tailwind CSS** | 3.4+ | 398KB (full) | 50KB (JIT purged) | Utility-first CSS |
@@ -2173,6 +2375,10 @@ The actual DEK is only recoverable by deriving the KEK from password + salt, the
 | **Prism.js** | 1.29+ | 30KB | 11KB | Syntax highlighting |
 | **DOMPurify** | 3.1+ | 20KB | 8KB | XSS sanitization |
 | **html5-qrcode** | 2.3+ | 156KB | 52KB | QR code scanning |
+
+**SQLite Runtime Selection:**
+- **sqlite-wasm** (official SQLite build): Preferred. Supports OPFS VFS for direct file access, better memory efficiency for large databases. Required for OPFS persistence opt-in.
+- **sql.js**: Fallback for browsers without OPFS support (older Safari, some mobile browsers). Works purely in memory.
 
 ### Optional Libraries (Feature-Dependent)
 
@@ -2189,12 +2395,15 @@ The actual DEK is only recoverable by deriving the KEK from password + salt, the
 | Component | Uncompressed | Gzipped | Brotli |
 |-----------|--------------|---------|--------|
 | **Core JavaScript** | ~400KB | ~120KB | ~95KB |
-| **sql.js WASM** | 640KB | 290KB | 235KB |
+| **sqlite-wasm** | 850KB | 340KB | 280KB |
 | **Argon2 WASM** | 200KB | 78KB | 62KB |
+| **fflate** | 29KB | 9KB | 7KB |
 | **Alpine.js** | 44KB | 16KB | 13KB |
 | **Tailwind CSS** | 50KB (purged) | 12KB | 10KB |
 | **Vendor libs** | ~150KB | ~55KB | ~45KB |
-| **Total (code only)** | **~1.5MB** | **~570KB** | **~460KB** |
+| **Total (code only)** | **~1.7MB** | **~630KB** | **~512KB** |
+
+**Note:** sql.js (640KB/290KB) is bundled as fallback but only loaded when sqlite-wasm OPFS is unavailable.
 
 #### Size by User Journey
 
@@ -2202,8 +2411,8 @@ The actual DEK is only recoverable by deriving the KEK from password + salt, the
 |--------|------------|--------------|
 | **Initial page** | index.html, auth.js, styles.css, Alpine | ~40KB |
 | **Password entry** | Argon2 WASM (async) | +78KB |
-| **After unlock** | sql.js WASM, viewer.js, Marked, Prism | +400KB |
-| **Encrypted data** | encrypted.bin (varies) | Variable |
+| **After unlock** | sqlite-wasm, fflate, viewer.js, Marked, Prism | +460KB |
+| **Encrypted data** | payload.*.bin chunks (varies) | Variable |
 
 ### Bundle Optimization Strategies (from bv)
 
@@ -2405,6 +2614,74 @@ Output:
     "site_size_bytes": 25678901
 }
 ```
+
+### Key Management Commands
+
+Envelope encryption enables key management without re-encrypting the payload:
+
+```
+USAGE:
+    cass pages key <SUBCOMMAND>
+
+SUBCOMMANDS:
+    list        List key slots in an exported archive
+    add         Add a new password/recovery key slot
+    revoke      Remove a key slot (requires another valid password)
+    rotate      Replace all key slots (regenerates DEK, re-encrypts payload)
+
+OPTIONS (common):
+    --archive <DIR>     Path to exported archive (site/ directory)
+    --password <PASS>   Current password to authenticate
+    --json              Output in JSON format
+
+EXAMPLES:
+    # List existing key slots (shows labels, not secrets)
+    cass pages key list --archive ./site
+
+    # Add a new password for a teammate
+    cass pages key add --archive ./site \
+        --password "current-pass" \
+        --new-password "teammate-pass" \
+        --label "alice"
+
+    # Add a recovery secret (generates high-entropy secret)
+    cass pages key add --archive ./site \
+        --password "current-pass" \
+        --recovery --label "backup-2025"
+
+    # Revoke a compromised key slot
+    cass pages key revoke --archive ./site \
+        --password "good-pass" \
+        --slot-id 2
+
+    # Full key rotation (re-encrypts payload - use if DEK may be compromised)
+    cass pages key rotate --archive ./site \
+        --old-password "compromised-pass" \
+        --new-password "fresh-pass"
+
+OUTPUT (key list --json):
+{
+    "key_slots": [
+        { "id": 0, "label": "password", "created_at": "2025-01-06T12:00:00Z" },
+        { "id": 1, "label": "recovery", "created_at": "2025-01-06T12:00:00Z" },
+        { "id": 2, "label": "alice", "created_at": "2025-01-07T09:00:00Z" }
+    ],
+    "active_slots": 3,
+    "dek_created_at": "2025-01-06T12:00:00Z"
+}
+
+EXIT CODES:
+    0   Success
+    1   Authentication failed (wrong password)
+    2   Invalid arguments
+    3   Archive not found or corrupted
+    4   Cannot revoke last remaining slot
+```
+
+**Security notes:**
+- `add` and `revoke` only modify `config.json` (key slots); the encrypted payload is unchanged
+- `rotate` re-encrypts the entire payload with a new DEK; use when the DEK itself may be compromised
+- After any key change, re-deploy the updated `site/` directory
 
 ### Robot Mode Output
 
@@ -2798,14 +3075,36 @@ if repo_exists {
 - [ ] Safety confirmations
 - [ ] Documentation
 
-### Phase 6: Testing & Hardening (1 week)
+### Phase 6: Testing & Hardening (1-2 weeks)
 
-- [ ] Cross-browser testing
-- [ ] Performance optimization
-- [ ] Security audit
+- [ ] Cross-browser testing (Chrome, Firefox, Safari, Edge, mobile)
+- [ ] Performance optimization (large archive profiling)
+- [ ] Security audit (focus on crypto, CSP, input validation)
 - [ ] Edge case handling
 
-**Estimated Total: 8-12 weeks**
+#### Crypto Test Vectors & Fuzzing
+
+**Test Vectors (known-answer tests):**
+- [ ] Argon2id: Verify against RFC 9106 test vectors
+- [ ] AES-256-GCM: Verify against NIST SP 800-38D test vectors
+- [ ] Key slot unwrapping: Round-trip encrypt/decrypt with multiple slots
+- [ ] Chunked AEAD: Verify chunk boundary handling, nonce derivation
+- [ ] AAD binding: Verify rejection when export_id or chunk_index tampered
+
+**Fuzzing targets:**
+- [ ] FTS5 query parser (malformed inputs, injection attempts)
+- [ ] Password input (Unicode normalization, empty, very long)
+- [ ] config.json parser (malformed JSON, missing fields, extra fields)
+- [ ] Chunk file fetch (partial responses, corrupted auth tags)
+- [ ] fflate decompressor (truncated streams, invalid deflate)
+
+**Integration tests:**
+- [ ] Full export → deploy → unlock cycle with test fixtures
+- [ ] Key add/revoke/rotate operations with verification
+- [ ] OPFS opt-in/clear-cache flow
+- [ ] Graceful degradation when sqlite-wasm unavailable (sql.js fallback)
+
+**Estimated Total: 9-14 weeks**
 
 ---
 
@@ -2861,6 +3160,26 @@ The following is the original prompt that initiated this proposal:
 |---------|------|--------|---------|
 | 1.0 | 2026-01-06 | Claude (Opus 4.5) | Initial proposal |
 | 1.1 | 2026-01-06 | Claude (Opus 4.5) | Enhanced with bv deep dive insights (see below) |
+| 1.2 | 2026-01-06 | Claude (Opus 4.5) | Added envelope encryption, key slots, AAD binding |
+| 1.3 | 2026-01-06 | Claude (Opus 4.5) | Added chunked AEAD, worker architecture, redaction |
+| 1.4 | 2026-01-06 | Claude (Opus 4.5) | Production hardening (see below) |
+
+### Version 1.4 Changes (Production Hardening)
+
+This version applies 12 revisions focused on internal consistency and production-grade implementation:
+
+1. **Crypto code consistency**: Sections 9.3, 9.4 now fully implement envelope encryption design from §7.2
+2. **Streamable chunked AEAD**: Section 9.5 rewritten for streaming decrypt + decompress pipeline
+3. **AAD binding**: export_id used as Additional Authenticated Data throughout to prevent chunk swapping
+4. **Streaming decompression**: Added fflate library (~9KB gzipped) to Section 11
+5. **SQLite runtime**: Clarified sqlite-wasm as primary (OPFS support), sql.js as fallback
+6. **Worker architecture**: All crypto/decompress/DB operations in dedicated Web Worker
+7. **OPFS opt-in**: Default is memory-only; "Remember on this device" checkbox enables persistence
+8. **Redaction pipeline**: Added FR-6 with secret detection, user-defined rules, share profiles
+9. **Key management CLI**: Added `cass pages key {list,add,revoke,rotate}` commands
+10. **SQL bug fixes**: Fixed invalid materialized view (window function in WHERE), added FTS5 query escaping
+11. **GitHub Pages limits**: Clarified sites are ALWAYS public, added real size limits (1GB site, 100MiB/file)
+12. **Test hardening**: Phase 6 now includes crypto test vectors, fuzzing targets, integration tests
 
 ### Version 1.1 Changes (bv Deep Dive Enhancements)
 
