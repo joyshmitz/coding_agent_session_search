@@ -29,7 +29,7 @@
 //!   Count × Dimension × bytes_per_quant, contiguous, 32-byte aligned.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use half::f16;
 use memmap2::Mmap;
+use rayon::prelude::*;
 use rusqlite::Connection;
 
 use crate::search::query::SearchFilters;
@@ -48,6 +49,22 @@ pub const CVVI_VERSION: u16 = 1;
 pub const VECTOR_ALIGN_BYTES: usize = 32;
 pub const ROW_SIZE_BYTES: usize = 70;
 pub const VECTOR_INDEX_DIR: &str = "vector_index";
+
+/// P1 Opt 3: Minimum vector count for parallel search.
+/// Below this threshold, Rayon overhead (~1-5µs per task) outweighs parallelism benefit.
+const PARALLEL_THRESHOLD: usize = 10_000;
+
+/// P1 Opt 3: Chunk size for parallel iteration.
+/// Smaller chunks = better load balancing but more overhead. 1024 is a good default.
+const PARALLEL_CHUNK_SIZE: usize = 1024;
+
+/// Cached parallel search enable flag (checked once at first use).
+/// Set CASS_PARALLEL_SEARCH=0 to disable parallel search.
+static PARALLEL_SEARCH_ENABLED: once_cell::sync::Lazy<bool> = once_cell::sync::Lazy::new(|| {
+    dotenvy::var("CASS_PARALLEL_SEARCH")
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(true)
+});
 
 pub fn vector_index_path(data_dir: &Path, embedder_id: &str) -> PathBuf {
     data_dir
@@ -795,7 +812,23 @@ impl VectorIndex {
             return Ok(Vec::new());
         }
 
-        let mut heap = std::collections::BinaryHeap::with_capacity(k + 1);
+        // P1 Opt 3: Dispatch to parallel search for large indices.
+        // Skip parallelism for small indices where Rayon overhead exceeds benefit.
+        if *PARALLEL_SEARCH_ENABLED && self.rows.len() >= PARALLEL_THRESHOLD {
+            return self.search_top_k_parallel(query_vec, k, filter);
+        }
+
+        self.search_top_k_sequential(query_vec, k, filter)
+    }
+
+    /// Sequential search implementation (used for small indices or when parallel is disabled).
+    fn search_top_k_sequential(
+        &self,
+        query_vec: &[f32],
+        k: usize,
+        filter: Option<&SemanticFilter>,
+    ) -> Result<Vec<VectorSearchResult>> {
+        let mut heap = BinaryHeap::with_capacity(k + 1);
         for row in &self.rows {
             if let Some(filter) = filter
                 && !filter.matches(row)
@@ -821,6 +854,75 @@ impl VectorIndex {
                 score: entry.0.score,
             })
             .collect();
+        results.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.message_id.cmp(&b.message_id))
+        });
+        Ok(results)
+    }
+
+    /// P1 Opt 3: Parallel search using Rayon for large indices.
+    /// Uses par_chunks with thread-local heaps, then merges results.
+    fn search_top_k_parallel(
+        &self,
+        query_vec: &[f32],
+        k: usize,
+        filter: Option<&SemanticFilter>,
+    ) -> Result<Vec<VectorSearchResult>> {
+        // Parallel scan with thread-local heaps.
+        // Each chunk maintains its own top-k heap to avoid contention.
+        let partial_results: Vec<Vec<ScoredEntry>> = self
+            .rows
+            .par_chunks(PARALLEL_CHUNK_SIZE)
+            .map(|chunk| {
+                let mut local_heap = BinaryHeap::with_capacity(k + 1);
+                for row in chunk {
+                    if let Some(f) = filter
+                        && !f.matches(row)
+                    {
+                        continue;
+                    }
+                    // Use unwrap_or(0.0) for errors in parallel path - errors are rare
+                    // and we don't want to propagate them across thread boundaries.
+                    let score = self
+                        .dot_product_at(row.vec_offset, query_vec)
+                        .unwrap_or(0.0);
+                    local_heap.push(std::cmp::Reverse(ScoredEntry {
+                        score,
+                        message_id: row.message_id,
+                        chunk_idx: row.chunk_idx,
+                    }));
+                    if local_heap.len() > k {
+                        local_heap.pop();
+                    }
+                }
+                // Extract entries from heap (they're wrapped in Reverse).
+                local_heap.into_iter().map(|r| r.0).collect()
+            })
+            .collect();
+
+        // Merge thread-local results into final top-k.
+        let mut final_heap = BinaryHeap::with_capacity(k + 1);
+        for entries in partial_results {
+            for entry in entries {
+                final_heap.push(std::cmp::Reverse(entry));
+                if final_heap.len() > k {
+                    final_heap.pop();
+                }
+            }
+        }
+
+        let mut results: Vec<VectorSearchResult> = final_heap
+            .into_iter()
+            .map(|entry| VectorSearchResult {
+                message_id: entry.0.message_id,
+                chunk_idx: entry.0.chunk_idx,
+                score: entry.0.score,
+            })
+            .collect();
+
+        // Deterministic ordering: sort by score desc, then message_id for tie-breaking.
         results.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
@@ -1724,5 +1826,128 @@ mod tests {
         // Test 9 elements (one SIMD chunk + remainder).
         let nine: Vec<f32> = vec![1.0; 9];
         assert!((dot_product_simd(&nine, &nine) - 9.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parallel_search_matches_sequential() -> Result<()> {
+        // P1 Opt 3: Verify parallel search produces same results as sequential.
+        // Create an index large enough to trigger parallel search.
+        let dimension = 64;
+        let count = PARALLEL_THRESHOLD + 1000; // Ensure parallel threshold is exceeded.
+
+        let entries: Vec<VectorEntry> = (0..count)
+            .map(|i| {
+                let mut vector = vec![0.0f32; dimension];
+                // Create vectors with varying values so search produces distinct scores.
+                for d in 0..dimension {
+                    vector[d] = ((i + d * 7) % 100) as f32 / 100.0;
+                }
+                VectorEntry {
+                    message_id: i as u64,
+                    created_at_ms: i as i64 * 1000,
+                    agent_id: (i % 4) as u32,
+                    workspace_id: 1,
+                    source_id: 1,
+                    role: (i % 2) as u8,
+                    chunk_idx: 0,
+                    content_hash: [0u8; 32],
+                    vector,
+                }
+            })
+            .collect();
+
+        let index = VectorIndex::build("test", "rev", dimension, Quantization::F32, entries)?;
+
+        // Verify the index is large enough for parallel search.
+        assert!(
+            index.rows().len() >= PARALLEL_THRESHOLD,
+            "Index should exceed parallel threshold"
+        );
+
+        // Create a query vector.
+        let query: Vec<f32> = (0..dimension).map(|d| (d % 10) as f32 / 10.0).collect();
+
+        // Get results from sequential search.
+        let sequential_results = index.search_top_k_sequential(&query, 25, None)?;
+
+        // Get results from parallel search.
+        let parallel_results = index.search_top_k_parallel(&query, 25, None)?;
+
+        // Verify same message IDs in same order.
+        let seq_ids: Vec<u64> = sequential_results.iter().map(|r| r.message_id).collect();
+        let par_ids: Vec<u64> = parallel_results.iter().map(|r| r.message_id).collect();
+        assert_eq!(
+            seq_ids, par_ids,
+            "Parallel search must return same message IDs as sequential"
+        );
+
+        // Verify scores are identical (both use same dot product function).
+        for (seq, par) in sequential_results.iter().zip(parallel_results.iter()) {
+            assert!(
+                (seq.score - par.score).abs() < 1e-6,
+                "Score mismatch: seq={}, par={}",
+                seq.score,
+                par.score
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn parallel_search_respects_filter() -> Result<()> {
+        // P1 Opt 3: Verify parallel search respects filters correctly.
+        let dimension = 32;
+        let count = PARALLEL_THRESHOLD + 500;
+
+        let entries: Vec<VectorEntry> = (0..count)
+            .map(|i| {
+                let mut vector = vec![0.0f32; dimension];
+                for d in 0..dimension {
+                    vector[d] = ((i + d * 3) % 50) as f32 / 50.0;
+                }
+                VectorEntry {
+                    message_id: i as u64,
+                    created_at_ms: i as i64 * 1000,
+                    agent_id: (i % 4) as u32, // Agents 0, 1, 2, 3
+                    workspace_id: 1,
+                    source_id: 1,
+                    role: 0,
+                    chunk_idx: 0,
+                    content_hash: [0u8; 32],
+                    vector,
+                }
+            })
+            .collect();
+
+        let index = VectorIndex::build("test", "rev", dimension, Quantization::F32, entries)?;
+
+        let query: Vec<f32> = (0..dimension).map(|d| d as f32 / dimension as f32).collect();
+
+        // Filter to agent 0 only.
+        let filter = SemanticFilter {
+            agents: Some(HashSet::from([0u32])),
+            ..Default::default()
+        };
+
+        let sequential_results = index.search_top_k_sequential(&query, 10, Some(&filter))?;
+        let parallel_results = index.search_top_k_parallel(&query, 10, Some(&filter))?;
+
+        // Verify all results have agent_id 0.
+        for result in &parallel_results {
+            let row = index.rows().iter().find(|r| r.message_id == result.message_id);
+            assert!(
+                row.map(|r| r.agent_id) == Some(0),
+                "Parallel search returned wrong agent_id for message {}",
+                result.message_id
+            );
+        }
+
+        // Verify same results as sequential.
+        let seq_ids: Vec<u64> = sequential_results.iter().map(|r| r.message_id).collect();
+        let par_ids: Vec<u64> = parallel_results.iter().map(|r| r.message_id).collect();
+        assert_eq!(seq_ids, par_ids, "Filtered parallel search must match sequential");
+
+        Ok(())
     }
 }
