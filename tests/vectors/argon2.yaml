@@ -1,0 +1,9 @@
+- name: "RFC 9106 Section 5.3"
+  password: "password"
+  salt: "somesalt"
+  memory_kb: 64
+  iterations: 3
+  parallelism: 4
+  output_len: 32
+  expected_hash_hex: "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"
+  source: "RFC 9106"

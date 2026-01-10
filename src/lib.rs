@@ -3,11 +3,13 @@ pub mod connectors;
 pub mod export;
 pub mod indexer;
 pub mod model;
+pub mod pages;
 pub mod search;
 pub mod sources;
 pub mod storage;
 pub mod ui;
 pub mod update_check;
+pub mod encryption;
 
 use anyhow::Result;
 use base64::{Engine, prelude::*};
