@@ -18,7 +18,8 @@ fn extract_workspace_from_content(messages: &[NormalizedMessage]) -> Option<Path
     // 2. Working directory: "Working directory: /path/to/project"
     // 3. Common project paths: /data/projects/X
 
-    for msg in messages {
+    // Limit to first 50 messages for performance
+    for msg in messages.iter().take(50) {
         // Try AGENTS.md pattern first (most reliable)
         // Pattern: "AGENTS.md instructions for /path/to/project"
         if let Some(idx) = msg.content.find("AGENTS.md instructions for ") {
@@ -58,17 +59,30 @@ fn extract_path_from_position(content: &str, start: usize) -> Option<PathBuf> {
     let rest = content.get(start..)?;
     let rest = rest.trim_start();
 
-    // Find the end of the path (whitespace, newline, or certain punctuation)
+    // Handle quoted paths
+    let (rest, delimiter) = if let Some(stripped) = rest.strip_prefix('"') {
+        (stripped, Some('"'))
+    } else if let Some(stripped) = rest.strip_prefix('\'') {
+        (stripped, Some('\''))
+    } else {
+        (rest, None)
+    };
+
+    // Find the end of the path (whitespace, newline, delimiter, or certain punctuation)
     let end = rest
         .find(|c: char| {
-            c.is_whitespace()
-                || c == '\n'
-                || c == '>'
-                || c == '"'
-                || c == '\''
-                || c == ')'
-                || c == ']'
-                || c == ','
+            if let Some(d) = delimiter {
+                c == d
+            } else {
+                c.is_whitespace()
+                    || c == '\n'
+                    || c == '>'
+                    || c == '"'
+                    || c == '\''
+                    || c == ')'
+                    || c == ']'
+                    || c == ','
+            }
         })
         .unwrap_or(rest.len());
 
@@ -388,6 +402,13 @@ mod tests {
     #[test]
     fn extract_path_handles_trailing_slash() {
         let content = "Working directory: /data/projects/foo/";
+        let path = extract_path_from_position(content, 19);
+        assert_eq!(path, Some(PathBuf::from("/data/projects/foo")));
+    }
+
+    #[test]
+    fn extract_path_handles_quoted_path_start() {
+        let content = "Working directory: \"/data/projects/foo\"";
         let path = extract_path_from_position(content, 19);
         assert_eq!(path, Some(PathBuf::from("/data/projects/foo")));
     }

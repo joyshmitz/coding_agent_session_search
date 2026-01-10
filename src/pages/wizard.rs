@@ -1,10 +1,10 @@
 use anyhow::Result;
-use console::{style, Term};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
+use console::{Term, style};
+use dialoguer::{Confirm, Input, MultiSelect, Select, theme::ColorfulTheme};
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::pages::export::{run_pages_export, PathMode};
+use crate::pages::export::{PathMode, run_pages_export};
 
 pub struct PagesWizard {
     // State will go here
@@ -26,13 +26,20 @@ impl PagesWizard {
         let theme = ColorfulTheme::default();
 
         term.clear_screen()?;
-        writeln!(term, "{}", style("🔐 cass Pages Export Wizard").bold().cyan())?;
-        writeln!(term, "Create an encrypted, searchable web archive of your AI coding agent conversations.")?;
+        writeln!(
+            term,
+            "{}",
+            style("🔐 cass Pages Export Wizard").bold().cyan()
+        )?;
+        writeln!(
+            term,
+            "Create an encrypted, searchable web archive of your AI coding agent conversations."
+        )?;
         writeln!(term)?;
 
         // 1. Content Selection
         writeln!(term, "Step 1 of 7: Content Selection")?;
-        
+
         // Agents
         // TODO: dynamic agent list from DB
         let agents = vec!["Claude Code", "Codex", "Gemini", "Cursor", "Aider"];
@@ -41,14 +48,18 @@ impl PagesWizard {
             .items(&agents)
             .defaults(&vec![true; agents.len()])
             .interact()?;
-        
+
         let selected_agent_names: Vec<String> = selected_agents
             .iter()
             .map(|&i| agents[i].to_lowercase().replace(" ", "_")) // basic slugify
             .collect();
 
         if selected_agent_names.is_empty() {
-            writeln!(term, "{}", style("⚠ No agents selected. Export cancelled.").red())?;
+            writeln!(
+                term,
+                "{}",
+                style("⚠ No agents selected. Export cancelled.").red()
+            )?;
             return Ok(());
         }
 
@@ -59,7 +70,7 @@ impl PagesWizard {
             .default(0)
             .items(&time_options)
             .interact()?;
-        
+
         let since = match time_selection {
             1 => Some("-30d".to_string()),
             2 => Some("-90d".to_string()),
@@ -71,16 +82,20 @@ impl PagesWizard {
             .with_prompt("Output directory")
             .default("cass-export".to_string())
             .interact_text()?;
-        
+
         let output_dir = PathBuf::from(&output_dir_str);
         if !output_dir.exists() {
             std::fs::create_dir_all(&output_dir)?;
         }
-        
+
         // For Phase 1, we just generate the raw export DB inside the dir
         let export_db_path = output_dir.join("export.db");
 
-        writeln!(term, "\n{}", style("Skipping advanced steps for Phase 1 scaffolding...").yellow())?;
+        writeln!(
+            term,
+            "\n{}",
+            style("Skipping advanced steps for Phase 1 scaffolding...").yellow()
+        )?;
 
         // Confirm
         if !Confirm::with_theme(&theme)

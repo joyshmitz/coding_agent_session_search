@@ -438,7 +438,10 @@ Second assistant response"#;
         let connector = AiderConnector::new();
         let conv = connector.parse_chat_history(&history_file).unwrap();
 
-        assert_eq!(conv.external_id, Some(history_file.to_string_lossy().to_string()));
+        assert_eq!(
+            conv.external_id,
+            Some(history_file.to_string_lossy().to_string())
+        );
     }
 
     #[test]

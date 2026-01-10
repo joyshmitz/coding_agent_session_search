@@ -290,7 +290,7 @@ impl BookmarkStore {
             // No, Transaction borrows Connection mutably.
             // We need to implement duplicate check manually or use INSERT OR IGNORE / INSERT ... ON CONFLICT
             // But logic says "merges, doesn't overwrite".
-            
+
             // Re-implement check using the transaction
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM bookmarks WHERE source_path = ?1 AND line_number IS ?2)",
@@ -332,9 +332,7 @@ fn row_to_bookmark(row: &rusqlite::Row) -> rusqlite::Result<Bookmark> {
         id: row.get(0)?,
         title: row.get(1)?,
         source_path: row.get(2)?,
-        line_number: row
-            .get::<_, Option<i64>>(3)?
-            .map(|n| n as usize),
+        line_number: row.get::<_, Option<i64>>(3)?.map(|n| n as usize),
         agent: row.get(4)?,
         workspace: row.get(5)?,
         note: row.get(6)?,

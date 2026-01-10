@@ -5947,8 +5947,9 @@ pub fn run_tui(
                         // Bulk action menu: A opens when items are selected
                         KeyCode::Char('A') => {
                             if selected.is_empty() {
-                                status = "No items selected. Ctrl+X to select, Ctrl+A to select all."
-                                    .to_string();
+                                status =
+                                    "No items selected. Ctrl+X to select, Ctrl+A to select all."
+                                        .to_string();
                             } else {
                                 show_bulk_modal = true;
                                 bulk_action_idx = 0;

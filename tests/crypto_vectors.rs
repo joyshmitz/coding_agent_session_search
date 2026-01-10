@@ -1,4 +1,6 @@
-use coding_agent_search::encryption::{Argon2Params, aes_gcm_decrypt, aes_gcm_encrypt, argon2id_hash, hkdf_expand};
+use coding_agent_search::encryption::{
+    Argon2Params, aes_gcm_decrypt, aes_gcm_encrypt, argon2id_hash, hkdf_expand,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -63,8 +65,8 @@ fn test_aes_gcm_vectors() {
         );
         assert_eq!(tag, expected_tag, "Tag mismatch for {}", v.name);
 
-        let decrypted = aes_gcm_decrypt(&key, &nonce, &ciphertext, &aad, &tag)
-            .expect("decryption failed");
+        let decrypted =
+            aes_gcm_decrypt(&key, &nonce, &ciphertext, &aad, &tag).expect("decryption failed");
         assert_eq!(decrypted, plaintext, "Decryption mismatch for {}", v.name);
     }
 }
@@ -85,7 +87,7 @@ fn test_argon2_vectors() {
 
         let expected = hex::decode(&v.expected_hash_hex).unwrap();
         let result = argon2id_hash(password, salt, &params);
-        
+
         assert_eq!(result, expected, "Argon2 mismatch for {}", v.name);
     }
 }

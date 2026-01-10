@@ -5,4 +5,3 @@ pub mod encrypt;
 pub mod export;
 pub mod qr;
 pub mod wizard;
-

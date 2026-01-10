@@ -225,8 +225,9 @@ impl ExportEngine {
             tx.prepare("INSERT INTO messages_code_fts (rowid, content) VALUES (?, ?)")?;
 
         while let Some(row) = rows.next()? {
-            if let Some(r) = &running 
-                && !r.load(Ordering::Relaxed) {
+            if let Some(r) = &running
+                && !r.load(Ordering::Relaxed)
+            {
                 return Err(anyhow::anyhow!("Export cancelled"));
             }
 
@@ -304,8 +305,9 @@ impl ExportEngine {
     fn transform_path(&self, path: &str, workspace: &Option<String>) -> String {
         match self.filter.path_mode {
             PathMode::Relative => {
-                if let Some(ws) = workspace 
-                    && let Some(stripped) = path.strip_prefix(ws) {
+                if let Some(ws) = workspace
+                    && let Some(stripped) = path.strip_prefix(ws)
+                {
                     return stripped.trim_start_matches(['/', '\\']).to_string();
                 }
                 path.to_string()

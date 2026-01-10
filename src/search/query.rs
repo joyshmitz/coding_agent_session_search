@@ -895,7 +895,6 @@ struct CachedHit {
     hit: SearchHit,
     lc_content: String,
     lc_title: Option<String>,
-    lc_snippet: String,
     bloom64: u64,
 }
 
@@ -913,9 +912,8 @@ impl CachedHit {
             + self.hit.agent.len()
             + self.hit.workspace.len();
         // Lowercase cache copies
-        let lc_strings = self.lc_content.len()
-            + self.lc_title.as_ref().map_or(0, std::string::String::len)
-            + self.lc_snippet.len();
+        let lc_strings =
+            self.lc_content.len() + self.lc_title.as_ref().map_or(0, std::string::String::len);
         base + hit_strings + lc_strings
     }
 }
@@ -1656,7 +1654,10 @@ impl SearchClient {
         }
 
         // Fast path: reuse cached prefix when user is typing forward (offset 0 only).
-        if offset == 0 {
+        // Only use cache for simple queries (no wildcards, no boolean operators) because
+        // the cache matching logic enforces strict prefix AND semantics which is incorrect
+        // for suffixes, substrings, OR, NOT, or phrases.
+        if offset == 0 && !query.contains('*') && !has_boolean_operators(query) {
             if let Some(cached) = self.cached_prefix_hits(&sanitized, &filters) {
                 let mut filtered: Vec<SearchHit> = cached
                     .into_iter()
@@ -2421,7 +2422,7 @@ impl SearchClient {
         // FTS5 requires balanced double quotes.
         // If unbalanced, strip them to avoid syntax error.
         let mut safe_query = query.to_string();
-        if safe_query.matches('"').count() % 2 != 0 {
+        if !safe_query.matches('"').count().is_multiple_of(2) {
             safe_query = safe_query.replace('"', "");
         }
 
@@ -2634,18 +2635,17 @@ fn maybe_spawn_warm_worker(
 fn cached_hit_from(hit: &SearchHit) -> CachedHit {
     let lc_content = hit.content.to_lowercase();
     let lc_title = (!hit.title.is_empty()).then(|| hit.title.to_lowercase());
-    let lc_snippet = hit.snippet.to_lowercase();
-    let bloom64 = bloom_from_text(&lc_content, &lc_title, &lc_snippet);
+    // Snippet is derived from content, so we don't index/bloom it separately
+    let bloom64 = bloom_from_text(&lc_content, &lc_title);
     CachedHit {
         hit: hit.clone(),
         lc_content,
         lc_title,
-        lc_snippet,
         bloom64,
     }
 }
 
-fn bloom_from_text(content: &str, title: &Option<String>, snippet: &str) -> u64 {
+fn bloom_from_text(content: &str, title: &Option<String>) -> u64 {
     let mut bits = 0u64;
     for token in token_stream(content) {
         bits |= hash_token(token);
@@ -2654,9 +2654,6 @@ fn bloom_from_text(content: &str, title: &Option<String>, snippet: &str) -> u64 
         for token in token_stream(t) {
             bits |= hash_token(token);
         }
-    }
-    for token in token_stream(snippet) {
-        bits |= hash_token(token);
     }
     bits
 }
@@ -2689,11 +2686,19 @@ fn hit_matches_query_cached(hit: &CachedHit, query: &str) -> bool {
         }
     }
 
-    // Verify each token exists in at least one field (implicit AND)
+    // Verify each token matches as a prefix of a word in at least one field (implicit AND)
     tokens.iter().all(|t| {
-        hit.lc_content.contains(t)
-            || hit.lc_title.as_ref().is_some_and(|title| title.contains(t))
-            || hit.lc_snippet.contains(t)
+        // Check content tokens
+        if token_stream(&hit.lc_content).any(|word| word.starts_with(t)) {
+            return true;
+        }
+        // Check title tokens
+        if let Some(title) = &hit.lc_title
+            && token_stream(title).any(|word| word.starts_with(t))
+        {
+            return true;
+        }
+        false
     })
 }
 
@@ -2940,6 +2945,76 @@ mod tests {
     use crate::connectors::{NormalizedConversation, NormalizedMessage, NormalizedSnippet};
     use crate::search::tantivy::TantivyIndex;
     use tempfile::TempDir;
+
+    #[test]
+    fn cache_enforces_prefix_matching() {
+        // Hit contains "arrow"
+        let hit = SearchHit {
+            title: "test".into(),
+            snippet: "".into(),
+            content: "arrow".into(),
+            score: 1.0,
+            source_path: "p".into(),
+            agent: "a".into(),
+            workspace: "w".into(),
+            workspace_original: None,
+            created_at: None,
+            line_number: None,
+            match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+        };
+
+        let cached = CachedHit {
+            hit: hit.clone(),
+            lc_content: "arrow".into(),
+            lc_title: Some("test".into()),
+            bloom64: u64::MAX, // Bypass bloom filter
+        };
+
+        // Query "row" is contained in "arrow" but is NOT a prefix.
+        // It should NOT match if we are enforcing prefix semantics.
+        let matched = hit_matches_query_cached(&cached, "row");
+
+        assert!(
+            !matched,
+            "Query 'row' should NOT match content 'arrow' (prefix match required)"
+        );
+    }
+
+    #[test]
+    fn cache_skips_complex_queries() {
+        let client = SearchClient {
+            reader: None,
+            sqlite: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+        };
+
+        // Wildcard query should skip cache logic entirely (no miss recorded)
+        let _ = client.search("foo*", SearchFilters::default(), 10, 0);
+        let stats = client.cache_stats();
+        assert_eq!(stats.cache_miss, 0, "Wildcard query should not trigger cache miss");
+
+        // Boolean query should skip cache
+        let _ = client.search("foo OR bar", SearchFilters::default(), 10, 0);
+        let stats = client.cache_stats();
+        assert_eq!(stats.cache_miss, 0, "Boolean query should not trigger cache miss");
+
+        // Simple query should trigger miss
+        let _ = client.search("simple", SearchFilters::default(), 10, 0);
+        let stats = client.cache_stats();
+        assert_eq!(stats.cache_miss, 1, "Simple query should trigger cache miss");
+    }
 
     #[test]
     fn cache_prefix_lookup_handles_utf8_boundaries() {
@@ -4006,7 +4081,7 @@ mod tests {
         // Short tool invocations are noise
         assert!(is_tool_invocation_noise("[Tool: Bash]"));
         assert!(is_tool_invocation_noise("[Tool: Read]"));
-        
+
         // Useful content should NOT be filtered
         assert!(!is_tool_invocation_noise("[Tool: Bash - Check status]"));
         assert!(!is_tool_invocation_noise("  [Tool: Grep - Search files]  "));
@@ -4027,7 +4102,7 @@ mod tests {
     fn is_tool_invocation_noise_detects_tool_markers() {
         assert!(is_tool_invocation_noise("[Tool: Bash]"));
         assert!(is_tool_invocation_noise("[Tool: Read]"));
-        
+
         // Useful content allowed
         assert!(!is_tool_invocation_noise("[Tool: Bash - Check status]"));
         assert!(!is_tool_invocation_noise("  [Tool: Write - description]  "));
@@ -5427,13 +5502,6 @@ mod tests {
     }
 
     // --- is_tool_invocation_noise tests ---
-
-    #[test]
-    fn is_tool_invocation_noise_detects_tool_markers() {
-        assert!(is_tool_invocation_noise("[Tool: Bash - Check status]"));
-        assert!(is_tool_invocation_noise("[Tool: Read]"));
-        assert!(is_tool_invocation_noise("  [Tool: Write - description]  "));
-    }
 
     #[test]
     fn is_tool_invocation_noise_allows_real_content() {
