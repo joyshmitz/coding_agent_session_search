@@ -1837,11 +1837,10 @@ mod tests {
 
         let entries: Vec<VectorEntry> = (0..count)
             .map(|i| {
-                let mut vector = vec![0.0f32; dimension];
                 // Create vectors with varying values so search produces distinct scores.
-                for d in 0..dimension {
-                    vector[d] = ((i + d * 7) % 100) as f32 / 100.0;
-                }
+                let vector: Vec<f32> = (0..dimension)
+                    .map(|d| ((i + d * 7) % 100) as f32 / 100.0)
+                    .collect();
                 VectorEntry {
                     message_id: i as u64,
                     created_at_ms: i as i64 * 1000,
@@ -1902,10 +1901,9 @@ mod tests {
 
         let entries: Vec<VectorEntry> = (0..count)
             .map(|i| {
-                let mut vector = vec![0.0f32; dimension];
-                for d in 0..dimension {
-                    vector[d] = ((i + d * 3) % 50) as f32 / 50.0;
-                }
+                let vector: Vec<f32> = (0..dimension)
+                    .map(|d| ((i + d * 3) % 50) as f32 / 50.0)
+                    .collect();
                 VectorEntry {
                     message_id: i as u64,
                     created_at_ms: i as i64 * 1000,
@@ -1922,7 +1920,9 @@ mod tests {
 
         let index = VectorIndex::build("test", "rev", dimension, Quantization::F32, entries)?;
 
-        let query: Vec<f32> = (0..dimension).map(|d| d as f32 / dimension as f32).collect();
+        let query: Vec<f32> = (0..dimension)
+            .map(|d| d as f32 / dimension as f32)
+            .collect();
 
         // Filter to agent 0 only.
         let filter = SemanticFilter {
@@ -1935,7 +1935,10 @@ mod tests {
 
         // Verify all results have agent_id 0.
         for result in &parallel_results {
-            let row = index.rows().iter().find(|r| r.message_id == result.message_id);
+            let row = index
+                .rows()
+                .iter()
+                .find(|r| r.message_id == result.message_id);
             assert!(
                 row.map(|r| r.agent_id) == Some(0),
                 "Parallel search returned wrong agent_id for message {}",
@@ -1946,7 +1949,10 @@ mod tests {
         // Verify same results as sequential.
         let seq_ids: Vec<u64> = sequential_results.iter().map(|r| r.message_id).collect();
         let par_ids: Vec<u64> = parallel_results.iter().map(|r| r.message_id).collect();
-        assert_eq!(seq_ids, par_ids, "Filtered parallel search must match sequential");
+        assert_eq!(
+            seq_ids, par_ids,
+            "Filtered parallel search must match sequential"
+        );
 
         Ok(())
     }
