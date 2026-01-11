@@ -56,7 +56,7 @@ fn test_aes_gcm_vectors() {
         let expected_ciphertext = hex::decode(&v.ciphertext).unwrap();
         let expected_tag = hex::decode(&v.tag).unwrap();
 
-        let (ciphertext, tag) = aes_gcm_encrypt(&key, &nonce, &plaintext, &aad);
+        let (ciphertext, tag) = aes_gcm_encrypt(&key, &nonce, &plaintext, &aad).unwrap();
 
         assert_eq!(
             ciphertext, expected_ciphertext,
@@ -86,7 +86,7 @@ fn test_argon2_vectors() {
         .unwrap();
 
         let expected = hex::decode(&v.expected_hash_hex).unwrap();
-        let result = argon2id_hash(password, salt, &params);
+        let result = argon2id_hash(password, salt, &params).unwrap();
 
         assert_eq!(result, expected, "Argon2 mismatch for {}", v.name);
     }
@@ -101,7 +101,7 @@ fn test_hkdf_vectors() {
         let info = hex::decode(&v.info).unwrap();
         let expected = hex::decode(&v.expected_okm).unwrap();
 
-        let result = hkdf_expand(&ikm, &salt, &info, v.output_len);
+        let result = hkdf_expand(&ikm, &salt, &info, v.output_len).unwrap();
 
         assert_eq!(result, expected, "HKDF mismatch for {}", v.name);
     }

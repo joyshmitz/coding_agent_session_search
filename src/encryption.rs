@@ -10,7 +10,7 @@ pub fn aes_gcm_encrypt(
     nonce: &[u8],
     plaintext: &[u8],
     aad: &[u8],
-) -> (Vec<u8>, Vec<u8>) {
+) -> Result<(Vec<u8>, Vec<u8>), String> {
     let key = Key::<Aes256Gcm>::from_slice(key);
     let cipher = Aes256Gcm::new(key);
     let nonce = Nonce::from_slice(nonce);
@@ -20,13 +20,15 @@ pub fn aes_gcm_encrypt(
     };
 
     // aes-gcm returns ciphertext + tag appended.
-    let ciphertext_with_tag = cipher.encrypt(nonce, payload).expect("encryption failure");
+    let ciphertext_with_tag = cipher
+        .encrypt(nonce, payload)
+        .map_err(|e| format!("encryption failure: {}", e))?;
 
     // Tag is 16 bytes for AES-256-GCM
     let split_idx = ciphertext_with_tag.len() - 16;
     let (cipher, tag) = ciphertext_with_tag.split_at(split_idx);
 
-    (cipher.to_vec(), tag.to_vec())
+    Ok((cipher.to_vec(), tag.to_vec()))
 }
 
 pub fn aes_gcm_decrypt(
@@ -55,7 +57,11 @@ pub fn aes_gcm_decrypt(
         .map_err(|e| format!("decryption failed: {}", e))
 }
 
-pub fn argon2id_hash(password: &[u8], salt: &[u8], params: &Argon2Params) -> Vec<u8> {
+pub fn argon2id_hash(
+    password: &[u8],
+    salt: &[u8],
+    params: &Argon2Params,
+) -> Result<Vec<u8>, String> {
     let argon2 = argon2::Argon2::new(
         argon2::Algorithm::Argon2id,
         argon2::Version::V0x13,
@@ -65,15 +71,16 @@ pub fn argon2id_hash(password: &[u8], salt: &[u8], params: &Argon2Params) -> Vec
     let mut output = vec![0u8; params.output_len().unwrap_or(32)];
     argon2
         .hash_password_into(password, salt, &mut output)
-        .expect("argon2 hashing failed");
-    output
+        .map_err(|e| format!("argon2 hashing failed: {}", e))?;
+    Ok(output)
 }
 
-pub fn hkdf_expand(ikm: &[u8], salt: &[u8], info: &[u8], len: usize) -> Vec<u8> {
+pub fn hkdf_expand(ikm: &[u8], salt: &[u8], info: &[u8], len: usize) -> Result<Vec<u8>, String> {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = vec![0u8; len];
-    hk.expand(info, &mut okm).expect("hkdf expand failed");
-    okm
+    hk.expand(info, &mut okm)
+        .map_err(|e| format!("hkdf expand failed: {}", e))?;
+    Ok(okm)
 }
 
 pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Vec<u8> {
