@@ -86,7 +86,7 @@ fn extract_path_from_position(content: &str, start: usize) -> Option<PathBuf> {
         })
         .unwrap_or(rest.len());
 
-    let path_str = rest.get(..end)?.trim_end_matches(['/', ':', ']', ')']);
+    let path_str = rest.get(..end)?.trim_end_matches(['/', ':']);
 
     // Check for Unix absolute path OR Windows absolute path (C:\ or \\)
     let is_unix_abs = path_str.starts_with('/');
@@ -411,6 +411,13 @@ mod tests {
         let content = "Working directory: \"/data/projects/foo\"";
         let path = extract_path_from_position(content, 19);
         assert_eq!(path, Some(PathBuf::from("/data/projects/foo")));
+    }
+
+    #[test]
+    fn extract_path_handles_quoted_path_with_brackets() {
+        let content = "Working directory: \"/data/projects/[foo]\"";
+        let path = extract_path_from_position(content, 19);
+        assert_eq!(path, Some(PathBuf::from("/data/projects/[foo]")));
     }
 
     #[test]
