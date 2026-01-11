@@ -66,7 +66,7 @@ pub fn create_backup(db_path: &Path) -> Result<Option<std::path::PathBuf>, Migra
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis())
         .unwrap_or(0);
 
     let backup_name = format!(
