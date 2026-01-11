@@ -230,7 +230,7 @@ fn check_schema_compatibility(path: &Path) -> std::result::Result<SchemaCheck, r
     }
 }
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 const MIGRATION_V1: &str = r"
 PRAGMA foreign_keys = ON;
@@ -425,6 +425,11 @@ CREATE INDEX IF NOT EXISTS idx_conversations_source_id ON conversations(source_i
 
 -- Re-enable foreign keys
 PRAGMA foreign_keys = ON;
+";
+
+const MIGRATION_V6: &str = r"
+-- Optimize lookup by source_path (used by TUI detail view)
+CREATE INDEX IF NOT EXISTS idx_conversations_source_path ON conversations(source_path);
 ";
 
 pub struct SqliteStorage {
@@ -1044,24 +1049,32 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V3)?;
             tx.execute_batch(MIGRATION_V4)?;
             tx.execute_batch(MIGRATION_V5)?;
+            tx.execute_batch(MIGRATION_V6)?;
         }
         1 => {
             tx.execute_batch(MIGRATION_V2)?;
             tx.execute_batch(MIGRATION_V3)?;
             tx.execute_batch(MIGRATION_V4)?;
             tx.execute_batch(MIGRATION_V5)?;
+            tx.execute_batch(MIGRATION_V6)?;
         }
         2 => {
             tx.execute_batch(MIGRATION_V3)?;
             tx.execute_batch(MIGRATION_V4)?;
             tx.execute_batch(MIGRATION_V5)?;
+            tx.execute_batch(MIGRATION_V6)?;
         }
         3 => {
             tx.execute_batch(MIGRATION_V4)?;
             tx.execute_batch(MIGRATION_V5)?;
+            tx.execute_batch(MIGRATION_V6)?;
         }
         4 => {
             tx.execute_batch(MIGRATION_V5)?;
+            tx.execute_batch(MIGRATION_V6)?;
+        }
+        5 => {
+            tx.execute_batch(MIGRATION_V6)?;
         }
         v => return Err(anyhow!("unsupported schema version {v}")),
     }
