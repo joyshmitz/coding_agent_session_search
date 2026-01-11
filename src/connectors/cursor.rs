@@ -325,8 +325,12 @@ impl CursorConnector {
         seen_ids.insert(composer_id.clone());
 
         // Extract timestamps
-        let created_at = val.get("createdAt").and_then(|v| v.as_i64());
-        let last_updated_at = val.get("lastUpdatedAt").and_then(|v| v.as_i64());
+        let created_at = val
+            .get("createdAt")
+            .and_then(crate::connectors::parse_timestamp);
+        let last_updated_at = val
+            .get("lastUpdatedAt")
+            .and_then(crate::connectors::parse_timestamp);
 
         // NOTE: Do NOT filter conversations/messages by timestamp here!
         // The file-level check in file_modified_since() is sufficient.

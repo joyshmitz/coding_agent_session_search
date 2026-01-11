@@ -3,7 +3,7 @@
 use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole, Snippet};
 use crate::sources::provenance::{LOCAL_SOURCE_ID, Source, SourceKind};
 use anyhow::{Context, Result, anyhow};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -75,8 +75,43 @@ pub fn create_backup(db_path: &Path) -> Result<Option<std::path::PathBuf>, Migra
         timestamp
     );
 
-    let backup_path = db_path.with_file_name(backup_name);
+    let backup_path = db_path.with_file_name(&backup_name);
+
+    // Try to use SQLite's VACUUM INTO command first, which safely handles WAL files
+    // and produces a clean, minimized backup.
+    let vacuum_success = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .and_then(|conn| {
+        let path_str = backup_path.to_string_lossy();
+        conn.execute("VACUUM INTO ?", params![path_str])
+    })
+    .is_ok();
+
+    if vacuum_success {
+        return Ok(Some(backup_path));
+    }
+
+    // Fallback to filesystem copy if VACUUM INTO failed (e.g., older SQLite or corruption)
+    // We strictly assume this is a single-user tool; if another process is writing,
+    // this raw copy might be inconsistent, but it's better than nothing.
     fs::copy(db_path, &backup_path)?;
+
+    // Best-effort copy of WAL/SHM sidecar files if they exist
+    // SQLite sidecars are named: <path>-wal and <path>-shm
+    let path_str = db_path.to_string_lossy();
+    let backup_str = backup_path.to_string_lossy();
+
+    let wal_src = std::path::PathBuf::from(format!("{}-wal", path_str));
+    let shm_src = std::path::PathBuf::from(format!("{}-shm", path_str));
+
+    if wal_src.exists() {
+        let _ = fs::copy(&wal_src, format!("{}-wal", backup_str));
+    }
+    if shm_src.exists() {
+        let _ = fs::copy(&shm_src, format!("{}-shm", backup_str));
+    }
 
     Ok(Some(backup_path))
 }

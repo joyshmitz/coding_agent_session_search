@@ -2480,6 +2480,64 @@ pub fn footer_legend(show_help: bool) -> &'static str {
     }
 }
 
+/// Helper to prepare a file path for opening in an editor.
+///
+/// For standard files, returns the path as-is.
+/// For virtual paths (e.g. Cursor .vscdb entries), exports the conversation content
+/// to a temporary Markdown file and returns the path to that temp file.
+fn prepare_editor_path(
+    path: &str,
+    db: Option<&crate::storage::sqlite::SqliteStorage>,
+) -> String {
+    // Check for Cursor virtual paths (contain .vscdb)
+    if path.contains(".vscdb") {
+        if let Some(storage) = db {
+            // Attempt to load the conversation from the DB
+            if let Ok(Some(view)) = load_conversation(storage, path) {
+                // Create a temp file with a meaningful name
+                let id = view.convo.id.unwrap_or(0);
+                let safe_title = view
+                    .convo
+                    .title
+                    .as_deref()
+                    .unwrap_or("cursor_session")
+                    .replace(|c: char| !c.is_alphanumeric(), "_");
+                let filename = format!("cass_cursor_{}_{}.md", id, safe_title);
+                let temp_path = std::env::temp_dir().join(filename);
+
+                // Render content to Markdown
+                let mut content = String::new();
+                if let Some(title) = &view.convo.title {
+                    content.push_str(&format!("# {}\n\n", title));
+                }
+
+                content.push_str(&format!("**Agent:** {}\n", view.convo.agent_slug));
+                if let Some(ws) = &view.workspace {
+                    content.push_str(&format!("**Workspace:** {}\n", ws.path.display()));
+                }
+                if let Some(ts) = view.convo.started_at {
+                    content.push_str(&format!("**Date:** {}\n", format_absolute_time(ts)));
+                }
+                content.push_str("\n---\n\n");
+
+                for msg in view.messages {
+                    content.push_str(&format!("### {}\n\n", msg.role));
+                    content.push_str(&msg.content);
+                    content.push_str("\n\n");
+                }
+
+                // Write to temp file
+                if std::fs::write(&temp_path, content).is_ok() {
+                    return temp_path.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+
+    // Default: return original path
+    path.to_string()
+}
+
 pub fn run_tui(
     data_dir_override: Option<std::path::PathBuf>,
     once: bool,
@@ -4972,17 +5030,18 @@ pub fn run_tui(
                                 execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
                                     .ok();
                                 for hit in &selected_hits {
+                                    let path = prepare_editor_path(&hit.source_path, db_reader.as_ref());
                                     let mut cmd = StdCommand::new(&editor_bin);
                                     cmd.args(&editor_args);
                                     if editor_bin == "code" {
                                         if let Some(ln) = hit.line_number {
                                             cmd.arg("--goto")
-                                                .arg(format!("{}:{}", hit.source_path, ln));
+                                                .arg(format!("{}:{}", path, ln));
                                         } else {
-                                            cmd.arg(&hit.source_path);
+                                            cmd.arg(&path);
                                         }
                                     } else {
-                                        cmd.arg(&hit.source_path);
+                                        cmd.arg(&path);
                                     }
                                     let _ = cmd.status();
                                 }
@@ -5335,7 +5394,7 @@ pub fn run_tui(
                         if let Some(pane) = panes.get(active_pane)
                             && let Some(hit) = pane.hits.get(pane.selected)
                         {
-                            let path = &hit.source_path;
+                            let path = prepare_editor_path(&hit.source_path, db_reader.as_ref());
                             // Determine editor: $EDITOR, $VISUAL, or fallback chain
                             let editor = dotenvy::var("EDITOR")
                                 .or_else(|_| dotenvy::var("VISUAL"))
@@ -5367,7 +5426,7 @@ pub fn run_tui(
                                 if let Some(ln) = hit.line_number {
                                     cmd.arg("--goto").arg(format!("{path}:{ln}"));
                                 } else {
-                                    cmd.arg(path);
+                                    cmd.arg(&path);
                                 }
                             } else if editor_bin == "vim"
                                 || editor_bin == "vi"
@@ -5377,16 +5436,16 @@ pub fn run_tui(
                                 if let Some(ln) = hit.line_number {
                                     cmd.arg(format!("+{ln}"));
                                 }
-                                cmd.arg(path);
+                                cmd.arg(&path);
                             } else if editor_bin == "nano" {
                                 // Nano: nano +line file
                                 if let Some(ln) = hit.line_number {
                                     cmd.arg(format!("+{ln}"));
                                 }
-                                cmd.arg(path);
+                                cmd.arg(&path);
                             } else {
                                 // Generic: just pass the path
-                                cmd.arg(path);
+                                cmd.arg(&path);
                             }
 
                             let result = cmd.status();
@@ -5918,17 +5977,18 @@ pub fn run_tui(
                                 execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
                                     .ok();
                                 for hit in &selected_hits {
+                                    let path = prepare_editor_path(&hit.source_path, db_reader.as_ref());
                                     let mut cmd = StdCommand::new(&editor_bin);
                                     cmd.args(&editor_args);
                                     if editor_bin == "code" {
                                         if let Some(ln) = hit.line_number {
                                             cmd.arg("--goto")
-                                                .arg(format!("{}:{}", hit.source_path, ln));
+                                                .arg(format!("{}:{}", path, ln));
                                         } else {
-                                            cmd.arg(&hit.source_path);
+                                            cmd.arg(&path);
                                         }
                                     } else {
-                                        cmd.arg(&hit.source_path);
+                                        cmd.arg(&path);
                                     }
                                     let _ = cmd.status();
                                 }
