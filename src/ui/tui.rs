@@ -5031,10 +5031,13 @@ pub fn run_tui(
                                     .ok();
                                 for hit in &selected_hits {
                                     let path = prepare_editor_path(&hit.source_path, db_reader.as_ref());
+                                    let is_virtual = path != hit.source_path;
                                     let mut cmd = StdCommand::new(&editor_bin);
                                     cmd.args(&editor_args);
+                                    let line_opt = hit.line_number.filter(|_| !is_virtual);
+
                                     if editor_bin == "code" {
-                                        if let Some(ln) = hit.line_number {
+                                        if let Some(ln) = line_opt {
                                             cmd.arg("--goto")
                                                 .arg(format!("{}:{}", path, ln));
                                         } else {
@@ -5395,6 +5398,8 @@ pub fn run_tui(
                             && let Some(hit) = pane.hits.get(pane.selected)
                         {
                             let path = prepare_editor_path(&hit.source_path, db_reader.as_ref());
+                            let is_virtual = path != hit.source_path;
+
                             // Determine editor: $EDITOR, $VISUAL, or fallback chain
                             let editor = dotenvy::var("EDITOR")
                                 .or_else(|_| dotenvy::var("VISUAL"))
@@ -5418,12 +5423,14 @@ pub fn run_tui(
                             disable_raw_mode().ok();
                             execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture).ok();
 
-                            // Build command with optional line number
+                            // Build command with optional line number (suppressed for virtual files)
                             let mut cmd = StdCommand::new(&editor_bin);
                             cmd.args(&editor_args);
+                            let line_opt = hit.line_number.filter(|_| !is_virtual);
+
                             if editor_bin == "code" {
                                 // VS Code: code --goto file:line
-                                if let Some(ln) = hit.line_number {
+                                if let Some(ln) = line_opt {
                                     cmd.arg("--goto").arg(format!("{path}:{ln}"));
                                 } else {
                                     cmd.arg(&path);
@@ -5433,13 +5440,13 @@ pub fn run_tui(
                                 || editor_bin == "nvim"
                             {
                                 // Vim: vim +line file
-                                if let Some(ln) = hit.line_number {
+                                if let Some(ln) = line_opt {
                                     cmd.arg(format!("+{ln}"));
                                 }
                                 cmd.arg(&path);
                             } else if editor_bin == "nano" {
                                 // Nano: nano +line file
-                                if let Some(ln) = hit.line_number {
+                                if let Some(ln) = line_opt {
                                     cmd.arg(format!("+{ln}"));
                                 }
                                 cmd.arg(&path);
@@ -5978,10 +5985,13 @@ pub fn run_tui(
                                     .ok();
                                 for hit in &selected_hits {
                                     let path = prepare_editor_path(&hit.source_path, db_reader.as_ref());
+                                    let is_virtual = path != hit.source_path;
                                     let mut cmd = StdCommand::new(&editor_bin);
                                     cmd.args(&editor_args);
+                                    let line_opt = hit.line_number.filter(|_| !is_virtual);
+
                                     if editor_bin == "code" {
-                                        if let Some(ln) = hit.line_number {
+                                        if let Some(ln) = line_opt {
                                             cmd.arg("--goto")
                                                 .arg(format!("{}:{}", path, ln));
                                         } else {
