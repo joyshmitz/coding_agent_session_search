@@ -218,13 +218,22 @@ function addSecurityHeaders(response) {
 self.addEventListener('message', (event) => {
     const { type, ...data } = event.data;
 
+    // Helper to respond - use MessageChannel port if available, otherwise event.source
+    const respond = (message) => {
+        if (event.ports && event.ports[0]) {
+            event.ports[0].postMessage(message);
+        } else if (event.source) {
+            event.source.postMessage(message);
+        }
+    };
+
     switch (type) {
         case 'SKIP_WAITING':
             self.skipWaiting();
             break;
 
         case 'GET_VERSION':
-            event.source.postMessage({
+            respond({
                 type: 'VERSION',
                 version: CACHE_NAME,
             });
@@ -232,7 +241,7 @@ self.addEventListener('message', (event) => {
 
         case 'CLEAR_CACHE':
             caches.delete(CACHE_NAME).then(() => {
-                event.source.postMessage({ type: 'CACHE_CLEARED' });
+                respond({ type: 'CACHE_CLEARED' });
             });
             break;
 

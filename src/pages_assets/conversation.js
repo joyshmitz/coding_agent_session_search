@@ -3,9 +3,18 @@
  *
  * Displays conversation messages with markdown rendering and syntax highlighting.
  * CSP-safe: No inline styles or eval-based rendering.
+ * Uses virtual scrolling for long conversations with 50+ messages.
  */
 
 import { getConversation, getConversationMessages } from './database.js';
+import { VariableHeightVirtualList } from './virtual-list.js';
+
+// Virtual scrolling configuration
+const VIRTUAL_CONFIG = {
+    MESSAGE_THRESHOLD: 50, // Use virtual scrolling above this message count
+    ESTIMATED_MESSAGE_HEIGHT: 150, // Estimated average message height
+    OVERSCAN: 3, // Extra items to render above/below viewport
+};
 
 // DOMPurify configuration for XSS prevention
 const SANITIZE_CONFIG = {
@@ -24,6 +33,7 @@ const SANITIZE_CONFIG = {
 let currentConversation = null;
 let currentMessages = [];
 let onBack = null;
+let messageVirtualList = null; // Virtual list for long conversations
 
 // DOM element references
 let elements = {
@@ -65,10 +75,15 @@ export async function loadConversation(conversationId, highlightMessageId = null
 
 /**
  * Render the conversation view
+ * Uses virtual scrolling for long conversations (> MESSAGE_THRESHOLD)
  */
 function render(conv, messages, highlightId) {
+    // Clean up previous virtual list
+    destroyVirtualList();
+
     const formattedDate = formatDate(conv.started_at);
     const duration = conv.ended_at ? formatDuration(conv.ended_at - conv.started_at) : null;
+    const useVirtualScrolling = messages.length > VIRTUAL_CONFIG.MESSAGE_THRESHOLD;
 
     elements.container.innerHTML = `
         <div class="conversation-container">
@@ -83,6 +98,7 @@ function render(conv, messages, highlightId) {
                         <span class="conv-date">${escapeHtml(formattedDate)}</span>
                         ${duration ? `<span class="conv-duration">${escapeHtml(duration)}</span>` : ''}
                         <span class="conv-count">${conv.message_count} message${conv.message_count !== 1 ? 's' : ''}</span>
+                        ${useVirtualScrolling ? '<span class="virtual-indicator" title="Virtual scrolling enabled for performance">⚡</span>' : ''}
                     </div>
                 </div>
                 <div class="conversation-actions">
@@ -99,8 +115,7 @@ function render(conv, messages, highlightId) {
                 </div>
             ` : ''}
 
-            <div class="messages-list" id="messages-list">
-                ${messages.map((msg, idx) => renderMessage(msg, idx, msg.id === highlightId)).join('')}
+            <div class="messages-list ${useVirtualScrolling ? 'virtual-messages' : ''}" id="messages-list">
             </div>
         </div>
     `;
@@ -109,16 +124,134 @@ function render(conv, messages, highlightId) {
     elements.header = elements.container.querySelector('.conversation-header');
     elements.messagesList = document.getElementById('messages-list');
 
+    // Render messages (virtual or direct)
+    if (useVirtualScrolling) {
+        renderVirtualMessages(messages, highlightId);
+    } else {
+        renderDirectMessages(messages, highlightId);
+    }
+
     // Set up event listeners
     setupEventListeners();
 
-    // Scroll to highlighted message
-    if (highlightId) {
+    // Scroll to highlighted message (for direct rendering)
+    if (highlightId && !useVirtualScrolling) {
         scrollToMessage(highlightId);
     }
+}
+
+/**
+ * Render messages using virtual scrolling
+ * @private
+ */
+function renderVirtualMessages(messages, highlightId) {
+    // Set up container for virtual scrolling
+    elements.messagesList.style.height = 'calc(100vh - 200px)';
+    elements.messagesList.style.minHeight = '400px';
+    elements.messagesList.style.overflow = 'auto';
+
+    // Create virtual list
+    messageVirtualList = new VariableHeightVirtualList({
+        container: elements.messagesList,
+        totalCount: messages.length,
+        estimatedItemHeight: VIRTUAL_CONFIG.ESTIMATED_MESSAGE_HEIGHT,
+        renderItem: (index) => createMessageElement(messages[index], index, messages[index].id === highlightId),
+        overscan: VIRTUAL_CONFIG.OVERSCAN,
+    });
+
+    console.debug(`[Conversation] Using virtual scrolling for ${messages.length} messages`);
+
+    // Scroll to highlighted message if specified
+    if (highlightId) {
+        const highlightIndex = messages.findIndex(m => m.id === highlightId);
+        if (highlightIndex >= 0) {
+            setTimeout(() => {
+                messageVirtualList.scrollToIndex(highlightIndex, 'center');
+            }, 100);
+        }
+    }
+}
+
+/**
+ * Render messages directly (for short conversations)
+ * @private
+ */
+function renderDirectMessages(messages, highlightId) {
+    const html = messages.map((msg, idx) => renderMessage(msg, idx, msg.id === highlightId)).join('');
+    elements.messagesList.innerHTML = html;
 
     // Apply syntax highlighting
     applySyntaxHighlighting();
+}
+
+/**
+ * Create a message element (for virtual list)
+ * @private
+ */
+function createMessageElement(message, index, isHighlighted = false) {
+    const roleClass = message.role === 'user' ? 'user' : 'assistant';
+    const highlightClass = isHighlighted ? 'highlighted' : '';
+    const time = message.created_at ? formatTime(message.created_at) : '';
+
+    // Render markdown content
+    const renderedContent = renderMarkdown(message.content);
+
+    const article = document.createElement('article');
+    article.className = `message ${roleClass} ${highlightClass}`;
+    article.id = `message-${message.id}`;
+    article.dataset.messageId = message.id;
+
+    article.innerHTML = `
+        <header class="message-header">
+            <span class="message-role ${roleClass}">
+                ${roleClass === 'user' ? '👤 User' : '🤖 Assistant'}
+            </span>
+            ${message.model ? `<span class="message-model">${escapeHtml(message.model)}</span>` : ''}
+            <span class="message-time">${escapeHtml(time)}</span>
+        </header>
+        <div class="message-content">
+            ${renderedContent}
+        </div>
+    `;
+
+    // Apply syntax highlighting after element is created
+    requestAnimationFrame(() => {
+        highlightCodeInElement(article);
+    });
+
+    return article;
+}
+
+/**
+ * Apply syntax highlighting to code blocks in a specific element
+ * @private
+ */
+function highlightCodeInElement(element) {
+    if (typeof window.Prism !== 'undefined') {
+        const codeBlocks = element.querySelectorAll('pre code[data-language]');
+        codeBlocks.forEach(block => {
+            const lang = block.dataset.language;
+            if (window.Prism.languages[lang]) {
+                block.innerHTML = window.Prism.highlight(
+                    block.textContent,
+                    window.Prism.languages[lang],
+                    lang
+                );
+                block.parentElement.classList.add(`language-${lang}`);
+            }
+        });
+    }
+}
+
+/**
+ * Destroy virtual list if it exists
+ * @private
+ */
+function destroyVirtualList() {
+    if (messageVirtualList) {
+        messageVirtualList.destroy();
+        messageVirtualList = null;
+    }
 }
 
 /**
@@ -382,10 +515,20 @@ function showError(message) {
             <div class="conversation-error">
                 <span class="error-icon">⚠️</span>
                 <p>${escapeHtml(message)}</p>
-                <button type="button" class="btn" onclick="history.back()">Go back</button>
+                <button type="button" class="btn" id="error-back-btn">Go back</button>
             </div>
         </div>
     `;
+
+    // Add CSP-safe event listener (no inline onclick)
+    const backBtn = document.getElementById('error-back-btn');
+    backBtn?.addEventListener('click', () => {
+        if (onBack) {
+            onBack();
+        } else {
+            history.back();
+        }
+    });
 }
 
 /**
@@ -473,6 +616,9 @@ export function getCurrentConversation() {
  * Clear the viewer
  */
 export function clearViewer() {
+    // Clean up virtual list
+    destroyVirtualList();
+
     currentConversation = null;
     currentMessages = [];
     elements.container.innerHTML = '';

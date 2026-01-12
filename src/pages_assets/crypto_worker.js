@@ -162,7 +162,7 @@ async function deriveKekFromPassword(password, slot) {
  */
 async function deriveKekFromRecovery(secretBytes, slot) {
     const salt = base64ToArray(slot.salt);
-    const info = new TextEncoder().encode('cass-recovery-kek');
+    const info = new TextEncoder().encode('cass-pages-kek-v2');
 
     // Import secret as HKDF key
     const baseKey = await crypto.subtle.importKey(
@@ -342,15 +342,20 @@ function deriveChunkNonce(baseNonce, counter) {
 }
 
 /**
- * Build chunk AAD: export_id || chunk_index
+ * Build chunk AAD: export_id || chunk_index || schema_version
+ * Must match Rust's build_chunk_aad for interoperability
  */
 function buildChunkAad(exportId, chunkIndex) {
-    const aad = new Uint8Array(exportId.length + 4);
+    const SCHEMA_VERSION = 2;
+    const aad = new Uint8Array(exportId.length + 4 + 1); // 16 + 4 + 1 = 21 bytes
     aad.set(exportId);
 
     // Big-endian u32 chunk index
     const view = new DataView(aad.buffer, exportId.length, 4);
     view.setUint32(0, chunkIndex, false);
+
+    // Schema version byte
+    aad[exportId.length + 4] = SCHEMA_VERSION;
 
     return aad;
 }
