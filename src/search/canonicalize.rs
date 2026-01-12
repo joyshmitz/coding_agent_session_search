@@ -64,6 +64,12 @@ const LOW_SIGNAL_CONTENT: &[&str] = &[
     "thank you.",
 ];
 
+static STREAMING_CANONICALIZE_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    dotenvy::var("CASS_STREAMING_CANONICALIZE")
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true)
+});
+
 /// Canonicalize text for embedding.
 ///
 /// Applies the full preprocessing pipeline to produce clean, consistent text
@@ -78,6 +84,14 @@ const LOW_SIGNAL_CONTENT: &[&str] = &[
 ///
 /// Canonicalized text, suitable for embedding and hashing.
 pub fn canonicalize_for_embedding(text: &str) -> String {
+    if *STREAMING_CANONICALIZE_ENABLED {
+        canonicalize_for_embedding_streaming(text)
+    } else {
+        canonicalize_for_embedding_legacy(text)
+    }
+}
+
+fn canonicalize_for_embedding_legacy(text: &str) -> String {
     // Step 1: Unicode NFC normalization (CRITICAL for hash stability)
     let normalized: String = text.nfc().collect();
 
@@ -92,6 +106,100 @@ pub fn canonicalize_for_embedding(text: &str) -> String {
 
     // Step 5: Truncate to max length
     truncate_to_chars(&filtered, MAX_EMBED_CHARS)
+}
+
+fn canonicalize_for_embedding_streaming(text: &str) -> String {
+    // Step 1: Unicode NFC normalization (CRITICAL for hash stability)
+    let normalized: String = text.nfc().collect();
+
+    let mut writer = WhitespaceWriter::new(normalized.len());
+    let mut in_code_block = false;
+    let mut code_block_lang = String::new();
+    let mut code_lines: Vec<&str> = Vec::new();
+
+    for line in normalized.lines() {
+        if line.starts_with("```") {
+            if in_code_block {
+                let collapsed = collapse_code_block(&code_block_lang, &code_lines);
+                writer.push_text(&collapsed);
+                writer.push_text("\n");
+                code_lines.clear();
+                code_block_lang.clear();
+                in_code_block = false;
+            } else {
+                in_code_block = true;
+                code_block_lang = line.trim_start_matches('`').trim().to_string();
+            }
+        } else if in_code_block {
+            code_lines.push(line);
+        } else {
+            let stripped = strip_markdown_line(line);
+            if !stripped.is_empty() {
+                writer.push_text(&stripped);
+                writer.push_text("\n");
+            }
+        }
+    }
+
+    if in_code_block && !code_lines.is_empty() {
+        let collapsed = collapse_code_block(&code_block_lang, &code_lines);
+        writer.push_text(&collapsed);
+        writer.push_text("\n");
+    }
+
+    let mut output = writer.finish();
+
+    // Step 4: Filter low-signal content (exact match after normalization)
+    let trimmed_lower = output.trim().to_lowercase();
+    for pattern in LOW_SIGNAL_CONTENT {
+        if trimmed_lower == *pattern {
+            return String::new();
+        }
+    }
+
+    // Step 5: Truncate to max length
+    if output.chars().count() <= MAX_EMBED_CHARS {
+        output
+    } else {
+        output = output.chars().take(MAX_EMBED_CHARS).collect();
+        output
+    }
+}
+
+struct WhitespaceWriter {
+    out: String,
+    prev_whitespace: bool,
+}
+
+impl WhitespaceWriter {
+    fn new(capacity: usize) -> Self {
+        let cap = capacity.min(MAX_EMBED_CHARS + 100);
+        Self {
+            out: String::with_capacity(cap),
+            prev_whitespace: true,
+        }
+    }
+
+    fn push_text(&mut self, text: &str) {
+        for c in text.chars() {
+            if c.is_whitespace() {
+                if !self.prev_whitespace {
+                    self.out.push(' ');
+                    self.prev_whitespace = true;
+                }
+            } else {
+                self.out.push(c);
+                self.prev_whitespace = false;
+            }
+        }
+    }
+
+    fn finish(mut self) -> String {
+        if self.out.ends_with(' ') {
+            self.out.pop();
+        }
+        self.out
+    }
 }
 
 /// Compute SHA256 content hash of text.
