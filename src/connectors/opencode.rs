@@ -117,6 +117,8 @@ struct PartInfo {
     #[serde(default)]
     #[allow(dead_code)]
     id: Option<String>,
+    #[serde(default, alias = "order", alias = "sequence")]
+    index: Option<i64>,
     #[serde(rename = "messageID", default)]
     message_id: Option<String>,
     #[serde(rename = "type", default)]
@@ -349,7 +351,7 @@ fn parse_session_file(path: &PathBuf) -> Result<SessionInfo> {
 
 /// Load all messages for a session
 fn load_messages(session_msg_dir: &PathBuf, part_dir: &PathBuf) -> Result<Vec<NormalizedMessage>> {
-    let mut messages = Vec::new();
+    let mut pending: Vec<(Option<i64>, String, NormalizedMessage)> = Vec::new();
 
     // Find all message files for this session
     let msg_files: Vec<PathBuf> = WalkDir::new(session_msg_dir)
@@ -398,7 +400,8 @@ fn load_messages(session_msg_dir: &PathBuf, part_dir: &PathBuf) -> Result<Vec<No
         };
 
         // Get parts for this message
-        let parts = parts_by_msg.get(&msg_info.id).cloned().unwrap_or_default();
+        let mut parts = parts_by_msg.get(&msg_info.id).cloned().unwrap_or_default();
+        sort_parts_for_message(&mut parts);
 
         // Assemble message content from parts
         let content_text = assemble_content_from_parts(&parts);
@@ -422,25 +425,61 @@ fn load_messages(session_msg_dir: &PathBuf, part_dir: &PathBuf) -> Result<Vec<No
             Some("user".to_string())
         };
 
-        messages.push(NormalizedMessage {
-            idx: 0, // Will be assigned later
-            role,
-            author,
+        let message_id = msg_info.id.clone();
+        pending.push((
             created_at,
-            content: content_text,
-            extra: serde_json::json!({
-                "message_id": msg_info.id,
-                "session_id": msg_info.session_id,
-            }),
-            snippets: Vec::new(),
-        });
+            message_id.clone(),
+            NormalizedMessage {
+                idx: 0, // Will be assigned later
+                role,
+                author,
+                created_at,
+                content: content_text,
+                extra: serde_json::json!({
+                    "message_id": message_id,
+                    "session_id": msg_info.session_id,
+                }),
+                snippets: Vec::new(),
+            },
+        ));
     }
 
-    // Sort by timestamp and assign indices
-    messages.sort_by_key(|m| m.created_at.unwrap_or(i64::MAX));
+    // Sort by timestamp, then by message id to ensure deterministic ordering.
+    pending.sort_by(|a, b| {
+        let a_ts = a.0.unwrap_or(i64::MAX);
+        let b_ts = b.0.unwrap_or(i64::MAX);
+        a_ts.cmp(&b_ts).then_with(|| a.1.cmp(&b.1))
+    });
+    let mut messages: Vec<NormalizedMessage> = pending.into_iter().map(|(_, _, msg)| msg).collect();
     super::reindex_messages(&mut messages);
 
     Ok(messages)
+}
+
+fn sort_parts_for_message(parts: &mut [PartInfo]) {
+    parts.sort_by(|a, b| {
+        let a_idx = a.index.unwrap_or(i64::MAX);
+        let b_idx = b.index.unwrap_or(i64::MAX);
+        a_idx
+            .cmp(&b_idx)
+            .then_with(|| {
+                a.id.as_deref()
+                    .unwrap_or("")
+                    .cmp(b.id.as_deref().unwrap_or(""))
+            })
+            .then_with(|| {
+                a.part_type
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(b.part_type.as_deref().unwrap_or(""))
+            })
+            .then_with(|| {
+                a.text
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(b.text.as_deref().unwrap_or(""))
+            })
+    });
 }
 
 /// Assemble message content from parts
@@ -634,6 +673,7 @@ mod tests {
         let parts = vec![
             PartInfo {
                 id: Some("p1".into()),
+                index: None,
                 message_id: Some("m1".into()),
                 part_type: Some("text".into()),
                 text: Some("Hello, world!".into()),
@@ -641,6 +681,7 @@ mod tests {
             },
             PartInfo {
                 id: Some("p2".into()),
+                index: None,
                 message_id: Some("m1".into()),
                 part_type: Some("text".into()),
                 text: Some("Second part".into()),
@@ -656,6 +697,7 @@ mod tests {
     fn assemble_content_from_tool_parts() {
         let parts = vec![PartInfo {
             id: Some("p1".into()),
+            index: None,
             message_id: Some("m1".into()),
             part_type: Some("tool".into()),
             text: None,
@@ -672,6 +714,7 @@ mod tests {
     fn assemble_content_from_reasoning_parts() {
         let parts = vec![PartInfo {
             id: Some("p1".into()),
+            index: None,
             message_id: Some("m1".into()),
             part_type: Some("reasoning".into()),
             text: Some("Let me think about this...".into()),
@@ -686,6 +729,7 @@ mod tests {
     fn assemble_content_from_patch_parts() {
         let parts = vec![PartInfo {
             id: Some("p1".into()),
+            index: None,
             message_id: Some("m1".into()),
             part_type: Some("patch".into()),
             text: Some("@@ -1,3 +1,4 @@".into()),
@@ -701,6 +745,7 @@ mod tests {
         let parts = vec![
             PartInfo {
                 id: Some("p1".into()),
+                index: None,
                 message_id: Some("m1".into()),
                 part_type: Some("text".into()),
                 text: Some("".into()),
@@ -708,6 +753,7 @@ mod tests {
             },
             PartInfo {
                 id: Some("p2".into()),
+                index: None,
                 message_id: Some("m1".into()),
                 part_type: Some("text".into()),
                 text: Some("   ".into()),
@@ -715,6 +761,7 @@ mod tests {
             },
             PartInfo {
                 id: Some("p3".into()),
+                index: None,
                 message_id: Some("m1".into()),
                 part_type: Some("text".into()),
                 text: Some("Actual content".into()),
@@ -730,6 +777,7 @@ mod tests {
         let parts = vec![
             PartInfo {
                 id: Some("p1".into()),
+                index: None,
                 message_id: Some("m1".into()),
                 part_type: Some("step-start".into()),
                 text: Some("Starting...".into()),
@@ -737,6 +785,7 @@ mod tests {
             },
             PartInfo {
                 id: Some("p2".into()),
+                index: None,
                 message_id: Some("m1".into()),
                 part_type: Some("step-finish".into()),
                 text: Some("Done".into()),
@@ -752,6 +801,7 @@ mod tests {
         let parts = vec![
             PartInfo {
                 id: Some("p1".into()),
+                index: None,
                 message_id: Some("m1".into()),
                 part_type: Some("text".into()),
                 text: Some("Here's my analysis:".into()),
@@ -759,6 +809,7 @@ mod tests {
             },
             PartInfo {
                 id: Some("p2".into()),
+                index: None,
                 message_id: Some("m1".into()),
                 part_type: Some("reasoning".into()),
                 text: Some("Thinking...".into()),
@@ -766,6 +817,7 @@ mod tests {
             },
             PartInfo {
                 id: Some("p3".into()),
+                index: None,
                 message_id: Some("m1".into()),
                 part_type: Some("tool".into()),
                 text: None,
@@ -778,6 +830,32 @@ mod tests {
         assert!(content.contains("Here's my analysis:"));
         assert!(content.contains("[Reasoning]"));
         assert!(content.contains("[Tool Output]"));
+    }
+
+    #[test]
+    fn sort_parts_for_message_orders_by_index_then_id() {
+        let mut parts = vec![
+            PartInfo {
+                id: Some("b".into()),
+                index: Some(2),
+                message_id: Some("m1".into()),
+                part_type: Some("text".into()),
+                text: Some("second".into()),
+                state: None,
+            },
+            PartInfo {
+                id: Some("a".into()),
+                index: Some(1),
+                message_id: Some("m1".into()),
+                part_type: Some("text".into()),
+                text: Some("first".into()),
+                state: None,
+            },
+        ];
+
+        sort_parts_for_message(&mut parts);
+        assert_eq!(parts[0].text.as_deref(), Some("first"));
+        assert_eq!(parts[1].text.as_deref(), Some("second"));
     }
 
     // =====================================================

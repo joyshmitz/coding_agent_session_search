@@ -219,6 +219,7 @@ impl Connector for CodexConnector {
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("");
                                         if !text.is_empty() {
+                                            started_at = started_at.or(created);
                                             ended_at = created.or(ended_at);
                                             messages.push(NormalizedMessage {
                                                 idx: 0, // will be re-assigned after filtering
@@ -238,6 +239,7 @@ impl Connector for CodexConnector {
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("");
                                         if !text.is_empty() {
+                                            started_at = started_at.or(created);
                                             ended_at = created.or(ended_at);
                                             messages.push(NormalizedMessage {
                                                 idx: 0, // will be re-assigned after filtering
@@ -559,6 +561,8 @@ mod tests {
         assert_eq!(convs[0].messages.len(), 1);
         assert_eq!(convs[0].messages[0].role, "user");
         assert_eq!(convs[0].messages[0].content, "User typed this");
+        assert!(convs[0].started_at.is_some());
+        assert!(convs[0].ended_at.is_some());
     }
 
     #[test]
@@ -581,6 +585,8 @@ mod tests {
         assert_eq!(convs[0].messages[0].role, "assistant");
         assert_eq!(convs[0].messages[0].author, Some("reasoning".to_string()));
         assert_eq!(convs[0].messages[0].content, "Let me think about this...");
+        assert!(convs[0].started_at.is_some());
+        assert!(convs[0].ended_at.is_some());
     }
 
     #[test]

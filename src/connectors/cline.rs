@@ -213,7 +213,7 @@ impl Connector for ClineConnector {
                         }
 
                         messages.push(NormalizedMessage {
-                            idx: 0, // set later
+                            idx: messages.len() as i64, // preserve original order for stable sorting
                             role: role.to_string(),
                             author: None,
                             created_at: created,
@@ -228,8 +228,12 @@ impl Connector for ClineConnector {
                     continue;
                 }
 
-                // Sort by timestamp to ensure correct ordering
-                messages.sort_by_key(|m| m.created_at.unwrap_or(0));
+                // Sort by timestamp (missing timestamps go last), preserving original order
+                messages.sort_by(|a, b| {
+                    let a_ts = a.created_at.unwrap_or(i64::MAX);
+                    let b_ts = b.created_at.unwrap_or(i64::MAX);
+                    a_ts.cmp(&b_ts).then_with(|| a.idx.cmp(&b.idx))
+                });
 
                 // Re-index
                 super::reindex_messages(&mut messages);
@@ -270,8 +274,8 @@ impl Connector for ClineConnector {
                     title,
                     workspace,
                     source_path: path.clone(),
-                    started_at: messages.first().and_then(|m| m.created_at),
-                    ended_at: messages.last().and_then(|m| m.created_at),
+                    started_at: messages.iter().filter_map(|m| m.created_at).min(),
+                    ended_at: messages.iter().filter_map(|m| m.created_at).max(),
                     metadata: serde_json::json!({"source": "cline"}),
                     messages,
                 });
