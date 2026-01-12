@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
+use arrayvec::ArrayVec;
 use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TEXT, TextFieldIndexing,
     TextOptions,
@@ -330,17 +331,32 @@ impl TantivyIndex {
     }
 }
 
+/// Maximum number of byte indices needed for edge n-gram generation.
+/// We need indices for up to 21 characters + 1 for the end position = 22 entries.
+/// This supports n-grams of length 2..=20 (max ngram length of 20 chars).
+const MAX_NGRAM_INDICES: usize = 22;
+
+/// Generate edge n-grams from text without heap allocation for index collection.
+///
+/// Uses `ArrayVec` instead of `Vec` to store byte indices on the stack,
+/// reducing allocator pressure during bulk indexing operations.
+///
+/// # Performance
+/// This optimization avoids heap allocation for the indices vector on every
+/// word processed. For large indexing jobs with millions of words, this
+/// eliminates millions of small allocations and deallocations.
 fn generate_edge_ngrams(text: &str) -> String {
     let mut ngrams = String::with_capacity(text.len() * 2);
     // Split by non-alphanumeric characters to identify words
     for word in text.split(|c: char| !c.is_alphanumeric()) {
-        // Collect byte indices of characters, plus the total length
+        // Collect byte indices of characters, plus the total length.
+        // Using ArrayVec avoids heap allocation since max size is known (22).
         // We only need up to 21 indices (to support max ngram length of 20)
-        let indices: Vec<usize> = word
+        let indices: ArrayVec<usize, MAX_NGRAM_INDICES> = word
             .char_indices()
             .map(|(i, _)| i)
             .chain(std::iter::once(word.len()))
-            .take(22) // Take 21 chars + end index
+            .take(MAX_NGRAM_INDICES)
             .collect();
 
         // Need at least 3 indices (start, char 2, end/char 3) for length 2 ngram
@@ -784,7 +800,7 @@ mod tests {
     #[test]
     fn title_prefix_ngrams_are_reused_for_each_message_doc() {
         use crate::connectors::{NormalizedConversation, NormalizedMessage};
-        use crate::search::query::{SearchClient, SearchFilters};
+        use crate::search::query::{FieldMask, SearchClient, SearchFilters};
 
         let dir = TempDir::new().unwrap();
         let index_path = dir.path();
@@ -830,7 +846,7 @@ mod tests {
 
         let client = SearchClient::open(index_path, None).unwrap().unwrap();
         let hits = client
-            .search("un", SearchFilters::default(), 10, 0)
+            .search("un", SearchFilters::default(), 10, 0, FieldMask::FULL)
             .unwrap();
 
         assert_eq!(

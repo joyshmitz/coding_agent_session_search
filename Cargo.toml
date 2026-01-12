@@ -35,6 +35,7 @@ rayon = "*"
 crossbeam-channel = "*"
 parking_lot = "*"
 lru = "*"
+fxhash = "*"  # Fast non-cryptographic hashing for cache keys (P1 Opt 1.3)
 reqwest = { version = "*", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 ratatui = { version = "*", features = ["crossterm"] }
 crossterm = "*"
@@ -56,6 +57,7 @@ half = "*"
 memmap2 = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries"] }
 wide = "0.7"  # Portable SIMD for P0 Opt 2: SIMD dot product
+arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
 
 # Crypto for ChatGPT encrypted conversations
 aes-gcm = "0.10"
@@ -74,7 +76,7 @@ argon2 = "*"
 hkdf = "*"
 zeroize = { version = "*", features = ["derive"] }
 flate2 = "*"
-rand = "*"
+rand = "0.8"  # Pin to 0.8.x for rand_core 0.6.x compatibility with argon2/aes-gcm
 
 # macOS keychain access (optional, for ChatGPT decryption)
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -93,8 +95,8 @@ once_cell = "*"
 serial_test = "*"
 proptest = "*"
 serde_yaml = "0.9.34"
-rand = "*"
-rand_chacha = "*"
+rand = "0.8"  # Match main dependency version
+rand_chacha = "0.3"  # Compatible with rand 0.8.x
 
 [[bin]]
 name = "cass"
