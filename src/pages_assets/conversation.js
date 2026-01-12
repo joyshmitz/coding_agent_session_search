@@ -1,0 +1,488 @@
+/**
+ * cass Archive Conversation Viewer
+ *
+ * Displays conversation messages with markdown rendering and syntax highlighting.
+ * CSP-safe: No inline styles or eval-based rendering.
+ */
+
+import { getConversation, getConversationMessages } from './database.js';
+
+// DOMPurify configuration for XSS prevention
+const SANITIZE_CONFIG = {
+    ALLOWED_TAGS: [
+        'p', 'br', 'strong', 'em', 'b', 'i', 'code', 'pre', 'ul', 'ol', 'li',
+        'a', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'mark', 'span',
+        'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr', 'del', 'sup', 'sub',
+    ],
+    ALLOWED_ATTR: ['href', 'title', 'class', 'data-language', 'id', 'name'],
+    ALLOW_DATA_ATTR: false,
+    FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input'],
+    FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover', 'style'],
+};
+
+// Module state
+let currentConversation = null;
+let currentMessages = [];
+let onBack = null;
+
+// DOM element references
+let elements = {
+    container: null,
+    header: null,
+    messagesList: null,
+};
+
+/**
+ * Initialize the conversation viewer
+ * @param {HTMLElement} container - Container element
+ * @param {Function} backCallback - Callback when back button is clicked
+ */
+export function initConversationViewer(container, backCallback) {
+    elements.container = container;
+    onBack = backCallback;
+}
+
+/**
+ * Load and display a conversation
+ * @param {number} conversationId - Conversation ID
+ * @param {number|null} highlightMessageId - Message ID to highlight/scroll to
+ */
+export async function loadConversation(conversationId, highlightMessageId = null) {
+    // Load conversation metadata
+    currentConversation = getConversation(conversationId);
+
+    if (!currentConversation) {
+        showError('Conversation not found');
+        return;
+    }
+
+    // Load messages
+    currentMessages = getConversationMessages(conversationId);
+
+    // Render the view
+    render(currentConversation, currentMessages, highlightMessageId);
+}
+
+/**
+ * Render the conversation view
+ */
+function render(conv, messages, highlightId) {
+    const formattedDate = formatDate(conv.started_at);
+    const duration = conv.ended_at ? formatDuration(conv.ended_at - conv.started_at) : null;
+
+    elements.container.innerHTML = `
+        <div class="conversation-container">
+            <header class="conversation-header">
+                <button id="back-btn" type="button" class="back-btn" aria-label="Back to search">
+                    ←
+                </button>
+                <div class="conversation-title">
+                    <h2>${escapeHtml(conv.title || 'Untitled conversation')}</h2>
+                    <div class="meta">
+                        <span class="conv-agent">${escapeHtml(formatAgentName(conv.agent))}</span>
+                        <span class="conv-date">${escapeHtml(formattedDate)}</span>
+                        ${duration ? `<span class="conv-duration">${escapeHtml(duration)}</span>` : ''}
+                        <span class="conv-count">${conv.message_count} message${conv.message_count !== 1 ? 's' : ''}</span>
+                    </div>
+                </div>
+                <div class="conversation-actions">
+                    <button id="copy-btn" type="button" class="btn btn-small" aria-label="Copy conversation">
+                        📋 Copy
+                    </button>
+                </div>
+            </header>
+
+            ${conv.workspace ? `
+                <div class="conversation-workspace">
+                    <span class="workspace-label">Workspace:</span>
+                    <code>${escapeHtml(conv.workspace)}</code>
+                </div>
+            ` : ''}
+
+            <div class="messages-list" id="messages-list">
+                ${messages.map((msg, idx) => renderMessage(msg, idx, msg.id === highlightId)).join('')}
+            </div>
+        </div>
+    `;
+
+    // Cache element references
+    elements.header = elements.container.querySelector('.conversation-header');
+    elements.messagesList = document.getElementById('messages-list');
+
+    // Set up event listeners
+    setupEventListeners();
+
+    // Scroll to highlighted message
+    if (highlightId) {
+        scrollToMessage(highlightId);
+    }
+
+    // Apply syntax highlighting
+    applySyntaxHighlighting();
+}
+
+/**
+ * Render a single message
+ */
+function renderMessage(message, index, isHighlighted = false) {
+    const roleClass = message.role === 'user' ? 'user' : 'assistant';
+    const highlightClass = isHighlighted ? 'highlighted' : '';
+    const time = message.created_at ? formatTime(message.created_at) : '';
+
+    // Render markdown content
+    const renderedContent = renderMarkdown(message.content);
+
+    return `
+        <article
+            class="message ${roleClass} ${highlightClass}"
+            id="message-${message.id}"
+            data-message-id="${message.id}"
+        >
+            <header class="message-header">
+                <span class="message-role ${roleClass}">
+                    ${roleClass === 'user' ? '👤 User' : '🤖 Assistant'}
+                </span>
+                ${message.model ? `<span class="message-model">${escapeHtml(message.model)}</span>` : ''}
+                <span class="message-time">${escapeHtml(time)}</span>
+            </header>
+            <div class="message-content">
+                ${renderedContent}
+            </div>
+        </article>
+    `;
+}
+
+/**
+ * Set up event listeners
+ */
+function setupEventListeners() {
+    // Back button
+    const backBtn = document.getElementById('back-btn');
+    backBtn?.addEventListener('click', () => {
+        if (onBack) {
+            onBack();
+        }
+    });
+
+    // Copy button
+    const copyBtn = document.getElementById('copy-btn');
+    copyBtn?.addEventListener('click', () => {
+        copyConversation();
+    });
+
+    // Escape key to go back
+    const handleKeydown = (e) => {
+        if (e.key === 'Escape' && onBack) {
+            onBack();
+            document.removeEventListener('keydown', handleKeydown);
+        }
+    };
+    document.addEventListener('keydown', handleKeydown);
+}
+
+/**
+ * Render markdown content (simple implementation)
+ * Falls back to plain text if marked.js is not available
+ */
+function renderMarkdown(content) {
+    if (!content) return '';
+
+    // Check if marked is available
+    if (typeof window.marked !== 'undefined') {
+        try {
+            const html = window.marked.parse(content);
+            return sanitizeHtml(html);
+        } catch (error) {
+            console.warn('[Conversation] Markdown rendering failed:', error);
+        }
+    }
+
+    // Fallback: simple markdown-like rendering
+    return sanitizeHtml(simpleMarkdown(content));
+}
+
+/**
+ * Simple markdown-like rendering (fallback)
+ */
+function simpleMarkdown(text) {
+    // Escape HTML first
+    let html = escapeHtml(text);
+
+    // Code blocks
+    html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+        const langClass = lang ? ` data-language="${lang}"` : '';
+        return `<pre><code${langClass}>${code.trim()}</code></pre>`;
+    });
+
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    // Bold
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+
+    // Italic
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    html = html.replace(/_([^_]+)_/g, '<em>$1</em>');
+
+    // Headers
+    html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+    // Links
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+    // Line breaks
+    html = html.replace(/\n\n/g, '</p><p>');
+    html = `<p>${html}</p>`;
+
+    // Clean up empty paragraphs
+    html = html.replace(/<p>\s*<\/p>/g, '');
+    html = html.replace(/<p>(<h[1-6]>)/g, '$1');
+    html = html.replace(/(<\/h[1-6]>)<\/p>/g, '$1');
+    html = html.replace(/<p>(<pre>)/g, '$1');
+    html = html.replace(/(<\/pre>)<\/p>/g, '$1');
+
+    return html;
+}
+
+/**
+ * Sanitize HTML to prevent XSS
+ */
+function sanitizeHtml(html) {
+    // Check if DOMPurify is available
+    if (typeof window.DOMPurify !== 'undefined') {
+        return window.DOMPurify.sanitize(html, SANITIZE_CONFIG);
+    }
+
+    // Fallback: create a document fragment and extract text/safe elements
+    const template = document.createElement('template');
+    template.innerHTML = html;
+
+    // Remove script tags and event handlers
+    const scripts = template.content.querySelectorAll('script, style, iframe, object, embed');
+    scripts.forEach(el => el.remove());
+
+    // Remove event handlers
+    const allElements = template.content.querySelectorAll('*');
+    allElements.forEach(el => {
+        Array.from(el.attributes).forEach(attr => {
+            if (attr.name.startsWith('on') || attr.name === 'style') {
+                el.removeAttribute(attr.name);
+            }
+        });
+    });
+
+    return template.innerHTML;
+}
+
+/**
+ * Apply syntax highlighting to code blocks
+ */
+function applySyntaxHighlighting() {
+    // Check if Prism is available
+    if (typeof window.Prism !== 'undefined') {
+        const codeBlocks = elements.container.querySelectorAll('pre code[data-language]');
+        codeBlocks.forEach(block => {
+            const lang = block.dataset.language;
+            if (window.Prism.languages[lang]) {
+                block.innerHTML = window.Prism.highlight(
+                    block.textContent,
+                    window.Prism.languages[lang],
+                    lang
+                );
+                block.parentElement.classList.add(`language-${lang}`);
+            }
+        });
+    }
+}
+
+/**
+ * Scroll to a specific message
+ */
+function scrollToMessage(messageId) {
+    setTimeout(() => {
+        const messageEl = document.getElementById(`message-${messageId}`);
+        if (messageEl) {
+            messageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            messageEl.classList.add('highlight-flash');
+            setTimeout(() => {
+                messageEl.classList.remove('highlight-flash');
+            }, 2000);
+        }
+    }, 100);
+}
+
+/**
+ * Copy conversation to clipboard
+ */
+async function copyConversation() {
+    if (!currentConversation || !currentMessages.length) return;
+
+    const text = formatConversationAsText(currentConversation, currentMessages);
+
+    try {
+        await navigator.clipboard.writeText(text);
+        showCopyFeedback('Copied!');
+    } catch (error) {
+        console.error('[Conversation] Copy failed:', error);
+        showCopyFeedback('Copy failed');
+    }
+}
+
+/**
+ * Format conversation as plain text
+ */
+function formatConversationAsText(conv, messages) {
+    const lines = [
+        `# ${conv.title || 'Untitled conversation'}`,
+        `Agent: ${conv.agent}`,
+        `Date: ${formatDate(conv.started_at)}`,
+        conv.workspace ? `Workspace: ${conv.workspace}` : '',
+        '',
+        '---',
+        '',
+    ];
+
+    messages.forEach(msg => {
+        const role = msg.role === 'user' ? 'User' : 'Assistant';
+        lines.push(`## ${role}:`);
+        lines.push('');
+        lines.push(msg.content);
+        lines.push('');
+        lines.push('---');
+        lines.push('');
+    });
+
+    return lines.filter(line => line !== null).join('\n');
+}
+
+/**
+ * Show copy feedback
+ */
+function showCopyFeedback(message) {
+    const copyBtn = document.getElementById('copy-btn');
+    if (copyBtn) {
+        const originalText = copyBtn.innerHTML;
+        copyBtn.innerHTML = message;
+        setTimeout(() => {
+            copyBtn.innerHTML = originalText;
+        }, 2000);
+    }
+}
+
+/**
+ * Show error message
+ */
+function showError(message) {
+    elements.container.innerHTML = `
+        <div class="conversation-container">
+            <div class="conversation-error">
+                <span class="error-icon">⚠️</span>
+                <p>${escapeHtml(message)}</p>
+                <button type="button" class="btn" onclick="history.back()">Go back</button>
+            </div>
+        </div>
+    `;
+}
+
+/**
+ * Format agent name for display
+ */
+function formatAgentName(agent) {
+    if (!agent) return 'Unknown';
+    return agent.charAt(0).toUpperCase() + agent.slice(1);
+}
+
+/**
+ * Format timestamp as date string
+ */
+function formatDate(timestamp) {
+    if (!timestamp) return '';
+
+    const date = new Date(timestamp);
+    return date.toLocaleDateString(undefined, {
+        weekday: 'short',
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+}
+
+/**
+ * Format timestamp as time string
+ */
+function formatTime(timestamp) {
+    if (!timestamp) return '';
+
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString(undefined, {
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+}
+
+/**
+ * Format duration in human-readable format
+ */
+function formatDuration(ms) {
+    if (!ms || ms < 0) return '';
+
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+
+    if (hours > 0) {
+        return `${hours}h ${minutes % 60}m`;
+    }
+    if (minutes > 0) {
+        return `${minutes}m`;
+    }
+    return `${seconds}s`;
+}
+
+/**
+ * Escape HTML special characters
+ */
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/**
+ * Get current conversation ID
+ */
+export function getCurrentConversationId() {
+    return currentConversation?.id || null;
+}
+
+/**
+ * Get current conversation data
+ */
+export function getCurrentConversation() {
+    return currentConversation;
+}
+
+/**
+ * Clear the viewer
+ */
+export function clearViewer() {
+    currentConversation = null;
+    currentMessages = [];
+    elements.container.innerHTML = '';
+}
+
+// Export default
+export default {
+    initConversationViewer,
+    loadConversation,
+    getCurrentConversationId,
+    getCurrentConversation,
+    clearViewer,
+};
