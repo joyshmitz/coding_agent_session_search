@@ -889,6 +889,62 @@ fn stable_hit_hash(
     hash
 }
 
+/// Comparator for FusedHit: descending RRF score, prefer dual-source, then key for determinism.
+fn cmp_fused_hit_desc(a: &FusedHit, b: &FusedHit) -> CmpOrdering {
+    b.score
+        .rrf
+        .total_cmp(&a.score.rrf)
+        .then_with(|| {
+            let a_both = a.score.lexical_rank.is_some() && a.score.semantic_rank.is_some();
+            let b_both = b.score.lexical_rank.is_some() && b.score.semantic_rank.is_some();
+            match (b_both, a_both) {
+                (true, false) => CmpOrdering::Greater,
+                (false, true) => CmpOrdering::Less,
+                _ => CmpOrdering::Equal,
+            }
+        })
+        .then_with(|| a.key.cmp(&b.key))
+}
+
+/// Threshold below which full sort is faster than quickselect + partial sort.
+const QUICKSELECT_THRESHOLD: usize = 64;
+
+/// Partition fused hits to get top-k in O(N + k log k) instead of O(N log N).
+///
+/// For k << N, this is significantly faster than sorting all N elements.
+/// Uses `select_nth_unstable_by` for O(N) average-case partitioning,
+/// then sorts only the top-k elements.
+fn top_k_fused(mut hits: Vec<FusedHit>, k: usize) -> Vec<FusedHit> {
+    let n = hits.len();
+
+    // Edge cases: nothing to do or k >= n
+    if n == 0 || k == 0 {
+        return Vec::new();
+    }
+    if k >= n {
+        hits.sort_by(cmp_fused_hit_desc);
+        return hits;
+    }
+
+    // For small N, full sort has less overhead than quickselect
+    if n < QUICKSELECT_THRESHOLD {
+        hits.sort_by(cmp_fused_hit_desc);
+        hits.truncate(k);
+        return hits;
+    }
+
+    // Partition: move top-k elements to the front (unordered) in O(N)
+    hits.select_nth_unstable_by(k - 1, cmp_fused_hit_desc);
+
+    // Truncate to just the top-k elements
+    hits.truncate(k);
+
+    // Sort just the top-k in O(k log k)
+    hits.sort_by(cmp_fused_hit_desc);
+
+    hits
+}
+
 /// Fuse lexical + semantic hits using Reciprocal Rank Fusion (RRF).
 /// Applies deterministic tie-breaking and returns the requested page slice.
 pub fn rrf_fuse_hits(
@@ -930,25 +986,14 @@ pub fn rrf_fuse_hits(
         }
     }
 
-    fused.sort_by(|a, b| {
-        b.score
-            .rrf
-            .total_cmp(&a.score.rrf)
-            .then_with(|| {
-                let a_both = a.score.lexical_rank.is_some() && a.score.semantic_rank.is_some();
-                let b_both = b.score.lexical_rank.is_some() && b.score.semantic_rank.is_some();
-                match (b_both, a_both) {
-                    (true, false) => CmpOrdering::Greater,
-                    (false, true) => CmpOrdering::Less,
-                    _ => CmpOrdering::Equal,
-                }
-            })
-            .then_with(|| a.key.cmp(&b.key))
-    });
+    // Use quickselect to get top-(offset+limit) elements in O(N + k log k)
+    // instead of sorting all N elements in O(N log N)
+    let k = offset.saturating_add(limit);
+    let fused = top_k_fused(fused, k);
 
+    // Take the slice from offset to offset+limit
     let start = offset.min(fused.len());
-    let end = start.saturating_add(limit).min(fused.len());
-    let mut results = Vec::with_capacity(end.saturating_sub(start));
+    let mut results = Vec::with_capacity(limit.min(fused.len().saturating_sub(start)));
     for mut entry in fused.into_iter().skip(start).take(limit) {
         entry.hit.score = entry.score.rrf;
         results.push(entry.hit);
@@ -3554,6 +3599,227 @@ mod tests {
 
         let terms_miss = QueryTermsLower::from_query("missing");
         assert!(!hit_matches_query_cached_precomputed(&cached, &terms_miss));
+    }
+
+    // ==========================================================================
+    // Quickselect Top-K Tests (Opt 2.5)
+    // ==========================================================================
+
+    fn make_fused_hit(id: &str, rrf: f32, lexical: Option<usize>, semantic: Option<usize>) -> FusedHit {
+        FusedHit {
+            key: SearchHitKey {
+                source_id: "local".to_string(),
+                source_path: id.to_string(),
+                line_number: None,
+                created_at: None,
+                content_hash: 0,
+            },
+            score: HybridScore {
+                rrf,
+                lexical_rank: lexical,
+                semantic_rank: semantic,
+                lexical_score: None,
+                semantic_score: None,
+            },
+            hit: SearchHit {
+                title: id.into(),
+                snippet: "".into(),
+                content: "".into(),
+                content_hash: 0,
+                score: rrf,
+                source_path: id.into(),
+                agent: "test".into(),
+                workspace: "test".into(),
+                workspace_original: None,
+                created_at: None,
+                line_number: None,
+                match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+            },
+        }
+    }
+
+    #[test]
+    fn top_k_fused_basic() {
+        let hits = vec![
+            make_fused_hit("a", 1.0, Some(0), None),
+            make_fused_hit("b", 3.0, Some(1), None),
+            make_fused_hit("c", 2.0, Some(2), None),
+            make_fused_hit("d", 5.0, Some(3), None),
+            make_fused_hit("e", 4.0, Some(4), None),
+        ];
+
+        let top = top_k_fused(hits, 3);
+
+        assert_eq!(top.len(), 3);
+        assert_eq!(top[0].key.source_path, "d"); // 5.0
+        assert_eq!(top[1].key.source_path, "e"); // 4.0
+        assert_eq!(top[2].key.source_path, "b"); // 3.0
+    }
+
+    #[test]
+    fn top_k_fused_empty() {
+        let hits: Vec<FusedHit> = vec![];
+        let top = top_k_fused(hits, 10);
+        assert!(top.is_empty());
+    }
+
+    #[test]
+    fn top_k_fused_k_zero() {
+        let hits = vec![
+            make_fused_hit("a", 1.0, Some(0), None),
+            make_fused_hit("b", 2.0, Some(1), None),
+        ];
+        let top = top_k_fused(hits, 0);
+        assert!(top.is_empty());
+    }
+
+    #[test]
+    fn top_k_fused_k_larger_than_n() {
+        let hits = vec![
+            make_fused_hit("a", 1.0, Some(0), None),
+            make_fused_hit("b", 2.0, Some(1), None),
+        ];
+
+        let top = top_k_fused(hits, 10);
+
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].key.source_path, "b"); // 2.0
+        assert_eq!(top[1].key.source_path, "a"); // 1.0
+    }
+
+    #[test]
+    fn top_k_fused_k_equals_n() {
+        let hits = vec![
+            make_fused_hit("a", 3.0, Some(0), None),
+            make_fused_hit("b", 1.0, Some(1), None),
+            make_fused_hit("c", 2.0, Some(2), None),
+        ];
+
+        let top = top_k_fused(hits, 3);
+
+        assert_eq!(top.len(), 3);
+        assert_eq!(top[0].key.source_path, "a"); // 3.0
+        assert_eq!(top[1].key.source_path, "c"); // 2.0
+        assert_eq!(top[2].key.source_path, "b"); // 1.0
+    }
+
+    #[test]
+    fn top_k_fused_k_one() {
+        let hits = vec![
+            make_fused_hit("a", 1.0, Some(0), None),
+            make_fused_hit("b", 3.0, Some(1), None),
+            make_fused_hit("c", 2.0, Some(2), None),
+        ];
+
+        let top = top_k_fused(hits, 1);
+
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].key.source_path, "b");
+        assert_eq!(top[0].score.rrf, 3.0);
+    }
+
+    #[test]
+    fn top_k_fused_duplicate_scores() {
+        let hits = vec![
+            make_fused_hit("a", 2.0, Some(0), None),
+            make_fused_hit("b", 2.0, Some(1), None),
+            make_fused_hit("c", 2.0, Some(2), None),
+            make_fused_hit("d", 1.0, Some(3), None),
+        ];
+
+        let top = top_k_fused(hits, 2);
+
+        assert_eq!(top.len(), 2);
+        // All have same score, so order is by key (deterministic tie-breaking)
+        assert_eq!(top[0].score.rrf, 2.0);
+        assert_eq!(top[1].score.rrf, 2.0);
+    }
+
+    #[test]
+    fn top_k_fused_dual_source_tiebreaker() {
+        // Hits with same RRF score, but some have both lexical and semantic ranks
+        let hits = vec![
+            make_fused_hit("a", 2.0, Some(0), None),      // lexical only
+            make_fused_hit("b", 2.0, Some(1), Some(0)),   // both sources
+            make_fused_hit("c", 2.0, None, Some(1)),      // semantic only
+        ];
+
+        let top = top_k_fused(hits, 3);
+
+        assert_eq!(top.len(), 3);
+        // Dual-source hit should come first
+        assert_eq!(top[0].key.source_path, "b");
+    }
+
+    #[test]
+    fn top_k_fused_large_input_uses_quickselect() {
+        // Create input larger than QUICKSELECT_THRESHOLD to trigger quickselect path
+        let hits: Vec<FusedHit> = (0..100)
+            .map(|i| make_fused_hit(&format!("hit_{}", i), i as f32, Some(i), None))
+            .collect();
+
+        let top = top_k_fused(hits, 10);
+
+        assert_eq!(top.len(), 10);
+        // Should be sorted descending: hit_99, hit_98, ... hit_90
+        for (i, hit) in top.iter().enumerate() {
+            assert_eq!(hit.key.source_path, format!("hit_{}", 99 - i));
+            assert_eq!(hit.score.rrf, (99 - i) as f32);
+        }
+    }
+
+    #[test]
+    fn top_k_fused_equivalence_with_full_sort() {
+        // Verify quickselect produces same results as full sort
+        for n in [10, 50, 100, 200] {
+            for k in [1, 5, 10, 25] {
+                if k > n {
+                    continue;
+                }
+
+                let hits: Vec<FusedHit> = (0..n)
+                    .map(|i| {
+                        // Pseudo-random scores using simple hash
+                        let score = ((i * 17 + 7) % 1000) as f32;
+                        make_fused_hit(&format!("hit_{}", i), score, Some(i), None)
+                    })
+                    .collect();
+
+                // Baseline: full sort
+                let mut baseline = hits.clone();
+                baseline.sort_by(cmp_fused_hit_desc);
+                baseline.truncate(k);
+
+                // Quickselect
+                let quickselect = top_k_fused(hits, k);
+
+                // Verify same length
+                assert_eq!(quickselect.len(), baseline.len(), "n={}, k={}", n, k);
+
+                // Verify same elements in same order
+                for (q, b) in quickselect.iter().zip(baseline.iter()) {
+                    assert_eq!(
+                        q.key.source_path, b.key.source_path,
+                        "n={}, k={}: mismatch", n, k
+                    );
+                    assert_eq!(q.score.rrf, b.score.rrf, "n={}, k={}: score mismatch", n, k);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cmp_fused_hit_desc_basic_ordering() {
+        let a = make_fused_hit("a", 2.0, Some(0), None);
+        let b = make_fused_hit("b", 3.0, Some(1), None);
+
+        // Higher score should come first (compare returns Less)
+        assert_eq!(cmp_fused_hit_desc(&a, &b), CmpOrdering::Greater);
+        assert_eq!(cmp_fused_hit_desc(&b, &a), CmpOrdering::Less);
+        assert_eq!(cmp_fused_hit_desc(&a, &a), CmpOrdering::Equal);
     }
 
     // ==========================================================================
