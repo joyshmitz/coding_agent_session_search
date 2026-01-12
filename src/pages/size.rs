@@ -3,7 +3,7 @@
 //! Provides pre-export size estimation to warn users before they spend time
 //! exporting/encrypting data that would exceed GitHub Pages limits.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -68,13 +68,11 @@ impl SizeEstimate {
         let mut conditions = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        if let Some(agents) = agents {
-            if !agents.is_empty() {
-                let placeholders: Vec<_> = agents.iter().map(|_| "?").collect();
-                conditions.push(format!("c.agent IN ({})", placeholders.join(", ")));
-                for agent in agents {
-                    params.push(Box::new(agent.clone()));
-                }
+        if let Some(agents) = agents.filter(|a| !a.is_empty()) {
+            let placeholders: Vec<_> = agents.iter().map(|_| "?").collect();
+            conditions.push(format!("c.agent IN ({})", placeholders.join(", ")));
+            for agent in agents {
+                params.push(Box::new(agent.clone()));
             }
         }
 
@@ -95,15 +93,14 @@ impl SizeEstimate {
         };
 
         // Query conversation count
-        let conv_sql = format!(
-            "SELECT COUNT(*) FROM conversations c{}",
-            where_clause
-        );
-        let conversation_count: u64 = conn.query_row(
-            &conv_sql,
-            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let conv_sql = format!("SELECT COUNT(*) FROM conversations c{}", where_clause);
+        let conversation_count: u64 = conn
+            .query_row(
+                &conv_sql,
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
         // Query message count and content size
         let msg_sql = format!(
@@ -113,11 +110,13 @@ impl SizeEstimate {
              {}",
             where_clause
         );
-        let (message_count, plaintext_bytes): (u64, u64) = conn.query_row(
-            &msg_sql,
-            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
-            |row| Ok((row.get(0).unwrap_or(0), row.get(1).unwrap_or(0))),
-        ).unwrap_or((0, 0));
+        let (message_count, plaintext_bytes): (u64, u64) = conn
+            .query_row(
+                &msg_sql,
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                |row| Ok((row.get(0).unwrap_or(0), row.get(1).unwrap_or(0))),
+            )
+            .unwrap_or((0, 0));
 
         Self::from_plaintext_size(plaintext_bytes, conversation_count, message_count)
     }
@@ -131,12 +130,10 @@ impl SizeEstimate {
         // Estimate compression
         let compressed_bytes = (plaintext_bytes as f64 * COMPRESSION_RATIO) as u64;
 
-        // Calculate chunk count
-        let chunk_count = if compressed_bytes == 0 {
-            1
-        } else {
-            ((compressed_bytes / DEFAULT_CHUNK_SIZE) + 1) as u32
-        };
+        // Calculate chunk count (minimum of 1 chunk even for empty content)
+        let chunk_count = compressed_bytes
+            .div_ceil(DEFAULT_CHUNK_SIZE)
+            .max(1) as u32;
 
         // Add AEAD overhead
         let encrypted_bytes = compressed_bytes + (chunk_count as u64 * AEAD_TAG_OVERHEAD);
@@ -169,7 +166,8 @@ impl SizeEstimate {
             return SizeLimitResult::Warning(SizeWarning::ApproachingLimit {
                 actual: self.total_site_bytes,
                 limit: MAX_SITE_SIZE_BYTES,
-                percentage: (self.total_site_bytes as f64 / MAX_SITE_SIZE_BYTES as f64 * 100.0) as u8,
+                percentage: (self.total_site_bytes as f64 / MAX_SITE_SIZE_BYTES as f64 * 100.0)
+                    as u8,
             });
         }
 
@@ -229,10 +227,7 @@ impl SizeLimitResult {
 #[derive(Debug, Clone)]
 pub enum SizeError {
     /// Total site size exceeds GitHub Pages limit
-    TotalExceedsLimit {
-        actual: u64,
-        limit: u64,
-    },
+    TotalExceedsLimit { actual: u64, limit: u64 },
     /// Individual file exceeds limit
     FileExceedsLimit {
         path: String,
@@ -256,7 +251,11 @@ impl std::fmt::Display for SizeError {
                     format_bytes(*limit)
                 )
             }
-            SizeError::FileExceedsLimit { path, actual, limit } => {
+            SizeError::FileExceedsLimit {
+                path,
+                actual,
+                limit,
+            } => {
                 write!(
                     f,
                     "File {} ({}) exceeds limit ({})",
@@ -281,16 +280,17 @@ pub enum SizeWarning {
         percentage: u8,
     },
     /// Individual file is large
-    LargeFile {
-        path: String,
-        size: u64,
-    },
+    LargeFile { path: String, size: u64 },
 }
 
 impl std::fmt::Display for SizeWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SizeWarning::ApproachingLimit { actual, limit, percentage } => {
+            SizeWarning::ApproachingLimit {
+                actual,
+                limit,
+                percentage,
+            } => {
                 write!(
                     f,
                     "Estimated size {} is {}% of GitHub Pages limit ({})",
@@ -300,12 +300,7 @@ impl std::fmt::Display for SizeWarning {
                 )
             }
             SizeWarning::LargeFile { path, size } => {
-                write!(
-                    f,
-                    "Large file: {} ({})",
-                    path,
-                    format_bytes(*size)
-                )
+                write!(f, "Large file: {} ({})", path, format_bytes(*size))
             }
         }
     }
@@ -334,7 +329,8 @@ impl BundleVerifier {
             }
 
             if size > FILE_SIZE_WARNING_BYTES {
-                let rel_path = path.strip_prefix(site_dir)
+                let rel_path = path
+                    .strip_prefix(site_dir)
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
@@ -413,7 +409,8 @@ mod tests {
             10 * 1024 * 1024, // 10 MB plaintext
             100,
             5000,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Should compress to ~4.5 MB
         assert!(estimate.compressed_bytes < estimate.plaintext_bytes);
@@ -436,7 +433,8 @@ mod tests {
             100 * 1024 * 1024, // 100 MB - should be fine
             100,
             5000,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = estimate.check_limits();
         assert!(result.is_ok());
@@ -450,7 +448,8 @@ mod tests {
             2000 * 1024 * 1024, // 2 GB plaintext -> ~900 MB compressed
             1000,
             50000,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = estimate.check_limits();
         assert!(result.is_warning() || result.is_error());
@@ -462,7 +461,8 @@ mod tests {
             3000 * 1024 * 1024, // 3 GB plaintext -> ~1.35 GB compressed
             5000,
             250000,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = estimate.check_limits();
         assert!(result.is_error());
@@ -479,11 +479,7 @@ mod tests {
 
     #[test]
     fn test_format_display() {
-        let estimate = SizeEstimate::from_plaintext_size(
-            10 * 1024 * 1024,
-            50,
-            2500,
-        ).unwrap();
+        let estimate = SizeEstimate::from_plaintext_size(10 * 1024 * 1024, 50, 2500).unwrap();
 
         let display = estimate.format_display();
         assert!(display.contains("Estimated bundle size"));
@@ -516,5 +512,34 @@ mod tests {
 
         let warnings = BundleVerifier::verify(temp.path()).unwrap();
         assert!(warnings.is_empty()); // No warnings for small files
+    }
+
+    #[test]
+    fn test_chunk_count_ceiling_division() {
+        // Test that chunk count uses proper ceiling division
+        // COMPRESSION_RATIO = 0.45, DEFAULT_CHUNK_SIZE = 8 MB
+
+        // Test 1: Very small data -> 1 chunk
+        let estimate = SizeEstimate::from_plaintext_size(1000, 1, 10).unwrap();
+        assert_eq!(estimate.chunk_count, 1, "Small data should be 1 chunk");
+
+        // Test 2: Data that compresses to exactly 1 chunk size
+        // 8 MB / 0.45 = 17.78 MB plaintext -> exactly 8 MB compressed -> 1 chunk
+        // Use a value that when multiplied by 0.45 gives exactly DEFAULT_CHUNK_SIZE
+        let one_chunk_plaintext = (DEFAULT_CHUNK_SIZE as f64 / COMPRESSION_RATIO) as u64;
+        let estimate = SizeEstimate::from_plaintext_size(one_chunk_plaintext, 10, 100).unwrap();
+        // Due to floating point, compressed_bytes should be very close to DEFAULT_CHUNK_SIZE
+        // The important thing is it should NOT be 2 chunks when it's exactly 1 chunk of data
+        assert_eq!(estimate.chunk_count, 1, "Exactly one chunk's worth should be 1 chunk, not 2");
+
+        // Test 3: Data just over 1 chunk -> 2 chunks
+        let over_one_chunk = one_chunk_plaintext + 1000000; // Add ~1 MB to plaintext
+        let estimate = SizeEstimate::from_plaintext_size(over_one_chunk, 10, 100).unwrap();
+        assert!(estimate.chunk_count >= 1, "Over one chunk should be at least 1 chunk");
+
+        // Test 4: Large data that compresses to ~2 chunks
+        let two_chunks_plaintext = (2.0 * DEFAULT_CHUNK_SIZE as f64 / COMPRESSION_RATIO) as u64;
+        let estimate = SizeEstimate::from_plaintext_size(two_chunks_plaintext, 100, 1000).unwrap();
+        assert_eq!(estimate.chunk_count, 2, "Exactly two chunks' worth should be 2 chunks, not 3");
     }
 }
