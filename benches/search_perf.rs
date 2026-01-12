@@ -3,13 +3,15 @@ use coding_agent_search::search::canonicalize::canonicalize_for_embedding;
 use coding_agent_search::search::embedder::Embedder;
 use coding_agent_search::search::hash_embedder::HashEmbedder;
 use coding_agent_search::search::query::{
-    MatchType, SearchClient, SearchFilters, SearchHit, rrf_fuse_hits,
+    FieldMask, MatchType, SearchClient, SearchFilters, SearchHit, rrf_fuse_hits,
 };
 use coding_agent_search::search::tantivy::index_dir;
 use coding_agent_search::search::vector_index::{
-    Quantization, SemanticFilter, VectorEntry, VectorIndex,
+    Quantization, SemanticFilter, VectorEntry, VectorIndex, dot_product_f16_scalar_bench,
+    dot_product_f16_simd_bench, dot_product_scalar_bench, dot_product_simd_bench,
 };
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use half::f16;
 use std::collections::HashSet;
 use std::hint::black_box;
 
@@ -111,6 +113,7 @@ fn make_bench_hit(id: &str, score: f32) -> SearchHit {
         title: id.to_string(),
         snippet: format!("Snippet for {id}"),
         content: format!("Content for {id}"),
+        content_hash: 0,
         score,
         source_path: format!("/path/to/{id}.jsonl"),
         agent: "test".to_string(),
@@ -176,7 +179,7 @@ fn bench_empty_search(c: &mut Criterion) {
         c.bench_function("search_empty_query", |b| {
             b.iter(|| {
                 let result = client
-                    .search("", SearchFilters::default(), 10, 0)
+                    .search("", SearchFilters::default(), 10, 0, FieldMask::FULL)
                     .unwrap_or_default();
                 black_box(result)
             })
@@ -339,7 +342,7 @@ fn build_query(dimension: usize) -> Vec<f32> {
 
 /// Benchmark vector search with 50k entries loaded from disk (F16 pre-conversion).
 /// This tests P0 Opt 1: Pre-Convert F16→F32 Slab at Load Time.
-/// Target: ~30ms (down from ~56ms without pre-conversion)
+/// Target (local, 2026-01-11): ~1.8ms with pre-conversion, ~4.6ms without.
 fn bench_vector_index_search_50k_loaded(c: &mut Criterion) {
     use tempfile::TempDir;
 
@@ -374,6 +377,90 @@ fn bench_vector_index_search_50k_loaded(c: &mut Criterion) {
     });
 }
 
+// =============================================================================
+// Opt 1.1: F16 SIMD Dot Product Benchmarks
+// =============================================================================
+
+/// Benchmark f32 dot product (scalar vs SIMD) at typical embedding dimensions.
+fn bench_dot_product_f32(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dot_product_f32");
+
+    for dim in [128, 256, 384, 512, 768, 1024] {
+        let a: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.001).sin()).collect();
+        let b: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.001).cos()).collect();
+
+        group.bench_with_input(BenchmarkId::new("scalar", dim), &dim, |bench, _| {
+            bench.iter(|| black_box(dot_product_scalar_bench(&a, &b)))
+        });
+
+        group.bench_with_input(BenchmarkId::new("simd", dim), &dim, |bench, _| {
+            bench.iter(|| black_box(dot_product_simd_bench(&a, &b)))
+        });
+    }
+    group.finish();
+}
+
+/// Benchmark f16 dot product (scalar vs SIMD) at typical embedding dimensions.
+/// Opt 1.1: This measures the impact of the SIMD optimization for f16→f32 dot product.
+fn bench_dot_product_f16(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dot_product_f16");
+
+    for dim in [128, 256, 384, 512, 768, 1024] {
+        let a: Vec<f16> = (0..dim)
+            .map(|i| f16::from_f32((i as f32 * 0.001).sin()))
+            .collect();
+        let b: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.001).cos()).collect();
+
+        group.bench_with_input(BenchmarkId::new("scalar", dim), &dim, |bench, _| {
+            bench.iter(|| black_box(dot_product_f16_scalar_bench(&a, &b)))
+        });
+
+        group.bench_with_input(BenchmarkId::new("simd", dim), &dim, |bench, _| {
+            bench.iter(|| black_box(dot_product_f16_simd_bench(&a, &b)))
+        });
+    }
+    group.finish();
+}
+
+/// Benchmark f16 dot product throughput for vector search simulation.
+/// Simulates searching through 10k, 25k, 50k vectors at dimension 384.
+fn bench_dot_product_f16_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dot_product_f16_throughput");
+    let dim = 384;
+
+    for count in [10_000, 25_000, 50_000] {
+        let vectors: Vec<Vec<f16>> = (0..count)
+            .map(|i| {
+                (0..dim)
+                    .map(|d| f16::from_f32(((i + d * 31) % 997) as f32 / 997.0))
+                    .collect()
+            })
+            .collect();
+        let query: Vec<f32> = (0..dim).map(|d| (d % 17) as f32 / 17.0).collect();
+
+        group.bench_with_input(BenchmarkId::new("scalar", count), &count, |bench, _| {
+            bench.iter(|| {
+                let mut sum = 0.0f32;
+                for v in &vectors {
+                    sum += dot_product_f16_scalar_bench(v, &query);
+                }
+                black_box(sum)
+            })
+        });
+
+        group.bench_with_input(BenchmarkId::new("simd", count), &count, |bench, _| {
+            bench.iter(|| {
+                let mut sum = 0.0f32;
+                for v in &vectors {
+                    sum += dot_product_f16_simd_bench(v, &query);
+                }
+                black_box(sum)
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     // Hash embedder benchmarks
@@ -392,5 +479,9 @@ criterion_group!(
     bench_vector_index_search_50k_filtered,
     bench_vector_index_search_50k_loaded,
     bench_vector_search_scaling,
+    // Opt 1.1: Dot product benchmarks (scalar vs SIMD)
+    bench_dot_product_f32,
+    bench_dot_product_f16,
+    bench_dot_product_f16_throughput,
 );
 criterion_main!(benches);
