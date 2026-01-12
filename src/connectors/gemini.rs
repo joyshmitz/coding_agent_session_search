@@ -288,7 +288,12 @@ impl Connector for GeminiConnector {
                 // the file is re-indexed after new messages are added.
 
                 started_at = started_at.or(created);
-                ended_at = created.or(ended_at);
+                ended_at = match (ended_at, created) {
+                    (Some(current), Some(ts)) => Some(current.max(ts)),
+                    (None, Some(ts)) => Some(ts),
+                    (Some(current), None) => Some(current),
+                    (None, None) => None,
+                };
 
                 // Extract content using flatten_content for consistency
                 let content_str = item

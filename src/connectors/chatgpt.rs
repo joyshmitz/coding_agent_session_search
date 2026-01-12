@@ -264,15 +264,17 @@ impl ChatGptConnector {
 
             // Simple ordering: sort by create_time if available
             msg_nodes.sort_by(|a, b| {
-                let ts_a =
-                    a.2.get("create_time")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
-                let ts_b =
-                    b.2.get("create_time")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
-                ts_a.partial_cmp(&ts_b).unwrap_or(std::cmp::Ordering::Equal)
+                let ts_a = a.2.get("create_time").and_then(|v| v.as_f64());
+                let ts_b = b.2.get("create_time").and_then(|v| v.as_f64());
+                match (ts_a, ts_b) {
+                    (Some(a_ts), Some(b_ts)) => a_ts
+                        .partial_cmp(&b_ts)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.1.cmp(&b.1)),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.1.cmp(&b.1),
+                }
             });
 
             for (_, _, msg) in msg_nodes {
@@ -323,10 +325,8 @@ impl ChatGptConnector {
                 // Filtering messages would cause older messages to be lost when
                 // the file is re-indexed after new messages are added.
 
-                if started_at.is_none() {
-                    started_at = created_at;
-                }
-                ended_at = created_at;
+                started_at = started_at.or(created_at);
+                ended_at = created_at.or(ended_at);
 
                 // Get model info
                 let model = msg
@@ -375,10 +375,8 @@ impl ChatGptConnector {
                 // NOTE: Do NOT filter individual messages by timestamp here!
                 // File-level check is sufficient for incremental indexing.
 
-                if started_at.is_none() {
-                    started_at = created_at;
-                }
-                ended_at = created_at;
+                started_at = started_at.or(created_at);
+                ended_at = created_at.or(ended_at);
 
                 messages.push(NormalizedMessage {
                     idx: messages.len() as i64,
@@ -770,6 +768,47 @@ mod tests {
         assert_eq!(conv.messages[1].role, "assistant");
         assert!(conv.messages[1].content.contains("How can I help"));
         assert_eq!(conv.messages[1].author, Some("gpt-4".to_string()));
+    }
+
+    #[test]
+    fn parse_mapping_preserves_ended_at_with_missing_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let conv_file = dir.path().join("conv_missing_ts.json");
+
+        let conv_json = json!({
+            "id": "conv-missing-ts",
+            "mapping": {
+                "node1": {
+                    "parent": null,
+                    "message": {
+                        "author": {"role": "user"},
+                        "content": {"parts": ["First message"]},
+                        "create_time": 1700000000.0
+                    }
+                },
+                "node2": {
+                    "parent": "node1",
+                    "message": {
+                        "author": {"role": "assistant"},
+                        "content": {"parts": ["Second message without timestamp"]}
+                    }
+                }
+            }
+        });
+
+        fs::write(&conv_file, conv_json.to_string()).unwrap();
+
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+        let result = connector.parse_conversation_file(&conv_file, None, false);
+
+        let conv = result.unwrap().unwrap();
+        assert_eq!(conv.messages.len(), 2);
+        assert_eq!(conv.messages[0].content, "First message");
+        assert_eq!(conv.messages[1].content, "Second message without timestamp");
+        assert_eq!(conv.started_at, Some(1_700_000_000_000));
+        assert_eq!(conv.ended_at, Some(1_700_000_000_000));
     }
 
     #[test]
