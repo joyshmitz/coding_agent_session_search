@@ -52,8 +52,9 @@ async function init() {
     }
 
     // Initialize crypto worker
+    // Note: Using classic worker (not module) because crypto_worker.js uses importScripts()
     try {
-        worker = new Worker('./crypto_worker.js', { type: 'module' });
+        worker = new Worker('./crypto_worker.js');
         worker.onmessage = handleWorkerMessage;
         worker.onerror = handleWorkerError;
     } catch (error) {
