@@ -41,15 +41,16 @@ fn read_metadata_compat(
     bin_idx: usize,
 ) -> serde_json::Value {
     // Try binary column first (new format)
-    if let Ok(Some(bytes)) = row.get::<_, Option<Vec<u8>>>(bin_idx) {
-        if !bytes.is_empty() {
-            return deserialize_msgpack_to_json(&bytes);
-        }
+    if let Ok(Some(bytes)) = row.get::<_, Option<Vec<u8>>>(bin_idx)
+        && !bytes.is_empty()
+    {
+        return deserialize_msgpack_to_json(&bytes);
     }
 
     // Fall back to JSON column (old format or migration in progress)
     if let Ok(Some(json_str)) = row.get::<_, Option<String>>(json_idx) {
-        return serde_json::from_str(&json_str).unwrap_or_default();
+        return serde_json::from_str(&json_str)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
     }
 
     serde_json::Value::Object(serde_json::Map::new())
