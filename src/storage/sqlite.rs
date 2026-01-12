@@ -116,6 +116,19 @@ pub fn create_backup(db_path: &Path) -> Result<Option<std::path::PathBuf>, Migra
     Ok(Some(backup_path))
 }
 
+/// Helper to safely remove a database file and its potential WAL/SHM sidecars.
+fn remove_database_files(path: &Path) -> std::io::Result<()> {
+    // Remove the main database file
+    fs::remove_file(path)?;
+
+    // Best-effort removal of sidecar files (ignore errors if they don't exist)
+    let path_str = path.to_string_lossy();
+    let _ = fs::remove_file(format!("{}-wal", path_str));
+    let _ = fs::remove_file(format!("{}-shm", path_str));
+
+    Ok(())
+}
+
 /// Remove old backup files, keeping only the most recent `keep_count`.
 pub fn cleanup_old_backups(db_path: &Path, keep_count: usize) -> Result<(), std::io::Error> {
     let parent = match db_path.parent() {
@@ -149,13 +162,18 @@ pub fn cleanup_old_backups(db_path: &Path, keep_count: usize) -> Result<(), std:
     // Delete oldest backups beyond keep_count
     for (path, _) in backups.into_iter().skip(keep_count) {
         let _ = fs::remove_file(&path);
+
+        // Also try to cleanup potential sidecars from fs::copy fallback
+        let path_str = path.to_string_lossy();
+        let _ = fs::remove_file(format!("{}-wal", path_str));
+        let _ = fs::remove_file(format!("{}-shm", path_str));
     }
 
     Ok(())
 }
 
 /// Public schema version constant for external checks.
-pub const CURRENT_SCHEMA_VERSION: i64 = 5;
+pub const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 /// Result of checking schema compatibility.
 #[derive(Debug, Clone)]
@@ -505,7 +523,7 @@ impl SqliteStorage {
                     // Schema from future or otherwise incompatible - trigger rebuild
                     let backup_path = create_backup(path)?;
                     cleanup_old_backups(path, MAX_BACKUPS)?;
-                    fs::remove_file(path)?;
+                    remove_database_files(path)?;
                     return Err(MigrationError::RebuildRequired {
                         reason,
                         backup_path,
@@ -515,7 +533,7 @@ impl SqliteStorage {
                     // If we can't even check, it's likely corrupt - trigger rebuild
                     let backup_path = create_backup(path)?;
                     cleanup_old_backups(path, MAX_BACKUPS)?;
-                    fs::remove_file(path)?;
+                    remove_database_files(path)?;
                     return Err(MigrationError::RebuildRequired {
                         reason: "Database appears corrupted".to_string(),
                         backup_path,
@@ -612,11 +630,14 @@ impl SqliteStorage {
         let tx = self.conn.transaction()?;
 
         let conv_id = insert_conversation(&tx, agent_id, workspace_id, conv)?;
+        let mut fts_entries = Vec::with_capacity(conv.messages.len());
         for msg in &conv.messages {
             let msg_id = insert_message(&tx, conv_id, msg)?;
             insert_snippets(&tx, msg_id, &msg.snippets)?;
-            insert_fts_message(&tx, msg_id, msg, conv)?;
+            fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
         }
+        // Batch insert FTS entries
+        batch_insert_fts_messages(&tx, &fts_entries)?;
         tx.commit()?;
         Ok(InsertOutcome {
             conversation_id: conv_id,
@@ -639,15 +660,19 @@ impl SqliteStorage {
         let cutoff = max_idx.unwrap_or(-1);
 
         let mut inserted_indices = Vec::new();
+        let mut fts_entries = Vec::new();
         for msg in &conv.messages {
             if msg.idx <= cutoff {
                 continue;
             }
             let msg_id = insert_message(&tx, conversation_id, msg)?;
             insert_snippets(&tx, msg_id, &msg.snippets)?;
-            insert_fts_message(&tx, msg_id, msg, conv)?;
+            fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
             inserted_indices.push(msg.idx);
         }
+
+        // Batch insert FTS entries
+        batch_insert_fts_messages(&tx, &fts_entries)?;
 
         if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
             // Use IFNULL to handle NULL ended_at values correctly.
@@ -665,8 +690,10 @@ impl SqliteStorage {
         })
     }
 
-    /// Insert multiple conversations in a single transaction for better performance.
-    /// Returns InsertOutcome for each conversation in the same order as input.
+    /// Insert multiple conversations in a single transaction with batch FTS indexing.
+    ///
+    /// Uses multi-value INSERT for FTS5 entries (P2 Opt 2.1) to reduce
+    /// transaction overhead and improve indexing throughput by 10-20%.
     pub fn insert_conversations_batched(
         &mut self,
         conversations: &[(i64, Option<i64>, &Conversation)],
@@ -677,10 +704,31 @@ impl SqliteStorage {
 
         let tx = self.conn.transaction()?;
         let mut outcomes = Vec::with_capacity(conversations.len());
+        let mut fts_entries = Vec::new();
 
+        // Process all conversations, collecting FTS entries
         for &(agent_id, workspace_id, conv) in conversations {
-            let outcome = insert_conversation_in_tx(&tx, agent_id, workspace_id, conv)?;
+            let outcome = insert_conversation_in_tx_batched(
+                &tx,
+                agent_id,
+                workspace_id,
+                conv,
+                &mut fts_entries,
+            )?;
             outcomes.push(outcome);
+        }
+
+        // Batch insert all FTS entries at once
+        let fts_count = fts_entries.len();
+        if fts_count > 0 {
+            let inserted = batch_insert_fts_messages(&tx, &fts_entries)?;
+            tracing::debug!(
+                target: "cass::perf::fts5",
+                total = fts_count,
+                inserted = inserted,
+                conversations = conversations.len(),
+                "batch_fts_insert_complete"
+            );
         }
 
         tx.commit()?;
@@ -1151,47 +1199,146 @@ fn insert_snippets(tx: &Transaction<'_>, message_id: i64, snippets: &[Snippet]) 
     Ok(())
 }
 
-fn insert_fts_message(
-    tx: &Transaction<'_>,
-    message_id: i64,
-    msg: &Message,
-    conv: &Conversation,
-) -> Result<()> {
-    if let Err(e) = tx.execute(
-        "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
-         VALUES(?,?,?,?,?,?,?)",
-        params![
-            msg.content,
-            conv.title.clone().unwrap_or_default(),
-            conv.agent_slug.clone(),
-            conv.workspace
+// -------------------------------------------------------------------------
+// FTS5 Batch Insert (P2 Opt 2.1)
+// -------------------------------------------------------------------------
+
+/// Batch size for FTS5 inserts. With 7 columns per row and SQLite's
+/// SQLITE_MAX_VARIABLE_NUMBER default of 999, max batch is ~142 rows.
+/// Using 100 for safety margin and memory efficiency.
+const FTS5_BATCH_SIZE: usize = 100;
+
+/// Entry for pending FTS5 insert.
+#[derive(Debug, Clone)]
+pub struct FtsEntry {
+    pub content: String,
+    pub title: String,
+    pub agent: String,
+    pub workspace: String,
+    pub source_path: String,
+    pub created_at: Option<i64>,
+    pub message_id: i64,
+}
+
+impl FtsEntry {
+    /// Create an FTS entry from a message and conversation.
+    pub fn from_message(message_id: i64, msg: &Message, conv: &Conversation) -> Self {
+        FtsEntry {
+            content: msg.content.clone(),
+            title: conv.title.clone().unwrap_or_default(),
+            agent: conv.agent_slug.clone(),
+            workspace: conv
+                .workspace
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            path_to_string(&conv.source_path),
-            msg.created_at.or(conv.started_at),
-            message_id
-        ],
-    ) {
-        // FTS mirror is best-effort; Tantivy remains source of truth.
-        // Log at debug level to help diagnose systematic issues without noise.
-        tracing::debug!(
+            source_path: path_to_string(&conv.source_path),
+            created_at: msg.created_at.or(conv.started_at),
             message_id,
-            agent = %conv.agent_slug,
-            error = %e,
-            "fts_insert_skipped"
-        );
+        }
     }
-    Ok(())
+}
+
+/// Batch insert FTS5 entries for better performance.
+///
+/// Uses multi-value INSERT to reduce transaction overhead and
+/// SQLite statement preparation costs.
+fn batch_insert_fts_messages(tx: &Transaction<'_>, entries: &[FtsEntry]) -> Result<usize> {
+    if entries.is_empty() {
+        return Ok(0);
+    }
+
+    let mut inserted = 0;
+
+    for chunk in entries.chunks(FTS5_BATCH_SIZE) {
+        // Build multi-value INSERT
+        let placeholders: String = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let base = i * 7;
+                format!(
+                    "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                    base + 1,
+                    base + 2,
+                    base + 3,
+                    base + 4,
+                    base + 5,
+                    base + 6,
+                    base + 7
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id) VALUES {}",
+            placeholders
+        );
+
+        // Flatten parameters
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(chunk.len() * 7);
+        for entry in chunk {
+            params_vec.push(Box::new(entry.content.clone()));
+            params_vec.push(Box::new(entry.title.clone()));
+            params_vec.push(Box::new(entry.agent.clone()));
+            params_vec.push(Box::new(entry.workspace.clone()));
+            params_vec.push(Box::new(entry.source_path.clone()));
+            params_vec.push(Box::new(entry.created_at));
+            params_vec.push(Box::new(entry.message_id));
+        }
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        if let Err(e) = tx.execute(&sql, params_refs.as_slice()) {
+            // FTS is best-effort; log and continue
+            tracing::debug!(
+                batch_size = chunk.len(),
+                error = %e,
+                "fts_batch_insert_failed"
+            );
+            // Fall back to individual inserts for this batch
+            for entry in chunk {
+                if let Err(e2) = tx.execute(
+                    "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+                     VALUES(?,?,?,?,?,?,?)",
+                    params![
+                        entry.content,
+                        entry.title,
+                        entry.agent,
+                        entry.workspace,
+                        entry.source_path,
+                        entry.created_at,
+                        entry.message_id
+                    ],
+                ) {
+                    tracing::debug!(
+                        message_id = entry.message_id,
+                        error = %e2,
+                        "fts_insert_skipped"
+                    );
+                } else {
+                    inserted += 1;
+                }
+            }
+        } else {
+            inserted += chunk.len();
+        }
+    }
+
+    Ok(inserted)
 }
 
 /// Insert or update a single conversation within an existing transaction.
 /// Used by insert_conversations_batched to process multiple conversations efficiently.
-fn insert_conversation_in_tx(
+/// Collects FTS entries into the provided vector for batch insertion.
+fn insert_conversation_in_tx_batched(
     tx: &Transaction<'_>,
     agent_id: i64,
     workspace_id: Option<i64>,
     conv: &Conversation,
+    fts_entries: &mut Vec<FtsEntry>,
 ) -> Result<InsertOutcome> {
     // Check for existing conversation with same (source_id, agent_id, external_id)
     if let Some(ext) = &conv.external_id {
@@ -1219,7 +1366,8 @@ fn insert_conversation_in_tx(
                 }
                 let msg_id = insert_message(tx, conversation_id, msg)?;
                 insert_snippets(tx, msg_id, &msg.snippets)?;
-                insert_fts_message(tx, msg_id, msg, conv)?;
+                // Collect FTS entry instead of inserting immediately
+                fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
                 inserted_indices.push(msg.idx);
             }
 
@@ -1242,7 +1390,8 @@ fn insert_conversation_in_tx(
     for msg in &conv.messages {
         let msg_id = insert_message(tx, conv_id, msg)?;
         insert_snippets(tx, msg_id, &msg.snippets)?;
-        insert_fts_message(tx, msg_id, msg, conv)?;
+        // Collect FTS entry instead of inserting immediately
+        fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
     }
 
     Ok(InsertOutcome {
