@@ -533,13 +533,16 @@ fn unwrap_key(
 }
 
 /// Derive chunk nonce from base nonce and chunk index (counter mode)
+///
+/// Uses deterministic counter mode: the first 8 bytes come from the random
+/// base_nonce (unique per export), and the last 4 bytes are the chunk index.
+/// This ensures unique nonces for up to 2^32 chunks per export without
+/// collision risk.
 fn derive_chunk_nonce(base_nonce: &[u8; 12], chunk_index: u32) -> [u8; 12] {
     let mut nonce = *base_nonce;
-    // XOR the chunk index into the last 4 bytes
-    let idx_bytes = chunk_index.to_be_bytes();
-    for i in 0..4 {
-        nonce[8 + i] ^= idx_bytes[i];
-    }
+    // Set the last 4 bytes to the chunk index (big-endian)
+    // This is safer than XOR as it guarantees unique nonces for each chunk
+    nonce[8..12].copy_from_slice(&chunk_index.to_be_bytes());
     nonce
 }
 

@@ -262,7 +262,7 @@ async function handleDecryptDatabase(dekBase64, cfg) {
             }
             const encryptedChunk = await response.arrayBuffer();
 
-            // Derive chunk nonce: base_nonce XOR counter
+            // Derive chunk nonce: first 8 bytes from base_nonce, last 4 bytes are counter
             const chunkNonce = deriveChunkNonce(baseNonce, i);
 
             // Build chunk AAD: export_id || chunk_index (big-endian u32)
@@ -323,20 +323,20 @@ async function handleDecryptDatabase(dekBase64, cfg) {
 }
 
 /**
- * Derive chunk nonce from base nonce and counter
+ * Derive chunk nonce from base nonce and counter.
+ * Uses deterministic counter mode: first 8 bytes from base_nonce,
+ * last 4 bytes are the chunk index (big-endian).
  */
 function deriveChunkNonce(baseNonce, counter) {
     const nonce = new Uint8Array(12);
-    nonce.set(baseNonce);
+    // Copy first 8 bytes from base nonce
+    nonce.set(baseNonce.subarray(0, 8));
 
-    // XOR with counter (big-endian u32 in last 4 bytes)
+    // Set last 4 bytes to counter (big-endian u32)
     const counterView = new DataView(new ArrayBuffer(4));
     counterView.setUint32(0, counter, false); // big-endian
     const counterBytes = new Uint8Array(counterView.buffer);
-
-    for (let i = 0; i < 4; i++) {
-        nonce[8 + i] ^= counterBytes[i];
-    }
+    nonce.set(counterBytes, 8);
 
     return nonce;
 }
