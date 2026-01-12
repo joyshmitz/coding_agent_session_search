@@ -2553,6 +2553,85 @@ All counters use `AtomicUsize` with relaxed ordering for lock-free updates from 
 ### Benchmarks & Tests
 - Benches: `index_perf` measures full index build; `runtime_perf` covers search latency + indexing micro-cases.
 - Tests: unit + integration + headless TUI e2e; installer checksum fixtures; watch-mode and index/search integration; cache/bloom UTF-8 safety and bloom gate tests.
+- CI guardrails: PRs run Criterion benches and compare against the latest main baseline (critcmp, 10% regression threshold). Targets: `search_latency` < 50µs, `vector_index_search_50k` < 10ms, `index_small_batch` < 20ms, `canonicalize_long_message` < 500µs.
+
+### Already-Shipped Optimizations (Round 0)
+- **Title-prefix n-gram reuse** (`src/search/tantivy.rs:261`): Precomputes per-conversation values once (source/workspace/title/title_prefix/started_at), reducing indexing alloc ~8.3% and time ~100ms.
+- **Sessions output short-circuit** (`src/lib.rs:3672`): For `--robot-format sessions`, builds `BTreeSet<&str>` of `source_path` and returns early, reducing sessions search alloc ~29.4 MB → 27.0 MB.
+
+### Optimization PR Workflow (One Optimization per PR)
+
+Each optimization MUST be implemented in a single, focused PR with before/after benchmarks.
+
+**PR Title Format**
+```
+perf(vector): Opt N: <Short Description>
+
+Examples:
+- perf(vector): Opt 1: Pre-convert F16 slab to F32 at load time
+- perf(vector): Opt 2: Explicit SIMD dot product using wide crate
+- perf(vector): Opt 3: Parallel vector search with Rayon
+```
+
+**PR Description Template**
+```markdown
+## Summary
+Brief description of the optimization.
+
+## Benchmark Comparison
+| Benchmark | Before | After | Change |
+|-----------|--------|-------|--------|
+| vector_index_search_50k | 56ms | 30ms | -46% |
+
+## Implementation Details
+- What was changed
+- Code locations modified
+- Trade-offs made
+
+## Rollback
+Env var: `CASS_<NAME>=0` to disable
+
+## Testing
+- [ ] Equivalence oracle tests pass
+- [ ] Benchmark comparison attached
+- [ ] All validation commands pass
+
+## Checklist
+- [ ] cargo fmt --check
+- [ ] cargo check --all-targets
+- [ ] cargo clippy --all-targets -- -D warnings
+- [ ] cargo test
+- [ ] Benchmark comparison included
+```
+
+**Benchmark Comparison Commands**
+```bash
+# Before making changes
+cargo bench --bench search_perf -- --save-baseline before
+
+# After making changes
+cargo bench --bench search_perf -- --save-baseline after
+
+# Generate comparison
+cargo install critcmp
+critcmp before after --export > bench_comparison.md
+
+# Include in PR
+cat bench_comparison.md
+```
+
+**PR Review Checklist**
+- Single optimization (no unrelated refactors)
+- Before/after benchmarks included
+- Rollback env var implemented and tested
+- Equivalence oracle tests pass
+- No regression in unrelated benchmarks
+
+**Anti-Patterns to Avoid**
+- Combining multiple optimizations in one PR
+- Adding unrelated refactors
+- Skipping benchmark comparison
+- Not testing rollback path
 
 ---
 
@@ -2719,10 +2798,13 @@ let pending_batches: Vec<_> = connector_factories
 |-----------|-----------------|------------|
 | Prefix search (cached) | 2-8ms | Warm cache, <1000 results |
 | Prefix search (cold) | 40-60ms | First query, index in page cache |
+| Vector search 50k (F16, loaded) | 1.8ms / 4.6ms | Pre-convert on/off (search_perf::vector_index_search_50k_loaded, 2026-01-11) |
 | Substring search | 80-200ms | Regex fallback required |
 | Full reindex | 5-30s | Depending on total conversation count |
 | Incremental reindex | 50-500ms | Single conversation update |
 | TUI render frame | <16ms | 60 FPS target achieved |
+
+Note: Benchmark timings are machine-dependent; values shown are from local dev runs.
 
 ### Memory Usage
 
