@@ -294,10 +294,8 @@ async function performSearch() {
         agent: currentFilters.agent,
     };
 
-    // Escape and format query for FTS5
-    const ftsQuery = formatFtsQuery(currentQuery);
-
-    currentResults = searchConversations(ftsQuery, options);
+    // Pass raw query - searchConversations handles escaping and FTS table routing
+    currentResults = searchConversations(currentQuery, options);
 
     // Apply time filter post-query if needed
     if (currentFilters.since || currentFilters.until) {
@@ -348,27 +346,9 @@ async function loadRecentConversations() {
     }
 }
 
-/**
- * Format query for FTS5
- * Escapes special characters and wraps terms in quotes
- */
-function formatFtsQuery(query) {
-    // Check if it looks like code (contains underscores, dots, camelCase)
-    const isCodeQuery = /[_.]|[a-z][A-Z]/.test(query);
-
-    // Split into terms
-    const terms = query.split(/\s+/).filter(t => t.length > 0);
-
-    // Escape and quote each term
-    return terms.map(term => {
-        // Remove FTS5 operators
-        const cleaned = term.replace(/['":\-+*()^~]/g, '');
-        if (!cleaned) return null;
-
-        // Quote the term
-        return `"${cleaned}"`;
-    }).filter(Boolean).join(' ');
-}
+// Note: FTS5 query formatting and escaping is now handled in database.js
+// searchConversations() automatically routes to messages_fts (natural language)
+// or messages_code_fts (code identifiers) based on query content
 
 /**
  * Render search results

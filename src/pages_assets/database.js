@@ -231,32 +231,74 @@ export function getConversationMessages(convId) {
 }
 
 /**
+ * Detect if query looks like code (for FTS table routing)
+ * @param {string} query - Search query
+ * @returns {boolean} True if query contains code patterns
+ */
+function isCodeQuery(query) {
+    // Check for underscores (snake_case)
+    if (query.includes('_')) return true;
+    // Check for dots (file extensions)
+    if (query.includes('.')) return true;
+    // Check for path separators
+    if (query.includes('/') || query.includes('\\')) return true;
+    // Check for camelCase (lowercase followed by uppercase)
+    if (/[a-z][A-Z]/.test(query)) return true;
+    return false;
+}
+
+/**
+ * Escape query for FTS5 MATCH
+ * Wraps each term in double-quotes and escapes internal quotes
+ * @param {string} query - Search query
+ * @returns {string} Escaped query safe for FTS5
+ */
+function escapeFts5Query(query) {
+    return query
+        .split(/\s+/)
+        .filter(t => t.length > 0)
+        .map(t => `"${t.replace(/"/g, '""')}"`)
+        .join(' ');
+}
+
+/**
  * Search conversations using FTS5
+ * Automatically routes to the appropriate FTS table:
+ * - messages_fts (porter stemmer) for natural language
+ * - messages_code_fts (unicode61) for code identifiers/paths
  * @param {string} query - Search query
  * @param {Object} options - Search options
  * @returns {Array<Object>} Search results
  */
 export function searchConversations(query, options = {}) {
-    const { limit = 50, offset = 0, agent = null } = options;
+    const { limit = 50, offset = 0, agent = null, forceCodeSearch = false } = options;
 
-    // Escape FTS5 special characters
-    const escapedQuery = query.replace(/['"]/g, '""');
+    // Escape query for FTS5
+    const escapedQuery = escapeFts5Query(query);
+    if (!escapedQuery) {
+        return [];
+    }
+
+    // Route to appropriate FTS table based on query type
+    const ftsTable = (forceCodeSearch || isCodeQuery(query))
+        ? 'messages_code_fts'
+        : 'messages_fts';
 
     let sql = `
         SELECT
             m.conversation_id,
             m.id as message_id,
             m.role,
-            snippet(messages_fts, 0, '<mark>', '</mark>', '...', 32) as snippet,
+            snippet(${ftsTable}, 0, '<mark>', '</mark>', '...', 32) as snippet,
             c.agent,
             c.workspace,
             c.title,
             c.started_at,
-            rank
-        FROM messages_fts
-        JOIN messages m ON messages_fts.rowid = m.id
+            bm25(${ftsTable}) as score
+        FROM ${ftsTable}
+        JOIN messages m ON ${ftsTable}.rowid = m.id
         JOIN conversations c ON m.conversation_id = c.id
-        WHERE messages_fts MATCH ?
+        WHERE ${ftsTable} MATCH ?
     `;
 
     const params = [escapedQuery];
@@ -267,7 +309,7 @@ export function searchConversations(query, options = {}) {
     }
 
     sql += `
-        ORDER BY rank
+        ORDER BY score
         LIMIT ? OFFSET ?
     `;
     params.push(limit, offset);
