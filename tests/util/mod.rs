@@ -3,8 +3,11 @@ use coding_agent_search::connectors::{
 };
 use coding_agent_search::model::types::{Conversation, Message, MessageRole, Snippet};
 use coding_agent_search::search::query::{MatchType, SearchHit};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use serde_json::json;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// Captures tracing output for tests.
@@ -732,5 +735,454 @@ impl SnippetSpec {
     pub fn text(mut self, text: impl Into<String>) -> Self {
         self.text = Some(text.into());
         self
+    }
+}
+
+// =============================================================================
+// Deterministic RNG Utilities
+// =============================================================================
+
+/// Deterministic random number generator for reproducible tests.
+///
+/// Uses ChaCha8Rng seeded from a u64 for fast, reproducible random generation.
+/// This ensures tests produce identical results across runs.
+#[allow(dead_code)]
+pub struct SeededRng {
+    rng: ChaCha8Rng,
+    seed: u64,
+}
+
+#[allow(dead_code)]
+impl SeededRng {
+    /// Create a new SeededRng with the given seed.
+    pub fn new(seed: u64) -> Self {
+        Self {
+            rng: ChaCha8Rng::seed_from_u64(seed),
+            seed,
+        }
+    }
+
+    /// Get the seed used to initialize this RNG.
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Generate a random f32 in the range [0, 1).
+    pub fn f32(&mut self) -> f32 {
+        self.rng.r#gen::<f32>()
+    }
+
+    /// Generate a random f32 in the given range.
+    pub fn f32_range(&mut self, min: f32, max: f32) -> f32 {
+        min + self.rng.r#gen::<f32>() * (max - min)
+    }
+
+    /// Generate a random i64 in the given range.
+    pub fn i64_range(&mut self, min: i64, max: i64) -> i64 {
+        self.rng.r#gen_range(min..max)
+    }
+
+    /// Generate a random usize in the given range.
+    pub fn usize_range(&mut self, min: usize, max: usize) -> usize {
+        self.rng.r#gen_range(min..max)
+    }
+
+    /// Generate a random alphanumeric string of the given length.
+    pub fn alphanumeric(&mut self, len: usize) -> String {
+        const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        (0..len)
+            .map(|_| {
+                let idx = self.rng.r#gen_range(0..CHARSET.len());
+                CHARSET[idx] as char
+            })
+            .collect()
+    }
+
+    /// Generate a normalized f32 vector of the given dimension.
+    /// Each component is in [-1, 1] and the vector is L2-normalized.
+    pub fn normalized_vector(&mut self, dimension: usize) -> Vec<f32> {
+        let mut vec: Vec<f32> = (0..dimension)
+            .map(|_| self.f32_range(-1.0, 1.0))
+            .collect();
+        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 1e-10 {
+            for v in &mut vec {
+                *v /= norm;
+            }
+        }
+        vec
+    }
+
+    /// Generate a vector of random f32 values.
+    pub fn f32_vector(&mut self, dimension: usize) -> Vec<f32> {
+        (0..dimension).map(|_| self.f32()).collect()
+    }
+}
+
+// =============================================================================
+// Performance Measurement Utilities
+// =============================================================================
+
+/// Performance measurement results with statistical analysis.
+#[derive(Debug, Clone)]
+pub struct PerfMeasurement {
+    pub samples: Vec<Duration>,
+    pub warmup_iterations: usize,
+    pub measured_iterations: usize,
+}
+
+#[allow(dead_code)]
+impl PerfMeasurement {
+    /// Run a function with warmup and measurement iterations.
+    ///
+    /// # Arguments
+    /// * `warmup` - Number of warmup iterations (not measured)
+    /// * `iterations` - Number of measured iterations
+    /// * `f` - The function to measure
+    pub fn measure<F>(warmup: usize, iterations: usize, mut f: F) -> Self
+    where
+        F: FnMut(),
+    {
+        // Warmup phase
+        for _ in 0..warmup {
+            f();
+        }
+
+        // Measurement phase
+        let mut samples = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let start = Instant::now();
+            f();
+            samples.push(start.elapsed());
+        }
+
+        Self {
+            samples,
+            warmup_iterations: warmup,
+            measured_iterations: iterations,
+        }
+    }
+
+    /// Get the mean duration.
+    pub fn mean(&self) -> Duration {
+        if self.samples.is_empty() {
+            return Duration::ZERO;
+        }
+        let total: Duration = self.samples.iter().sum();
+        total / self.samples.len() as u32
+    }
+
+    /// Get the mean as milliseconds (f64).
+    pub fn mean_ms(&self) -> f64 {
+        self.mean().as_secs_f64() * 1000.0
+    }
+
+    /// Get the median duration.
+    pub fn median(&self) -> Duration {
+        if self.samples.is_empty() {
+            return Duration::ZERO;
+        }
+        let mut sorted: Vec<_> = self.samples.clone();
+        sorted.sort();
+        let mid = sorted.len() / 2;
+        if sorted.len() % 2 == 0 {
+            (sorted[mid - 1] + sorted[mid]) / 2
+        } else {
+            sorted[mid]
+        }
+    }
+
+    /// Get the median as milliseconds (f64).
+    pub fn median_ms(&self) -> f64 {
+        self.median().as_secs_f64() * 1000.0
+    }
+
+    /// Get the standard deviation.
+    pub fn std_dev(&self) -> Duration {
+        if self.samples.len() < 2 {
+            return Duration::ZERO;
+        }
+        let mean_nanos = self.mean().as_nanos() as f64;
+        let variance: f64 = self
+            .samples
+            .iter()
+            .map(|d| {
+                let diff = d.as_nanos() as f64 - mean_nanos;
+                diff * diff
+            })
+            .sum::<f64>()
+            / (self.samples.len() - 1) as f64;
+        Duration::from_nanos(variance.sqrt() as u64)
+    }
+
+    /// Get the standard deviation as milliseconds (f64).
+    pub fn std_dev_ms(&self) -> f64 {
+        self.std_dev().as_secs_f64() * 1000.0
+    }
+
+    /// Get the minimum duration.
+    pub fn min(&self) -> Duration {
+        self.samples.iter().min().copied().unwrap_or(Duration::ZERO)
+    }
+
+    /// Get the maximum duration.
+    pub fn max(&self) -> Duration {
+        self.samples.iter().max().copied().unwrap_or(Duration::ZERO)
+    }
+
+    /// Get a percentile (0-100).
+    pub fn percentile(&self, p: f64) -> Duration {
+        if self.samples.is_empty() {
+            return Duration::ZERO;
+        }
+        let mut sorted: Vec<_> = self.samples.clone();
+        sorted.sort();
+        let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    /// Print a summary of the measurement.
+    pub fn print_summary(&self, label: &str) {
+        println!(
+            "{}: mean={:.3}ms median={:.3}ms std_dev={:.3}ms min={:.3}ms max={:.3}ms p95={:.3}ms",
+            label,
+            self.mean_ms(),
+            self.median_ms(),
+            self.std_dev_ms(),
+            self.min().as_secs_f64() * 1000.0,
+            self.max().as_secs_f64() * 1000.0,
+            self.percentile(95.0).as_secs_f64() * 1000.0,
+        );
+    }
+}
+
+/// Compare two implementations and return whether the new one is faster.
+///
+/// Returns (speedup_ratio, baseline_measurement, new_measurement).
+/// A speedup_ratio > 1.0 means the new implementation is faster.
+#[allow(dead_code)]
+pub fn compare_implementations<F1, F2>(
+    warmup: usize,
+    iterations: usize,
+    mut baseline: F1,
+    mut new_impl: F2,
+) -> (f64, PerfMeasurement, PerfMeasurement)
+where
+    F1: FnMut(),
+    F2: FnMut(),
+{
+    let baseline_perf = PerfMeasurement::measure(warmup, iterations, &mut baseline);
+    let new_perf = PerfMeasurement::measure(warmup, iterations, &mut new_impl);
+
+    let baseline_mean = baseline_perf.mean_ms();
+    let new_mean = new_perf.mean_ms();
+
+    let speedup = if new_mean > 0.0 {
+        baseline_mean / new_mean
+    } else {
+        f64::INFINITY
+    };
+
+    (speedup, baseline_perf, new_perf)
+}
+
+// =============================================================================
+// Float Comparison Assertions
+// =============================================================================
+
+/// Assert that two f32 values are approximately equal within epsilon.
+#[allow(dead_code)]
+pub fn assert_float_eq(a: f32, b: f32, epsilon: f32) {
+    let diff = (a - b).abs();
+    assert!(
+        diff <= epsilon,
+        "float mismatch: {} vs {} (diff={}, epsilon={})",
+        a,
+        b,
+        diff,
+        epsilon
+    );
+}
+
+/// Assert that two f64 values are approximately equal within epsilon.
+#[allow(dead_code)]
+pub fn assert_float64_eq(a: f64, b: f64, epsilon: f64) {
+    let diff = (a - b).abs();
+    assert!(
+        diff <= epsilon,
+        "float64 mismatch: {} vs {} (diff={}, epsilon={})",
+        a,
+        b,
+        diff,
+        epsilon
+    );
+}
+
+/// Assert that two f32 vectors are approximately equal (element-wise).
+#[allow(dead_code)]
+pub fn assert_vec_float_eq(a: &[f32], b: &[f32], epsilon: f32) {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "vector length mismatch: {} vs {}",
+        a.len(),
+        b.len()
+    );
+    for (i, (va, vb)) in a.iter().zip(b.iter()).enumerate() {
+        let diff = (va - vb).abs();
+        assert!(
+            diff <= epsilon,
+            "vector element mismatch at index {}: {} vs {} (diff={}, epsilon={})",
+            i,
+            va,
+            vb,
+            diff,
+            epsilon
+        );
+    }
+}
+
+/// Assert that two slices contain the same elements (order-independent).
+#[allow(dead_code)]
+pub fn assert_same_elements<T: Ord + Clone + std::fmt::Debug>(a: &[T], b: &[T]) {
+    let mut a_sorted: Vec<_> = a.to_vec();
+    let mut b_sorted: Vec<_> = b.to_vec();
+    a_sorted.sort();
+    b_sorted.sort();
+    assert_eq!(
+        a_sorted, b_sorted,
+        "slices contain different elements:\n  a={:?}\n  b={:?}",
+        a, b
+    );
+}
+
+/// Macro to assert two values are "isomorphic" (structurally equivalent).
+/// Useful for comparing search results where order may vary but content should match.
+#[macro_export]
+macro_rules! assert_isomorphic {
+    ($a:expr, $b:expr, $key_fn:expr) => {{
+        let mut a_keys: Vec<_> = $a.iter().map($key_fn).collect();
+        let mut b_keys: Vec<_> = $b.iter().map($key_fn).collect();
+        a_keys.sort();
+        b_keys.sort();
+        assert_eq!(
+            a_keys, b_keys,
+            "collections are not isomorphic:\n  a keys={:?}\n  b keys={:?}",
+            a_keys, b_keys
+        );
+    }};
+}
+
+// =============================================================================
+// Test Data Generation Utilities
+// =============================================================================
+
+/// Generate test metadata (agent, workspace, source) using a seeded RNG.
+#[allow(dead_code)]
+pub struct TestDataGenerator {
+    rng: SeededRng,
+}
+
+#[allow(dead_code)]
+impl TestDataGenerator {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            rng: SeededRng::new(seed),
+        }
+    }
+
+    /// Generate a random agent slug.
+    pub fn agent(&mut self) -> String {
+        const AGENTS: &[&str] = &[
+            "claude_code",
+            "codex",
+            "cline",
+            "gemini",
+            "opencode",
+            "amp",
+            "chatgpt",
+        ];
+        let idx = self.rng.usize_range(0, AGENTS.len());
+        AGENTS[idx].to_string()
+    }
+
+    /// Generate a random workspace path.
+    pub fn workspace(&mut self) -> PathBuf {
+        let project = self.rng.alphanumeric(8);
+        PathBuf::from(format!("/home/user/projects/{}", project))
+    }
+
+    /// Generate random message content.
+    pub fn content(&mut self, min_words: usize, max_words: usize) -> String {
+        const WORDS: &[&str] = &[
+            "rust",
+            "code",
+            "function",
+            "test",
+            "error",
+            "fix",
+            "implement",
+            "refactor",
+            "debug",
+            "optimize",
+            "performance",
+            "memory",
+            "async",
+            "await",
+            "struct",
+            "enum",
+            "trait",
+            "impl",
+            "pub",
+            "mod",
+            "use",
+            "let",
+            "mut",
+            "const",
+            "static",
+            "fn",
+            "return",
+            "if",
+            "else",
+            "match",
+            "loop",
+            "while",
+            "for",
+            "in",
+            "vec",
+            "string",
+            "option",
+            "result",
+            "ok",
+            "err",
+        ];
+        let word_count = self.rng.usize_range(min_words, max_words + 1);
+        (0..word_count)
+            .map(|_| {
+                let idx = self.rng.usize_range(0, WORDS.len());
+                WORDS[idx]
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Generate a timestamp in milliseconds.
+    pub fn timestamp(&mut self) -> i64 {
+        // Range: 2024-01-01 to 2025-12-31
+        self.rng.i64_range(1704067200000, 1767225600000)
+    }
+
+    /// Generate a vector of random documents for embedding tests.
+    pub fn documents(&mut self, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|_| self.content(10, 50))
+            .collect()
+    }
+
+    /// Generate embedding vectors for testing.
+    pub fn embeddings(&mut self, count: usize, dimension: usize) -> Vec<Vec<f32>> {
+        (0..count)
+            .map(|_| self.rng.normalized_vector(dimension))
+            .collect()
     }
 }

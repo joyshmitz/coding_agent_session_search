@@ -88,7 +88,10 @@ insta = { version = "*", features = ["yaml", "json"] }
 criterion = "*"
 once_cell = "*"
 serial_test = "*"
+proptest = "*"
 serde_yaml = "0.9.34"
+rand = "*"
+rand_chacha = "*"
 
 [[bin]]
 name = "cass"
