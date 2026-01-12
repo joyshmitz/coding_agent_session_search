@@ -138,7 +138,8 @@ impl ConversationCache {
         let arc = Arc::new(view);
 
         let mut shard = self.shards[shard_idx].write();
-        if shard.len() == shard.cap().get() {
+        // Only count eviction if shard is full AND key doesn't already exist
+        if shard.len() == shard.cap().get() && !shard.contains(&hash) {
             self.stats.evictions.fetch_add(1, Ordering::Relaxed);
         }
         shard.put(hash, Arc::clone(&arc));
@@ -482,7 +483,11 @@ mod tests {
 
         // Hit rate should be positive (2 hits / 2 total)
         let hit_rate = cache.stats().hit_rate();
-        assert!(hit_rate > 0.5, "Expected >50% hit rate, got {:.1}%", hit_rate * 100.0);
+        assert!(
+            hit_rate > 0.5,
+            "Expected >50% hit rate, got {:.1}%",
+            hit_rate * 100.0
+        );
     }
 
     #[test]
