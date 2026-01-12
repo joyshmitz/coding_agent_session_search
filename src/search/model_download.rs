@@ -160,9 +160,21 @@ impl ModelManifest {
                         .into(),
                     size: 612,
                 },
-                // Note: special_tokens_map.json and tokenizer_config.json are optional
-                // metadata files that FastEmbed can work without. We only require the
-                // three core files: model.onnx, tokenizer.json, and config.json.
+                // FastEmbed requires special_tokens_map.json and tokenizer_config.json
+                // to construct a tokenizer with correct padding/truncation behavior.
+                // We download and verify them alongside the core model files.
+                ModelFile {
+                    name: "special_tokens_map.json".into(),
+                    sha256: "303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3"
+                        .into(),
+                    size: 112,
+                },
+                ModelFile {
+                    name: "tokenizer_config.json".into(),
+                    sha256: "acb92769e8195aabd29b7b2137a9e6d6e25c476a4f15aa4355c233426c61576b"
+                        .into(),
+                    size: 350,
+                },
             ],
             license: "Apache-2.0".into(),
         }
@@ -449,11 +461,17 @@ impl ModelDownloader {
         on_progress: Option<&ProgressCallback>,
     ) -> Result<(), DownloadError> {
         // Check for existing partial download
-        let existing_size = if path.exists() {
+        let mut existing_size = if path.exists() {
             fs::metadata(path).map(|m| m.len()).unwrap_or(0)
         } else {
             0
         };
+
+        // If the existing partial is larger than expected, discard it and start fresh.
+        if existing_size > expected_size {
+            let _ = fs::remove_file(path);
+            existing_size = 0;
+        }
 
         // If already complete, skip download
         if existing_size == expected_size {
@@ -659,7 +677,13 @@ pub fn check_model_installed(model_dir: &Path) -> ModelState {
     }
 
     // Check if all required files exist
-    let required = ["model.onnx", "tokenizer.json", "config.json"];
+    let required = [
+        "model.onnx",
+        "tokenizer.json",
+        "config.json",
+        "special_tokens_map.json",
+        "tokenizer_config.json",
+    ];
     for file in required {
         if !model_dir.join(file).is_file() {
             return ModelState::NotInstalled;
@@ -767,6 +791,8 @@ mod tests {
         fs::write(model_dir.join("model.onnx"), b"fake").unwrap();
         fs::write(model_dir.join("tokenizer.json"), b"{}").unwrap();
         fs::write(model_dir.join("config.json"), b"{}").unwrap();
+        fs::write(model_dir.join("special_tokens_map.json"), b"{}").unwrap();
+        fs::write(model_dir.join("tokenizer_config.json"), b"{}").unwrap();
         fs::write(model_dir.join(".verified"), "revision=test\n").unwrap();
         assert_eq!(check_model_installed(&model_dir), ModelState::Ready);
     }
