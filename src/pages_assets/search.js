@@ -12,6 +12,7 @@ import {
     getConversationsByAgent,
     getConversationsByTimeRange,
 } from './database.js';
+import { VirtualList } from './virtual-list.js';
 
 // Search configuration
 const SEARCH_CONFIG = {
@@ -19,6 +20,10 @@ const SEARCH_CONFIG = {
     PAGE_SIZE: 50,
     SNIPPET_LENGTH: 64,
     MAX_RESULTS: 1000,
+    // Virtual list configuration
+    RESULT_CARD_HEIGHT: 88, // Fixed height per result card
+    VIRTUAL_LIST_OVERSCAN: 5, // Extra items to render above/below viewport
+    VIRTUAL_LIST_THRESHOLD: 20, // Use virtual list above this count
 };
 
 // Module state
@@ -32,6 +37,7 @@ let currentResults = [];
 let currentPage = 0;
 let searchTimeout = null;
 let onResultSelect = null;
+let virtualList = null; // Virtual list instance for large result sets
 
 // DOM element references
 let elements = {
@@ -366,17 +372,113 @@ function formatFtsQuery(query) {
 
 /**
  * Render search results
+ * Uses virtual scrolling for large result sets (> VIRTUAL_LIST_THRESHOLD)
  */
 function renderResults() {
     if (currentResults.length === 0) {
         showNoResults();
+        destroyVirtualList();
         return;
     }
 
     hideNoResults();
     updateResultCount();
 
-    const html = currentResults.map((result, index) => `
+    // Use virtual scrolling for large result sets
+    if (currentResults.length > SEARCH_CONFIG.VIRTUAL_LIST_THRESHOLD) {
+        renderVirtualResults();
+    } else {
+        renderDirectResults();
+    }
+}
+
+/**
+ * Render results using virtual scrolling
+ * @private
+ */
+function renderVirtualResults() {
+    // Destroy previous virtual list if exists
+    destroyVirtualList();
+
+    // Clear container and set up for virtual scrolling
+    elements.resultsList.innerHTML = '';
+    elements.resultsList.style.height = '100%';
+    elements.resultsList.style.minHeight = '400px';
+    elements.resultsList.style.maxHeight = 'calc(100vh - 300px)';
+
+    // Create virtual list
+    virtualList = new VirtualList({
+        container: elements.resultsList,
+        itemHeight: SEARCH_CONFIG.RESULT_CARD_HEIGHT,
+        totalCount: currentResults.length,
+        renderItem: (index) => createResultCard(currentResults[index], index),
+        overscan: SEARCH_CONFIG.VIRTUAL_LIST_OVERSCAN,
+    });
+
+    console.debug(`[Search] Using virtual scrolling for ${currentResults.length} results`);
+}
+
+/**
+ * Render results directly (for small result sets)
+ * @private
+ */
+function renderDirectResults() {
+    destroyVirtualList();
+
+    // Reset container styling
+    elements.resultsList.style.height = '';
+    elements.resultsList.style.minHeight = '';
+    elements.resultsList.style.maxHeight = '';
+
+    const html = currentResults.map((result, index) => createResultCardHtml(result)).join('');
+    elements.resultsList.innerHTML = html;
+}
+
+/**
+ * Create a result card element (for virtual list)
+ * @private
+ */
+function createResultCard(result, index) {
+    const article = document.createElement('article');
+    article.className = 'result-card';
+    article.dataset.conversationId = result.conversation_id;
+    article.dataset.messageId = result.message_id || '';
+    article.tabIndex = 0;
+    article.setAttribute('role', 'button');
+    article.setAttribute('aria-label', `Open conversation: ${result.title || 'Untitled'}`);
+
+    article.innerHTML = `
+        <div class="result-header">
+            <span class="result-title">${escapeHtml(result.title || 'Untitled conversation')}</span>
+            <span class="result-agent">${escapeHtml(formatAgentName(result.agent))}</span>
+        </div>
+        ${result.snippet ? `
+            <div class="result-snippet">${result.snippet}</div>
+        ` : ''}
+        <div class="result-meta">
+            ${result.workspace ? `<span class="result-workspace">${escapeHtml(formatWorkspace(result.workspace))}</span>` : ''}
+            <span class="result-time">${formatTime(result.started_at)}</span>
+        </div>
+    `;
+
+    // Add click handler for virtual list items
+    article.addEventListener('click', () => {
+        const convId = parseInt(article.dataset.conversationId, 10);
+        const msgId = parseInt(article.dataset.messageId, 10) || null;
+        if (onResultSelect) {
+            onResultSelect(convId, msgId);
+        }
+    });
+
+    return article;
+}
+
+/**
+ * Create result card HTML string (for direct rendering)
+ * @private
+ */
+function createResultCardHtml(result) {
+    return `
         <article
             class="result-card"
             data-conversation-id="${result.conversation_id}"
@@ -397,9 +499,18 @@ function renderResults() {
                 <span class="result-time">${formatTime(result.started_at)}</span>
             </div>
         </article>
-    `).join('');
+    `;
+}
 
-    elements.resultsList.innerHTML = html;
+/**
+ * Destroy virtual list if it exists
+ * @private
+ */
+function destroyVirtualList() {
+    if (virtualList) {
+        virtualList.destroy();
+        virtualList = null;
+    }
 }
 
 /**
@@ -540,6 +651,9 @@ export function clearSearch() {
     currentFilters = { agent: null, since: null, until: null };
     currentResults = [];
     currentPage = 0;
+
+    // Clean up virtual list if it exists
+    destroyVirtualList();
 
     if (elements.searchInput) {
         elements.searchInput.value = '';
