@@ -110,6 +110,7 @@ pub fn run_index(
     if opts.full {
         reset_storage(&mut storage)?;
         t_index.delete_all()?;
+        t_index.commit()?;
     }
 
     // Get last scan timestamp for incremental indexing.
@@ -162,28 +163,31 @@ pub fn run_index(
         .collect();
 
     // Run connector detection and scanning in parallel using rayon
+    // Optimization 2.2: Eliminate mutex lock contention on discovered_agent_names
+    // by collecting names after the parallel phase instead of locking inside par_iter.
     use rayon::prelude::*;
 
     let progress_ref = opts.progress.as_ref();
     let data_dir = opts.data_dir.clone();
 
-    let pending_batches: Vec<(&'static str, Vec<NormalizedConversation>)> = connector_factories
+    // Return type includes whether agent was discovered (for post-parallel name collection)
+    let pending_batches: Vec<(&'static str, Vec<NormalizedConversation>, bool)> = connector_factories
         .into_par_iter()
         .filter_map(|(name, factory)| {
             let conn = factory();
             let detect = conn.detect();
             let was_detected = detect.detected;
             let mut convs = Vec::new();
+            let mut is_discovered = false;
 
             if detect.detected {
                 // Update discovered agents count immediately when detected
                 // This gives fast UI feedback during the discovery phase
+                // Note: AtomicUsize has no contention, only the mutex was problematic
                 if let Some(p) = progress_ref {
                     p.discovered_agents.fetch_add(1, Ordering::Relaxed);
-                    if let Ok(mut names) = p.discovered_agent_names.lock() {
-                        names.push(name.to_string());
-                    }
                 }
+                is_discovered = true;
 
                 let ctx = crate::connectors::ScanContext::local_default(data_dir.clone(), since_ts);
                 match conn.scan(&ctx) {
@@ -228,11 +232,12 @@ pub fn run_index(
                 }
             }
 
-            if !was_detected && let Some(p) = progress_ref {
-                p.discovered_agents.fetch_add(1, Ordering::Relaxed);
-                if let Ok(mut names) = p.discovered_agent_names.lock() {
-                    names.push(name.to_string());
+            // Agent discovered via remote scan (wasn't detected locally but has conversations)
+            if !was_detected && !convs.is_empty() {
+                if let Some(p) = progress_ref {
+                    p.discovered_agents.fetch_add(1, Ordering::Relaxed);
                 }
+                is_discovered = true;
             }
 
             // Mark this connector as scanned for discovery progress.
@@ -240,27 +245,40 @@ pub fn run_index(
                 p.current.fetch_add(1, Ordering::Relaxed);
             }
 
-            if convs.is_empty() {
+            if convs.is_empty() && !is_discovered {
                 return None;
             }
 
             tracing::info!(
                 connector = name,
                 conversations = convs.len(),
+                discovered = is_discovered,
                 "parallel_scan_complete"
             );
-            Some((name, convs))
+            Some((name, convs, is_discovered))
         })
         .collect();
 
+    // Post-parallel phase: collect discovered agent names with single mutex lock
+    // This eliminates O(connectors) mutex acquisitions during parallel execution
     if let Some(p) = &opts.progress {
-        let total_conversations: usize = pending_batches.iter().map(|(_, convs)| convs.len()).sum();
+        let discovered_names: Vec<&str> = pending_batches
+            .iter()
+            .filter(|(_, _, discovered)| *discovered)
+            .map(|(name, _, _)| *name)
+            .collect();
+
+        if let Ok(mut names) = p.discovered_agent_names.lock() {
+            names.extend(discovered_names.into_iter().map(String::from));
+        }
+
+        let total_conversations: usize = pending_batches.iter().map(|(_, convs, _)| convs.len()).sum();
         p.phase.store(2, Ordering::Relaxed); // Indexing
         p.total.store(total_conversations, Ordering::Relaxed);
         p.current.store(0, Ordering::Relaxed);
     }
 
-    for (name, convs) in pending_batches {
+    for (name, convs, _discovered) in pending_batches {
         ingest_batch(
             &mut storage,
             &mut t_index,
@@ -532,6 +550,7 @@ fn reset_storage(storage: &mut SqliteStorage) -> Result<()> {
          DELETE FROM workspaces;
          DELETE FROM tags;
          DELETE FROM conversation_tags;
+         DELETE FROM meta WHERE key = 'last_scan_ts';
          COMMIT;",
     )?;
     Ok(())
@@ -1012,6 +1031,9 @@ pub fn apply_workspace_rewrite(
 }
 
 pub mod persist {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
     use anyhow::Result;
 
     use crate::connectors::NormalizedConversation;
@@ -1143,21 +1165,54 @@ pub mod persist {
             return Ok(());
         }
 
+        let cache_enabled = dotenvy::var("CASS_SQLITE_CACHE")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
+        let mut agent_cache: HashMap<String, i64> = HashMap::new();
+        let mut workspace_cache: HashMap<PathBuf, i64> = HashMap::new();
+
         // Prepare data for batched insert: (agent_id, workspace_id, Conversation)
         let mut prepared: Vec<(i64, Option<i64>, Conversation)> = Vec::with_capacity(convs.len());
 
         for conv in convs {
-            let agent = Agent {
-                id: None,
-                slug: conv.agent_slug.clone(),
-                name: conv.agent_slug.clone(),
-                version: None,
-                kind: AgentKind::Cli,
+            let agent_id = if cache_enabled {
+                if let Some(&cached) = agent_cache.get(&conv.agent_slug) {
+                    cached
+                } else {
+                    let agent = Agent {
+                        id: None,
+                        slug: conv.agent_slug.clone(),
+                        name: conv.agent_slug.clone(),
+                        version: None,
+                        kind: AgentKind::Cli,
+                    };
+                    let id = storage.ensure_agent(&agent)?;
+                    agent_cache.insert(conv.agent_slug.clone(), id);
+                    id
+                }
+            } else {
+                let agent = Agent {
+                    id: None,
+                    slug: conv.agent_slug.clone(),
+                    name: conv.agent_slug.clone(),
+                    version: None,
+                    kind: AgentKind::Cli,
+                };
+                storage.ensure_agent(&agent)?
             };
-            let agent_id = storage.ensure_agent(&agent)?;
 
             let workspace_id = if let Some(ws) = &conv.workspace {
-                Some(storage.ensure_workspace(ws, None)?)
+                if cache_enabled {
+                    if let Some(&cached) = workspace_cache.get(ws) {
+                        Some(cached)
+                    } else {
+                        let id = storage.ensure_workspace(ws, None)?;
+                        workspace_cache.insert(ws.clone(), id);
+                        Some(id)
+                    }
+                } else {
+                    Some(storage.ensure_workspace(ws, None)?)
+                }
             } else {
                 None
             };
@@ -1336,7 +1391,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(msg_count, 0);
-        assert_eq!(storage.schema_version().unwrap(), 5);
+        assert_eq!(storage.schema_version().unwrap(), 6);
     }
 
     #[test]
