@@ -3,7 +3,7 @@
 //! Deploys encrypted archives to GitHub Pages using the gh CLI.
 //! Creates a repository, pushes to gh-pages branch, and enables Pages.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,9 +45,7 @@ pub struct Prerequisites {
 impl Prerequisites {
     /// Check if all prerequisites are met
     pub fn is_ready(&self) -> bool {
-        self.gh_version.is_some()
-            && self.gh_authenticated
-            && self.git_version.is_some()
+        self.gh_version.is_some() && self.gh_authenticated && self.git_version.is_some()
     }
 
     /// Get a list of missing prerequisites
@@ -180,13 +178,15 @@ impl GitHubDeployer {
 
             if size > MAX_FILE_SIZE_BYTES {
                 has_oversized = true;
-                let rel_path = path.strip_prefix(bundle_dir)
+                let rel_path = path
+                    .strip_prefix(bundle_dir)
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
                 large_files.push((rel_path, size));
             } else if size > FILE_SIZE_WARNING_BYTES {
-                let rel_path = path.strip_prefix(bundle_dir)
+                let rel_path = path
+                    .strip_prefix(bundle_dir)
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
@@ -224,7 +224,8 @@ impl GitHubDeployer {
             bail!("Prerequisites not met:\n{}", missing.join("\n"));
         }
 
-        let username = prereqs.gh_username
+        let username = prereqs
+            .gh_username
             .as_ref()
             .context("Could not determine GitHub username")?;
 
@@ -241,13 +242,36 @@ impl GitHubDeployer {
         }
 
         if size_check.has_oversized_files {
-            let oversized: Vec<_> = size_check.large_files.iter()
+            let oversized: Vec<_> = size_check
+                .large_files
+                .iter()
                 .filter(|(_, size)| *size > MAX_FILE_SIZE_BYTES)
-                .map(|(path, size)| format!("  {} ({:.1} MB)", path, *size as f64 / (1024.0 * 1024.0)))
+                .map(|(path, size)| {
+                    format!("  {} ({:.1} MB)", path, *size as f64 / (1024.0 * 1024.0))
+                })
                 .collect();
             bail!(
                 "Files exceed GitHub's 100 MiB limit:\n{}",
                 oversized.join("\n")
+            );
+        }
+
+        // Warn about large files (above 50 MiB but under 100 MiB)
+        let warning_files: Vec<_> = size_check
+            .large_files
+            .iter()
+            .filter(|(_, size)| *size <= MAX_FILE_SIZE_BYTES && *size > FILE_SIZE_WARNING_BYTES)
+            .collect();
+        if !warning_files.is_empty() {
+            let warnings: Vec<_> = warning_files
+                .iter()
+                .map(|(path, size)| {
+                    format!("{} ({:.1} MB)", path, *size as f64 / (1024.0 * 1024.0))
+                })
+                .collect();
+            progress(
+                "warning",
+                &format!("Large files detected (may slow deployment): {}", warnings.join(", ")),
             );
         }
 
@@ -305,9 +329,12 @@ impl GitHubDeployer {
             let visibility = if self.public { "--public" } else { "--private" };
             let output = Command::new("gh")
                 .args([
-                    "repo", "create", &self.repo_name,
+                    "repo",
+                    "create",
+                    &self.repo_name,
                     visibility,
-                    "--description", &self.description,
+                    "--description",
+                    &self.description,
                 ])
                 .output()
                 .context("Failed to run gh repo create")?;
@@ -356,9 +383,7 @@ fn get_gh_version() -> Option<String> {
 
 /// Check gh authentication status
 fn check_gh_auth() -> (bool, Option<String>) {
-    let output = Command::new("gh")
-        .args(["auth", "status"])
-        .output();
+    let output = Command::new("gh").args(["auth", "status"]).output();
 
     match output {
         Ok(out) if out.status.success() => {
@@ -367,7 +392,8 @@ fn check_gh_auth() -> (bool, Option<String>) {
             let combined = format!("{}{}", stdout, stderr);
 
             // Parse username from output like "Logged in to github.com as username"
-            let username = combined.lines()
+            let username = combined
+                .lines()
                 .find(|line| line.contains("Logged in to"))
                 .and_then(|line| line.split(" as ").nth(1))
                 .map(|s| s.split_whitespace().next().unwrap_or(s).to_string());
@@ -407,7 +433,8 @@ fn get_available_space_mb() -> Option<u64> {
                 if out.status.success() {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     // Parse second line, fourth column (available)
-                    stdout.lines()
+                    stdout
+                        .lines()
                         .nth(1)
                         .and_then(|line| line.split_whitespace().nth(3))
                         .and_then(|s| s.parse().ok())
@@ -431,23 +458,60 @@ fn check_repo_exists(repo_full_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Clone repository to directory
-fn clone_repo(repo_url: &str, dest: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .args(["clone", repo_url])
-        .current_dir(dest)
-        .output()
-        .context("Failed to run git clone")?;
+/// Retry a fallible operation with exponential backoff.
+///
+/// Retries the operation up to `MAX_RETRIES` times with exponentially
+/// increasing delays between attempts. Useful for network operations
+/// that may transiently fail.
+fn retry_with_backoff<T, F>(operation_name: &str, mut f: F) -> Result<T>
+where
+    F: FnMut() -> Result<T>,
+{
+    let mut last_error = None;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Allow empty repo warning
-        if !stderr.contains("empty repository") {
-            bail!("Failed to clone repository: {}", stderr);
+    for attempt in 0..MAX_RETRIES {
+        match f() {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_error = Some(e);
+                if attempt + 1 < MAX_RETRIES {
+                    let delay_ms = BASE_DELAY_MS * (1 << attempt); // 1s, 2s, 4s
+                    eprintln!(
+                        "[{}] Attempt {} failed, retrying in {}ms...",
+                        operation_name,
+                        attempt + 1,
+                        delay_ms
+                    );
+                    thread::sleep(Duration::from_millis(delay_ms));
+                }
+            }
         }
     }
 
-    Ok(())
+    Err(last_error.unwrap_or_else(|| {
+        anyhow::anyhow!("{} failed after {} attempts", operation_name, MAX_RETRIES)
+    }))
+}
+
+/// Clone repository to directory with retry logic
+fn clone_repo(repo_url: &str, dest: &Path) -> Result<()> {
+    retry_with_backoff("git clone", || {
+        let output = Command::new("git")
+            .args(["clone", repo_url])
+            .current_dir(dest)
+            .output()
+            .context("Failed to run git clone")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Allow empty repo warning
+            if !stderr.contains("empty repository") {
+                bail!("Failed to clone repository: {}", stderr);
+            }
+        }
+
+        Ok(())
+    })
 }
 
 /// Copy bundle contents to repository directory
@@ -547,40 +611,64 @@ fn push_gh_pages(repo_dir: &Path) -> Result<String> {
         .output()
         .context("Failed to get commit SHA")?;
 
-    let commit_sha = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
+    let commit_sha = String::from_utf8_lossy(&sha_output.stdout)
+        .trim()
+        .to_string();
 
-    // Force push to origin
-    let output = Command::new("git")
-        .args(["push", "-f", "origin", "gh-pages"])
-        .current_dir(repo_dir)
-        .output()
-        .context("Failed to git push")?;
+    // Force push to origin with retry for network errors
+    let repo_dir_owned = repo_dir.to_owned();
+    retry_with_backoff("git push", move || {
+        let output = Command::new("git")
+            .args(["push", "-f", "origin", "gh-pages"])
+            .current_dir(&repo_dir_owned)
+            .output()
+            .context("Failed to git push")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to push: {}", stderr);
-    }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to push: {}", stderr);
+        }
+
+        Ok(())
+    })?;
 
     Ok(commit_sha)
 }
 
-/// Enable GitHub Pages via API
+/// Enable GitHub Pages via API with retry logic
 fn enable_github_pages(username: &str, repo_name: &str) -> bool {
-    // Try to enable Pages - may fail if already enabled
-    let output = Command::new("gh")
-        .args([
-            "api",
-            &format!("repos/{}/{}/pages", username, repo_name),
-            "-X", "POST",
-            "-f", "source[branch]=gh-pages",
-            "-f", "source[path]=/",
-        ])
-        .output();
+    let api_path = format!("repos/{}/{}/pages", username, repo_name);
 
-    match output {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
-    }
+    // Try with retry - may fail if already enabled, which is okay
+    let result = retry_with_backoff("enable Pages", || {
+        let output = Command::new("gh")
+            .args([
+                "api",
+                &api_path,
+                "-X",
+                "POST",
+                "-f",
+                "source[branch]=gh-pages",
+                "-f",
+                "source[path]=/",
+            ])
+            .output()
+            .context("Failed to call GitHub API")?;
+
+        if output.status.success() {
+            Ok(true)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // If Pages is already enabled, that's fine
+            if stderr.contains("already exists") || stderr.contains("409") {
+                Ok(true)
+            } else {
+                bail!("Failed to enable Pages: {}", stderr);
+            }
+        }
+    });
+
+    result.unwrap_or(false)
 }
 
 /// Visit all files in a directory recursively
