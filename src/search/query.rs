@@ -1900,9 +1900,11 @@ impl SearchClient {
         // for suffixes, substrings, OR, NOT, or phrases.
         if can_use_cache && offset == 0 && !query.contains('*') && !has_boolean_operators(query) {
             if let Some(cached) = self.cached_prefix_hits(&sanitized, &filters) {
+                // Opt 2.4: Pre-compute lowercase query terms once, reuse for all hits
+                let query_terms = QueryTermsLower::from_query(&sanitized);
                 let mut filtered: Vec<SearchHit> = cached
                     .into_iter()
-                    .filter(|h| hit_matches_query_cached(h, &sanitized))
+                    .filter(|h| hit_matches_query_cached_precomputed(h, &query_terms))
                     .map(|c| c.hit.clone())
                     .collect();
                 if filtered.len() >= limit {
@@ -2996,22 +2998,101 @@ fn hash_token(tok: &str) -> u64 {
     1u64 << (h % 64)
 }
 
-fn hit_matches_query_cached(hit: &CachedHit, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    let q = query.to_lowercase();
-    let tokens: Vec<&str> = token_stream(&q).collect();
-    // Bloom gate: all query tokens must have bits set
-    for t in &tokens {
-        let bit = hash_token(t);
-        if hit.bloom64 & bit == 0 {
-            return false;
+// ============================================================================
+// QueryTermsLower: Pre-computed lowercase query tokens (Opt 2.4)
+// ============================================================================
+//
+// Avoids repeated to_lowercase() calls when filtering many cached hits.
+// The query is lowercased once and tokens extracted once, then reused.
+
+/// Pre-computed lowercase query terms for efficient hit matching.
+/// Call `from_query` once, then reuse for all hits in a search.
+struct QueryTermsLower {
+    /// The lowercased query string (owned to keep tokens valid)
+    query_lower: String,
+    /// Pre-computed token positions (start, end) into query_lower
+    token_ranges: Vec<(usize, usize)>,
+    /// Pre-computed bloom bits for fast rejection
+    bloom_mask: u64,
+}
+
+impl QueryTermsLower {
+    /// Create from a query string, pre-computing lowercase and tokens.
+    fn from_query(query: &str) -> Self {
+        if query.is_empty() {
+            return Self {
+                query_lower: String::new(),
+                token_ranges: Vec::new(),
+                bloom_mask: 0,
+            };
+        }
+
+        let query_lower = query.to_lowercase();
+        let mut token_ranges = Vec::new();
+        let mut bloom_mask = 0u64;
+
+        // Extract token positions
+        let mut start = None;
+        for (i, c) in query_lower.char_indices() {
+            if c.is_alphanumeric() {
+                if start.is_none() {
+                    start = Some(i);
+                }
+            } else if let Some(s) = start.take() {
+                let token = &query_lower[s..i];
+                bloom_mask |= hash_token(token);
+                token_ranges.push((s, i));
+            }
+        }
+        // Handle trailing token
+        if let Some(s) = start {
+            let token = &query_lower[s..];
+            bloom_mask |= hash_token(token);
+            token_ranges.push((s, query_lower.len()));
+        }
+
+        Self {
+            query_lower,
+            token_ranges,
+            bloom_mask,
         }
     }
 
+    /// Check if this query is empty (no tokens).
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.token_ranges.is_empty()
+    }
+
+    /// Iterate over the pre-computed lowercase tokens.
+    #[inline]
+    fn tokens(&self) -> impl Iterator<Item = &str> {
+        self.token_ranges
+            .iter()
+            .map(|(s, e)| &self.query_lower[*s..*e])
+    }
+
+    /// Get the bloom mask for fast rejection.
+    #[inline]
+    fn bloom_mask(&self) -> u64 {
+        self.bloom_mask
+    }
+}
+
+/// Check if a cached hit matches the pre-computed query terms.
+/// This is the optimized version that avoids repeated to_lowercase() calls.
+fn hit_matches_query_cached_precomputed(hit: &CachedHit, terms: &QueryTermsLower) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+
+    // Bloom gate: all query tokens must have bits set
+    if hit.bloom64 & terms.bloom_mask() != terms.bloom_mask() {
+        return false;
+    }
+
     // Verify each token matches as a prefix of a word in at least one field (implicit AND)
-    tokens.iter().all(|t| {
+    terms.tokens().all(|t| {
         // Check content tokens
         if token_stream(&hit.lc_content).any(|word| word.starts_with(t)) {
             return true;
@@ -3024,6 +3105,14 @@ fn hit_matches_query_cached(hit: &CachedHit, query: &str) -> bool {
         }
         false
     })
+}
+
+/// Legacy function for backward compatibility with tests.
+/// Prefer `hit_matches_query_cached_precomputed` with `QueryTermsLower` for batch operations.
+#[cfg(test)]
+fn hit_matches_query_cached(hit: &CachedHit, query: &str) -> bool {
+    let terms = QueryTermsLower::from_query(query);
+    hit_matches_query_cached_precomputed(hit, &terms)
 }
 
 fn is_prefix_only(query: &str) -> bool {
@@ -3377,6 +3466,93 @@ mod tests {
             let s2 = interner.intern(query);
             assert!(Arc::ptr_eq(&s1, &s2));
         }
+    }
+
+    // ==========================================================================
+    // QueryTermsLower Tests (Opt 2.4)
+    // ==========================================================================
+
+    #[test]
+    fn query_terms_lower_basic() {
+        let terms = QueryTermsLower::from_query("Hello World");
+
+        assert_eq!(terms.query_lower, "hello world");
+        let tokens: Vec<&str> = terms.tokens().collect();
+        assert_eq!(tokens, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn query_terms_lower_empty() {
+        let terms = QueryTermsLower::from_query("");
+
+        assert!(terms.is_empty());
+        assert_eq!(terms.tokens().count(), 0);
+    }
+
+    #[test]
+    fn query_terms_lower_single_term() {
+        let terms = QueryTermsLower::from_query("TEST");
+
+        let tokens: Vec<&str> = terms.tokens().collect();
+        assert_eq!(tokens, vec!["test"]);
+    }
+
+    #[test]
+    fn query_terms_lower_with_punctuation() {
+        let terms = QueryTermsLower::from_query("hello, world! how's it?");
+
+        let tokens: Vec<&str> = terms.tokens().collect();
+        assert_eq!(tokens, vec!["hello", "world", "how", "s", "it"]);
+    }
+
+    #[test]
+    fn query_terms_lower_unicode() {
+        let terms = QueryTermsLower::from_query("Héllo Wörld");
+
+        assert_eq!(terms.query_lower, "héllo wörld");
+        let tokens: Vec<&str> = terms.tokens().collect();
+        assert_eq!(tokens, vec!["héllo", "wörld"]);
+    }
+
+    #[test]
+    fn query_terms_lower_bloom_mask() {
+        let terms = QueryTermsLower::from_query("test");
+
+        // Bloom mask should be non-zero for non-empty query
+        assert_ne!(terms.bloom_mask(), 0);
+
+        // Same query should produce same bloom mask
+        let terms2 = QueryTermsLower::from_query("test");
+        assert_eq!(terms.bloom_mask(), terms2.bloom_mask());
+    }
+
+    #[test]
+    fn hit_matches_with_precomputed_terms() {
+        let hit = SearchHit {
+            title: "Test Title".into(),
+            snippet: "".into(),
+            content: "hello world content".into(),
+            content_hash: stable_content_hash("hello world content"),
+            score: 1.0,
+            source_path: "p".into(),
+            agent: "a".into(),
+            workspace: "w".into(),
+            workspace_original: None,
+            created_at: None,
+            line_number: None,
+            match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+        };
+        let cached = cached_hit_from(&hit);
+
+        // Test with precomputed terms
+        let terms = QueryTermsLower::from_query("hello");
+        assert!(hit_matches_query_cached_precomputed(&cached, &terms));
+
+        let terms_miss = QueryTermsLower::from_query("missing");
+        assert!(!hit_matches_query_cached_precomputed(&cached, &terms_miss));
     }
 
     // ==========================================================================
