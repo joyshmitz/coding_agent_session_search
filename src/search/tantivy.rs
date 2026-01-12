@@ -631,24 +631,34 @@ mod tests {
             index.commit().unwrap();
         }
 
-        // Find and truncate any .store or .idx files
-        for entry in fs::read_dir(path).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.ends_with(".store") || name_str.ends_with(".idx") {
-                // Truncate the file
-                let file = fs::OpenOptions::new()
-                    .write(true)
-                    .truncate(true)
-                    .open(entry.path())
-                    .unwrap();
-                file.set_len(10).unwrap(); // Leave only 10 bytes
-                break;
-            }
-        }
+        // Collect and sort segment files for deterministic behavior
+        let mut segment_files: Vec<_> = fs::read_dir(path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name();
+                let name_str = name.to_string_lossy();
+                name_str.ends_with(".store") || name_str.ends_with(".idx")
+            })
+            .collect();
+        segment_files.sort_by_key(|e| e.path());
 
-        // Should handle truncated segment gracefully
+        // Ensure we found at least one segment file to truncate
+        assert!(
+            !segment_files.is_empty(),
+            "Test setup error: no .store or .idx files found after commit"
+        );
+
+        // Truncate the first segment file (deterministic after sort)
+        let file_to_truncate = &segment_files[0];
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(file_to_truncate.path())
+            .unwrap();
+        file.set_len(10).unwrap(); // Leave only 10 bytes (corrupted)
+        file.sync_all().unwrap(); // Ensure truncation is persisted to disk
+
+        // Should handle truncated segment gracefully by rebuilding
         let result = TantivyIndex::open_or_create(path);
         assert!(
             result.is_ok(),
