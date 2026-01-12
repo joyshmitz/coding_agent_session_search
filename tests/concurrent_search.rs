@@ -11,7 +11,7 @@
 //! - No deadlocks
 //! - Reasonable latency
 
-use coding_agent_search::search::query::{SearchClient, SearchFilters};
+use coding_agent_search::search::query::{FieldMask, SearchClient, SearchFilters};
 use coding_agent_search::search::tantivy::TantivyIndex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -68,7 +68,13 @@ fn concurrent_10_simultaneous_searches() {
 
             let start = Instant::now();
             let hits = client
-                .search(&search_term, SearchFilters::default(), 10, 0)
+                .search(
+                    &search_term,
+                    SearchFilters::default(),
+                    10,
+                    0,
+                    FieldMask::FULL,
+                )
                 .unwrap();
             let elapsed = start.elapsed();
 
@@ -137,7 +143,13 @@ fn concurrent_search_during_indexing() {
             .expect("client");
 
         while !indexing_complete_clone.load(Ordering::Relaxed) {
-            let result = client.search("searchable_term", SearchFilters::default(), 10, 0);
+            let result = client.search(
+                "searchable_term",
+                SearchFilters::default(),
+                10,
+                0,
+                FieldMask::FULL,
+            );
             searches_clone.fetch_add(1, Ordering::Relaxed);
             if result.is_ok() {
                 successes_clone.fetch_add(1, Ordering::Relaxed);
@@ -211,7 +223,13 @@ fn concurrent_cache_contention() {
         .unwrap()
         .expect("client");
     let initial_hits = test_client
-        .search("cache_contention", SearchFilters::default(), 10, 0)
+        .search(
+            "cache_contention",
+            SearchFilters::default(),
+            10,
+            0,
+            FieldMask::FULL,
+        )
         .unwrap();
     assert_eq!(initial_hits.len(), 1, "Should find the cached content");
     drop(test_client);
@@ -237,7 +255,13 @@ fn concurrent_cache_contention() {
             // All threads search for the same term
             let start = Instant::now();
             let hits = client
-                .search("cache_contention", SearchFilters::default(), 10, 0)
+                .search(
+                    "cache_contention",
+                    SearchFilters::default(),
+                    10,
+                    0,
+                    FieldMask::FULL,
+                )
                 .unwrap();
             let elapsed = start.elapsed();
 
@@ -312,7 +336,7 @@ fn concurrent_reader_handle_exhaustion() {
 
             for j in 0..10 {
                 let term = format!("stress_content_{}", (i * 10 + j) % 100);
-                match client.search(&term, SearchFilters::default(), 5, 0) {
+                match client.search(&term, SearchFilters::default(), 5, 0, FieldMask::FULL) {
                     Ok(hits) if !hits.is_empty() => local_success += 1,
                     Ok(_) => local_success += 1, // Empty results still count as success
                     Err(_) => local_errors += 1,
@@ -394,7 +418,9 @@ fn concurrent_different_filters_no_interference() {
             let mut filters = SearchFilters::default();
             filters.agents.insert(agent.clone());
 
-            let hits = client.search("common_term", filters, 20, 0).unwrap();
+            let hits = client
+                .search("common_term", filters, 20, 0, FieldMask::FULL)
+                .unwrap();
 
             // All results should be from the filtered agent
             for hit in &hits {
@@ -420,7 +446,13 @@ fn concurrent_different_filters_no_interference() {
             barrier_clone.wait();
 
             let hits = client
-                .search("common_term", SearchFilters::default(), 20, 0)
+                .search(
+                    "common_term",
+                    SearchFilters::default(),
+                    20,
+                    0,
+                    FieldMask::FULL,
+                )
                 .unwrap();
 
             // Should find results from all agents
@@ -484,7 +516,7 @@ fn concurrent_no_deadlock_mixed_operations() {
                 .expect("client");
 
             while !done.load(Ordering::Relaxed) {
-                let _ = client.search("deadlock", SearchFilters::default(), 10, 0);
+                let _ = client.search("deadlock", SearchFilters::default(), 10, 0, FieldMask::FULL);
                 search_count.fetch_add(1, Ordering::Relaxed);
                 thread::sleep(Duration::from_millis(5));
             }

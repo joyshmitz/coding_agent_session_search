@@ -11,7 +11,7 @@
 
 use coding_agent_search::connectors::{NormalizedConversation, NormalizedMessage};
 use coding_agent_search::indexer::persist::persist_conversation;
-use coding_agent_search::search::query::{SearchClient, SearchFilters};
+use coding_agent_search::search::query::{FieldMask, SearchClient, SearchFilters};
 use coding_agent_search::search::tantivy::{TantivyIndex, index_dir};
 use coding_agent_search::storage::sqlite::SqliteStorage;
 use std::path::PathBuf;
@@ -122,7 +122,7 @@ fn test_search_memory_no_leak() {
 
     // Warm up - run a few searches to initialize caches
     for _ in 0..10 {
-        let _ = client.search("lorem", filters.clone(), 20, 0);
+        let _ = client.search("lorem", filters.clone(), 20, 0, FieldMask::FULL);
     }
 
     // Get baseline memory after warmup
@@ -143,7 +143,7 @@ fn test_search_memory_no_leak() {
         } else {
             "dolor"
         };
-        let _ = client.search(query, filters.clone(), 20, 0);
+        let _ = client.search(query, filters.clone(), 20, 0, FieldMask::FULL);
     }
 
     let after = get_process_memory_bytes();

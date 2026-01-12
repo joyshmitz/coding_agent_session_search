@@ -1,4 +1,4 @@
-use coding_agent_search::search::query::{MatchType, SearchClient, SearchFilters};
+use coding_agent_search::search::query::{FieldMask, MatchType, SearchClient, SearchFilters};
 use coding_agent_search::search::tantivy::TantivyIndex;
 use tempfile::TempDir;
 
@@ -31,7 +31,7 @@ fn implicit_wildcard_fallback_finds_substrings() {
     // Fallback to "*pple*" -> should find "apple".
     // We use sparse_threshold=1 to force fallback if < 1 result.
     let result = client
-        .search_with_fallback("pple", filters.clone(), 10, 0, 1)
+        .search_with_fallback("pple", filters.clone(), 10, 0, 1, FieldMask::FULL)
         .unwrap();
     let hits = result.hits;
 
@@ -65,7 +65,9 @@ fn explicit_wildcard_works_without_fallback() {
     let filters = SearchFilters::default();
 
     // Search "*fig*" -> explicit wildcard
-    let hits = client.search("*fig*", filters.clone(), 10, 0).unwrap();
+    let hits = client
+        .search("*fig*", filters.clone(), 10, 0, FieldMask::FULL)
+        .unwrap();
     assert_eq!(hits.len(), 1);
     // Should be Substring because of *x*
     assert_eq!(

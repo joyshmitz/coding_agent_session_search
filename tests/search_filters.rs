@@ -1,4 +1,4 @@
-use coding_agent_search::search::query::{SearchClient, SearchFilters};
+use coding_agent_search::search::query::{FieldMask, SearchClient, SearchFilters};
 use coding_agent_search::search::tantivy::TantivyIndex;
 use tempfile::TempDir;
 
@@ -36,7 +36,7 @@ fn agent_filter_limits_results() {
     let mut filters = SearchFilters::default();
     filters.agents.insert("codex".into());
     let hits = client
-        .search("shared_term", filters, 10, 0)
+        .search("shared_term", filters, 10, 0, FieldMask::FULL)
         .expect("search");
 
     assert_eq!(hits.len(), 1);
@@ -79,7 +79,7 @@ fn workspace_filter_limits_results() {
         .insert(dir.path().join("repo/a").to_string_lossy().to_string());
 
     let hits = client
-        .search("workspace_term", filters, 10, 0)
+        .search("workspace_term", filters, 10, 0, FieldMask::FULL)
         .expect("search");
 
     assert_eq!(hits.len(), 1);
@@ -123,8 +123,66 @@ fn time_filter_respects_since_until() {
         ..SearchFilters::default()
     };
 
-    let hits = client.search("time_term", filters, 10, 0).expect("search");
+    let hits = client
+        .search("time_term", filters, 10, 0, FieldMask::FULL)
+        .expect("search");
 
     assert_eq!(hits.len(), 1, "only middle conversation should match");
     assert!(hits[0].content.contains("two"));
+}
+
+/// Minimal field mask should preserve hit ordering while omitting heavy fields.
+#[test]
+fn minimal_field_mask_preserves_order() {
+    let dir = TempDir::new().unwrap();
+    let mut index = TantivyIndex::open_or_create(dir.path()).unwrap();
+
+    let conv_strong = util::ConversationFixtureBuilder::new("tester")
+        .title("strong match")
+        .source_path(dir.path().join("strong.jsonl"))
+        .base_ts(1_700_000_000_000)
+        .messages(1)
+        .with_content(0, "repeat repeat repeat")
+        .build_normalized();
+    let conv_weak = util::ConversationFixtureBuilder::new("tester")
+        .title("weak match")
+        .source_path(dir.path().join("weak.jsonl"))
+        .base_ts(1_700_000_000_001)
+        .messages(1)
+        .with_content(0, "repeat")
+        .build_normalized();
+
+    index.add_conversation(&conv_strong).unwrap();
+    index.add_conversation(&conv_weak).unwrap();
+    index.commit().unwrap();
+
+    let client = SearchClient::open(dir.path(), None)
+        .unwrap()
+        .expect("client");
+
+    let full_hits = client
+        .search("repeat", SearchFilters::default(), 10, 0, FieldMask::FULL)
+        .expect("search full");
+    let minimal_hits = client
+        .search(
+            "repeat",
+            SearchFilters::default(),
+            10,
+            0,
+            FieldMask::new(false, false, false, false),
+        )
+        .expect("search minimal");
+
+    assert_eq!(full_hits.len(), minimal_hits.len());
+    let full_paths: Vec<String> = full_hits.iter().map(|h| h.source_path.clone()).collect();
+    let minimal_paths: Vec<String> = minimal_hits.iter().map(|h| h.source_path.clone()).collect();
+    assert_eq!(full_paths, minimal_paths, "ordering should be identical");
+
+    for hit in minimal_hits {
+        assert!(hit.content.is_empty());
+        assert!(hit.snippet.is_empty());
+        assert!(hit.title.is_empty());
+        assert!(!hit.source_path.is_empty());
+        assert!(!hit.agent.is_empty());
+    }
 }

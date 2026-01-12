@@ -1,4 +1,4 @@
-use coding_agent_search::search::query::{SearchClient, SearchFilters};
+use coding_agent_search::search::query::{FieldMask, SearchClient, SearchFilters};
 use coding_agent_search::search::tantivy::TantivyIndex;
 use tempfile::TempDir;
 
@@ -27,7 +27,9 @@ fn search_client_caches_repeated_queries() {
     let filters = SearchFilters::default();
 
     // First search: Miss
-    let hits1 = client.search("unique_term", filters.clone(), 1, 0).unwrap();
+    let hits1 = client
+        .search("unique_term", filters.clone(), 1, 0, FieldMask::FULL)
+        .unwrap();
     assert_eq!(hits1.len(), 1);
 
     let stats1 = client.cache_stats();
@@ -39,7 +41,9 @@ fn search_client_caches_repeated_queries() {
 
     // Second search: Hit
     // We use limit 1 so the single cached result satisfies the requirement
-    let hits2 = client.search("unique_term", filters.clone(), 1, 0).unwrap();
+    let hits2 = client
+        .search("unique_term", filters.clone(), 1, 0, FieldMask::FULL)
+        .unwrap();
     assert_eq!(hits2.len(), 1);
 
     let stats2 = client.cache_stats();
@@ -71,12 +75,16 @@ fn search_client_prefix_cache_works() {
     let filters = SearchFilters::default();
 
     // Search "app": populates cache for "app". Use limit 1.
-    let hits_app = client.search("app", filters.clone(), 1, 0).unwrap();
+    let hits_app = client
+        .search("app", filters.clone(), 1, 0, FieldMask::FULL)
+        .unwrap();
     assert_eq!(hits_app.len(), 1);
 
     // Search "appl": should hit cache for "app" via prefix matching logic.
     // Use limit 1 to be satisfied by the single cached hit.
-    let hits_appl = client.search("appl", filters.clone(), 1, 0).unwrap();
+    let hits_appl = client
+        .search("appl", filters.clone(), 1, 0, FieldMask::FULL)
+        .unwrap();
     assert_eq!(hits_appl.len(), 1);
 
     let stats = client.cache_stats();

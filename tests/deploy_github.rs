@@ -192,7 +192,9 @@ fn test_bundle_structure_validation() -> Result<()> {
 #[test]
 fn test_progress_phases() {
     // Verify expected progress phases
-    let expected_phases = ["prereq", "size", "repo", "clone", "copy", "push", "pages", "complete"];
+    let expected_phases = [
+        "prereq", "size", "repo", "clone", "copy", "push", "pages", "complete",
+    ];
 
     // The deploy function uses these phases in order
     for phase in expected_phases {
@@ -264,6 +266,5 @@ fn test_deployer_force_toggle() {
 #[test]
 fn test_deployer_description() {
     // Test that builder accepts description
-    let _deployer = GitHubDeployer::new("test")
-        .description("A custom description for my archive");
+    let _deployer = GitHubDeployer::new("test").description("A custom description for my archive");
 }
