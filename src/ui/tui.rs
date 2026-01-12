@@ -2503,12 +2503,12 @@ fn prepare_editor_path(path: &str, db: Option<&crate::storage::sqlite::SqliteSto
             let filename = format!("cass_cursor_{}_{}.md", id, safe_title);
             let temp_path = std::env::temp_dir().join(filename);
 
-                            // Render content to Markdown
-                            let mut content = String::new();
-                            content.push_str("<!-- ⚠️ READ ONLY: This is a temporary export. Edits will NOT be saved to the original source. -->\n\n");
-                            if let Some(title) = &view.convo.title {
-                                content.push_str(&format!("# {}\n\n", title));
-                            }
+            // Render content to Markdown
+            let mut content = String::new();
+            content.push_str("<!-- ⚠️ READ ONLY: This is a temporary export. Edits will NOT be saved to the original source. -->\n\n");
+            if let Some(title) = &view.convo.title {
+                content.push_str(&format!("# {}\n\n", title));
+            }
             content.push_str(&format!("**Agent:** {}\n", view.convo.agent_slug));
             if let Some(ws) = &view.workspace {
                 content.push_str(&format!("**Workspace:** {}\n", ws.path.display()));
@@ -7079,6 +7079,7 @@ pub fn run_tui(
                                 page_size,
                                 page * page_size,
                                 SPARSE_THRESHOLD,
+                                crate::search::query::FieldMask::FULL,
                             ) {
                                 Ok(result) => {
                                     effective_search_mode = SearchMode::Hybrid;
@@ -7099,6 +7100,7 @@ pub fn run_tui(
                                         page_size,
                                         page * page_size,
                                         SPARSE_THRESHOLD,
+                                        crate::search::query::FieldMask::FULL,
                                     )
                                 }
                             }
@@ -7109,6 +7111,7 @@ pub fn run_tui(
                                 filters.clone(),
                                 page_size,
                                 page * page_size,
+                                crate::search::query::FieldMask::FULL,
                             ) {
                                 Ok(hits) => {
                                     effective_search_mode = SearchMode::Semantic;
@@ -7135,6 +7138,7 @@ pub fn run_tui(
                                         page_size,
                                         page * page_size,
                                         SPARSE_THRESHOLD,
+                                        crate::search::query::FieldMask::FULL,
                                     )
                                 }
                             }
@@ -7145,6 +7149,7 @@ pub fn run_tui(
                             page_size,
                             page * page_size,
                             SPARSE_THRESHOLD,
+                            crate::search::query::FieldMask::FULL,
                         ),
                     };
                     match search_result {
@@ -7187,7 +7192,13 @@ pub fn run_tui(
                             } else if use_recent_fallback {
                                 // Fetch recent results with no query filter (dft.2)
                                 let fallback_filters = SearchFilters::default();
-                                match client.search("", fallback_filters, page_size, 0) {
+                                match client.search(
+                                    "",
+                                    fallback_filters,
+                                    page_size,
+                                    0,
+                                    crate::search::query::FieldMask::FULL,
+                                ) {
                                     Ok(recent_hits) => {
                                         results = recent_hits;
                                         // Sort by recency (newest first)
@@ -7629,7 +7640,13 @@ fn run_tui_headless(data_dir_override: Option<std::path::PathBuf>) -> Result<()>
     let db_path = default_db_path_for(&data_dir);
     let client = SearchClient::open(&index_path, Some(&db_path))?
         .ok_or_else(|| anyhow::anyhow!("index/db not found"))?;
-    let _ = client.search("", SearchFilters::default(), 5, 0)?;
+    let _ = client.search(
+        "",
+        SearchFilters::default(),
+        5,
+        0,
+        crate::search::query::FieldMask::FULL,
+    )?;
     Ok(())
 }
 
@@ -7898,6 +7915,7 @@ mod tests {
             title: "Test".into(),
             snippet: snippet.into(),
             content: "content".into(),
+            content_hash: crate::search::query::stable_content_hash("content"),
             score,
             source_path: path.into(),
             agent: agent.into(),
