@@ -313,10 +313,16 @@ LOG_FILE=~/.cass_index.log
 rm -f "$LOG_FILE"
 
 nohup bash -c '
+set -o pipefail
 source "$HOME/.cargo/env" 2>/dev/null || true
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 cass index --progress 2>&1 | tee "$HOME/.cass_index.log"
-echo "===INDEX_COMPLETE===" >> "$HOME/.cass_index.log"
+STATUS=${PIPESTATUS[0]}
+if [ "$STATUS" -eq 0 ]; then
+    echo "===INDEX_COMPLETE===" >> "$HOME/.cass_index.log"
+else
+    echo "===INDEX_FAILED:${STATUS}===" >> "$HOME/.cass_index.log"
+fi
 ' > /dev/null 2>&1 &
 
 echo "INDEX_PID=$!"
@@ -347,13 +353,16 @@ echo "INDEX_PID=$!"
         let poll_script = r#"
 LOG_FILE=~/.cass_index.log
 if [ -f "$LOG_FILE" ]; then
-    if grep -q "===INDEX_COMPLETE===" "$LOG_FILE"; then
+    if grep -q "===INDEX_FAILED:" "$LOG_FILE"; then
+        echo "STATUS=ERROR"
+        tail -30 "$LOG_FILE"
+    elif grep -q "===INDEX_COMPLETE===" "$LOG_FILE"; then
         echo "STATUS=COMPLETE"
         # Get session count from health
         source ~/.cargo/env 2>/dev/null || true
         export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
         STATS=$(cass stats --json 2>/dev/null || echo '{}')
-        SESSIONS=$(echo "$STATS" | grep -o '"conversations":[0-9]*' | cut -d: -f2)
+        SESSIONS=$(echo "$STATS" | tr -d '\n' | sed -n 's/.*"conversations"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p')
         echo "SESSIONS=${SESSIONS:-0}"
     elif grep -qi "error" "$LOG_FILE" && ! grep -q "===INDEX_COMPLETE===" "$LOG_FILE"; then
         # Check if it's a real error or just log noise
@@ -553,14 +562,42 @@ fn extract_agent_from_line(line: &str) -> Option<String> {
 /// Extract session count from a log line.
 fn extract_session_count(line: &str) -> Option<u64> {
     // Match patterns like "found 234 sessions" or "Indexed 291 sessions"
-    if line.contains("sessions") || line.contains("conversations") {
-        for word in line.split_whitespace() {
-            if let Ok(count) = word.parse::<u64>() {
+    // Avoid picking unrelated numbers (timestamps, IDs) by anchoring near
+    // session/conversation keywords.
+    let lower = line.to_lowercase();
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+
+    for (idx, token) in tokens.iter().enumerate() {
+        let word = token.trim_matches(|c: char| !c.is_ascii_alphabetic());
+        if matches!(
+            word,
+            "session" | "sessions" | "conversation" | "conversations"
+        ) {
+            if idx > 0
+                && let Some(count) = parse_count(tokens[idx - 1])
+            {
+                return Some(count);
+            }
+            if idx + 1 < tokens.len()
+                && let Some(count) = parse_count(tokens[idx + 1])
+            {
                 return Some(count);
             }
         }
     }
+
     None
+}
+
+fn parse_count(token: &str) -> Option<u64> {
+    let trimmed = token.trim_matches(|c: char| !c.is_ascii_digit() && c != '/');
+    let candidate = trimmed.split('/').next().unwrap_or(trimmed);
+    let digits: String = candidate.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<u64>().ok()
+    }
 }
 
 #[cfg(test)]
@@ -678,6 +715,12 @@ mod tests {
             extract_session_count("Processing 42 conversations"),
             Some(42)
         );
+        assert_eq!(
+            extract_session_count("2026-01-11 12:00:00 Indexed 291 sessions"),
+            Some(291)
+        );
+        assert_eq!(extract_session_count("Indexed 5/10 conversations"), Some(5));
+        assert_eq!(extract_session_count("conversations: 17 total"), Some(17));
         assert_eq!(extract_session_count("Some other line"), None);
     }
 

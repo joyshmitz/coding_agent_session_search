@@ -359,6 +359,7 @@ mod tests {
             title: "Test Result".to_string(),
             snippet: "This is a test snippet".to_string(),
             content: "Full content here".to_string(),
+            content_hash: crate::search::query::stable_content_hash("Full content here"),
             score: 8.5,
             source_path: "/path/to/file.jsonl".to_string(),
             agent: "claude_code".to_string(),

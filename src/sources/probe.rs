@@ -219,10 +219,10 @@ if command -v cass &> /dev/null; then
     if [ $? -eq 0 ]; then
         echo "CASS_HEALTH=OK"
         # Try to get session count from stats
-        STATS=$(cass stats --json 2>/dev/null)
+        STATS=$(cass stats --json 2>/dev/null || echo '{}')
         if [ $? -eq 0 ]; then
-            # Extract total conversations from JSON
-            SESSIONS=$(echo "$STATS" | grep -o '"conversations":[0-9]*' | cut -d: -f2)
+            # Extract total conversations from JSON (allow whitespace/newlines)
+            SESSIONS=$(echo "$STATS" | tr -d '\n' | sed -n 's/.*"conversations"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p')
             echo "CASS_SESSIONS=${SESSIONS:-0}"
         fi
     else

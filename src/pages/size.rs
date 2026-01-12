@@ -131,9 +131,7 @@ impl SizeEstimate {
         let compressed_bytes = (plaintext_bytes as f64 * COMPRESSION_RATIO) as u64;
 
         // Calculate chunk count (minimum of 1 chunk even for empty content)
-        let chunk_count = compressed_bytes
-            .div_ceil(DEFAULT_CHUNK_SIZE)
-            .max(1) as u32;
+        let chunk_count = compressed_bytes.div_ceil(DEFAULT_CHUNK_SIZE).max(1) as u32;
 
         // Add AEAD overhead
         let encrypted_bytes = compressed_bytes + (chunk_count as u64 * AEAD_TAG_OVERHEAD);
@@ -530,16 +528,25 @@ mod tests {
         let estimate = SizeEstimate::from_plaintext_size(one_chunk_plaintext, 10, 100).unwrap();
         // Due to floating point, compressed_bytes should be very close to DEFAULT_CHUNK_SIZE
         // The important thing is it should NOT be 2 chunks when it's exactly 1 chunk of data
-        assert_eq!(estimate.chunk_count, 1, "Exactly one chunk's worth should be 1 chunk, not 2");
+        assert_eq!(
+            estimate.chunk_count, 1,
+            "Exactly one chunk's worth should be 1 chunk, not 2"
+        );
 
         // Test 3: Data just over 1 chunk -> 2 chunks
         let over_one_chunk = one_chunk_plaintext + 1000000; // Add ~1 MB to plaintext
         let estimate = SizeEstimate::from_plaintext_size(over_one_chunk, 10, 100).unwrap();
-        assert!(estimate.chunk_count >= 1, "Over one chunk should be at least 1 chunk");
+        assert!(
+            estimate.chunk_count >= 1,
+            "Over one chunk should be at least 1 chunk"
+        );
 
         // Test 4: Large data that compresses to ~2 chunks
         let two_chunks_plaintext = (2.0 * DEFAULT_CHUNK_SIZE as f64 / COMPRESSION_RATIO) as u64;
         let estimate = SizeEstimate::from_plaintext_size(two_chunks_plaintext, 100, 1000).unwrap();
-        assert_eq!(estimate.chunk_count, 2, "Exactly two chunks' worth should be 2 chunks, not 3");
+        assert_eq!(
+            estimate.chunk_count, 2,
+            "Exactly two chunks' worth should be 2 chunks, not 3"
+        );
     }
 }

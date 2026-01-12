@@ -271,7 +271,10 @@ impl GitHubDeployer {
                 .collect();
             progress(
                 "warning",
-                &format!("Large files detected (may slow deployment): {}", warnings.join(", ")),
+                &format!(
+                    "Large files detected (may slow deployment): {}",
+                    warnings.join(", ")
+                ),
             );
         }
 
