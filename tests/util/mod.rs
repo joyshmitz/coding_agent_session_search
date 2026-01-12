@@ -777,13 +777,21 @@ impl SeededRng {
         min + self.rng.r#gen::<f32>() * (max - min)
     }
 
-    /// Generate a random i64 in the given range.
+    /// Generate a random i64 in the given range [min, max).
+    /// If min >= max, returns min.
     pub fn i64_range(&mut self, min: i64, max: i64) -> i64 {
+        if min >= max {
+            return min;
+        }
         self.rng.r#gen_range(min..max)
     }
 
-    /// Generate a random usize in the given range.
+    /// Generate a random usize in the given range [min, max).
+    /// If min >= max, returns min.
     pub fn usize_range(&mut self, min: usize, max: usize) -> usize {
+        if min >= max {
+            return min;
+        }
         self.rng.r#gen_range(min..max)
     }
 
@@ -931,13 +939,16 @@ impl PerfMeasurement {
     }
 
     /// Get a percentile (0-100).
+    /// Values outside [0, 100] are clamped.
     pub fn percentile(&self, p: f64) -> Duration {
         if self.samples.is_empty() {
             return Duration::ZERO;
         }
         let mut sorted: Vec<_> = self.samples.clone();
         sorted.sort();
-        let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
+        // Clamp p to [0, 100] to avoid negative values or overflow
+        let p_clamped = p.clamp(0.0, 100.0);
+        let idx = ((p_clamped / 100.0) * (sorted.len() - 1) as f64).round() as usize;
         sorted[idx.min(sorted.len() - 1)]
     }
 
@@ -1112,7 +1123,8 @@ impl TestDataGenerator {
         PathBuf::from(format!("/home/user/projects/{}", project))
     }
 
-    /// Generate random message content.
+    /// Generate random message content with word count in [min_words, max_words].
+    /// If min_words > max_words, they are swapped.
     pub fn content(&mut self, min_words: usize, max_words: usize) -> String {
         const WORDS: &[&str] = &[
             "rust",
@@ -1156,7 +1168,12 @@ impl TestDataGenerator {
             "ok",
             "err",
         ];
-        let word_count = self.rng.usize_range(min_words, max_words + 1);
+        let (lo, hi) = if min_words <= max_words {
+            (min_words, max_words)
+        } else {
+            (max_words, min_words)
+        };
+        let word_count = self.rng.usize_range(lo, hi + 1);
         (0..word_count)
             .map(|_| {
                 let idx = self.rng.usize_range(0, WORDS.len());
