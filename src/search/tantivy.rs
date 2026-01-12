@@ -332,8 +332,9 @@ impl TantivyIndex {
 }
 
 /// Maximum number of byte indices needed for edge n-gram generation.
-/// We need indices for up to 21 characters + 1 for the end position = 22 entries.
-/// This supports n-grams of length 2..=20 (max ngram length of 20 chars).
+/// We collect up to 22 character byte positions, enabling n-grams from length 2
+/// up to 21 characters. For words shorter than 22 chars, the word.len() position
+/// is included automatically via the chain; for longer words, we cap at 22 positions.
 const MAX_NGRAM_INDICES: usize = 22;
 
 /// Generate edge n-grams from text without heap allocation for index collection.
@@ -368,7 +369,7 @@ fn generate_edge_ngrams(text: &str) -> String {
             continue;
         }
 
-        // Generate edge ngrams of length 2..=20 (or word length)
+        // Generate edge ngrams of length 2..=21 (or word length if shorter)
         for &end_idx in &indices[2..] {
             if !ngrams.is_empty() {
                 ngrams.push(' ');
