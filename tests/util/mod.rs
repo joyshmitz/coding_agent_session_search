@@ -811,9 +811,7 @@ impl SeededRng {
     /// Generate a normalized f32 vector of the given dimension.
     /// Each component is in [-1, 1] and the vector is L2-normalized.
     pub fn normalized_vector(&mut self, dimension: usize) -> Vec<f32> {
-        let mut vec: Vec<f32> = (0..dimension)
-            .map(|_| self.f32_range(-1.0, 1.0))
-            .collect();
+        let mut vec: Vec<f32> = (0..dimension).map(|_| self.f32_range(-1.0, 1.0)).collect();
         let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 1e-10 {
             for v in &mut vec {
@@ -835,6 +833,7 @@ impl SeededRng {
 
 /// Performance measurement results with statistical analysis.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PerfMeasurement {
     pub samples: Vec<Duration>,
     pub warmup_iterations: usize,
@@ -895,7 +894,7 @@ impl PerfMeasurement {
         let mut sorted: Vec<_> = self.samples.clone();
         sorted.sort();
         let mid = sorted.len() / 2;
-        if sorted.len() % 2 == 0 {
+        if sorted.len().is_multiple_of(2) {
             (sorted[mid - 1] + sorted[mid]) / 2
         } else {
             sorted[mid]
@@ -1193,9 +1192,7 @@ impl TestDataGenerator {
 
     /// Generate a vector of random documents for embedding tests.
     pub fn documents(&mut self, count: usize) -> Vec<String> {
-        (0..count)
-            .map(|_| self.content(10, 50))
-            .collect()
+        (0..count).map(|_| self.content(10, 50)).collect()
     }
 
     /// Generate embedding vectors for testing.

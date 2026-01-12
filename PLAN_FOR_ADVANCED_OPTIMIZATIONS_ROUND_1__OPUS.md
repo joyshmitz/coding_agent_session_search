@@ -64,7 +64,7 @@ Add thresholds/bench tests to prevent "perf backslide".
 | `search_latency` (40 convs) | **10.5 µs** | Tantivy lexical, cached |
 | `search_scaling/500_convs` | **11 µs** | Scales well |
 | `vector_index_search_10k` | **11.2 ms** | Semantic search |
-| `vector_index_search_50k` | **56.1 ms** | **MAJOR HOTSPOT** |
+| `vector_index_search_50k_loaded` | **1.83 ms** | F16 preconvert on; ~4.57 ms with `CASS_F16_PRECONVERT=0` |
 | `vector_index_search_50k_filtered` | 23.5 ms | Filtering helps |
 | `wildcard_large_dataset/substring` | **7.5 ms** | Regex overhead |
 | `canonicalize_long_message` | **951 µs** | Text preprocessing |
@@ -72,7 +72,7 @@ Add thresholds/bench tests to prevent "perf backslide".
 | `hash_embed_1000_docs` | 2.68 ms | Hash embedder |
 | `index_small_batch` (10 convs) | 13.3 ms | Indexing throughput |
 
-**Key Finding**: The 50k vector search benchmark uses `Quantization::F16`. Estimated ~50% of the 56ms is F16→F32 conversion overhead (based on instruction-level analysis: 19.2M conversions at ~1-2 cycles each vs ~38M FP ops for dot products).
+**Key Finding**: The 50k vector search benchmark uses `Quantization::F16`. Estimated ~60% of the ~4.57ms mmap path is F16→F32 conversion overhead; pre-conversion brings the same benchmark to ~1.83ms.
 
 ### 2.2 Indexing Baseline (from profiling corpus)
 
@@ -141,7 +141,7 @@ Indexing total allocated: ~1,375 MB for 36k messages
 
 ## 4) Profiled Hotspots
 
-### 4.1 **Vector Search Linear Scan** (56ms for 50k vectors) — `vector_index.rs:773-803`
+### 4.1 **Vector Search Linear Scan** (~4.57ms mmap / ~1.83ms preconvert for 50k vectors) — `vector_index.rs:773-803`
 
 ```rust
 // O(n) scan over ALL vectors
@@ -159,7 +159,7 @@ for row in &self.rows {
 - F16→F32 conversion (when using F16 quantization)
 - Heap operations
 
-**Memory Bandwidth Check**: 50k × 384 × 2 bytes = 38.4 MB read in 56ms = ~686 MB/s. Modern DDR4 provides 20-50 GB/s. **Conclusion**: Compute-bound, not memory-bound.
+**Memory Bandwidth Check**: 50k × 384 × 2 bytes = 38.4 MB. In ~4.57ms ≈ 8.4 GB/s; in ~1.83ms ≈ 21.0 GB/s. Modern DDR4 provides 20-50 GB/s. **Conclusion**: mmap path is compute-bound; preconvert pushes closer to bandwidth limits.
 
 ### 4.2 **Dot Product Implementation** — `vector_index.rs:1221-1228`
 
@@ -226,9 +226,9 @@ Property-based tests:
 
 | # | Optimization | Impact | Confidence | Effort | Score | p95 Move? |
 |---|-------------|--------|------------|--------|-------|-----------|
-| **1** | Pre-convert F16→F32 slab | 56ms → 30ms | HIGH | LOW | **9.0** | YES |
-| **2** | SIMD dot product | 30ms → 10-15ms | MEDIUM | LOW | **6.0** | YES |
-| **3** | Parallel vector search | 10-15ms → 2-3ms | HIGH | MEDIUM | **6.0** | YES |
+| **1** | Pre-convert F16→F32 slab | 4.57ms → 1.83ms | HIGH | LOW | **9.0** | YES |
+| **2** | SIMD dot product | legacy 30ms → 10-15ms (now shipped; current ~4.57ms mmap) | MEDIUM | LOW | **6.0** | YES |
+| **3** | Parallel vector search | legacy 10-15ms → 2-3ms (now shipped; current ~4.57ms mmap) | HIGH | MEDIUM | **6.0** | YES |
 | **4** | Output-field laziness | Medium | HIGH | MEDIUM | **5.0** | YES |
 | **5** | Wildcard regex caching | Medium | MEDIUM | MEDIUM | **4.0** | YES |
 | **6** | Streaming canonicalize | 951µs → 300µs | HIGH | MEDIUM | 4.0 | NO |
@@ -240,7 +240,7 @@ Property-based tests:
 
 ---
 
-## 7) Already-Shipped Optimizations
+## 7) Already-Shipped Optimizations (Round 0)
 
 ### 7.1 Title-Prefix N-Gram Reuse
 
@@ -301,7 +301,10 @@ let vectors = match header.quantization {
 - 2x memory for F16 indices (76.8 MB for 50k × 384 × 4-byte f32 vectors)
 - Loses mmap benefits: currently `VectorStorage::Mmap` enables lazy page loading and OS caching. Converting to heap-allocated `Vec<f32>` requires loading entire slab into memory at startup. For very large indices, consider keeping mmap and adding an optional "preload" flag.
 
-**Expected Impact**: 56ms → ~30ms
+**Measured Impact** (search_perf::vector_index_search_50k_loaded, 2026-01-11):
+- `CASS_F16_PRECONVERT=0`: ~4.57ms
+- Default (pre-convert on): ~1.83ms
+- ~60% faster on this workstation
 
 **Rollback**: Env var `CASS_F16_PRECONVERT=0` to keep F16 storage and convert per-query (original behavior).
 
@@ -338,7 +341,17 @@ fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
 
 **Isomorphism Note**: SIMD reorders FP operations, causing ~1e-7 relative error. Ranking order is preserved; scores may differ slightly.
 
-**Expected Impact**: 2-4x speedup (30ms → 10-15ms). Verify LLVM isn't already auto-vectorizing before implementing.
+**Measured Impact** (2026-01-11, search_perf::vector_index_search_50k, target_critcmp):
+- SIMD disabled (`CASS_SIMD_DOT=0`): ~5.92ms (median; 5.84-6.01ms)
+- SIMD enabled (default): ~19.48ms (median; 16.49-22.72ms)
+- On this host, SIMD is slower (~3.3x). Needs re-test on AVX2/NEON-capable hardware.
+
+**Micro-bench** (runtime_perf::dot_product_* on this host):
+- `dot_product_scalar`: ~260ns
+- `dot_product_simd`: ~39ns
+- ~6-7x faster in isolation, despite end-to-end regression above.
+
+**Expected Impact** (legacy): 2-4x speedup (30ms → 10-15ms). Current 50k bench is ~4.57ms (mmap) / ~1.83ms (preconvert); remaining headroom is smaller.
 
 **Dependency**: Add `wide = "0.7"` to Cargo.toml (or latest stable version)
 
@@ -412,7 +425,26 @@ pub fn search_top_k_parallel(
 - Final sort with deterministic tie-breaking (message_id) ensures identical output
 - Parallel execution order doesn't affect result set
 
-**Expected Impact**: ~4x on 4-core, ~8x on 8-core (10-15ms → 2-3ms)
+**Expected Impact** (legacy): ~4x on 4-core, ~8x on 8-core (10-15ms → 2-3ms). Current 50k bench is ~4.57ms (mmap) / ~1.83ms (preconvert).
+
+**Measured Impact** (2026-01-12, 64-core host, search_perf::vector_index_search_50k_loaded):
+
+| Configuration | Time (p50) | Speedup vs Sequential |
+|---------------|------------|----------------------|
+| Sequential (CASS_PARALLEL_SEARCH=0) | ~100ms (63-135ms) | 1x (baseline) |
+| RAYON_NUM_THREADS=1 | ~6.3ms | ~16x |
+| RAYON_NUM_THREADS=4 | ~2.3ms | ~43x |
+| RAYON_NUM_THREADS=8 | ~1.67ms | ~60x |
+| RAYON_NUM_THREADS=16 | ~1.67ms | ~60x |
+| RAYON_NUM_THREADS=32 | ~1.81ms | ~55x |
+| Default (64 cores) | ~2.05ms | ~49x |
+
+**Analysis**:
+- Excellent scaling up to 8 threads (~60x improvement)
+- Diminishing returns beyond 8-16 threads (memory bandwidth saturation, merge overhead)
+- Single-threaded Rayon (~6.3ms) outperforms pure sequential (~100ms) by 16x due to chunked processing and better cache locality
+- Optimal thread count appears to be 8-16 for this 50k vector workload
+- Full 64-core utilization shows slight regression vs 8-16 cores due to scheduling overhead
 
 **Tuning Note**: Chunk size of 1024 yields ~49 chunks for 50k vectors. Consider 256-512 for better load balancing on many-core systems. Benchmark to find optimal value.
 
@@ -591,13 +623,13 @@ cargo install critcmp && critcmp before after
 ### Next Steps
 | Priority | Optimization | Expected Impact |
 |----------|-------------|-----------------|
-| **P0** | Pre-convert F16 | 56ms → 30ms |
-| **P0** | SIMD dot product | 30ms → 10-15ms |
-| **P1** | Parallel search (Rayon) | 10-15ms → 2-3ms |
+| **P0** | Pre-convert F16 | 4.57ms → 1.83ms (bench) |
+| **P0** | SIMD dot product | legacy 30ms → 10-15ms (shipped; current ~4.57ms mmap) |
+| **P1** | Parallel search (Rayon) | legacy 10-15ms → 2-3ms (shipped; current ~4.57ms mmap) |
 | **P1** | Output-field laziness | Medium (cold-open) |
 | **P2** | Wildcard regex caching | Medium (TUI) |
 | **P2** | Streaming canonicalize | 951µs → 300µs |
 | **P2** | SQLite N+1 caching | Medium |
 | **P3** | Streaming backpressure | Peak RSS reduction |
 
-**Achievable speedup on semantic search**: **20-30x** (56ms → 2-3ms) with exact search preserved.
+**Achievable speedup on semantic search**: legacy estimate **20-30x** (56ms → 2-3ms). Current measured 50k bench: ~4.57ms mmap → ~1.83ms preconvert.
