@@ -2,8 +2,177 @@
 
 use crate::sources::config::{PathMapping, Platform};
 use crate::sources::provenance::Origin;
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// -------------------------------------------------------------------------
+// PathTrie: Optimized prefix trie for workspace path rewriting
+// -------------------------------------------------------------------------
+
+/// A mapping entry stored at trie nodes.
+#[derive(Debug, Clone)]
+struct TrieMapping {
+    /// Target path prefix to rewrite to.
+    to: Box<str>,
+    /// Optional agent filter (None = applies to all).
+    agents: Option<Vec<String>>,
+}
+
+impl TrieMapping {
+    fn applies_to_agent(&self, agent: Option<&str>) -> bool {
+        match (&self.agents, agent) {
+            (None, _) => true,
+            (Some(_), None) => true,
+            (Some(agents), Some(a)) => agents.iter().any(|allowed| allowed == a),
+        }
+    }
+}
+
+/// Trie node for path component matching.
+#[derive(Debug, Default)]
+struct PathTrieNode {
+    /// Children indexed by path component.
+    children: HashMap<Box<str>, PathTrieNode>,
+    /// Mappings at this node (multiple mappings can share a prefix with different agent filters).
+    mappings: Vec<TrieMapping>,
+}
+
+/// Prefix trie optimized for workspace path rewriting.
+///
+/// Provides O(k) lookup where k is the path depth, instead of O(n) where n is
+/// the number of mappings. This is a significant improvement for users with
+/// many workspace mappings.
+#[derive(Debug, Default)]
+pub struct PathTrie {
+    root: PathTrieNode,
+    /// Lookup count for observability.
+    lookup_count: AtomicU64,
+    /// Hit count (successful rewrites) for observability.
+    hit_count: AtomicU64,
+}
+
+impl PathTrie {
+    /// Create a new empty trie.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build a trie from a list of path mappings.
+    pub fn from_mappings(mappings: &[PathMapping]) -> Self {
+        let mut trie = Self::new();
+        for mapping in mappings {
+            trie.insert(&mapping.from, &mapping.to, mapping.agents.clone());
+        }
+        trie
+    }
+
+    /// Split a path into components, handling both Unix and Windows separators.
+    fn split_path(path: &str) -> Vec<&str> {
+        path.split(['/', '\\']).filter(|s| !s.is_empty()).collect()
+    }
+
+    /// Insert a path mapping into the trie.
+    ///
+    /// # Arguments
+    /// * `from` - Source path prefix to match.
+    /// * `to` - Target path prefix to rewrite to.
+    /// * `agents` - Optional agent filter.
+    pub fn insert(&mut self, from: &str, to: &str, agents: Option<Vec<String>>) {
+        let components = Self::split_path(from);
+        let mut current = &mut self.root;
+
+        for component in components {
+            current = current.children.entry(component.into()).or_default();
+        }
+
+        current.mappings.push(TrieMapping {
+            to: to.into(),
+            agents,
+        });
+    }
+
+    /// Lookup and rewrite a path using longest-prefix matching.
+    ///
+    /// # Arguments
+    /// * `path` - The path to potentially rewrite.
+    /// * `agent` - Optional agent name for filtering.
+    ///
+    /// # Returns
+    /// The rewritten path if a matching mapping is found, otherwise the original path.
+    pub fn lookup(&self, path: &str, agent: Option<&str>) -> String {
+        self.lookup_count.fetch_add(1, Ordering::Relaxed);
+
+        let components = Self::split_path(path);
+        let mut current = &self.root;
+        let mut best_match: Option<(&TrieMapping, usize)> = None;
+
+        // Check root-level mappings (empty prefix)
+        for mapping in &current.mappings {
+            if mapping.applies_to_agent(agent) {
+                best_match = Some((mapping, 0));
+            }
+        }
+
+        // Walk the trie as deep as possible, tracking the deepest matching mapping
+        for (depth, component) in components.iter().enumerate() {
+            match current.children.get(*component) {
+                Some(child) => {
+                    current = child;
+                    let current_depth = depth + 1;
+
+                    // Check if this node has a matching mapping
+                    for mapping in &current.mappings {
+                        if mapping.applies_to_agent(agent) {
+                            best_match = Some((mapping, current_depth));
+                        }
+                    }
+                }
+                None => break, // No more matches possible
+            }
+        }
+
+        // Apply the best match if found
+        if let Some((mapping, depth)) = best_match {
+            self.hit_count.fetch_add(1, Ordering::Relaxed);
+
+            // Reconstruct the remaining path after the matched prefix
+            let remaining: Vec<&str> = components.into_iter().skip(depth).collect();
+            if remaining.is_empty() {
+                return mapping.to.to_string();
+            }
+
+            // Use the original separator style from the path
+            let sep = if path.contains('\\') { '\\' } else { '/' };
+            let remainder = remaining.join(&sep.to_string());
+
+            // Handle trailing separator in the target
+            if mapping.to.ends_with('/') || mapping.to.ends_with('\\') {
+                format!("{}{}", mapping.to, remainder)
+            } else {
+                format!("{}{}{}", mapping.to, sep, remainder)
+            }
+        } else {
+            path.to_string()
+        }
+    }
+
+    /// Get lookup statistics for observability.
+    pub fn stats(&self) -> (u64, u64) {
+        (
+            self.lookup_count.load(Ordering::Relaxed),
+            self.hit_count.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Check if the trie is empty (no mappings).
+    pub fn is_empty(&self) -> bool {
+        self.root.children.is_empty() && self.root.mappings.is_empty()
+    }
+}
 
 pub mod aider;
 pub mod amp;
@@ -38,7 +207,7 @@ impl DetectionResult {
 /// A root directory to scan with associated provenance.
 ///
 /// Part of P2.1 - multi-root support for remote sources.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ScanRoot {
     /// Path to scan (e.g., ~/.claude, or /data/remotes/work-laptop/mirror/home/.claude)
     pub path: PathBuf,
@@ -54,6 +223,23 @@ pub struct ScanRoot {
     /// Used to map remote workspace paths to local equivalents.
     /// Applied at ingest time so filters work across sources.
     pub workspace_rewrites: Vec<PathMapping>,
+
+    /// Cached trie for fast workspace rewriting (Opt 1.5).
+    /// Lazily initialized on first use of rewrite_workspace.
+    rewrite_trie: OnceCell<Arc<PathTrie>>,
+}
+
+impl Clone for ScanRoot {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            origin: self.origin.clone(),
+            platform: self.platform,
+            workspace_rewrites: self.workspace_rewrites.clone(),
+            // Each clone gets its own lazy trie cell
+            rewrite_trie: OnceCell::new(),
+        }
+    }
 }
 
 impl ScanRoot {
@@ -64,6 +250,7 @@ impl ScanRoot {
             origin: Origin::local(),
             platform: None,
             workspace_rewrites: Vec::new(),
+            rewrite_trie: OnceCell::new(),
         }
     }
 
@@ -74,6 +261,7 @@ impl ScanRoot {
             origin,
             platform,
             workspace_rewrites: Vec::new(),
+            rewrite_trie: OnceCell::new(),
         }
     }
 
@@ -85,14 +273,39 @@ impl ScanRoot {
     ) -> Self {
         self.workspace_rewrites
             .push(PathMapping::new(src_prefix, dst_prefix));
+        // Invalidate cached trie since mappings changed
+        self.rewrite_trie = OnceCell::new();
         self
+    }
+
+    /// Get or build the cached rewrite trie.
+    fn get_trie(&self) -> &Arc<PathTrie> {
+        self.rewrite_trie
+            .get_or_init(|| Arc::new(PathTrie::from_mappings(&self.workspace_rewrites)))
     }
 
     /// Apply workspace rewriting rules to a path.
     ///
+    /// Uses a prefix trie for O(k) lookup where k is path depth (Opt 1.5),
+    /// instead of O(n) where n is the number of mappings.
     /// Uses longest-prefix matching for correct handling of nested paths.
     /// Optionally filters by agent name.
     pub fn rewrite_workspace(&self, path: &str, agent: Option<&str>) -> String {
+        // Fast path: no rewrites configured
+        if self.workspace_rewrites.is_empty() {
+            return path.to_string();
+        }
+
+        // Use cached trie for efficient lookup
+        let trie = self.get_trie();
+        trie.lookup(path, agent)
+    }
+
+    /// Apply workspace rewriting using linear search (original algorithm).
+    ///
+    /// Kept for benchmarking comparison. Use `rewrite_workspace` for production.
+    #[allow(dead_code)]
+    pub fn rewrite_workspace_linear(&self, path: &str, agent: Option<&str>) -> String {
         // Sort by prefix length descending for longest-prefix match
         let mut mappings: Vec<_> = self
             .workspace_rewrites
@@ -760,5 +973,189 @@ mod tests {
         };
         assert!(result.detected);
         assert_eq!(result.evidence.len(), 2);
+    }
+
+    // =========================================================================
+    // PathTrie (Opt 1.5)
+    // =========================================================================
+
+    #[test]
+    fn path_trie_empty_lookup() {
+        let trie = PathTrie::new();
+        assert_eq!(
+            trie.lookup("/home/user/project", None),
+            "/home/user/project"
+        );
+    }
+
+    #[test]
+    fn path_trie_simple_rewrite() {
+        let mut trie = PathTrie::new();
+        trie.insert("/home/user", "/Users/me", None);
+
+        assert_eq!(trie.lookup("/home/user/project", None), "/Users/me/project");
+    }
+
+    #[test]
+    fn path_trie_exact_match() {
+        let mut trie = PathTrie::new();
+        trie.insert("/home/user", "/Users/me", None);
+
+        assert_eq!(trie.lookup("/home/user", None), "/Users/me");
+    }
+
+    #[test]
+    fn path_trie_no_match() {
+        let mut trie = PathTrie::new();
+        trie.insert("/home/user", "/Users/me", None);
+
+        // Different prefix - should not match
+        assert_eq!(trie.lookup("/var/log/app", None), "/var/log/app");
+    }
+
+    #[test]
+    fn path_trie_longest_prefix_match() {
+        let mut trie = PathTrie::new();
+        trie.insert("/home", "/Users", None);
+        trie.insert("/home/user", "/Users/me", None);
+        trie.insert("/home/user/projects", "/work", None);
+
+        // Should match /home/user/projects (longest)
+        assert_eq!(
+            trie.lookup("/home/user/projects/cass/src", None),
+            "/work/cass/src"
+        );
+
+        // Should match /home/user
+        assert_eq!(
+            trie.lookup("/home/user/documents", None),
+            "/Users/me/documents"
+        );
+
+        // Should match /home
+        assert_eq!(trie.lookup("/home/other", None), "/Users/other");
+    }
+
+    #[test]
+    fn path_trie_agent_filter() {
+        let mut trie = PathTrie::new();
+        trie.insert(
+            "/remote/projects",
+            "/local/work",
+            Some(vec!["claude-code".into()]),
+        );
+        trie.insert(
+            "/remote/projects",
+            "/local/other",
+            Some(vec!["cursor".into()]),
+        );
+
+        // Should use claude-code mapping
+        assert_eq!(
+            trie.lookup("/remote/projects/app", Some("claude-code")),
+            "/local/work/app"
+        );
+
+        // Should use cursor mapping
+        assert_eq!(
+            trie.lookup("/remote/projects/app", Some("cursor")),
+            "/local/other/app"
+        );
+
+        // No agent filter - uses first matching (agent=None matches all)
+        let result = trie.lookup("/remote/projects/app", None);
+        assert!(result.starts_with("/local/"));
+    }
+
+    #[test]
+    fn path_trie_windows_paths() {
+        let mut trie = PathTrie::new();
+        trie.insert("C:\\Users\\dev", "/home/dev", None);
+
+        assert_eq!(
+            trie.lookup("C:\\Users\\dev\\project\\src", None),
+            "/home/dev\\project\\src" // Preserves original separator for remainder
+        );
+    }
+
+    #[test]
+    fn path_trie_stats() {
+        let mut trie = PathTrie::new();
+        trie.insert("/home/user", "/Users/me", None);
+
+        // Initial stats should be 0
+        assert_eq!(trie.stats(), (0, 0));
+
+        // Lookup that hits
+        let _ = trie.lookup("/home/user/project", None);
+        assert_eq!(trie.stats(), (1, 1));
+
+        // Lookup that misses
+        let _ = trie.lookup("/var/log", None);
+        assert_eq!(trie.stats(), (2, 1));
+    }
+
+    #[test]
+    fn path_trie_from_mappings() {
+        use crate::sources::config::PathMapping;
+
+        let mappings = vec![
+            PathMapping::new("/home/user", "/Users/me"),
+            PathMapping::new("/opt/app", "/Applications/app"),
+        ];
+
+        let trie = PathTrie::from_mappings(&mappings);
+
+        assert_eq!(trie.lookup("/home/user/project", None), "/Users/me/project");
+        assert_eq!(trie.lookup("/opt/app/bin", None), "/Applications/app/bin");
+    }
+
+    #[test]
+    fn scan_root_rewrite_uses_trie() {
+        let root = ScanRoot::local(PathBuf::from("/test"))
+            .with_rewrite("/home/user", "/Users/me")
+            .with_rewrite("/home/user/projects", "/work");
+
+        // Should use longest-prefix match via trie
+        assert_eq!(
+            root.rewrite_workspace("/home/user/projects/cass", None),
+            "/work/cass"
+        );
+
+        // Should match shorter prefix
+        assert_eq!(
+            root.rewrite_workspace("/home/user/documents", None),
+            "/Users/me/documents"
+        );
+    }
+
+    #[test]
+    fn scan_root_rewrite_empty() {
+        let root = ScanRoot::local(PathBuf::from("/test"));
+
+        // No rewrites - should return original path
+        assert_eq!(
+            root.rewrite_workspace("/home/user/project", None),
+            "/home/user/project"
+        );
+    }
+
+    #[test]
+    fn scan_root_trie_vs_linear_equivalence() {
+        let root = ScanRoot::local(PathBuf::from("/test"))
+            .with_rewrite("/a/b/c", "/x/y/z")
+            .with_rewrite("/a/b", "/x/y")
+            .with_rewrite("/a", "/x");
+
+        let paths = ["/a/b/c/d/e", "/a/b/foo", "/a/bar", "/other/path"];
+
+        for path in paths {
+            assert_eq!(
+                root.rewrite_workspace(path, None),
+                root.rewrite_workspace_linear(path, None),
+                "Mismatch for path: {}",
+                path
+            );
+        }
     }
 }
