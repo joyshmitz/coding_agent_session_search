@@ -28,6 +28,7 @@ use chrono::Utc;
 use rand::{rngs::OsRng, RngCore};
 use std::path::Path;
 use tracing::info;
+use zeroize::Zeroize;
 
 /// Recovery secret entropy (256 bits = 32 bytes)
 const RECOVERY_SECRET_BYTES: usize = 32;
@@ -108,10 +109,15 @@ impl RecoverySecret {
 
 impl Drop for RecoverySecret {
     fn drop(&mut self) {
-        // Zeroize secret bytes
-        for byte in &mut self.bytes {
-            *byte = 0;
+        // Use zeroize crate for secure erasure (prevents compiler optimization)
+        self.bytes.zeroize();
+        // SAFETY: Zeroize encoded string by replacing with zeros then clearing
+        // This ensures the base64-encoded secret doesn't linger in memory
+        unsafe {
+            let encoded_bytes = self.encoded.as_bytes_mut();
+            encoded_bytes.zeroize();
         }
+        self.encoded.clear();
     }
 }
 

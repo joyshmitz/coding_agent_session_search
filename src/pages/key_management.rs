@@ -16,7 +16,7 @@
 //! - Rotate re-encrypts entire payload with new DEK
 
 use crate::pages::encrypt::{
-    Argon2Params, DecryptionEngine, EncryptionConfig, KeySlot, KdfAlgorithm, SlotType, load_config,
+    Argon2Params, EncryptionConfig, KeySlot, KdfAlgorithm, SlotType, load_config,
 };
 use crate::pages::qr::RecoverySecret;
 use aes_gcm::{
@@ -133,7 +133,10 @@ pub fn key_add_password(
     let dek = unwrap_dek_with_password(&config, current_password)?;
 
     // Create new slot (use max ID + 1 since IDs are stable after revocation)
-    let slot_id = config.key_slots.iter().map(|s| s.id).max().unwrap_or(0).saturating_add(1);
+    let max_id = config.key_slots.iter().map(|s| s.id).max().unwrap_or(0);
+    let slot_id = max_id.checked_add(1).ok_or_else(|| {
+        anyhow::anyhow!("Cannot add more key slots: maximum slot ID (255) reached")
+    })?;
     let new_slot = create_password_slot(new_password, &dek, &config.export_id, slot_id)?;
 
     config.key_slots.push(new_slot);
@@ -164,7 +167,10 @@ pub fn key_add_recovery(
     let secret = RecoverySecret::generate();
 
     // Create new slot (use max ID + 1 since IDs are stable after revocation)
-    let slot_id = config.key_slots.iter().map(|s| s.id).max().unwrap_or(0).saturating_add(1);
+    let max_id = config.key_slots.iter().map(|s| s.id).max().unwrap_or(0);
+    let slot_id = max_id.checked_add(1).ok_or_else(|| {
+        anyhow::anyhow!("Cannot add more key slots: maximum slot ID (255) reached")
+    })?;
     let new_slot = create_recovery_slot(secret.as_bytes(), &dek, &config.export_id, slot_id)?;
 
     config.key_slots.push(new_slot);
@@ -239,7 +245,7 @@ pub fn key_rotate(
     let config = load_config(archive_dir)?;
 
     // 1. Decrypt payload with old password
-    let old_dek = unwrap_dek_with_password(&config, old_password)?;
+    let mut old_dek = unwrap_dek_with_password(&config, old_password)?;
     let plaintext = decrypt_all_chunks(archive_dir, &old_dek, &config, |p| progress(p * 0.5))?;
 
     // 2. Generate new DEK and export_id
@@ -303,9 +309,9 @@ pub fn key_rotate(
     // 6. Regenerate integrity.json
     regenerate_integrity_manifest(archive_dir)?;
 
-    // 7. Zeroize old DEK (new_dek goes out of scope)
-    let mut old_dek_copy = old_dek;
-    old_dek_copy.zeroize();
+    // 7. Zeroize sensitive key material
+    old_dek.zeroize();
+    new_dek.zeroize();
 
     info!("Key rotation complete");
     Ok(RotateResult {
@@ -718,7 +724,7 @@ fn sha256_hex(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pages::encrypt::EncryptionEngine;
+    use crate::pages::encrypt::{DecryptionEngine, EncryptionEngine};
     use tempfile::TempDir;
 
     fn setup_test_archive() -> (TempDir, std::path::PathBuf) {
