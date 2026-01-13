@@ -130,14 +130,20 @@ pub fn key_add_password(
     let mut config = load_config(archive_dir)?;
 
     // Unlock with current password to get DEK
-    let dek = unwrap_dek_with_password(&config, current_password)?;
+    let mut dek = unwrap_dek_with_password(&config, current_password)?;
 
     // Create new slot (use max ID + 1 since IDs are stable after revocation)
-    let max_id = config.key_slots.iter().map(|s| s.id).max().unwrap_or(0);
-    let slot_id = max_id.checked_add(1).ok_or_else(|| {
-        anyhow::anyhow!("Cannot add more key slots: maximum slot ID (255) reached")
-    })?;
+    // If no slots exist, start at 0; otherwise use max + 1
+    let slot_id = match config.key_slots.iter().map(|s| s.id).max() {
+        Some(max_id) => max_id.checked_add(1).ok_or_else(|| {
+            anyhow::anyhow!("Cannot add more key slots: maximum slot ID (255) reached")
+        })?,
+        None => 0,
+    };
     let new_slot = create_password_slot(new_password, &dek, &config.export_id, slot_id)?;
+
+    // Zeroize DEK before any potential early return
+    dek.zeroize();
 
     config.key_slots.push(new_slot);
 
@@ -161,17 +167,23 @@ pub fn key_add_recovery(
     let mut config = load_config(archive_dir)?;
 
     // Unlock with current password to get DEK
-    let dek = unwrap_dek_with_password(&config, current_password)?;
+    let mut dek = unwrap_dek_with_password(&config, current_password)?;
 
     // Generate recovery secret
     let secret = RecoverySecret::generate();
 
     // Create new slot (use max ID + 1 since IDs are stable after revocation)
-    let max_id = config.key_slots.iter().map(|s| s.id).max().unwrap_or(0);
-    let slot_id = max_id.checked_add(1).ok_or_else(|| {
-        anyhow::anyhow!("Cannot add more key slots: maximum slot ID (255) reached")
-    })?;
+    // If no slots exist, start at 0; otherwise use max + 1
+    let slot_id = match config.key_slots.iter().map(|s| s.id).max() {
+        Some(max_id) => max_id.checked_add(1).ok_or_else(|| {
+            anyhow::anyhow!("Cannot add more key slots: maximum slot ID (255) reached")
+        })?,
+        None => 0,
+    };
     let new_slot = create_recovery_slot(secret.as_bytes(), &dek, &config.export_id, slot_id)?;
+
+    // Zeroize DEK before any potential early return
+    dek.zeroize();
 
     config.key_slots.push(new_slot);
 
@@ -201,7 +213,10 @@ pub fn key_revoke(
     }
 
     // Find which slot authenticates with this password
-    let (auth_slot_id, _dek) = unwrap_dek_with_slot_id(&config, current_password)?;
+    let (auth_slot_id, mut dek) = unwrap_dek_with_slot_id(&config, current_password)?;
+
+    // Zeroize DEK immediately - we only needed to verify the password works
+    dek.zeroize();
 
     // Safety: Cannot revoke slot used for authentication
     if auth_slot_id == slot_id_to_revoke {
@@ -338,8 +353,10 @@ fn unwrap_dek_with_password(config: &EncryptionConfig, password: &str) -> Result
         let wrapped_dek = BASE64.decode(&slot.wrapped_dek)?;
         let nonce = BASE64.decode(&slot.nonce)?;
 
-        if let Ok(kek) = derive_kek_argon2id(password, &salt) {
-            if let Ok(dek) = unwrap_key(&kek, &wrapped_dek, &nonce, &export_id, slot.id) {
+        if let Ok(mut kek) = derive_kek_argon2id(password, &salt) {
+            let result = unwrap_key(&kek, &wrapped_dek, &nonce, &export_id, slot.id);
+            kek.zeroize(); // Always zeroize KEK after use
+            if let Ok(dek) = result {
                 return Ok(dek);
             }
         }
@@ -361,8 +378,10 @@ fn unwrap_dek_with_slot_id(config: &EncryptionConfig, password: &str) -> Result<
         let wrapped_dek = BASE64.decode(&slot.wrapped_dek)?;
         let nonce = BASE64.decode(&slot.nonce)?;
 
-        if let Ok(kek) = derive_kek_argon2id(password, &salt) {
-            if let Ok(dek) = unwrap_key(&kek, &wrapped_dek, &nonce, &export_id, slot.id) {
+        if let Ok(mut kek) = derive_kek_argon2id(password, &salt) {
+            let result = unwrap_key(&kek, &wrapped_dek, &nonce, &export_id, slot.id);
+            kek.zeroize(); // Always zeroize KEK after use
+            if let Ok(dek) = result {
                 return Ok((slot.id, dek));
             }
         }
@@ -443,10 +462,15 @@ fn create_password_slot(
     OsRng.fill_bytes(&mut salt);
 
     // Derive KEK from password
-    let kek = derive_kek_argon2id(password, &salt)?;
+    let mut kek = derive_kek_argon2id(password, &salt)?;
 
     // Wrap DEK
-    let (wrapped_dek, nonce) = wrap_key(&kek, dek, &export_id, slot_id)?;
+    let result = wrap_key(&kek, dek, &export_id, slot_id);
+
+    // Zeroize KEK immediately after use
+    kek.zeroize();
+
+    let (wrapped_dek, nonce) = result?;
 
     Ok(KeySlot {
         id: slot_id,
@@ -473,10 +497,15 @@ fn create_recovery_slot(
     OsRng.fill_bytes(&mut salt);
 
     // Derive KEK from recovery secret
-    let kek = derive_kek_hkdf(secret, &salt)?;
+    let mut kek = derive_kek_hkdf(secret, &salt)?;
 
     // Wrap DEK
-    let (wrapped_dek, nonce) = wrap_key(&kek, dek, &export_id, slot_id)?;
+    let result = wrap_key(&kek, dek, &export_id, slot_id);
+
+    // Zeroize KEK immediately after use
+    kek.zeroize();
+
+    let (wrapped_dek, nonce) = result?;
 
     Ok(KeySlot {
         id: slot_id,

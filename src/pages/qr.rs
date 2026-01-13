@@ -125,12 +125,26 @@ impl Drop for RecoverySecret {
 pub struct RecoveryArtifacts {
     /// The recovery secret
     pub secret: RecoverySecret,
-    /// Content for recovery-secret.txt
+    /// Content for recovery-secret.txt (contains secret, zeroized on drop)
     pub secret_text: String,
     /// PNG image bytes for qr-code.png
     pub qr_png: Vec<u8>,
     /// SVG markup for qr-code.svg
     pub qr_svg: String,
+}
+
+impl Drop for RecoveryArtifacts {
+    fn drop(&mut self) {
+        // Zeroize secret_text which contains the encoded secret
+        // SAFETY: Same as RecoverySecret::drop - zeroize string contents
+        unsafe {
+            let text_bytes = self.secret_text.as_bytes_mut();
+            text_bytes.zeroize();
+        }
+        self.secret_text.clear();
+        // Note: secret field has its own Drop impl that zeroizes it
+        // qr_png and qr_svg don't contain plaintext secret (encoded in QR)
+    }
 }
 
 impl RecoveryArtifacts {
