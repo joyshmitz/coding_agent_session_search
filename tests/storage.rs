@@ -51,7 +51,7 @@ fn schema_version_created_on_open() {
     let db_path = tmp.path().join("store.db");
     let storage = SqliteStorage::open(&db_path).expect("open");
 
-    assert_eq!(storage.schema_version().unwrap(), 6);
+    assert_eq!(storage.schema_version().unwrap(), 8);
 
     // If meta row is removed, the getter surfaces an error.
     storage.raw().execute("DELETE FROM meta", []).unwrap();
@@ -562,7 +562,7 @@ fn migration_from_v1_applies_v2_and_v3() {
     let storage = SqliteStorage::open(&db_path).expect("open v1 db");
 
     // Verify migration completed
-    assert_eq!(storage.schema_version().unwrap(), 6, "should migrate to v6");
+    assert_eq!(storage.schema_version().unwrap(), 8, "should migrate to v8");
 
     // Verify FTS5 table was created
     let tables: Vec<String> = storage
@@ -678,7 +678,7 @@ fn migration_from_v2_applies_v3() {
     let storage = SqliteStorage::open(&db_path).expect("open v2 db");
 
     // Verify migration completed
-    assert_eq!(storage.schema_version().unwrap(), 6, "should migrate to v6");
+    assert_eq!(storage.schema_version().unwrap(), 8, "should migrate to v8");
 }
 
 #[test]
@@ -1039,7 +1039,7 @@ fn migration_from_v3_creates_sources_table() {
     let storage = SqliteStorage::open(&db_path).expect("open v3 db");
 
     // Verify migration completed
-    assert_eq!(storage.schema_version().unwrap(), 6, "should migrate to v6");
+    assert_eq!(storage.schema_version().unwrap(), 8, "should migrate to v8");
 
     // Verify sources table was created with local source
     let sources = storage.list_sources().expect("list_sources");
@@ -1877,4 +1877,337 @@ fn timeline_json_grouped_output_includes_provenance() {
 
     assert!(has_local, "should have local entry with kind='local'");
     assert!(has_remote, "should have remote entry with kind='ssh'");
+}
+
+// =============================================================================
+// Daily Stats Tests (Opt 3.2 - tst.sto.daily_stats)
+// Tests for materialized time-range aggregates
+// =============================================================================
+
+#[test]
+fn daily_stats_table_created_on_fresh_db() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("daily_stats.db");
+    let storage = SqliteStorage::open(&db_path).expect("open");
+
+    // Check that daily_stats table exists
+    let tables: Vec<String> = storage
+        .raw()
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_stats'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    assert_eq!(tables.len(), 1, "daily_stats table should exist");
+
+    // Check columns
+    let columns: Vec<String> = storage
+        .raw()
+        .prepare("PRAGMA table_info(daily_stats)")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    assert!(columns.contains(&"day_id".to_string()));
+    assert!(columns.contains(&"agent_slug".to_string()));
+    assert!(columns.contains(&"source_id".to_string()));
+    assert!(columns.contains(&"session_count".to_string()));
+    assert!(columns.contains(&"message_count".to_string()));
+    assert!(columns.contains(&"total_chars".to_string()));
+    assert!(columns.contains(&"last_updated".to_string()));
+}
+
+#[test]
+fn daily_stats_day_id_conversion() {
+    // Test day_id conversion: 2024-01-01 00:00:00 UTC = 1704067200 seconds
+    // Days since 2020-01-01 (1577836800) = (1704067200 - 1577836800) / 86400 = 1461
+    let ts_ms = 1704067200 * 1000; // 2024-01-01 in milliseconds
+    let day_id = SqliteStorage::day_id_from_millis(ts_ms);
+    assert_eq!(day_id, 1461, "2024-01-01 should be day 1461 since 2020-01-01");
+
+    // Test round-trip: day_id -> timestamp -> day_id
+    let ts_back = SqliteStorage::millis_from_day_id(day_id);
+    let day_id_back = SqliteStorage::day_id_from_millis(ts_back);
+    assert_eq!(day_id, day_id_back, "day_id should round-trip correctly");
+}
+
+#[test]
+fn daily_stats_rebuild_from_conversations() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("daily_rebuild.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open");
+
+    // Insert some conversations
+    let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
+    let ws_id = storage
+        .ensure_workspace(PathBuf::from("/workspace/demo").as_path(), Some("Demo"))
+        .unwrap();
+
+    // Insert 3 conversations on different days
+    let base_ts = 1704067200000_i64; // 2024-01-01 00:00:00 UTC in ms
+    for i in 0..3 {
+        let started_at = base_ts + (i * 86400 * 1000); // Each day
+        let conv = Conversation {
+            id: None,
+            agent_slug: "tester".into(),
+            workspace: Some(PathBuf::from("/workspace/demo")),
+            external_id: Some(format!("conv-{}", i)),
+            title: Some(format!("Conversation {}", i)),
+            source_path: PathBuf::from(format!("/logs/conv{}.jsonl", i)),
+            started_at: Some(started_at),
+            ended_at: Some(started_at + 3600000),
+            approx_tokens: Some(100),
+            metadata_json: serde_json::json!({}),
+            messages: vec![msg(0, started_at)],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, Some(ws_id), &conv)
+            .unwrap();
+    }
+
+    // Rebuild daily stats
+    let result = storage.rebuild_daily_stats().expect("rebuild_daily_stats");
+    assert!(result.rows_created > 0, "should create daily_stats rows");
+    assert_eq!(result.total_sessions, 3, "should count 3 sessions");
+
+    // Verify health check
+    let health = storage.daily_stats_health().expect("daily_stats_health");
+    assert!(health.populated, "daily_stats should be populated");
+    assert_eq!(health.conversation_count, 3);
+    assert_eq!(health.materialized_total, 3);
+    assert_eq!(health.drift, 0, "no drift after rebuild");
+}
+
+#[test]
+fn daily_stats_count_sessions_in_range() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("daily_count.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open");
+
+    // Insert conversations
+    let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
+    let base_ts = 1704067200000_i64;
+
+    for i in 0..5 {
+        let started_at = base_ts + (i * 86400 * 1000);
+        let conv = Conversation {
+            id: None,
+            agent_slug: "tester".into(),
+            workspace: None,
+            external_id: Some(format!("sess-{}", i)),
+            title: None,
+            source_path: PathBuf::from(format!("/logs/s{}.jsonl", i)),
+            started_at: Some(started_at),
+            ended_at: None,
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conv)
+            .unwrap();
+    }
+
+    // Rebuild stats
+    storage.rebuild_daily_stats().expect("rebuild");
+
+    // Query range: days 1-3 (should get 3 sessions)
+    let start = base_ts + (1 * 86400 * 1000);
+    let end = base_ts + (3 * 86400 * 1000);
+    let (count, from_cache) = storage
+        .count_sessions_in_range(Some(start), Some(end), None, None)
+        .expect("count_sessions_in_range");
+
+    assert!(from_cache, "should use materialized stats");
+    assert_eq!(count, 3, "should count 3 sessions in range");
+
+    // Query all time
+    let (total, _) = storage
+        .count_sessions_in_range(None, None, None, None)
+        .expect("count all");
+    assert_eq!(total, 5, "should count all 5 sessions");
+}
+
+#[test]
+fn daily_stats_histogram() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("daily_hist.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open");
+
+    let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
+    let base_ts = 1704067200000_i64;
+
+    // Insert multiple conversations on day 0 and day 2
+    for i in 0..3 {
+        let started_at = base_ts; // Day 0
+        let conv = Conversation {
+            id: None,
+            agent_slug: "tester".into(),
+            workspace: None,
+            external_id: Some(format!("d0-{}", i)),
+            title: None,
+            source_path: PathBuf::from(format!("/logs/d0-{}.jsonl", i)),
+            started_at: Some(started_at),
+            ended_at: None,
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![msg(0, started_at)],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conv)
+            .unwrap();
+    }
+
+    for i in 0..2 {
+        let started_at = base_ts + (2 * 86400 * 1000); // Day 2
+        let conv = Conversation {
+            id: None,
+            agent_slug: "tester".into(),
+            workspace: None,
+            external_id: Some(format!("d2-{}", i)),
+            title: None,
+            source_path: PathBuf::from(format!("/logs/d2-{}.jsonl", i)),
+            started_at: Some(started_at),
+            ended_at: None,
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![msg(0, started_at)],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conv)
+            .unwrap();
+    }
+
+    storage.rebuild_daily_stats().expect("rebuild");
+
+    // Get histogram for days 0-2
+    let histogram = storage
+        .get_daily_histogram(base_ts, base_ts + (2 * 86400 * 1000), None, None)
+        .expect("get_daily_histogram");
+
+    // Should have entries for day 0 and day 2 (day 1 has no sessions)
+    assert!(histogram.len() >= 2, "should have at least 2 days with data");
+
+    // Find day 0 entry
+    let day0_id = SqliteStorage::day_id_from_millis(base_ts);
+    let day0 = histogram.iter().find(|d| d.day_id == day0_id);
+    assert!(day0.is_some(), "should have day 0 entry");
+    assert_eq!(day0.unwrap().sessions, 3, "day 0 should have 3 sessions");
+
+    // Find day 2 entry
+    let day2_id = SqliteStorage::day_id_from_millis(base_ts + (2 * 86400 * 1000));
+    let day2 = histogram.iter().find(|d| d.day_id == day2_id);
+    assert!(day2.is_some(), "should have day 2 entry");
+    assert_eq!(day2.unwrap().sessions, 2, "day 2 should have 2 sessions");
+}
+
+#[test]
+fn daily_stats_fallback_to_direct_query() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("daily_fallback.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open");
+
+    let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
+    let base_ts = 1704067200000_i64;
+
+    // Insert conversation without rebuilding stats
+    let conv = Conversation {
+        id: None,
+        agent_slug: "tester".into(),
+        workspace: None,
+        external_id: Some("fallback-1".to_string()),
+        title: None,
+        source_path: PathBuf::from("/logs/fallback.jsonl"),
+        started_at: Some(base_ts),
+        ended_at: None,
+        approx_tokens: None,
+        metadata_json: serde_json::json!({}),
+        messages: vec![],
+        source_id: "local".to_string(),
+        origin_host: None,
+    };
+    storage
+        .insert_conversation_tree(agent_id, None, &conv)
+        .unwrap();
+
+    // daily_stats is empty, should fall back to direct COUNT(*)
+    let (count, from_cache) = storage
+        .count_sessions_in_range(None, None, None, None)
+        .expect("count with fallback");
+
+    assert!(!from_cache, "should use direct query (not cache)");
+    assert_eq!(count, 1, "should count 1 session via direct query");
+}
+
+#[test]
+fn daily_stats_health_detects_drift() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("daily_drift.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open");
+
+    let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
+    let base_ts = 1704067200000_i64;
+
+    // Insert and rebuild
+    let conv1 = Conversation {
+        id: None,
+        agent_slug: "tester".into(),
+        workspace: None,
+        external_id: Some("drift-1".to_string()),
+        title: None,
+        source_path: PathBuf::from("/logs/drift1.jsonl"),
+        started_at: Some(base_ts),
+        ended_at: None,
+        approx_tokens: None,
+        metadata_json: serde_json::json!({}),
+        messages: vec![],
+        source_id: "local".to_string(),
+        origin_host: None,
+    };
+    storage
+        .insert_conversation_tree(agent_id, None, &conv1)
+        .unwrap();
+    storage.rebuild_daily_stats().expect("rebuild");
+
+    // Health should show no drift
+    let health1 = storage.daily_stats_health().expect("health");
+    assert_eq!(health1.drift, 0, "no drift after rebuild");
+
+    // Insert another conversation (without updating stats)
+    let conv2 = Conversation {
+        id: None,
+        agent_slug: "tester".into(),
+        workspace: None,
+        external_id: Some("drift-2".to_string()),
+        title: None,
+        source_path: PathBuf::from("/logs/drift2.jsonl"),
+        started_at: Some(base_ts + 3600000),
+        ended_at: None,
+        approx_tokens: None,
+        metadata_json: serde_json::json!({}),
+        messages: vec![],
+        source_id: "local".to_string(),
+        origin_host: None,
+    };
+    storage
+        .insert_conversation_tree(agent_id, None, &conv2)
+        .unwrap();
+
+    // Health should detect drift
+    let health2 = storage.daily_stats_health().expect("health after insert");
+    assert_eq!(health2.drift, 1, "should detect 1 session drift");
+    assert_eq!(health2.conversation_count, 2);
+    assert_eq!(health2.materialized_total, 1);
 }
