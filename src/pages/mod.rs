@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod bundle;
 pub mod deploy_cloudflare;
 pub mod deploy_github;
@@ -5,6 +6,7 @@ pub mod encrypt;
 pub mod export;
 pub mod fts;
 pub mod qr;
+pub mod redact;
 pub mod secret_scan;
 pub mod size;
 pub mod wizard;
