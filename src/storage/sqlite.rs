@@ -30,7 +30,8 @@ fn deserialize_msgpack_to_json(bytes: &[u8]) -> serde_json::Value {
     if bytes.is_empty() {
         return serde_json::Value::Object(serde_json::Map::new());
     }
-    rmp_serde::from_slice(bytes).unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+    rmp_serde::from_slice(bytes)
+        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
 }
 
 /// Read metadata from row, preferring binary column, falling back to JSON.
@@ -220,7 +221,7 @@ pub fn cleanup_old_backups(db_path: &Path, keep_count: usize) -> Result<(), std:
 }
 
 /// Public schema version constant for external checks.
-pub const CURRENT_SCHEMA_VERSION: i64 = 7;
+pub const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 /// Result of checking schema compatibility.
 #[derive(Debug, Clone)]
@@ -295,7 +296,7 @@ fn check_schema_compatibility(path: &Path) -> std::result::Result<SchemaCheck, r
     }
 }
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 const MIGRATION_V1: &str = r"
 PRAGMA foreign_keys = ON;
@@ -504,6 +505,25 @@ ALTER TABLE conversations ADD COLUMN metadata_bin BLOB;
 ALTER TABLE messages ADD COLUMN extra_bin BLOB;
 ";
 
+const MIGRATION_V8: &str = r"
+-- Opt 3.2: Daily stats materialized table for O(1) time-range histograms
+-- Provides fast aggregated queries for stats/dashboard without full table scans
+
+CREATE TABLE IF NOT EXISTS daily_stats (
+    day_id INTEGER NOT NULL,              -- Days since 2020-01-01 (Unix epoch + offset)
+    agent_slug TEXT NOT NULL,             -- 'all' for totals, or specific agent slug
+    source_id TEXT NOT NULL DEFAULT 'all', -- 'all' for totals, or specific source
+    session_count INTEGER NOT NULL DEFAULT 0,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    total_chars INTEGER NOT NULL DEFAULT 0,
+    last_updated INTEGER NOT NULL,
+    PRIMARY KEY (day_id, agent_slug, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_stats_agent ON daily_stats(agent_slug, day_id);
+CREATE INDEX IF NOT EXISTS idx_daily_stats_source ON daily_stats(source_id, day_id);
+";
+
 pub struct SqliteStorage {
     conn: Connection,
 }
@@ -660,7 +680,129 @@ impl SqliteStorage {
             )
             .with_context(|| format!("fetching workspace id for {path_str}"))
     }
+}
 
+// -------------------------------------------------------------------------
+// IndexingCache (Opt 7.2) - N+1 Prevention for Agent/Workspace IDs
+// -------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// Cache for agent and workspace IDs during batch indexing.
+///
+/// Prevents N+1 database queries by caching the results of ensure_agent
+/// and ensure_workspace calls within a batch. This is per-batch and
+/// single-threaded, so no synchronization is needed.
+///
+/// # Usage
+/// ```ignore
+/// let mut cache = IndexingCache::new();
+/// for conv in conversations {
+///     let agent_id = cache.get_or_insert_agent(storage, &agent)?;
+///     let workspace_id = cache.get_or_insert_workspace(storage, workspace)?;
+///     // ... use agent_id and workspace_id
+/// }
+/// ```
+///
+/// # Rollback
+/// Set environment variable `CASS_SQLITE_CACHE=0` to bypass caching
+/// and use direct DB calls (useful for debugging).
+#[derive(Debug, Default)]
+pub struct IndexingCache {
+    agent_ids: HashMap<String, i64>,
+    workspace_ids: HashMap<PathBuf, i64>,
+    hits: u64,
+    misses: u64,
+}
+
+impl IndexingCache {
+    /// Create a new empty cache.
+    pub fn new() -> Self {
+        Self {
+            agent_ids: HashMap::new(),
+            workspace_ids: HashMap::new(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Check if caching is enabled via environment variable.
+    /// Returns true unless CASS_SQLITE_CACHE is set to "0" or "false".
+    pub fn is_enabled() -> bool {
+        dotenvy::var("CASS_SQLITE_CACHE")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true)
+    }
+
+    /// Get or insert an agent ID, using cache if available.
+    ///
+    /// Returns the cached ID if present, otherwise calls ensure_agent
+    /// and caches the result.
+    pub fn get_or_insert_agent(&mut self, storage: &SqliteStorage, agent: &Agent) -> Result<i64> {
+        if let Some(&cached) = self.agent_ids.get(&agent.slug) {
+            self.hits += 1;
+            return Ok(cached);
+        }
+
+        self.misses += 1;
+        let id = storage.ensure_agent(agent)?;
+        self.agent_ids.insert(agent.slug.clone(), id);
+        Ok(id)
+    }
+
+    /// Get or insert a workspace ID, using cache if available.
+    ///
+    /// Returns the cached ID if present, otherwise calls ensure_workspace
+    /// and caches the result.
+    pub fn get_or_insert_workspace(
+        &mut self,
+        storage: &SqliteStorage,
+        path: &Path,
+        display_name: Option<&str>,
+    ) -> Result<i64> {
+        if let Some(&cached) = self.workspace_ids.get(path) {
+            self.hits += 1;
+            return Ok(cached);
+        }
+
+        self.misses += 1;
+        let id = storage.ensure_workspace(path, display_name)?;
+        self.workspace_ids.insert(path.to_path_buf(), id);
+        Ok(id)
+    }
+
+    /// Get cache statistics: (hits, misses, hit_rate).
+    pub fn stats(&self) -> (u64, u64, f64) {
+        let total = self.hits + self.misses;
+        let hit_rate = if total > 0 {
+            self.hits as f64 / total as f64
+        } else {
+            0.0
+        };
+        (self.hits, self.misses, hit_rate)
+    }
+
+    /// Clear the cache, resetting all state.
+    pub fn clear(&mut self) {
+        self.agent_ids.clear();
+        self.workspace_ids.clear();
+        self.hits = 0;
+        self.misses = 0;
+    }
+
+    /// Number of cached agents.
+    pub fn agent_count(&self) -> usize {
+        self.agent_ids.len()
+    }
+
+    /// Number of cached workspaces.
+    pub fn workspace_count(&self) -> usize {
+        self.workspace_ids.len()
+    }
+}
+
+impl SqliteStorage {
     pub fn insert_conversation_tree(
         &mut self,
         agent_id: i64,
@@ -1075,6 +1217,395 @@ impl SqliteStorage {
 
         Ok(rows_affected > 0)
     }
+
+    // -------------------------------------------------------------------------
+    // Daily Stats (Opt 3.2) - Materialized Aggregates for O(1) Range Queries
+    // -------------------------------------------------------------------------
+
+    /// Epoch offset: Days are counted from 2020-01-01 (Unix timestamp 1577836800).
+    const EPOCH_2020_SECS: i64 = 1577836800;
+
+    /// Convert a millisecond timestamp to a day_id (days since 2020-01-01).
+    pub fn day_id_from_millis(timestamp_ms: i64) -> i64 {
+        let secs = timestamp_ms / 1000;
+        (secs - Self::EPOCH_2020_SECS) / 86400
+    }
+
+    /// Convert a day_id back to a timestamp (milliseconds, start of day UTC).
+    pub fn millis_from_day_id(day_id: i64) -> i64 {
+        (Self::EPOCH_2020_SECS + day_id * 86400) * 1000
+    }
+
+    /// Get session count for a date range using materialized stats.
+    /// Returns (count, is_from_cache) - is_from_cache is true if from daily_stats.
+    ///
+    /// If daily_stats table is empty or stale, falls back to COUNT(*) query.
+    pub fn count_sessions_in_range(
+        &self,
+        start_ts_ms: Option<i64>,
+        end_ts_ms: Option<i64>,
+        agent_slug: Option<&str>,
+        source_id: Option<&str>,
+    ) -> Result<(i64, bool)> {
+        let agent = agent_slug.unwrap_or("all");
+        let source = source_id.unwrap_or("all");
+
+        // Check if we have materialized stats
+        let stats_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM daily_stats", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        if stats_count == 0 {
+            // Fall back to direct COUNT(*)
+            return self.count_sessions_direct(start_ts_ms, end_ts_ms, agent_slug, source_id);
+        }
+
+        // Use materialized stats
+        let start_day = start_ts_ms.map(Self::day_id_from_millis);
+        let end_day = end_ts_ms.map(Self::day_id_from_millis);
+
+        let count: i64 = match (start_day, end_day) {
+            (Some(start), Some(end)) => self.conn.query_row(
+                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats
+                 WHERE day_id BETWEEN ? AND ? AND agent_slug = ? AND source_id = ?",
+                params![start, end, agent, source],
+                |r| r.get(0),
+            )?,
+            (Some(start), None) => self.conn.query_row(
+                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats
+                 WHERE day_id >= ? AND agent_slug = ? AND source_id = ?",
+                params![start, agent, source],
+                |r| r.get(0),
+            )?,
+            (None, Some(end)) => self.conn.query_row(
+                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats
+                 WHERE day_id <= ? AND agent_slug = ? AND source_id = ?",
+                params![end, agent, source],
+                |r| r.get(0),
+            )?,
+            (None, None) => self.conn.query_row(
+                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats
+                 WHERE agent_slug = ? AND source_id = ?",
+                params![agent, source],
+                |r| r.get(0),
+            )?,
+        };
+
+        Ok((count, true))
+    }
+
+    /// Direct COUNT(*) query as fallback when daily_stats is empty.
+    fn count_sessions_direct(
+        &self,
+        start_ts_ms: Option<i64>,
+        end_ts_ms: Option<i64>,
+        agent_slug: Option<&str>,
+        source_id: Option<&str>,
+    ) -> Result<(i64, bool)> {
+        let mut sql = "SELECT COUNT(*) FROM conversations c
+                       JOIN agents a ON c.agent_id = a.id WHERE 1=1"
+            .to_string();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(start) = start_ts_ms {
+            sql.push_str(" AND c.started_at >= ?");
+            params_vec.push(Box::new(start));
+        }
+        if let Some(end) = end_ts_ms {
+            sql.push_str(" AND c.started_at <= ?");
+            params_vec.push(Box::new(end));
+        }
+        if let Some(agent) = agent_slug {
+            sql.push_str(" AND a.slug = ?");
+            params_vec.push(Box::new(agent.to_string()));
+        }
+        if let Some(source) = source_id
+            && source != "all"
+        {
+            sql.push_str(" AND c.source_id = ?");
+            params_vec.push(Box::new(source.to_string()));
+        }
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
+        let count: i64 = self
+            .conn
+            .query_row(&sql, params_refs.as_slice(), |r| r.get(0))?;
+        Ok((count, false))
+    }
+
+    /// Get daily histogram data for a date range.
+    pub fn get_daily_histogram(
+        &self,
+        start_ts_ms: i64,
+        end_ts_ms: i64,
+        agent_slug: Option<&str>,
+        source_id: Option<&str>,
+    ) -> Result<Vec<DailyCount>> {
+        let start_day = Self::day_id_from_millis(start_ts_ms);
+        let end_day = Self::day_id_from_millis(end_ts_ms);
+        let agent = agent_slug.unwrap_or("all");
+        let source = source_id.unwrap_or("all");
+
+        let mut stmt = self.conn.prepare(
+            "SELECT day_id, session_count, message_count, total_chars
+             FROM daily_stats
+             WHERE day_id BETWEEN ? AND ? AND agent_slug = ? AND source_id = ?
+             ORDER BY day_id",
+        )?;
+
+        let rows = stmt.query_map(params![start_day, end_day, agent, source], |row| {
+            Ok(DailyCount {
+                day_id: row.get(0)?,
+                sessions: row.get(1)?,
+                messages: row.get(2)?,
+                chars: row.get(3)?,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Update daily stats for a single conversation insert.
+    /// Called after inserting a new conversation to maintain materialized aggregates.
+    pub fn update_daily_stats_for_conversation(
+        &self,
+        agent_slug: &str,
+        source_id: &str,
+        started_at_ms: Option<i64>,
+        message_count: i64,
+        total_chars: i64,
+    ) -> Result<()> {
+        let day_id = started_at_ms.map(Self::day_id_from_millis).unwrap_or(0);
+        let now = Self::now_millis();
+
+        // Update agent-specific + source-specific stats
+        self.conn.execute(
+            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+             VALUES (?, ?, ?, 1, ?, ?, ?)
+             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
+                 session_count = session_count + 1,
+                 message_count = message_count + excluded.message_count,
+                 total_chars = total_chars + excluded.total_chars,
+                 last_updated = excluded.last_updated",
+            params![day_id, agent_slug, source_id, message_count, total_chars, now],
+        )?;
+
+        // Update 'all' agent stats for this source
+        self.conn.execute(
+            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+             VALUES (?, 'all', ?, 1, ?, ?, ?)
+             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
+                 session_count = session_count + 1,
+                 message_count = message_count + excluded.message_count,
+                 total_chars = total_chars + excluded.total_chars,
+                 last_updated = excluded.last_updated",
+            params![day_id, source_id, message_count, total_chars, now],
+        )?;
+
+        // Update agent stats for 'all' sources
+        self.conn.execute(
+            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+             VALUES (?, ?, 'all', 1, ?, ?, ?)
+             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
+                 session_count = session_count + 1,
+                 message_count = message_count + excluded.message_count,
+                 total_chars = total_chars + excluded.total_chars,
+                 last_updated = excluded.last_updated",
+            params![day_id, agent_slug, message_count, total_chars, now],
+        )?;
+
+        // Update global 'all'/'all' stats
+        self.conn.execute(
+            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+             VALUES (?, 'all', 'all', 1, ?, ?, ?)
+             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
+                 session_count = session_count + 1,
+                 message_count = message_count + excluded.message_count,
+                 total_chars = total_chars + excluded.total_chars,
+                 last_updated = excluded.last_updated",
+            params![day_id, message_count, total_chars, now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Rebuild all daily stats from scratch.
+    /// Use this for recovery or when stats appear to be out of sync.
+    pub fn rebuild_daily_stats(&mut self) -> Result<DailyStatsRebuildResult> {
+        let tx = self.conn.transaction()?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        // Clear existing stats
+        tx.execute("DELETE FROM daily_stats", [])?;
+
+        // Rebuild from conversations table - per agent, per source
+        tx.execute(
+            r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+              SELECT
+                  CAST(((COALESCE(c.started_at, 0) / 1000 - 1577836800) / 86400) AS INTEGER) as day_id,
+                  a.slug as agent_slug,
+                  c.source_id,
+                  COUNT(DISTINCT c.id) as session_count,
+                  COUNT(m.id) as message_count,
+                  COALESCE(SUM(LENGTH(m.content)), 0) as total_chars,
+                  ? as last_updated
+              FROM conversations c
+              JOIN agents a ON c.agent_id = a.id
+              LEFT JOIN messages m ON m.conversation_id = c.id
+              GROUP BY day_id, a.slug, c.source_id",
+            params![now],
+        )?;
+
+        // Add 'all' agent aggregates for each source
+        tx.execute(
+            r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+              SELECT
+                  CAST(((COALESCE(c.started_at, 0) / 1000 - 1577836800) / 86400) AS INTEGER) as day_id,
+                  'all',
+                  c.source_id,
+                  COUNT(DISTINCT c.id) as session_count,
+                  COUNT(m.id) as message_count,
+                  COALESCE(SUM(LENGTH(m.content)), 0) as total_chars,
+                  ? as last_updated
+              FROM conversations c
+              LEFT JOIN messages m ON m.conversation_id = c.id
+              GROUP BY day_id, c.source_id",
+            params![now],
+        )?;
+
+        // Add per-agent aggregates for 'all' sources
+        tx.execute(
+            r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+              SELECT
+                  CAST(((COALESCE(c.started_at, 0) / 1000 - 1577836800) / 86400) AS INTEGER) as day_id,
+                  a.slug,
+                  'all',
+                  COUNT(DISTINCT c.id) as session_count,
+                  COUNT(m.id) as message_count,
+                  COALESCE(SUM(LENGTH(m.content)), 0) as total_chars,
+                  ? as last_updated
+              FROM conversations c
+              JOIN agents a ON c.agent_id = a.id
+              LEFT JOIN messages m ON m.conversation_id = c.id
+              GROUP BY day_id, a.slug",
+            params![now],
+        )?;
+
+        // Add global 'all'/'all' aggregates
+        tx.execute(
+            r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+              SELECT
+                  CAST(((COALESCE(c.started_at, 0) / 1000 - 1577836800) / 86400) AS INTEGER) as day_id,
+                  'all',
+                  'all',
+                  COUNT(DISTINCT c.id) as session_count,
+                  COUNT(m.id) as message_count,
+                  COALESCE(SUM(LENGTH(m.content)), 0) as total_chars,
+                  ? as last_updated
+              FROM conversations c
+              LEFT JOIN messages m ON m.conversation_id = c.id
+              GROUP BY day_id",
+            params![now],
+        )?;
+
+        let rows_created: i64 =
+            tx.query_row("SELECT COUNT(*) FROM daily_stats", [], |r| r.get(0))?;
+        let total_sessions: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats WHERE agent_slug = 'all' AND source_id = 'all'",
+            [],
+            |r| r.get(0),
+        )?;
+
+        tx.commit()?;
+
+        tracing::info!(
+            target: "cass::perf::daily_stats",
+            rows_created = rows_created,
+            total_sessions = total_sessions,
+            "Daily stats rebuilt from conversations"
+        );
+
+        Ok(DailyStatsRebuildResult {
+            rows_created,
+            total_sessions,
+        })
+    }
+
+    /// Check if daily_stats are populated and reasonably fresh.
+    pub fn daily_stats_health(&self) -> Result<DailyStatsHealth> {
+        let row_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM daily_stats", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        let oldest_update: Option<i64> = self
+            .conn
+            .query_row("SELECT MIN(last_updated) FROM daily_stats", [], |r| {
+                r.get(0)
+            })
+            .ok();
+
+        let conversation_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        // Get materialized total
+        let materialized_total: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats
+                 WHERE agent_slug = 'all' AND source_id = 'all'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        Ok(DailyStatsHealth {
+            populated: row_count > 0,
+            row_count,
+            oldest_update_ms: oldest_update,
+            conversation_count,
+            materialized_total,
+            drift: (conversation_count - materialized_total).abs(),
+        })
+    }
+}
+
+/// Daily count data for histogram display.
+#[derive(Debug, Clone)]
+pub struct DailyCount {
+    pub day_id: i64,
+    pub sessions: i64,
+    pub messages: i64,
+    pub chars: i64,
+}
+
+/// Result of rebuilding daily stats.
+#[derive(Debug, Clone)]
+pub struct DailyStatsRebuildResult {
+    pub rows_created: i64,
+    pub total_sessions: i64,
+}
+
+/// Health status of daily stats table.
+#[derive(Debug, Clone)]
+pub struct DailyStatsHealth {
+    pub populated: bool,
+    pub row_count: i64,
+    pub oldest_update_ms: Option<i64>,
+    pub conversation_count: i64,
+    pub materialized_total: i64,
+    pub drift: i64,
 }
 
 fn apply_pragmas(conn: &mut Connection) -> Result<()> {
@@ -1149,6 +1680,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V5)?;
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
+            tx.execute_batch(MIGRATION_V8)?;
         }
         1 => {
             tx.execute_batch(MIGRATION_V2)?;
@@ -1157,6 +1689,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V5)?;
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
+            tx.execute_batch(MIGRATION_V8)?;
         }
         2 => {
             tx.execute_batch(MIGRATION_V3)?;
@@ -1164,24 +1697,32 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V5)?;
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
+            tx.execute_batch(MIGRATION_V8)?;
         }
         3 => {
             tx.execute_batch(MIGRATION_V4)?;
             tx.execute_batch(MIGRATION_V5)?;
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
+            tx.execute_batch(MIGRATION_V8)?;
         }
         4 => {
             tx.execute_batch(MIGRATION_V5)?;
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
+            tx.execute_batch(MIGRATION_V8)?;
         }
         5 => {
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
+            tx.execute_batch(MIGRATION_V8)?;
         }
         6 => {
             tx.execute_batch(MIGRATION_V7)?;
+            tx.execute_batch(MIGRATION_V8)?;
+        }
+        7 => {
+            tx.execute_batch(MIGRATION_V8)?;
         }
         v => return Err(anyhow!("unsupported schema version {v}")),
     }
@@ -2016,7 +2557,10 @@ mod tests {
                 |r| r.get::<_, i64>(0).map(|c| c > 0),
             )
             .unwrap();
-        assert!(has_metadata_bin, "conversations should have metadata_bin column");
+        assert!(
+            has_metadata_bin,
+            "conversations should have metadata_bin column"
+        );
 
         // Verify extra_bin column exists
         let has_extra_bin: bool = storage
