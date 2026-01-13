@@ -108,12 +108,25 @@ impl ModelState {
 /// A file in the model manifest.
 #[derive(Debug, Clone)]
 pub struct ModelFile {
-    /// File name (e.g., "model.onnx").
+    /// File path relative to repo root (e.g., "model.onnx" or "onnx/model.onnx").
     pub name: String,
     /// Expected SHA256 hash (hex string).
     pub sha256: String,
     /// Expected file size in bytes.
     pub size: u64,
+}
+
+impl ModelFile {
+    /// Get the local filename (basename) for saving.
+    ///
+    /// For paths like "onnx/model.onnx", returns "model.onnx".
+    /// This handles HuggingFace repos that restructure files into subdirectories.
+    pub fn local_name(&self) -> &str {
+        self.name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.name)
+    }
 }
 
 /// Model manifest describing a downloadable model.
@@ -135,28 +148,30 @@ impl ModelManifest {
     /// Get the default MiniLM model manifest.
     ///
     /// The revision and checksums are pinned for reproducibility.
+    /// Updated 2026-01-13: HuggingFace restructured the repo - ONNX models moved to onnx/ subdir.
     pub fn minilm_v2() -> Self {
         Self {
             id: "all-minilm-l6-v2".into(),
             repo: "sentence-transformers/all-MiniLM-L6-v2".into(),
-            // Pinned revision for reproducibility
-            revision: "e4ce9877abf3edfe10b0d82785e83bdcb973e22e".into(),
+            // Pinned revision for reproducibility (updated 2026-01-13 for onnx/ restructuring)
+            revision: "c9745ed1d9f207416be6d2e6f8de32d1f16199bf".into(),
             files: vec![
                 ModelFile {
-                    name: "model.onnx".into(),
-                    sha256: "af9eceaf5d8a75d882c9cb8ba36c693a36bd41cf57ffe0adac38daa59bdf4bca"
+                    // Note: model moved from root to onnx/ subdirectory in repo restructuring
+                    name: "onnx/model.onnx".into(),
+                    sha256: "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452"
                         .into(),
-                    size: 22713856,
+                    size: 90405214,
                 },
                 ModelFile {
                     name: "tokenizer.json".into(),
-                    sha256: "eb1de459c8d47e0fb1bd6ef7e98d9cfcd7a50a8b1bca8f631b21f0ed7c5b2bde"
+                    sha256: "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"
                         .into(),
-                    size: 711396,
+                    size: 466247,
                 },
                 ModelFile {
                     name: "config.json".into(),
-                    sha256: "89d6e23cd85b1d8cbc63c7a5cee4eb7b2df8e09dcf89eed39b0d6b84bd8dfe88"
+                    sha256: "953f9c0d463486b10a6871cc2fd59f223b2c70184f49815e7efbcab5d8908b41"
                         .into(),
                     size: 612,
                 },
@@ -371,7 +386,8 @@ impl ModelDownloader {
                 return Err(DownloadError::Cancelled);
             }
 
-            let file_path = self.temp_dir.join(&file.name);
+            // Use local_name() for local path (handles onnx/model.onnx -> model.onnx)
+            let file_path = self.temp_dir.join(file.local_name());
             let url = manifest.download_url(file);
 
             // Track bytes_downloaded at start of this file to reset on retry
@@ -815,15 +831,43 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let model_dir = tmp.path().join("model");
         fs::create_dir_all(&model_dir).unwrap();
+        // Use the current pinned revision from the manifest
+        let manifest = ModelManifest::minilm_v2();
         fs::write(
             model_dir.join(".verified"),
-            "revision=e4ce9877abf3edfe10b0d82785e83bdcb973e22e\n",
+            format!("revision={}\n", manifest.revision),
         )
         .unwrap();
 
-        let manifest = ModelManifest::minilm_v2();
         let result = check_version_mismatch(&model_dir, &manifest);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_model_file_local_name() {
+        // Test that local_name() extracts basename from path with subdirectories
+        let file = ModelFile {
+            name: "onnx/model.onnx".into(),
+            sha256: "abc123".into(),
+            size: 1000,
+        };
+        assert_eq!(file.local_name(), "model.onnx");
+
+        // Test that local_name() works for files without subdirectory
+        let file2 = ModelFile {
+            name: "tokenizer.json".into(),
+            sha256: "def456".into(),
+            size: 500,
+        };
+        assert_eq!(file2.local_name(), "tokenizer.json");
+
+        // Test nested paths
+        let file3 = ModelFile {
+            name: "path/to/deep/model.bin".into(),
+            sha256: "ghi789".into(),
+            size: 2000,
+        };
+        assert_eq!(file3.local_name(), "model.bin");
     }
 
     #[test]
