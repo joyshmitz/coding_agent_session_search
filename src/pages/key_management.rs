@@ -132,8 +132,8 @@ pub fn key_add_password(
     // Unlock with current password to get DEK
     let dek = unwrap_dek_with_password(&config, current_password)?;
 
-    // Create new slot
-    let slot_id = config.key_slots.len() as u8;
+    // Create new slot (use max ID + 1 since IDs are stable after revocation)
+    let slot_id = config.key_slots.iter().map(|s| s.id).max().unwrap_or(0).saturating_add(1);
     let new_slot = create_password_slot(new_password, &dek, &config.export_id, slot_id)?;
 
     config.key_slots.push(new_slot);
@@ -163,8 +163,8 @@ pub fn key_add_recovery(
     // Generate recovery secret
     let secret = RecoverySecret::generate();
 
-    // Create new slot
-    let slot_id = config.key_slots.len() as u8;
+    // Create new slot (use max ID + 1 since IDs are stable after revocation)
+    let slot_id = config.key_slots.iter().map(|s| s.id).max().unwrap_or(0).saturating_add(1);
     let new_slot = create_recovery_slot(secret.as_bytes(), &dek, &config.export_id, slot_id)?;
 
     config.key_slots.push(new_slot);
@@ -874,5 +874,38 @@ mod tests {
         assert_eq!(list_result.slots.len(), 2);
         assert_eq!(list_result.slots[0].slot_type, "password");
         assert_eq!(list_result.slots[1].slot_type, "recovery");
+    }
+
+    #[test]
+    fn test_key_add_after_revoke_no_id_collision() {
+        let (_temp_dir, archive_dir) = setup_test_archive();
+
+        // Add slots 1 and 2
+        key_add_password(&archive_dir, "test-password", "password-1").unwrap();
+        key_add_password(&archive_dir, "test-password", "password-2").unwrap();
+
+        // Now have slots [0, 1, 2]
+        let list = key_list(&archive_dir).unwrap();
+        assert_eq!(list.slots.len(), 3);
+
+        // Revoke slot 1 using slot 2's password
+        key_revoke(&archive_dir, "password-2", 1).unwrap();
+
+        // Now have slots [0, 2] (gap at 1)
+        let list = key_list(&archive_dir).unwrap();
+        assert_eq!(list.slots.len(), 2);
+        let ids: Vec<u8> = list.slots.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![0, 2]);
+
+        // Add new slot - should get ID 3, not 2
+        let new_id = key_add_password(&archive_dir, "test-password", "password-3").unwrap();
+        assert_eq!(new_id, 3, "New slot should get max_id + 1, not len()");
+
+        // Verify all passwords still work
+        let config = load_config(&archive_dir).unwrap();
+        assert!(unwrap_dek_with_password(&config, "test-password").is_ok());
+        assert!(unwrap_dek_with_password(&config, "password-1").is_err()); // Revoked
+        assert!(unwrap_dek_with_password(&config, "password-2").is_ok());
+        assert!(unwrap_dek_with_password(&config, "password-3").is_ok());
     }
 }
