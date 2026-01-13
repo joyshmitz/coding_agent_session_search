@@ -1927,7 +1927,10 @@ fn daily_stats_day_id_conversion() {
     // Days since 2020-01-01 (1577836800) = (1704067200 - 1577836800) / 86400 = 1461
     let ts_ms = 1704067200 * 1000; // 2024-01-01 in milliseconds
     let day_id = SqliteStorage::day_id_from_millis(ts_ms);
-    assert_eq!(day_id, 1461, "2024-01-01 should be day 1461 since 2020-01-01");
+    assert_eq!(
+        day_id, 1461,
+        "2024-01-01 should be day 1461 since 2020-01-01"
+    );
 
     // Test round-trip: day_id -> timestamp -> day_id
     let ts_back = SqliteStorage::millis_from_day_id(day_id);
@@ -2020,7 +2023,7 @@ fn daily_stats_count_sessions_in_range() {
     storage.rebuild_daily_stats().expect("rebuild");
 
     // Query range: days 1-3 (should get 3 sessions)
-    let start = base_ts + (1 * 86400 * 1000);
+    let start = base_ts + (86400 * 1000);
     let end = base_ts + (3 * 86400 * 1000);
     let (count, from_cache) = storage
         .count_sessions_in_range(Some(start), Some(end), None, None)
@@ -2098,7 +2101,10 @@ fn daily_stats_histogram() {
         .expect("get_daily_histogram");
 
     // Should have entries for day 0 and day 2 (day 1 has no sessions)
-    assert!(histogram.len() >= 2, "should have at least 2 days with data");
+    assert!(
+        histogram.len() >= 2,
+        "should have at least 2 days with data"
+    );
 
     // Find day 0 entry
     let day0_id = SqliteStorage::day_id_from_millis(base_ts);
@@ -2210,4 +2216,67 @@ fn daily_stats_health_detects_drift() {
     assert_eq!(health2.drift, 1, "should detect 1 session drift");
     assert_eq!(health2.conversation_count, 2);
     assert_eq!(health2.materialized_total, 1);
+}
+
+#[test]
+fn daily_stats_null_timestamp_consistency() {
+    // Regression test: Ensure NULL started_at timestamps are handled
+    // consistently between incremental updates and full rebuilds.
+    // Both should map NULL -> day_id=0 (not a large negative number).
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("daily_null_ts.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open");
+
+    let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
+
+    // Insert conversation with NULL started_at
+    let conv = Conversation {
+        id: None,
+        agent_slug: "tester".into(),
+        workspace: None,
+        external_id: Some("null-ts-1".to_string()),
+        title: None,
+        source_path: PathBuf::from("/logs/null_ts.jsonl"),
+        started_at: None, // NULL timestamp!
+        ended_at: None,
+        approx_tokens: None,
+        metadata_json: serde_json::json!({}),
+        messages: vec![],
+        source_id: "local".to_string(),
+        origin_host: None,
+    };
+    storage
+        .insert_conversation_tree(agent_id, None, &conv)
+        .unwrap();
+
+    // Rebuild daily stats
+    let result = storage.rebuild_daily_stats().expect("rebuild");
+    assert_eq!(result.total_sessions, 1, "should count 1 session");
+
+    // Check that the session was placed at day_id=0, not a negative day_id
+    let day_ids: Vec<i64> = storage
+        .raw()
+        .prepare("SELECT DISTINCT day_id FROM daily_stats WHERE agent_slug = 'all' AND source_id = 'all'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    assert_eq!(day_ids.len(), 1, "should have exactly 1 day_id");
+    assert_eq!(
+        day_ids[0], 0,
+        "NULL started_at should map to day_id=0, not negative"
+    );
+
+    // Verify the count at day_id=0
+    let count_at_zero: i64 = storage
+        .raw()
+        .query_row(
+            "SELECT session_count FROM daily_stats WHERE day_id = 0 AND agent_slug = 'all' AND source_id = 'all'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query day_id=0");
+    assert_eq!(count_at_zero, 1, "day_id=0 should have 1 session");
 }

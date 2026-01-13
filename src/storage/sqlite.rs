@@ -1448,10 +1448,12 @@ impl SqliteStorage {
         tx.execute("DELETE FROM daily_stats", [])?;
 
         // Rebuild from conversations table - per agent, per source
+        // Note: COALESCE wraps the entire day_id calculation to match Rust's unwrap_or(0) behavior
+        // for conversations with NULL started_at timestamps
         tx.execute(
             r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
               SELECT
-                  CAST(((COALESCE(c.started_at, 0) / 1000 - 1577836800) / 86400) AS INTEGER) as day_id,
+                  COALESCE(CAST((c.started_at / 1000 - 1577836800) / 86400 AS INTEGER), 0) as day_id,
                   a.slug as agent_slug,
                   c.source_id,
                   COUNT(DISTINCT c.id) as session_count,
@@ -1469,7 +1471,7 @@ impl SqliteStorage {
         tx.execute(
             r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
               SELECT
-                  CAST(((COALESCE(c.started_at, 0) / 1000 - 1577836800) / 86400) AS INTEGER) as day_id,
+                  COALESCE(CAST((c.started_at / 1000 - 1577836800) / 86400 AS INTEGER), 0) as day_id,
                   'all',
                   c.source_id,
                   COUNT(DISTINCT c.id) as session_count,
@@ -1486,7 +1488,7 @@ impl SqliteStorage {
         tx.execute(
             r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
               SELECT
-                  CAST(((COALESCE(c.started_at, 0) / 1000 - 1577836800) / 86400) AS INTEGER) as day_id,
+                  COALESCE(CAST((c.started_at / 1000 - 1577836800) / 86400 AS INTEGER), 0) as day_id,
                   a.slug,
                   'all',
                   COUNT(DISTINCT c.id) as session_count,
@@ -1504,7 +1506,7 @@ impl SqliteStorage {
         tx.execute(
             r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
               SELECT
-                  CAST(((COALESCE(c.started_at, 0) / 1000 - 1577836800) / 86400) AS INTEGER) as day_id,
+                  COALESCE(CAST((c.started_at / 1000 - 1577836800) / 86400 AS INTEGER), 0) as day_id,
                   'all',
                   'all',
                   COUNT(DISTINCT c.id) as session_count,
