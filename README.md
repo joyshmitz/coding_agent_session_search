@@ -21,6 +21,17 @@ irm https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_sea
 install.ps1 -EasyMode -Verify
 ```
 
+**Or via package managers:**
+
+```bash
+# macOS/Linux (Homebrew)
+brew install dicklesworthstone/tap/cass
+
+# Windows (Scoop)
+scoop bucket add dicklesworthstone https://github.com/Dicklesworthstone/scoop-bucket
+scoop install dicklesworthstone/cass
+```
+
 </div>
 
 ---
