@@ -234,6 +234,7 @@ fn run_streaming_consumer(
     let mut discovered_names: Vec<String> = Vec::new();
     let mut total_conversations = 0usize;
     let mut switched_to_indexing = false;
+    let mut last_commit = std::time::Instant::now();
 
     loop {
         match rx.recv() {
@@ -267,6 +268,16 @@ fn run_streaming_consumer(
 
                 // Ingest the batch
                 ingest_batch(storage, t_index, &conversations, progress, needs_rebuild)?;
+
+                // Periodic commit to make results visible incrementally (every 5s)
+                if last_commit.elapsed() >= Duration::from_secs(5) {
+                    if let Err(e) = t_index.commit() {
+                        tracing::warn!("incremental commit failed: {}", e);
+                    } else {
+                        tracing::debug!("incremental commit completed");
+                    }
+                    last_commit = std::time::Instant::now();
+                }
 
                 tracing::info!(
                     connector = connector_name,
@@ -303,6 +314,9 @@ fn run_streaming_consumer(
             }
         }
     }
+
+    // Final commit to ensure all data is persisted
+    t_index.commit()?;
 
     tracing::info!(
         total_conversations,
