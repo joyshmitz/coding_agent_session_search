@@ -3605,7 +3605,12 @@ mod tests {
     // Quickselect Top-K Tests (Opt 2.5)
     // ==========================================================================
 
-    fn make_fused_hit(id: &str, rrf: f32, lexical: Option<usize>, semantic: Option<usize>) -> FusedHit {
+    fn make_fused_hit(
+        id: &str,
+        rrf: f32,
+        lexical: Option<usize>,
+        semantic: Option<usize>,
+    ) -> FusedHit {
         FusedHit {
             key: SearchHitKey {
                 source_id: "local".to_string(),
@@ -3742,9 +3747,9 @@ mod tests {
     fn top_k_fused_dual_source_tiebreaker() {
         // Hits with same RRF score, but some have both lexical and semantic ranks
         let hits = vec![
-            make_fused_hit("a", 2.0, Some(0), None),      // lexical only
-            make_fused_hit("b", 2.0, Some(1), Some(0)),   // both sources
-            make_fused_hit("c", 2.0, None, Some(1)),      // semantic only
+            make_fused_hit("a", 2.0, Some(0), None),    // lexical only
+            make_fused_hit("b", 2.0, Some(1), Some(0)), // both sources
+            make_fused_hit("c", 2.0, None, Some(1)),    // semantic only
         ];
 
         let top = top_k_fused(hits, 3);
@@ -3803,7 +3808,8 @@ mod tests {
                 for (q, b) in quickselect.iter().zip(baseline.iter()) {
                     assert_eq!(
                         q.key.source_path, b.key.source_path,
-                        "n={}, k={}: mismatch", n, k
+                        "n={}, k={}: mismatch",
+                        n, k
                     );
                     assert_eq!(q.score.rrf, b.score.rrf, "n={}, k={}: score mismatch", n, k);
                 }

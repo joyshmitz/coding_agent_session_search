@@ -343,11 +343,7 @@ fn test_streaming_larger_corpus() {
         "Expected 100 messages (50 sessions × 2), got {}",
         messages
     );
-    assert_eq!(
-        convs, 50,
-        "Expected 50 conversations, got {}",
-        convs
-    );
+    assert_eq!(convs, 50, "Expected 50 conversations, got {}", convs);
 }
 
 // =============================================================================
@@ -378,7 +374,10 @@ fn test_streaming_incremental_indexing() {
         .success();
 
     let initial_count = count_conversations(&data_dir.join("agent_search.db"));
-    assert_eq!(initial_count, 5, "Initial corpus should have 5 conversations");
+    assert_eq!(
+        initial_count, 5,
+        "Initial corpus should have 5 conversations"
+    );
 
     // Add more sessions
     for i in 5..8 {
@@ -487,5 +486,8 @@ fn test_switch_from_batch_to_streaming() {
         .success();
 
     let streaming_count = count_conversations(&data_dir.join("agent_search.db"));
-    assert_eq!(streaming_count, 6, "Should have all 6 conversations after streaming reindex");
+    assert_eq!(
+        streaming_count, 6,
+        "Should have all 6 conversations after streaming reindex"
+    );
 }

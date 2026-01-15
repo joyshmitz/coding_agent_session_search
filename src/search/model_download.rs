@@ -122,10 +122,7 @@ impl ModelFile {
     /// For paths like "onnx/model.onnx", returns "model.onnx".
     /// This handles HuggingFace repos that restructure files into subdirectories.
     pub fn local_name(&self) -> &str {
-        self.name
-            .rsplit('/')
-            .next()
-            .unwrap_or(&self.name)
+        self.name.rsplit('/').next().unwrap_or(&self.name)
     }
 }
 

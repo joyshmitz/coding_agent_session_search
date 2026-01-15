@@ -1,4 +1,4 @@
-use coding_agent_search::storage::sqlite::{SqliteStorage, MigrationError, CURRENT_SCHEMA_VERSION};
+use coding_agent_search::storage::sqlite::{CURRENT_SCHEMA_VERSION, MigrationError, SqliteStorage};
 use rusqlite::Connection;
 use std::path::Path;
 use tempfile::TempDir;
@@ -101,48 +101,50 @@ fn test_migration_v1_to_current_preserves_data() {
 
     // Verify data preservation
     let conn = storage.raw();
-    
+
     // Check Agent
-    let agent_name: String = conn.query_row(
-        "SELECT name FROM agents WHERE slug = 'claude'", 
-        [], 
-        |r| r.get(0)
-    ).unwrap();
+    let agent_name: String = conn
+        .query_row("SELECT name FROM agents WHERE slug = 'claude'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     assert_eq!(agent_name, "Claude");
 
     // Check Conversation
-    let title: String = conn.query_row(
-        "SELECT title FROM conversations WHERE source_path = '/logs/v1.jsonl'",
-        [],
-        |r| r.get(0)
-    ).unwrap();
+    let title: String = conn
+        .query_row(
+            "SELECT title FROM conversations WHERE source_path = '/logs/v1.jsonl'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(title, "V1 Conversation");
 
     // Check Message
-    let content: String = conn.query_row(
-        "SELECT content FROM messages WHERE content = 'Hello from V1'",
-        [],
-        |r| r.get(0)
-    ).unwrap();
+    let content: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE content = 'Hello from V1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(content, "Hello from V1");
 
     // Verify V2+ features (FTS)
-    let fts_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM fts_messages",
-        [],
-        |r| r.get(0)
-    ).unwrap();
-    // V1 migration should populate FTS? 
+    let fts_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM fts_messages", [], |r| r.get(0))
+        .unwrap();
+    // V1 migration should populate FTS?
     // The migration V2 script does: INSERT INTO fts_messages SELECT ... FROM messages ...
     // So yes, it should be 1.
     assert_eq!(fts_count, 1, "FTS should be backfilled");
 
     // Verify V4 features (Sources)
-    let source_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sources WHERE id = 'local'",
-        [],
-        |r| r.get(0)
-    ).unwrap();
+    let source_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sources WHERE id = 'local'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     assert_eq!(source_count, 1, "Local source should be created");
 }
 
@@ -156,25 +158,28 @@ fn test_rebuild_safety_on_corruption() {
 
     // open_or_rebuild should fail with RebuildRequired
     let result = SqliteStorage::open_or_rebuild(&db_path);
-    
+
     match result {
-        Err(MigrationError::RebuildRequired { reason, backup_path }) => {
+        Err(MigrationError::RebuildRequired {
+            reason,
+            backup_path,
+        }) => {
             println!("Rebuild required as expected: {}", reason);
             assert!(backup_path.is_some());
             let backup = backup_path.unwrap();
             assert!(backup.exists());
-            
+
             // Verify backup contains original corrupted data
             let content = std::fs::read_to_string(&backup).unwrap();
             assert_eq!(content, "Not a SQLite file");
-            
+
             // The original file should be gone (or replaced? logic says remove_database_files called)
             assert!(!db_path.exists());
 
             // Now we can "rebuild" by opening fresh
             let _new_storage = SqliteStorage::open(&db_path).expect("open fresh");
             assert!(db_path.exists());
-        },
+        }
         _ => panic!("Should have required rebuild"),
     }
 }
@@ -187,14 +192,15 @@ fn test_missing_meta_triggers_rebuild() {
     // Create a valid SQLite DB but without meta table (simulating very old or broken state)
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute("CREATE TABLE some_table (id INTEGER)", []).unwrap();
+        conn.execute("CREATE TABLE some_table (id INTEGER)", [])
+            .unwrap();
     }
 
     let result = SqliteStorage::open_or_rebuild(&db_path);
-     match result {
+    match result {
         Err(MigrationError::RebuildRequired { reason, .. }) => {
-             assert!(reason.contains("metadata"));
-        },
+            assert!(reason.contains("metadata"));
+        }
         _ => panic!("Should have required rebuild due to missing meta"),
     }
 }
@@ -206,15 +212,17 @@ fn test_future_schema_triggers_rebuild() {
 
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute("CREATE TABLE meta (key TEXT, value TEXT)", []).unwrap();
-        conn.execute("INSERT INTO meta VALUES ('schema_version', '9999')", []).unwrap();
+        conn.execute("CREATE TABLE meta (key TEXT, value TEXT)", [])
+            .unwrap();
+        conn.execute("INSERT INTO meta VALUES ('schema_version', '9999')", [])
+            .unwrap();
     }
 
     let result = SqliteStorage::open_or_rebuild(&db_path);
-     match result {
+    match result {
         Err(MigrationError::RebuildRequired { reason, .. }) => {
-             assert!(reason.contains("newer than supported"));
-        },
+            assert!(reason.contains("newer than supported"));
+        }
         _ => panic!("Should have required rebuild due to future version"),
     }
 }

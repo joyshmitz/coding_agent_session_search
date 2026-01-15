@@ -16,14 +16,14 @@
 //! - Rotate re-encrypts entire payload with new DEK
 
 use crate::pages::encrypt::{
-    Argon2Params, EncryptionConfig, KeySlot, KdfAlgorithm, SlotType, load_config,
+    Argon2Params, EncryptionConfig, KdfAlgorithm, KeySlot, SlotType, load_config,
 };
 use crate::pages::qr::RecoverySecret;
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
@@ -283,9 +283,12 @@ pub fn key_rotate(
     )?;
 
     // 4. Create new key slots
-    let mut new_slots = vec![
-        create_password_slot(new_password, &new_dek, &BASE64.encode(new_export_id), 0)?,
-    ];
+    let mut new_slots = vec![create_password_slot(
+        new_password,
+        &new_dek,
+        &BASE64.encode(new_export_id),
+        0,
+    )?];
 
     let mut recovery_secret_encoded: Option<String> = None;
     if keep_recovery {
@@ -710,7 +713,10 @@ fn regenerate_integrity_manifest(archive_dir: &Path) -> Result<()> {
     let config_path = archive_dir.join("config.json");
     if config_path.exists() {
         let content = std::fs::read(&config_path)?;
-        files_map.insert("config.json".to_string(), serde_json::json!(sha256_hex(&content)));
+        files_map.insert(
+            "config.json".to_string(),
+            serde_json::json!(sha256_hex(&content)),
+        );
     }
 
     // Hash all payload chunks

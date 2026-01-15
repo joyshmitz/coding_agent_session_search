@@ -34,15 +34,16 @@ use tracing::info;
 
 /// Stop words to filter out from term extraction.
 const STOP_WORDS: &[&str] = &[
-    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from",
-    "is", "it", "as", "was", "be", "are", "been", "being", "have", "has", "had", "do", "does",
-    "did", "will", "would", "could", "should", "may", "might", "must", "shall", "can", "need",
-    "this", "that", "these", "those", "i", "you", "he", "she", "we", "they", "what", "which",
-    "who", "when", "where", "why", "how", "all", "each", "every", "both", "few", "more", "most",
-    "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too",
-    "very", "just", "also", "now", "here", "there", "then", "once", "about", "after", "again",
-    "into", "over", "under", "out", "up", "down", "off", "any", "its", "your", "my", "our",
-    "their", "his", "her", "him", "them", "me", "us", "if", "else", "while", "during", "before",
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+    "from", "is", "it", "as", "was", "be", "are", "been", "being", "have", "has", "had", "do",
+    "does", "did", "will", "would", "could", "should", "may", "might", "must", "shall", "can",
+    "need", "this", "that", "these", "those", "i", "you", "he", "she", "we", "they", "what",
+    "which", "who", "when", "where", "why", "how", "all", "each", "every", "both", "few", "more",
+    "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than",
+    "too", "very", "just", "also", "now", "here", "there", "then", "once", "about", "after",
+    "again", "into", "over", "under", "out", "up", "down", "off", "any", "its", "your", "my",
+    "our", "their", "his", "her", "him", "them", "me", "us", "if", "else", "while", "during",
+    "before",
 ];
 
 /// Overall statistics for the archive.
@@ -173,8 +174,8 @@ impl AnalyticsBundle {
 
         // Write statistics.json
         let stats_path = dir.join("statistics.json");
-        let stats_json =
-            serde_json::to_string_pretty(&self.statistics).context("Failed to serialize statistics")?;
+        let stats_json = serde_json::to_string_pretty(&self.statistics)
+            .context("Failed to serialize statistics")?;
         std::fs::write(&stats_path, stats_json).context("Failed to write statistics.json")?;
 
         // Write timeline.json
@@ -198,8 +199,8 @@ impl AnalyticsBundle {
 
         // Write top_terms.json
         let terms_path = dir.join("top_terms.json");
-        let terms_json =
-            serde_json::to_string_pretty(&self.top_terms).context("Failed to serialize top_terms")?;
+        let terms_json = serde_json::to_string_pretty(&self.top_terms)
+            .context("Failed to serialize top_terms")?;
         std::fs::write(&terms_path, terms_json).context("Failed to write top_terms.json")?;
 
         info!(
@@ -269,9 +270,9 @@ impl<'a> AnalyticsGenerator<'a> {
 
         // Per-agent stats
         let mut agents: HashMap<String, AgentStats> = HashMap::new();
-        let mut stmt = self.db.prepare(
-            "SELECT agent, COUNT(*) as conv_count FROM conversations GROUP BY agent",
-        )?;
+        let mut stmt = self
+            .db
+            .prepare("SELECT agent, COUNT(*) as conv_count FROM conversations GROUP BY agent")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
@@ -360,10 +361,7 @@ impl<'a> AnalyticsGenerator<'a> {
              ORDER BY date",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, i64>(1)?,
-            ))
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
         })?;
 
         for row in rows {
@@ -375,10 +373,7 @@ impl<'a> AnalyticsGenerator<'a> {
                     conversations: 0,
                 });
                 entry.messages += 1;
-                daily_conv_ids
-                    .entry(date)
-                    .or_default()
-                    .insert(conv_id);
+                daily_conv_ids.entry(date).or_default().insert(conv_id);
             }
         }
 
@@ -513,9 +508,9 @@ impl<'a> AnalyticsGenerator<'a> {
             )?;
 
             // Get agents for this workspace
-            let mut agent_stmt = self.db.prepare(
-                "SELECT DISTINCT agent FROM conversations WHERE workspace = ?",
-            )?;
+            let mut agent_stmt = self
+                .db
+                .prepare("SELECT DISTINCT agent FROM conversations WHERE workspace = ?")?;
             let agent_rows = agent_stmt.query_map([&workspace], |row| row.get::<_, String>(0))?;
             let agents: Vec<String> = agent_rows.filter_map(|r| r.ok()).collect();
 
@@ -632,9 +627,9 @@ impl<'a> AnalyticsGenerator<'a> {
         let stop_words: HashSet<&str> = STOP_WORDS.iter().copied().collect();
 
         // Get all titles
-        let mut stmt = self.db.prepare(
-            "SELECT title FROM conversations WHERE title IS NOT NULL",
-        )?;
+        let mut stmt = self
+            .db
+            .prepare("SELECT title FROM conversations WHERE title IS NOT NULL")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
 
         let mut term_counts: HashMap<String, usize> = HashMap::new();
@@ -701,11 +696,13 @@ pub fn aggregate_to_monthly(daily: &[DailyEntry]) -> Vec<MonthlyEntry> {
         if entry.date.len() >= 7 {
             let month_str = entry.date[..7].to_string();
 
-            let monthly = monthly_map.entry(month_str.clone()).or_insert(MonthlyEntry {
-                month: month_str,
-                messages: 0,
-                conversations: 0,
-            });
+            let monthly = monthly_map
+                .entry(month_str.clone())
+                .or_insert(MonthlyEntry {
+                    month: month_str,
+                    messages: 0,
+                    conversations: 0,
+                });
             monthly.messages += entry.messages;
             monthly.conversations += entry.conversations;
         }
@@ -782,12 +779,20 @@ mod tests {
             };
             for idx in 0..msg_count {
                 let role = if idx % 2 == 0 { "user" } else { "assistant" };
-                let created_at = 1700000000000i64 + (conv_id as i64 * 100000000) + (idx as i64 * 1000);
+                let created_at =
+                    1700000000000i64 + (conv_id as i64 * 100000000) + (idx as i64 * 1000);
                 conn.execute(
                     "INSERT INTO messages (conversation_id, idx, role, content, created_at)
                      VALUES (?, ?, ?, ?, ?)",
-                    rusqlite::params![conv_id, idx, role, format!("Message {} for conv {}", idx, conv_id), created_at],
-                ).unwrap();
+                    rusqlite::params![
+                        conv_id,
+                        idx,
+                        role,
+                        format!("Message {} for conv {}", idx, conv_id),
+                        created_at
+                    ],
+                )
+                .unwrap();
             }
         }
     }
@@ -845,7 +850,11 @@ mod tests {
         let top = generator.generate_top_terms().unwrap();
 
         // "authentication" appears in 2 titles
-        assert!(top.terms.iter().any(|(term, count)| term == "authentication" && *count >= 2));
+        assert!(
+            top.terms
+                .iter()
+                .any(|(term, count)| term == "authentication" && *count >= 2)
+        );
     }
 
     #[test]
@@ -859,7 +868,10 @@ mod tests {
         assert_eq!(summary.workspaces.len(), 2);
 
         // project-a has 2 conversations
-        let project_a = summary.workspaces.iter().find(|w| w.path.contains("project-a"));
+        let project_a = summary
+            .workspaces
+            .iter()
+            .find(|w| w.path.contains("project-a"));
         assert!(project_a.is_some());
         assert_eq!(project_a.unwrap().conversations, 2);
     }

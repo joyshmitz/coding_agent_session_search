@@ -1585,7 +1585,9 @@ fn update_daily_stats_in_tx(
         return Ok(());
     }
 
-    let day_id = started_at_ms.map(SqliteStorage::day_id_from_millis).unwrap_or(0);
+    let day_id = started_at_ms
+        .map(SqliteStorage::day_id_from_millis)
+        .unwrap_or(0);
     let now = SqliteStorage::now_millis();
 
     let updates = [
@@ -2032,7 +2034,7 @@ fn insert_conversation_in_tx_batched(
                     conv.started_at,
                     0, // Existing session
                     message_count,
-                    new_chars
+                    new_chars,
                 )?;
             }
 
@@ -2062,7 +2064,7 @@ fn insert_conversation_in_tx_batched(
         conv.started_at,
         1, // New session
         conv.messages.len() as i64,
-        total_chars
+        total_chars,
     )?;
 
     Ok(InsertOutcome {

@@ -22,10 +22,10 @@
 
 #![allow(unexpected_cfgs)]
 
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use rand::{rngs::OsRng, RngCore};
+use rand::{RngCore, rngs::OsRng};
 use std::path::Path;
 use tracing::info;
 use zeroize::Zeroize;
@@ -261,8 +261,8 @@ pub fn generate_qr_png(data: &str) -> Result<Vec<u8>> {
 pub fn generate_qr_svg(data: &str) -> Result<String> {
     #[cfg(feature = "qr")]
     {
-        use qrcode::render::svg;
         use qrcode::QrCode;
+        use qrcode::render::svg;
 
         let code = QrCode::new(data.as_bytes()).context("Failed to create QR code")?;
         let svg = code
