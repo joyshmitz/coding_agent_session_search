@@ -334,12 +334,12 @@ mod tests {
 
     #[test]
     fn test_recovery_secret_minimum_entropy() {
-        // Should reject secrets with < 128 bits
-        let short_bytes = vec![0u8; 15]; // Only 120 bits
+        // Should reject secrets with < 192 bits (NIST recommendation for long-term security)
+        let short_bytes = vec![0u8; 23]; // Only 184 bits (below 192-bit threshold)
         assert!(RecoverySecret::from_bytes(short_bytes).is_none());
 
-        // Should accept secrets with >= 128 bits
-        let min_bytes = vec![0u8; 16]; // 128 bits
+        // Should accept secrets with >= 192 bits
+        let min_bytes = vec![0u8; 24]; // 192 bits (minimum acceptable)
         assert!(RecoverySecret::from_bytes(min_bytes).is_some());
     }
 

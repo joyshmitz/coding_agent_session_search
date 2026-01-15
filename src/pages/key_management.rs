@@ -649,7 +649,13 @@ fn encrypt_all_chunks(
         let mut chunk_file = File::create(&chunk_path)?;
         chunk_file.write_all(&ciphertext)?;
 
-        chunk_index += 1;
+        chunk_index = chunk_index.checked_add(1).ok_or_else(|| {
+            anyhow::anyhow!(
+                "File too large: exceeds maximum of {} chunks ({} bytes with current chunk size)",
+                u32::MAX,
+                (u32::MAX as u64) * (chunk_size as u64)
+            )
+        })?;
     }
 
     progress(1.0);

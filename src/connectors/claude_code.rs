@@ -191,6 +191,18 @@ impl Connector for ClaudeCodeConnector {
                 // Re-assign sequential indices after filtering
                 super::reindex_messages(&mut messages);
             } else {
+                // Safety check: Don't read files larger than 100MB to avoid OOM
+                if let Ok(metadata) = fs::metadata(entry.path())
+                    && metadata.len() > 100 * 1024 * 1024
+                {
+                    tracing::debug!(
+                        path = %entry.path().display(),
+                        size_bytes = metadata.len(),
+                        "skipping large file (>100MB)"
+                    );
+                    continue;
+                }
+
                 content_string = fs::read_to_string(entry.path())
                     .with_context(|| format!("read {}", entry.path().display()))?;
                 // JSON or Claude format files

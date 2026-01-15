@@ -213,6 +213,18 @@ impl ChatGptConnector {
         _since_ts: Option<i64>,
         is_encrypted: bool,
     ) -> Result<Option<NormalizedConversation>> {
+        // Safety check: Don't read files larger than 100MB to avoid OOM
+        if let Ok(metadata) = fs::metadata(path)
+            && metadata.len() > 100 * 1024 * 1024
+        {
+            tracing::warn!(
+                path = %path.display(),
+                size_bytes = metadata.len(),
+                "skipping large file (>100MB)"
+            );
+            return Ok(None);
+        }
+
         let content_bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
 
         // Decrypt if necessary

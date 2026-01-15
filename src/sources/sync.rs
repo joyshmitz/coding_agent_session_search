@@ -935,14 +935,17 @@ pub fn path_to_safe_dirname(path: &str) -> String {
         match component {
             Component::Normal(name) => {
                 if let Some(s) = name.to_str() {
-                    // Skip hidden files starting with dot if they're just "."
-                    if !s.is_empty() && s != "." {
+                    // Skip "~" (home directory marker) and empty/dot-only components
+                    if !s.is_empty() && s != "." && s != "~" {
                         parts.push(s);
                     }
                 }
             }
             // Skip all traversal components for security
-            Component::ParentDir | Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir
+            | Component::CurDir
+            | Component::RootDir
+            | Component::Prefix(_) => {}
         }
     }
 

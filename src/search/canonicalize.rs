@@ -776,15 +776,21 @@ See [docs](http://docs.rs) for more.
     fn test_strip_markdown_links_unbalanced_swallow() {
         let text = "Check [link](url( unbalanced. Next sentence.";
         let canonical = canonicalize_for_embedding(text);
-        
+
         // Before fix: "Check link"
         // After fix: "Check [link](url( unbalanced. Next sentence."
         // Or if processed via strip_markdown_links directly:
         // "[link](url( unbalanced. Next sentence."
-        
+
         // Note: canonicalize_for_embedding applies whitespace norm and other steps,
         // but it should definitely preserve "Next sentence"
-        assert!(canonical.contains("Next sentence"), "Should not swallow content");
-        assert!(canonical.contains("unbalanced"), "Should not swallow content");
+        assert!(
+            canonical.contains("Next sentence"),
+            "Should not swallow content"
+        );
+        assert!(
+            canonical.contains("unbalanced"),
+            "Should not swallow content"
+        );
     }
 }

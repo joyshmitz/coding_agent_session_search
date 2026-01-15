@@ -446,7 +446,8 @@ mod tests {
     fn extract_path_handles_windows_drive() {
         let content = r"Working directory: C:\Users\User\Project";
         let path = extract_path_from_position(content, 19);
-        assert_eq!(path, Some(PathBuf::from(r"C:\Users\User\Project")));
+        // Windows paths are normalized to forward slashes for cross-platform robustness
+        assert_eq!(path, Some(PathBuf::from("C:/Users/User/Project")));
     }
 
     #[test]
@@ -460,7 +461,8 @@ mod tests {
     fn extract_path_handles_windows_unc() {
         let content = r"Working directory: \\Server\Share\Project";
         let path = extract_path_from_position(content, 19);
-        assert_eq!(path, Some(PathBuf::from(r"\\Server\Share\Project")));
+        // UNC paths are normalized to forward slashes for cross-platform robustness
+        assert_eq!(path, Some(PathBuf::from("//Server/Share/Project")));
     }
 
     #[test]
