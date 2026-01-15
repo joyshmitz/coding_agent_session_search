@@ -216,8 +216,11 @@ impl Connector for AiderConnector {
             if !super::file_modified_since(&path, ctx.since_ts) {
                 continue;
             }
-            if let Ok(conv) = self.parse_chat_history(&path) {
-                conversations.push(conv);
+            match self.parse_chat_history(&path) {
+                Ok(conv) => conversations.push(conv),
+                Err(e) => {
+                    tracing::warn!("failed to parse aider history {}: {}", path.display(), e);
+                }
             }
         }
         Ok(conversations)

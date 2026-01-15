@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -107,7 +107,15 @@ fn extract_path_from_position(content: &str, start: usize) -> Option<PathBuf> {
         return None; // Too short to be a useful workspace path
     }
 
-    let path = PathBuf::from(path_str);
+    // Normalize separators for cross-platform robustness (e.g. scanning Windows logs on Linux)
+    // This ensures PathBuf::components() and parent() work correctly regardless of host OS.
+    let clean_path_str = if is_win_drive || is_win_unc {
+        path_str.replace('\\', "/")
+    } else {
+        path_str.to_string()
+    };
+
+    let path = PathBuf::from(clean_path_str);
 
     // If it looks like a file path (has extension), get the parent directory
     // Also if it's deeper than /data/projects/X or /home/user/projects/X, truncate
@@ -233,12 +241,21 @@ impl Connector for GeminiConnector {
             if !crate::connectors::file_modified_since(&file, ctx.since_ts) {
                 continue;
             }
-            let content = fs::read_to_string(&file)
-                .with_context(|| format!("read session {}", file.display()))?;
+
+            let content = match fs::read_to_string(&file) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("failed to read session {}: {}", file.display(), e);
+                    continue;
+                }
+            };
 
             let val: Value = match serde_json::from_str(&content) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!("failed to parse session {}: {}", file.display(), e);
+                    continue;
+                }
             };
 
             // Extract session metadata
