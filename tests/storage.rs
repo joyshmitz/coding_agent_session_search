@@ -2401,3 +2401,422 @@ fn daily_stats_tree_insert_no_drift() {
         "should have NO drift after insert (stats updated inline)"
     );
 }
+
+// =============================================================================
+// SQLite ID Caching Equivalence Tests (16pz / Opt 7.3)
+// =============================================================================
+// These tests verify that IndexingCache produces identical database state
+// compared to direct ensure_* calls. The cache is an optimization that should
+// not change observable behavior.
+
+use coding_agent_search::storage::sqlite::IndexingCache;
+
+/// Helper to dump database state for comparison.
+#[allow(clippy::type_complexity)]
+fn dump_agent_workspace_state(storage: &SqliteStorage) -> (Vec<(i64, String)>, Vec<(i64, String)>) {
+    let agents: Vec<(i64, String)> = storage
+        .raw()
+        .prepare("SELECT id, slug FROM agents ORDER BY slug")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    let workspaces: Vec<(i64, String)> = storage
+        .raw()
+        .prepare("SELECT id, path FROM workspaces ORDER BY path")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    (agents, workspaces)
+}
+
+/// Test that cached agent lookups return the same ID as direct ensure_agent calls.
+#[test]
+fn cache_agent_id_consistency() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("cache_agent.db");
+    let storage = SqliteStorage::open(&db_path).expect("open");
+    let mut cache = IndexingCache::new();
+
+    let agent = Agent {
+        id: None,
+        slug: "claude_code".into(),
+        name: "Claude Code".into(),
+        version: Some("1.0".into()),
+        kind: AgentKind::Cli,
+    };
+
+    // First lookup - should be a miss (goes to DB)
+    let id1 = cache.get_or_insert_agent(&storage, &agent).unwrap();
+
+    // Second lookup - should be a hit (from cache)
+    let id2 = cache.get_or_insert_agent(&storage, &agent).unwrap();
+
+    // Direct DB lookup should match
+    let id3 = storage.ensure_agent(&agent).unwrap();
+
+    assert_eq!(id1, id2, "cached lookups should return same ID");
+    assert_eq!(id1, id3, "cached ID should match direct DB lookup");
+    assert!(id1 > 0, "ID should be positive");
+}
+
+/// Test that cached workspace lookups return the same ID as direct ensure_workspace calls.
+#[test]
+fn cache_workspace_id_consistency() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("cache_workspace.db");
+    let storage = SqliteStorage::open(&db_path).expect("open");
+    let mut cache = IndexingCache::new();
+
+    let path = std::path::Path::new("/home/user/projects/myapp");
+
+    // First lookup - miss
+    let id1 = cache
+        .get_or_insert_workspace(&storage, path, Some("My App"))
+        .unwrap();
+
+    // Second lookup - hit
+    let id2 = cache
+        .get_or_insert_workspace(&storage, path, Some("My App"))
+        .unwrap();
+
+    // Direct DB lookup
+    let id3 = storage.ensure_workspace(path, Some("My App")).unwrap();
+
+    assert_eq!(id1, id2, "cached lookups should return same ID");
+    assert_eq!(id1, id3, "cached ID should match direct DB lookup");
+    assert!(id1 > 0, "ID should be positive");
+}
+
+/// Test cache hit/miss statistics are tracked correctly.
+#[test]
+fn cache_statistics_tracking() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("cache_stats.db");
+    let storage = SqliteStorage::open(&db_path).expect("open");
+    let mut cache = IndexingCache::new();
+
+    // Initial stats should be zero
+    let (hits, misses, hit_rate) = cache.stats();
+    assert_eq!(hits, 0);
+    assert_eq!(misses, 0);
+    assert_eq!(hit_rate, 0.0);
+
+    let agents = ["codex", "claude_code", "cline"];
+    let workspaces = ["/ws/a", "/ws/b"];
+
+    // First round - all misses
+    for slug in &agents {
+        let agent = Agent {
+            id: None,
+            slug: (*slug).into(),
+            name: (*slug).into(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        cache.get_or_insert_agent(&storage, &agent).unwrap();
+    }
+    for ws in &workspaces {
+        cache
+            .get_or_insert_workspace(&storage, std::path::Path::new(ws), None)
+            .unwrap();
+    }
+
+    let (hits, misses, _) = cache.stats();
+    assert_eq!(misses, 5, "5 unique lookups = 5 misses");
+    assert_eq!(hits, 0, "no hits on first round");
+
+    // Second round - all hits
+    for slug in &agents {
+        let agent = Agent {
+            id: None,
+            slug: (*slug).into(),
+            name: (*slug).into(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        cache.get_or_insert_agent(&storage, &agent).unwrap();
+    }
+    for ws in &workspaces {
+        cache
+            .get_or_insert_workspace(&storage, std::path::Path::new(ws), None)
+            .unwrap();
+    }
+
+    let (hits, misses, hit_rate) = cache.stats();
+    assert_eq!(hits, 5, "5 repeated lookups = 5 hits");
+    assert_eq!(misses, 5, "misses unchanged");
+    assert!((hit_rate - 0.5).abs() < 0.01, "50% hit rate");
+}
+
+/// Test that cache.clear() resets all state.
+#[test]
+fn cache_clear_resets_state() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("cache_clear.db");
+    let storage = SqliteStorage::open(&db_path).expect("open");
+    let mut cache = IndexingCache::new();
+
+    let agent = Agent {
+        id: None,
+        slug: "test_agent".into(),
+        name: "Test".into(),
+        version: None,
+        kind: AgentKind::Cli,
+    };
+
+    // Populate cache
+    cache.get_or_insert_agent(&storage, &agent).unwrap();
+    cache
+        .get_or_insert_workspace(&storage, std::path::Path::new("/ws"), None)
+        .unwrap();
+
+    assert_eq!(cache.agent_count(), 1);
+    assert_eq!(cache.workspace_count(), 1);
+    let (_, misses, _) = cache.stats();
+    assert_eq!(misses, 2);
+
+    // Clear cache
+    cache.clear();
+
+    assert_eq!(cache.agent_count(), 0, "agents cleared");
+    assert_eq!(cache.workspace_count(), 0, "workspaces cleared");
+    let (hits, misses, _) = cache.stats();
+    assert_eq!(hits, 0, "hits reset");
+    assert_eq!(misses, 0, "misses reset");
+
+    // After clear, next lookup is a miss again
+    cache.get_or_insert_agent(&storage, &agent).unwrap();
+    let (hits, misses, _) = cache.stats();
+    assert_eq!(hits, 0);
+    assert_eq!(misses, 1, "lookup after clear is a miss");
+}
+
+/// Test that multiple unique agents/workspaces are all cached correctly.
+#[test]
+fn cache_multiple_unique_entries() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("cache_multi.db");
+    let storage = SqliteStorage::open(&db_path).expect("open");
+    let mut cache = IndexingCache::new();
+
+    let agent_slugs: Vec<String> = (0..20).map(|i| format!("agent_{}", i)).collect();
+    let workspace_paths: Vec<String> = (0..15).map(|i| format!("/workspace/{}", i)).collect();
+
+    // Insert all agents
+    let mut agent_ids: Vec<i64> = Vec::new();
+    for slug in &agent_slugs {
+        let agent = Agent {
+            id: None,
+            slug: slug.clone(),
+            name: slug.clone(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let id = cache.get_or_insert_agent(&storage, &agent).unwrap();
+        agent_ids.push(id);
+    }
+
+    // Insert all workspaces
+    let mut workspace_ids: Vec<i64> = Vec::new();
+    for ws in &workspace_paths {
+        let id = cache
+            .get_or_insert_workspace(&storage, std::path::Path::new(ws), None)
+            .unwrap();
+        workspace_ids.push(id);
+    }
+
+    // Verify counts
+    assert_eq!(cache.agent_count(), 20);
+    assert_eq!(cache.workspace_count(), 15);
+
+    // Verify IDs are unique
+    let unique_agent_ids: std::collections::HashSet<_> = agent_ids.iter().collect();
+    let unique_ws_ids: std::collections::HashSet<_> = workspace_ids.iter().collect();
+    assert_eq!(unique_agent_ids.len(), 20, "all agent IDs unique");
+    assert_eq!(unique_ws_ids.len(), 15, "all workspace IDs unique");
+
+    // Verify cache hit on second lookup
+    for (i, slug) in agent_slugs.iter().enumerate() {
+        let agent = Agent {
+            id: None,
+            slug: slug.clone(),
+            name: slug.clone(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let id = cache.get_or_insert_agent(&storage, &agent).unwrap();
+        assert_eq!(id, agent_ids[i], "cached ID matches original");
+    }
+
+    let (hits, misses, _) = cache.stats();
+    assert_eq!(misses, 35, "35 unique entries = 35 misses");
+    assert_eq!(hits, 20, "20 agent re-lookups = 20 hits");
+}
+
+/// Test CASS_SQLITE_CACHE environment variable control.
+#[test]
+fn cache_env_var_control() {
+    // Default: cache enabled
+    assert!(
+        IndexingCache::is_enabled(),
+        "cache should be enabled by default"
+    );
+
+    // With CASS_SQLITE_CACHE=0, cache is disabled
+    unsafe { std::env::set_var("CASS_SQLITE_CACHE", "0") };
+    assert!(
+        !IndexingCache::is_enabled(),
+        "cache should be disabled with CASS_SQLITE_CACHE=0"
+    );
+
+    // With CASS_SQLITE_CACHE=false, cache is disabled
+    unsafe { std::env::set_var("CASS_SQLITE_CACHE", "false") };
+    assert!(
+        !IndexingCache::is_enabled(),
+        "cache should be disabled with CASS_SQLITE_CACHE=false"
+    );
+
+    // With CASS_SQLITE_CACHE=1, cache is enabled
+    unsafe { std::env::set_var("CASS_SQLITE_CACHE", "1") };
+    assert!(
+        IndexingCache::is_enabled(),
+        "cache should be enabled with CASS_SQLITE_CACHE=1"
+    );
+
+    // Cleanup
+    unsafe { std::env::remove_var("CASS_SQLITE_CACHE") };
+}
+
+/// Stress test: large corpus with many unique agents/workspaces.
+/// Verifies cache produces identical state to direct calls.
+#[test]
+fn cache_stress_test_large_corpus() {
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    // Test with cache enabled
+    let db_cached = tmp.path().join("cached.db");
+    let storage_cached = SqliteStorage::open(&db_cached).expect("open cached");
+    let mut cache = IndexingCache::new();
+
+    // Test without cache (direct calls)
+    let db_direct = tmp.path().join("direct.db");
+    let storage_direct = SqliteStorage::open(&db_direct).expect("open direct");
+
+    // Generate test data: 100 conversations across 10 agents and 50 workspaces
+    let agents: Vec<String> = (0..10).map(|i| format!("agent_{}", i)).collect();
+    let workspaces: Vec<String> = (0..50)
+        .map(|i| format!("/workspace/project_{}", i))
+        .collect();
+
+    // Insert with cache
+    for i in 0..100 {
+        let slug = &agents[i % agents.len()];
+        let ws = &workspaces[i % workspaces.len()];
+
+        let agent = Agent {
+            id: None,
+            slug: slug.clone(),
+            name: slug.clone(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+
+        cache.get_or_insert_agent(&storage_cached, &agent).unwrap();
+        cache
+            .get_or_insert_workspace(&storage_cached, std::path::Path::new(ws), None)
+            .unwrap();
+    }
+
+    // Insert without cache (direct calls)
+    for i in 0..100 {
+        let slug = &agents[i % agents.len()];
+        let ws = &workspaces[i % workspaces.len()];
+
+        let agent = Agent {
+            id: None,
+            slug: slug.clone(),
+            name: slug.clone(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+
+        storage_direct.ensure_agent(&agent).unwrap();
+        storage_direct
+            .ensure_workspace(std::path::Path::new(ws), None)
+            .unwrap();
+    }
+
+    // Compare database states
+    let (cached_agents, cached_workspaces) = dump_agent_workspace_state(&storage_cached);
+    let (direct_agents, direct_workspaces) = dump_agent_workspace_state(&storage_direct);
+
+    // Agent slugs should match (IDs may differ due to insertion order timing)
+    let cached_slugs: Vec<_> = cached_agents.iter().map(|(_, s)| s.clone()).collect();
+    let direct_slugs: Vec<_> = direct_agents.iter().map(|(_, s)| s.clone()).collect();
+    assert_eq!(cached_slugs, direct_slugs, "agent slugs should match");
+    assert_eq!(cached_slugs.len(), 10, "should have 10 unique agents");
+
+    // Workspace paths should match
+    let cached_paths: Vec<_> = cached_workspaces.iter().map(|(_, p)| p.clone()).collect();
+    let direct_paths: Vec<_> = direct_workspaces.iter().map(|(_, p)| p.clone()).collect();
+    assert_eq!(cached_paths, direct_paths, "workspace paths should match");
+    assert_eq!(cached_paths.len(), 50, "should have 50 unique workspaces");
+
+    // Verify cache statistics
+    let (hits, misses, hit_rate) = cache.stats();
+    assert_eq!(misses, 60, "10 agents + 50 workspaces = 60 misses");
+    assert_eq!(
+        hits, 140,
+        "100 iterations - 60 unique = 140 hits from repeats"
+    );
+    assert!(hit_rate > 0.6, "hit rate should be >60%");
+}
+
+/// Test that IDs are stable across multiple indexing runs.
+#[test]
+fn cache_id_stability_across_runs() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("stability.db");
+
+    let agent = Agent {
+        id: None,
+        slug: "stable_agent".into(),
+        name: "Stable Agent".into(),
+        version: None,
+        kind: AgentKind::Cli,
+    };
+    let ws_path = std::path::Path::new("/stable/workspace");
+
+    // First run
+    let agent_id_1;
+    let ws_id_1;
+    {
+        let storage = SqliteStorage::open(&db_path).expect("open");
+        let mut cache = IndexingCache::new();
+        agent_id_1 = cache.get_or_insert_agent(&storage, &agent).unwrap();
+        ws_id_1 = cache
+            .get_or_insert_workspace(&storage, ws_path, Some("Stable WS"))
+            .unwrap();
+    }
+
+    // Second run (new cache, same DB)
+    let agent_id_2;
+    let ws_id_2;
+    {
+        let storage = SqliteStorage::open(&db_path).expect("reopen");
+        let mut cache = IndexingCache::new();
+        agent_id_2 = cache.get_or_insert_agent(&storage, &agent).unwrap();
+        ws_id_2 = cache
+            .get_or_insert_workspace(&storage, ws_path, Some("Stable WS"))
+            .unwrap();
+    }
+
+    assert_eq!(agent_id_1, agent_id_2, "agent ID stable across runs");
+    assert_eq!(ws_id_1, ws_id_2, "workspace ID stable across runs");
+}
