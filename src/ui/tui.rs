@@ -5623,7 +5623,7 @@ pub fn run_tui(
                             && c.is_ascii_digit()
                             && c != '0'
                         {
-                            let slot = c.to_digit(10).unwrap() as u8;
+                            let slot = c.to_digit(10).unwrap_or(0) as u8;
                             status = save_view_slot(slot, &filters, ranking_mode, &mut saved_views);
                             continue;
                         }
@@ -5669,7 +5669,7 @@ pub fn run_tui(
                                 && c.is_ascii_digit()
                                 && c != '0' =>
                         {
-                            let slot = c.to_digit(10).unwrap() as u8;
+                            let slot = c.to_digit(10).unwrap_or(0) as u8;
                             if let Some(msg) =
                                 load_view_slot(slot, &mut filters, &mut ranking_mode, &saved_views)
                             {
