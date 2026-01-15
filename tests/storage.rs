@@ -2120,22 +2120,22 @@ fn daily_stats_histogram() {
 }
 
 #[test]
-fn daily_stats_fallback_to_direct_query() {
+fn daily_stats_uses_materialized_after_insert() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let db_path = tmp.path().join("daily_fallback.db");
+    let db_path = tmp.path().join("daily_materialized.db");
     let mut storage = SqliteStorage::open(&db_path).expect("open");
 
     let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
     let base_ts = 1704067200000_i64;
 
-    // Insert conversation without rebuilding stats
+    // Insert conversation - stats are now updated inline
     let conv = Conversation {
         id: None,
         agent_slug: "tester".into(),
         workspace: None,
-        external_id: Some("fallback-1".to_string()),
+        external_id: Some("mat-1".to_string()),
         title: None,
-        source_path: PathBuf::from("/logs/fallback.jsonl"),
+        source_path: PathBuf::from("/logs/mat.jsonl"),
         started_at: Some(base_ts),
         ended_at: None,
         approx_tokens: None,
@@ -2148,32 +2148,32 @@ fn daily_stats_fallback_to_direct_query() {
         .insert_conversation_tree(agent_id, None, &conv)
         .unwrap();
 
-    // daily_stats is empty, should fall back to direct COUNT(*)
+    // daily_stats is now populated after insert, should use materialized stats
     let (count, from_cache) = storage
         .count_sessions_in_range(None, None, None, None)
-        .expect("count with fallback");
+        .expect("count from cache");
 
-    assert!(!from_cache, "should use direct query (not cache)");
-    assert_eq!(count, 1, "should count 1 session via direct query");
+    assert!(from_cache, "should use materialized stats (from cache)");
+    assert_eq!(count, 1, "should count 1 session via materialized stats");
 }
 
 #[test]
-fn daily_stats_health_detects_drift() {
+fn daily_stats_health_no_drift_after_inserts() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let db_path = tmp.path().join("daily_drift.db");
+    let db_path = tmp.path().join("daily_health.db");
     let mut storage = SqliteStorage::open(&db_path).expect("open");
 
     let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
     let base_ts = 1704067200000_i64;
 
-    // Insert and rebuild
+    // Insert first conversation - stats updated inline
     let conv1 = Conversation {
         id: None,
         agent_slug: "tester".into(),
         workspace: None,
-        external_id: Some("drift-1".to_string()),
+        external_id: Some("health-1".to_string()),
         title: None,
-        source_path: PathBuf::from("/logs/drift1.jsonl"),
+        source_path: PathBuf::from("/logs/health1.jsonl"),
         started_at: Some(base_ts),
         ended_at: None,
         approx_tokens: None,
@@ -2185,20 +2185,21 @@ fn daily_stats_health_detects_drift() {
     storage
         .insert_conversation_tree(agent_id, None, &conv1)
         .unwrap();
-    storage.rebuild_daily_stats().expect("rebuild");
 
-    // Health should show no drift
+    // Health should show no drift after insert
     let health1 = storage.daily_stats_health().expect("health");
-    assert_eq!(health1.drift, 0, "no drift after rebuild");
+    assert_eq!(health1.drift, 0, "no drift after first insert");
+    assert_eq!(health1.conversation_count, 1);
+    assert_eq!(health1.materialized_total, 1);
 
-    // Insert another conversation (without updating stats)
+    // Insert another conversation - stats also updated inline
     let conv2 = Conversation {
         id: None,
         agent_slug: "tester".into(),
         workspace: None,
-        external_id: Some("drift-2".to_string()),
+        external_id: Some("health-2".to_string()),
         title: None,
-        source_path: PathBuf::from("/logs/drift2.jsonl"),
+        source_path: PathBuf::from("/logs/health2.jsonl"),
         started_at: Some(base_ts + 3600000),
         ended_at: None,
         approx_tokens: None,
@@ -2211,11 +2212,23 @@ fn daily_stats_health_detects_drift() {
         .insert_conversation_tree(agent_id, None, &conv2)
         .unwrap();
 
-    // Health should detect drift
-    let health2 = storage.daily_stats_health().expect("health after insert");
-    assert_eq!(health2.drift, 1, "should detect 1 session drift");
+    // Health should still show no drift after second insert
+    let health2 = storage
+        .daily_stats_health()
+        .expect("health after second insert");
+    assert_eq!(health2.drift, 0, "no drift after second insert");
     assert_eq!(health2.conversation_count, 2);
-    assert_eq!(health2.materialized_total, 1);
+    assert_eq!(health2.materialized_total, 2);
+
+    // Rebuild should be a no-op (stats are already correct)
+    let rebuild_result = storage.rebuild_daily_stats().expect("rebuild");
+    assert_eq!(
+        rebuild_result.total_sessions, 2,
+        "rebuild should count same sessions"
+    );
+
+    let health3 = storage.daily_stats_health().expect("health after rebuild");
+    assert_eq!(health3.drift, 0, "still no drift after rebuild");
 }
 
 #[test]
@@ -2279,4 +2292,112 @@ fn daily_stats_null_timestamp_consistency() {
         )
         .expect("query day_id=0");
     assert_eq!(count_at_zero, 1, "day_id=0 should have 1 session");
+}
+
+/// Verify that insert_conversations_batched updates daily_stats correctly without rebuild.
+#[test]
+fn daily_stats_batched_insert_no_drift() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("batched_stats.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open");
+
+    let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
+    let ws_id = storage
+        .ensure_workspace(&PathBuf::from("/workspace/demo"), None)
+        .unwrap();
+    let base_ts = 1704067200000_i64; // 2024-01-01 00:00:00 UTC
+
+    // Create 3 conversations for batched insert
+    let convs: Vec<Conversation> = (0..3)
+        .map(|i| {
+            let started_at = base_ts + (i * 3600000); // Spread 1 hour apart, same day
+            Conversation {
+                id: None,
+                agent_slug: "tester".into(),
+                workspace: Some(PathBuf::from("/workspace/demo")),
+                external_id: Some(format!("batch-conv-{}", i)),
+                title: Some(format!("Batched conversation {}", i)),
+                source_path: PathBuf::from(format!("/logs/batch{}.jsonl", i)),
+                started_at: Some(started_at),
+                ended_at: Some(started_at + 1800000),
+                approx_tokens: Some(50),
+                metadata_json: serde_json::json!({}),
+                messages: vec![msg(0, started_at), msg(1, started_at + 60000)],
+                source_id: "local".to_string(),
+                origin_host: None,
+            }
+        })
+        .collect();
+
+    // Build references for batched insert
+    let refs: Vec<(i64, Option<i64>, &Conversation)> =
+        convs.iter().map(|c| (agent_id, Some(ws_id), c)).collect();
+
+    // Use batched insert (should update daily_stats automatically)
+    let outcomes = storage
+        .insert_conversations_batched(&refs)
+        .expect("batched insert");
+    assert_eq!(outcomes.len(), 3, "should insert 3 conversations");
+
+    // Check daily_stats health WITHOUT calling rebuild_daily_stats
+    let health = storage.daily_stats_health().expect("daily_stats_health");
+    assert!(
+        health.populated,
+        "daily_stats should be populated after batched insert"
+    );
+    assert_eq!(health.conversation_count, 3, "should have 3 conversations");
+    assert_eq!(
+        health.materialized_total, 3,
+        "should have 3 sessions in materialized stats"
+    );
+    assert_eq!(
+        health.drift, 0,
+        "should have NO drift after batched insert (stats updated inline)"
+    );
+}
+
+/// Verify that insert_conversation_tree updates daily_stats correctly (fixed path).
+#[test]
+fn daily_stats_tree_insert_no_drift() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("tree_stats.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open");
+
+    let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
+    let base_ts = 1704067200000_i64;
+
+    // Insert using insert_conversation_tree path
+    for i in 0..3 {
+        let started_at = base_ts + (i * 3600000);
+        let conv = Conversation {
+            id: None,
+            agent_slug: "tester".into(),
+            workspace: None,
+            external_id: Some(format!("tree-conv-{}", i)),
+            title: None,
+            source_path: PathBuf::from(format!("/logs/tree{}.jsonl", i)),
+            started_at: Some(started_at),
+            ended_at: None,
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![msg(0, started_at)],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conv)
+            .unwrap();
+    }
+
+    // Check daily_stats health WITHOUT calling rebuild
+    let health = storage.daily_stats_health().expect("daily_stats_health");
+    assert_eq!(health.conversation_count, 3, "should have 3 conversations");
+    assert_eq!(
+        health.materialized_total, 3,
+        "should have 3 sessions in materialized stats"
+    );
+    assert_eq!(
+        health.drift, 0,
+        "should have NO drift after insert (stats updated inline)"
+    );
 }

@@ -796,6 +796,119 @@ impl IndexingCache {
     }
 }
 
+// -------------------------------------------------------------------------
+// StatsAggregator (kzxu) - Batched Daily Stats Updates
+// -------------------------------------------------------------------------
+// Aggregates daily stats in memory during batch ingestion, then flushes
+// to the database in a single batched INSERT...ON CONFLICT operation.
+// This prevents N×4 database writes (4 permutations per conversation).
+
+/// Accumulated statistics delta for a single (day_id, agent, source) combination.
+#[derive(Clone, Debug, Default)]
+pub struct StatsDelta {
+    pub session_count_delta: i64,
+    pub message_count_delta: i64,
+    pub total_chars_delta: i64,
+}
+
+/// In-memory aggregator for batched daily stats updates.
+///
+/// During batch ingestion, we accumulate deltas per (day, agent, source) key.
+/// After processing all conversations, call `expand()` to generate the 4
+/// permutations per raw entry, then flush via `SqliteStorage::update_daily_stats_batched`.
+///
+/// # Example
+/// ```ignore
+/// let mut agg = StatsAggregator::new();
+/// for conv in conversations {
+///     agg.record(&conv.agent_slug, source_id, day_id, msg_count, char_count);
+/// }
+/// let entries = agg.expand();
+/// storage.update_daily_stats_batched(&entries)?;
+/// ```
+#[derive(Debug, Default)]
+pub struct StatsAggregator {
+    /// Raw deltas keyed by (day_id, agent_slug, source_id).
+    /// Only stores specific (non-"all") combinations.
+    deltas: HashMap<(i64, String, String), StatsDelta>,
+}
+
+impl StatsAggregator {
+    /// Create a new empty aggregator.
+    pub fn new() -> Self {
+        Self {
+            deltas: HashMap::new(),
+        }
+    }
+
+    /// Record a conversation's contribution to stats.
+    ///
+    /// # Arguments
+    /// * `agent_slug` - The specific agent slug (not "all")
+    /// * `source_id` - The specific source ID (not "all")
+    /// * `day_id` - Days since 2020-01-01 (from `SqliteStorage::day_id_from_millis`)
+    /// * `message_count` - Number of messages in the conversation
+    /// * `total_chars` - Total character count across all messages
+    pub fn record(
+        &mut self,
+        agent_slug: &str,
+        source_id: &str,
+        day_id: i64,
+        message_count: i64,
+        total_chars: i64,
+    ) {
+        let key = (day_id, agent_slug.to_owned(), source_id.to_owned());
+        let delta = self.deltas.entry(key).or_default();
+        delta.session_count_delta += 1;
+        delta.message_count_delta += message_count;
+        delta.total_chars_delta += total_chars;
+    }
+
+    /// Expand raw deltas into the 4 permutation keys:
+    /// - (agent, source) - specific both
+    /// - ("all", source) - all agents, specific source
+    /// - (agent, "all") - specific agent, all sources
+    /// - ("all", "all") - totals
+    ///
+    /// Returns a Vec for predictable ordering in batch INSERT.
+    pub fn expand(&self) -> Vec<(i64, String, String, StatsDelta)> {
+        let mut expanded: HashMap<(i64, String, String), StatsDelta> = HashMap::new();
+
+        for ((day_id, agent, source), delta) in &self.deltas {
+            // Generate 4 permutations
+            let permutations = [
+                (agent.as_str(), source.as_str()),
+                ("all", source.as_str()),
+                (agent.as_str(), "all"),
+                ("all", "all"),
+            ];
+
+            for (a, s) in permutations {
+                let key = (*day_id, a.to_owned(), s.to_owned());
+                let entry = expanded.entry(key).or_default();
+                entry.session_count_delta += delta.session_count_delta;
+                entry.message_count_delta += delta.message_count_delta;
+                entry.total_chars_delta += delta.total_chars_delta;
+            }
+        }
+
+        expanded
+            .into_iter()
+            .map(|((d, a, s), delta)| (d, a, s, delta))
+            .collect()
+    }
+
+    /// Check if the aggregator is empty (no data recorded).
+    pub fn is_empty(&self) -> bool {
+        self.deltas.is_empty()
+    }
+
+    /// Get number of distinct raw (day, agent, source) combinations recorded.
+    pub fn raw_entry_count(&self) -> usize {
+        self.deltas.len()
+    }
+}
+
 impl SqliteStorage {
     pub fn insert_conversation_tree(
         &mut self,
@@ -821,13 +934,27 @@ impl SqliteStorage {
 
         let conv_id = insert_conversation(&tx, agent_id, workspace_id, conv)?;
         let mut fts_entries = Vec::with_capacity(conv.messages.len());
+        let mut total_chars: i64 = 0;
         for msg in &conv.messages {
             let msg_id = insert_message(&tx, conv_id, msg)?;
             insert_snippets(&tx, msg_id, &msg.snippets)?;
             fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
+            total_chars += msg.content.len() as i64;
         }
         // Batch insert FTS entries
         batch_insert_fts_messages(&tx, &fts_entries)?;
+
+        // Update daily stats (+1 session, +N messages)
+        update_daily_stats_in_tx(
+            &tx,
+            &conv.agent_slug,
+            &conv.source_id,
+            conv.started_at,
+            1, // New session
+            conv.messages.len() as i64,
+            total_chars,
+        )?;
+
         tx.commit()?;
         Ok(InsertOutcome {
             conversation_id: conv_id,
@@ -851,6 +978,7 @@ impl SqliteStorage {
 
         let mut inserted_indices = Vec::new();
         let mut fts_entries = Vec::new();
+        let mut new_chars: i64 = 0;
         for msg in &conv.messages {
             if msg.idx <= cutoff {
                 continue;
@@ -859,6 +987,7 @@ impl SqliteStorage {
             insert_snippets(&tx, msg_id, &msg.snippets)?;
             fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
             inserted_indices.push(msg.idx);
+            new_chars += msg.content.len() as i64;
         }
 
         // Batch insert FTS entries
@@ -870,6 +999,20 @@ impl SqliteStorage {
             tx.execute(
                 "UPDATE conversations SET ended_at = MAX(IFNULL(ended_at, 0), ?) WHERE id = ?",
                 params![last_ts, conversation_id],
+            )?;
+        }
+
+        // Update daily stats if new messages were appended (+0 sessions, +N messages)
+        if !inserted_indices.is_empty() {
+            let message_count = inserted_indices.len() as i64;
+            update_daily_stats_in_tx(
+                &tx,
+                &conv.agent_slug,
+                &conv.source_id,
+                conv.started_at,
+                0, // Existing session
+                message_count,
+                new_chars,
             )?;
         }
 
@@ -1367,30 +1510,6 @@ impl SqliteStorage {
         Ok(out)
     }
 
-    /// Update daily stats for a single conversation insert.
-    /// Called after inserting a new conversation to maintain materialized aggregates.
-    pub fn update_daily_stats_for_conversation(
-        &mut self,
-        agent_slug: &str,
-        source_id: &str,
-        started_at_ms: Option<i64>,
-        message_count: i64,
-        total_chars: i64,
-    ) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        update_daily_stats_in_tx(
-            &tx,
-            agent_slug,
-            source_id,
-            started_at_ms,
-            1, // Assuming new session for this legacy API
-            message_count,
-            total_chars,
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Rebuild all daily stats from scratch.
     /// Use this for recovery or when stats appear to be out of sync.
     pub fn rebuild_daily_stats(&mut self) -> Result<DailyStatsRebuildResult> {
@@ -1496,6 +1615,81 @@ impl SqliteStorage {
             rows_created,
             total_sessions,
         })
+    }
+
+    /// Flush aggregated stats deltas to daily_stats table in a single batch.
+    ///
+    /// Uses multi-value INSERT with ON CONFLICT for efficient upserts.
+    /// This is the batched alternative to `update_daily_stats_in_tx` which
+    /// does 4 writes per conversation.
+    ///
+    /// # Arguments
+    /// * `entries` - Expanded entries from `StatsAggregator::expand()`.
+    ///   Each tuple is (day_id, agent_slug, source_id, delta).
+    ///
+    /// # Returns
+    /// Number of rows affected (inserted + updated).
+    pub fn update_daily_stats_batched(
+        &mut self,
+        entries: &[(i64, String, String, StatsDelta)],
+    ) -> Result<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let now = Self::now_millis();
+        let tx = self.conn.transaction()?;
+
+        // SQLite supports up to 999 variables per statement (though 32766 in newer versions).
+        // With 7 variables per row, we can safely batch ~100 rows.
+        const BATCH_SIZE: usize = 100;
+        let mut total_affected = 0;
+
+        for chunk in entries.chunks(BATCH_SIZE) {
+            // Build multi-value INSERT statement
+            let placeholders: String = (0..chunk.len())
+                .map(|_| "(?, ?, ?, ?, ?, ?, ?)")
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let sql = format!(
+                "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+                 VALUES {}
+                 ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
+                     session_count = session_count + excluded.session_count,
+                     message_count = message_count + excluded.message_count,
+                     total_chars = total_chars + excluded.total_chars,
+                     last_updated = excluded.last_updated",
+                placeholders
+            );
+
+            // Flatten parameters for rusqlite
+            let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 7);
+
+            for (day_id, agent, source, delta) in chunk {
+                params_vec.push((*day_id).into());
+                params_vec.push(agent.clone().into());
+                params_vec.push(source.clone().into());
+                params_vec.push(delta.session_count_delta.into());
+                params_vec.push(delta.message_count_delta.into());
+                params_vec.push(delta.total_chars_delta.into());
+                params_vec.push(now.into());
+            }
+
+            let affected = tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
+            total_affected += affected;
+        }
+
+        tx.commit()?;
+
+        tracing::debug!(
+            target: "cass::perf::daily_stats",
+            entries = entries.len(),
+            affected = total_affected,
+            "batched_stats_update_complete"
+        );
+
+        Ok(total_affected)
     }
 
     /// Check if daily_stats are populated and reasonably fresh.

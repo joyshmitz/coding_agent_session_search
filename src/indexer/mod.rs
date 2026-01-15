@@ -19,9 +19,9 @@ use crate::connectors::{
 };
 use crate::search::tantivy::{TantivyIndex, index_dir, schema_hash_matches};
 use crate::sources::config::{Platform, SourcesConfig};
-use crate::sources::provenance::{Origin, Source};
+use crate::sources::provenance::{LOCAL_SOURCE_ID, Origin, Source};
 use crate::sources::sync::path_to_safe_dirname;
-use crate::storage::sqlite::SqliteStorage;
+use crate::storage::sqlite::{SqliteStorage, StatsAggregator};
 
 #[derive(Debug, Clone)]
 pub enum ReindexCommand {
@@ -748,6 +748,39 @@ fn ingest_batch(
 ) -> Result<()> {
     // Use batched insert for better SQLite performance (single transaction)
     persist::persist_conversations_batched(storage, t_index, convs, force_tantivy_reindex)?;
+
+    // Aggregate and update daily_stats in a single batch (kzxu fix)
+    // This prevents N×4 database writes by aggregating in memory first
+    if !convs.is_empty() {
+        let mut aggregator = StatsAggregator::new();
+
+        for conv in convs {
+            let day_id = conv
+                .started_at
+                .map(SqliteStorage::day_id_from_millis)
+                .unwrap_or(0);
+
+            // Use LOCAL_SOURCE_ID since NormalizedConversation doesn't carry source origin
+            // (origin is associated at persist time based on ScanRoot)
+            let source_id = LOCAL_SOURCE_ID;
+
+            let message_count = conv.messages.len() as i64;
+            let total_chars: i64 = conv.messages.iter().map(|m| m.content.len() as i64).sum();
+
+            aggregator.record(
+                &conv.agent_slug,
+                source_id,
+                day_id,
+                message_count,
+                total_chars,
+            );
+        }
+
+        if !aggregator.is_empty() {
+            let entries = aggregator.expand();
+            storage.update_daily_stats_batched(&entries)?;
+        }
+    }
 
     // Update progress counter for all conversations at once
     if let Some(p) = progress {
