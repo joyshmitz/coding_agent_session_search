@@ -9,6 +9,7 @@ on:
 jobs:
   fuzz:
     name: Fuzz Testing
+    if: false  # Disabled until fuzz targets are defined
     runs-on: ubuntu-latest
     strategy:
       matrix:
