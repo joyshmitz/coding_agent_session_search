@@ -2230,28 +2230,15 @@ fn insert_conversation_in_tx_batched(
 
     // Insert new conversation
     let conv_id = insert_conversation(tx, agent_id, workspace_id, conv)?;
-    let mut total_chars: i64 = 0;
     for msg in &conv.messages {
         let msg_id = insert_message(tx, conv_id, msg)?;
         insert_snippets(tx, msg_id, &msg.snippets)?;
         // Collect FTS entry instead of inserting immediately
         fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
-        total_chars += msg.content.len() as i64;
     }
 
-    // Update daily stats (+1 session, +N messages)
-    // Removed to prevent double counting: caller (ingest_batch) handles stats aggregation.
-    /*
-    update_daily_stats_in_tx(
-        tx,
-        &conv.agent_slug,
-        &conv.source_id,
-        conv.started_at,
-        1, // New session
-        conv.messages.len() as i64,
-        total_chars,
-    )?;
-    */
+    // Note: Daily stats update skipped here to prevent double counting.
+    // The caller (ingest_batch) handles stats aggregation efficiently.
 
     Ok(InsertOutcome {
         conversation_id: conv_id,
