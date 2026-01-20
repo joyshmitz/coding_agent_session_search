@@ -1,0 +1,51 @@
+name: Performance Regression (Pages)
+
+on:
+  workflow_dispatch:
+    inputs:
+      preset:
+        description: "Bundle preset to generate (small|medium|large|xlarge)"
+        required: false
+        default: "small"
+      lighthouse:
+        description: "Run Lighthouse audits"
+        required: false
+        default: "false"
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install perf dependencies
+        working-directory: tests/performance
+        run: npm install
+
+      - name: Run perf harness
+        run: |
+          args=("--preset" "${{ inputs.preset }}")
+          if [[ "${{ inputs.lighthouse }}" == "true" ]]; then
+            args+=("--lighthouse")
+          fi
+          ./scripts/perf/run_pages_perf.sh "${args[@]}"
+
+      - name: Upload perf artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-artifacts
+          path: target/perf/
+          retention-days: 14
