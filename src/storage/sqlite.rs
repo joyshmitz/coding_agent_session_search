@@ -2220,6 +2220,8 @@ fn insert_conversation_in_tx_batched(
                 )?;
 
                 // Update daily stats (+0 sessions, +N messages)
+                // Removed to prevent double counting: caller (ingest_batch) handles stats aggregation.
+                /*
                 let message_count = inserted_indices.len() as i64;
                 update_daily_stats_in_tx(
                     tx,
@@ -2230,6 +2232,7 @@ fn insert_conversation_in_tx_batched(
                     message_count,
                     new_chars,
                 )?;
+                */
             }
 
             return Ok(InsertOutcome {
@@ -2251,6 +2254,8 @@ fn insert_conversation_in_tx_batched(
     }
 
     // Update daily stats (+1 session, +N messages)
+    // Removed to prevent double counting: caller (ingest_batch) handles stats aggregation.
+    /*
     update_daily_stats_in_tx(
         tx,
         &conv.agent_slug,
@@ -2260,6 +2265,7 @@ fn insert_conversation_in_tx_batched(
         conv.messages.len() as i64,
         total_chars,
     )?;
+    */
 
     Ok(InsertOutcome {
         conversation_id: conv_id,
