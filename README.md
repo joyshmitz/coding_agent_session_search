@@ -1968,6 +1968,19 @@ cass completions powershell >> $PROFILE
 ## 🚀 Quickstart
 
 ### 1. Install
+
+**Recommended: Homebrew (macOS/Linux)**
+```bash
+brew install dicklesworthstone/tap/cass
+```
+
+**Windows: Scoop**
+```powershell
+scoop bucket add dicklesworthstone https://github.com/Dicklesworthstone/scoop-bucket
+scoop install dicklesworthstone/cass
+```
+
+**Alternative: Install Script**
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh?$(date +%s)" \
   | bash -s -- --easy-mode --verify
