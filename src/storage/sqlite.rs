@@ -813,7 +813,7 @@ pub struct StatsDelta {
 
 /// In-memory aggregator for batched daily stats updates.
 ///
-/// During batch ingestion, we accumulate deltas per (day, agent, source) key.
+/// During batch ingestion, we accumulate deltas per (day_id, agent, source) key.
 /// After processing all conversations, call `expand()` to generate the 4
 /// permutations per raw entry, then flush via `SqliteStorage::update_daily_stats_batched`.
 ///
@@ -2175,7 +2175,6 @@ fn insert_conversation_in_tx_batched(
             let cutoff = max_idx.unwrap_or(-1);
 
             let mut inserted_indices = Vec::new();
-            let mut new_chars: i64 = 0;
             for msg in &conv.messages {
                 if msg.idx <= cutoff {
                     continue;
@@ -2185,7 +2184,6 @@ fn insert_conversation_in_tx_batched(
                 // Collect FTS entry instead of inserting immediately
                 fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
                 inserted_indices.push(msg.idx);
-                new_chars += msg.content.len() as i64;
             }
 
             // Update metadata fields and ended_at
@@ -2219,20 +2217,8 @@ fn insert_conversation_in_tx_batched(
                     ],
                 )?;
 
-                // Update daily stats (+0 sessions, +N messages)
-                // Removed to prevent double counting: caller (ingest_batch) handles stats aggregation.
-                /*
-                let message_count = inserted_indices.len() as i64;
-                update_daily_stats_in_tx(
-                    tx,
-                    &conv.agent_slug,
-                    &conv.source_id,
-                    conv.started_at,
-                    0, // Existing session
-                    message_count,
-                    new_chars,
-                )?;
-                */
+                // Note: Daily stats update skipped here to prevent double counting.
+                // The caller (ingest_batch) handles stats aggregation efficiently.
             }
 
             return Ok(InsertOutcome {
@@ -2794,20 +2780,6 @@ mod tests {
     }
 
     #[test]
-    fn msgpack_deserialize_empty_returns_default() {
-        let recovered = deserialize_msgpack_to_json(&[]);
-        assert_eq!(recovered, serde_json::Value::Object(serde_json::Map::new()));
-    }
-
-    #[test]
-    fn msgpack_deserialize_garbage_returns_default() {
-        // Use truncated msgpack data that will fail to parse
-        // 0x85 indicates a fixmap with 5 elements, but we don't provide them
-        let recovered = deserialize_msgpack_to_json(&[0x85]);
-        assert_eq!(recovered, serde_json::Value::Object(serde_json::Map::new()));
-    }
-
-    #[test]
     fn migration_v7_adds_binary_columns() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
@@ -2837,5 +2809,75 @@ mod tests {
             )
             .unwrap();
         assert!(has_extra_bin, "messages should have extra_bin column");
+    }
+
+    #[test]
+    fn msgpack_deserialize_empty_returns_default() {
+        let recovered = deserialize_msgpack_to_json(&[]);
+        assert_eq!(recovered, serde_json::Value::Object(serde_json::Map::new()));
+    }
+
+    #[test]
+    fn msgpack_deserialize_garbage_returns_default() {
+        // Use truncated msgpack data that will fail to parse
+        // 0x85 indicates a fixmap with 5 elements, but we don't provide them
+        let recovered = deserialize_msgpack_to_json(&[0x85]);
+        assert_eq!(recovered, serde_json::Value::Object(serde_json::Map::new()));
+    }
+
+    #[test]
+    fn stats_aggregator_collects_and_expands() {
+        let mut agg = StatsAggregator::new();
+        assert!(agg.is_empty());
+
+        // Record some stats
+        // Day 100, agent "claude", source "local"
+        agg.record("claude", "local", 100, 5, 500);
+        // Day 100, agent "codex", source "local"
+        agg.record("codex", "local", 100, 3, 300);
+        // Day 101, agent "claude", source "local"
+        agg.record("claude", "local", 101, 2, 200);
+
+        assert!(!agg.is_empty());
+        assert_eq!(agg.raw_entry_count(), 3);
+
+        let entries = agg.expand();
+        // Each raw entry expands to 4 permutations.
+        // But (all, local) and (all, all) will aggregate.
+        //
+        // Raw:
+        // 1. (100, claude, local) -> 1 sess, 5 msgs, 500 chars
+        // 2. (100, codex, local)  -> 1 sess, 3 msgs, 300 chars
+        // 3. (101, claude, local) -> 1 sess, 2 msgs, 200 chars
+        //
+        // Expanded 1 (day 100):
+        // - (100, claude, local): 1 sess, 5 msgs, 500 chars
+        // - (100, all, local):    1 (from claude) + 1 (from codex) = 2 sess, 8 msgs, 800 chars
+        // - (100, claude, all):   1 sess, 5 msgs, 500 chars
+        // - (100, codex, local):  1 sess, 3 msgs, 300 chars
+        // - (100, codex, all):    1 sess, 3 msgs, 300 chars
+        // - (100, all, all):      2 sess, 8 msgs, 800 chars
+        //
+        // Expanded 3 (day 101):
+        // - (101, claude, local): 1 sess, 2 msgs, 200 chars
+        // - (101, all, local):    1 sess, 2 msgs, 200 chars
+        // - (101, claude, all):   1 sess, 2 msgs, 200 chars
+        // - (101, all, all):      1 sess, 2 msgs, 200 chars
+        //
+        // Total unique keys in expanded map:
+        // Day 100: (claude, local), (codex, local), (all, local), (claude, all), (codex, all), (all, all) = 6
+        // Day 101: (claude, local), (all, local), (claude, all), (all, all) = 4
+        // Total = 10 entries
+
+        assert_eq!(entries.len(), 10);
+
+        // Verify totals for day 100, all/all
+        let day100_all = entries
+            .iter()
+            .find(|(d, a, s, _)| *d == 100 && a == "all" && s == "all")
+            .unwrap();
+        assert_eq!(day100_all.3.session_count_delta, 2);
+        assert_eq!(day100_all.3.message_count_delta, 8);
+        assert_eq!(day100_all.3.total_chars_delta, 800);
     }
 }
