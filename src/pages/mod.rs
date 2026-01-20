@@ -6,6 +6,8 @@ pub mod encrypt;
 pub mod export;
 pub mod fts;
 pub mod key_management;
+pub mod patterns;
+pub mod profiles;
 pub mod qr;
 pub mod redact;
 pub mod secret_scan;

@@ -18,6 +18,12 @@ pub struct RedactionConfig {
     pub custom_patterns: Vec<CustomPattern>,
     /// Preserve structure but anonymize project directory names.
     pub anonymize_project_names: bool,
+    /// Redact hostnames (e.g., internal server names).
+    pub redact_hostnames: bool,
+    /// Redact email addresses.
+    pub redact_emails: bool,
+    /// Block export if critical secrets are detected (private keys, cloud credentials).
+    pub block_on_critical_secrets: bool,
 }
 
 impl Default for RedactionConfig {
@@ -29,6 +35,9 @@ impl Default for RedactionConfig {
             path_replacements: Vec::new(),
             custom_patterns: Vec::new(),
             anonymize_project_names: false,
+            redact_hostnames: false,
+            redact_emails: true,
+            block_on_critical_secrets: true,
         }
     }
 }
