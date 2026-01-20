@@ -12,5 +12,6 @@ pub mod qr;
 pub mod redact;
 pub mod secret_scan;
 pub mod size;
+pub mod summary;
 pub mod verify;
 pub mod wizard;
