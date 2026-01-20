@@ -2284,11 +2284,15 @@ When a new version is available, a notification appears in the TUI with:
 
 Selecting "Update Now" runs the same verified installer used for initial installation:
 
-```bash
-# macOS/Linux: Downloads and verifies via curl
-curl -fsSL https://...install.sh | bash -s -- --easy-mode --verify
+macOS/Linux:
 
-# Windows: PowerShell equivalent
+```bash
+curl -fsSL https://...install.sh | bash -s -- --easy-mode --verify
+```
+
+Windows (PowerShell):
+
+```powershell
 irm https://...install.ps1 | iex
 ```
 
