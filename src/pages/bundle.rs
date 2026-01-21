@@ -13,6 +13,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
 
+use super::docs::{DocLocation, GeneratedDoc};
 use super::encrypt::EncryptionConfig;
 
 /// Files embedded from pages_assets at compile time
@@ -90,6 +91,8 @@ pub struct BundleConfig {
     pub recovery_secret: Option<Vec<u8>>,
     /// Whether to generate QR codes for recovery
     pub generate_qr: bool,
+    /// Additional generated documentation files to include
+    pub generated_docs: Vec<GeneratedDoc>,
 }
 
 impl Default for BundleConfig {
@@ -100,6 +103,7 @@ impl Default for BundleConfig {
             hide_metadata: false,
             recovery_secret: None,
             generate_qr: false,
+            generated_docs: Vec::new(),
         }
     }
 }
@@ -155,6 +159,12 @@ impl BundleBuilder {
     /// Set QR code generation option
     pub fn generate_qr(mut self, generate: bool) -> Self {
         self.config.generate_qr = generate;
+        self
+    }
+
+    /// Add generated documentation files to include in the bundle
+    pub fn with_docs(mut self, docs: Vec<GeneratedDoc>) -> Self {
+        self.config.generated_docs = docs;
         self
     }
 
@@ -244,9 +254,22 @@ impl BundleBuilder {
         // Write .nojekyll (empty file to disable Jekyll processing)
         fs::write(site_dir.join(".nojekyll"), "")?;
 
-        // Write public README.md
-        let public_readme = generate_public_readme(&self.config.title, &self.config.description);
-        fs::write(site_dir.join("README.md"), public_readme)?;
+        // Write generated documentation if provided, otherwise fallback to basic readme
+        if !self.config.generated_docs.is_empty() {
+            progress("docs", "Writing generated documentation...");
+            for doc in &self.config.generated_docs {
+                let dest_path = match doc.location {
+                    DocLocation::RepoRoot => site_dir.join(&doc.filename),
+                    DocLocation::WebRoot => site_dir.join(&doc.filename),
+                };
+                fs::write(&dest_path, &doc.content)
+                    .with_context(|| format!("Failed to write {}", doc.filename))?;
+            }
+        } else {
+            // Fallback to basic README.md
+            let public_readme = generate_public_readme(&self.config.title, &self.config.description);
+            fs::write(site_dir.join("README.md"), public_readme)?;
+        }
 
         progress("integrity", "Generating integrity manifest...");
 

@@ -11,8 +11,10 @@ use std::time::Duration;
 use crate::pages::bundle::{BundleBuilder, BundleConfig};
 use crate::pages::confirmation::{
     ConfirmationConfig, ConfirmationFlow, ConfirmationStep, PasswordStrengthAction, StepValidation,
-    estimate_password_entropy, password_strength_label,
+    estimate_password_entropy, password_strength_label, validate_unencrypted_ack,
+    unencrypted_warning_lines, UNENCRYPTED_ACK_PHRASE,
 };
+use crate::pages::docs::{DocConfig, DocumentationGenerator};
 use crate::pages::encrypt::EncryptionEngine;
 use crate::pages::export::{ExportEngine, ExportFilter, PathMode};
 use crate::pages::secret_scan::{
@@ -81,6 +83,10 @@ pub struct WizardState {
 
     // Password entropy
     pub password_entropy_bits: f64,
+
+    // Unencrypted export mode (DANGEROUS)
+    pub no_encryption: bool,
+    pub unencrypted_confirmed: bool,
 }
 
 impl Default for WizardState {
@@ -111,12 +117,15 @@ impl Default for WizardState {
             secret_scan_has_critical: false,
             secret_scan_count: 0,
             password_entropy_bits: 0.0,
+            no_encryption: false,
+            unencrypted_confirmed: false,
         }
     }
 }
 
 pub struct PagesWizard {
     state: WizardState,
+    no_encryption_mode: bool,
 }
 
 impl Default for PagesWizard {
@@ -129,7 +138,14 @@ impl PagesWizard {
     pub fn new() -> Self {
         Self {
             state: WizardState::default(),
+            no_encryption_mode: false,
         }
+    }
+
+    /// Set whether to skip encryption (DANGEROUS - requires explicit confirmation).
+    pub fn set_no_encryption(&mut self, no_encryption: bool) {
+        self.no_encryption_mode = no_encryption;
+        self.state.no_encryption = no_encryption;
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -139,14 +155,24 @@ impl PagesWizard {
         term.clear_screen()?;
         self.print_header(&mut term)?;
 
+        // If no-encryption mode, show explicit warning at the start
+        if self.no_encryption_mode {
+            if !self.step_unencrypted_warning(&mut term, &theme)? {
+                writeln!(term, "{}", style("Export cancelled.").yellow())?;
+                return Ok(());
+            }
+        }
+
         // Step 1: Content Selection
         self.step_content_selection(&mut term, &theme)?;
 
         // Step 2: Secret Scan
         self.step_secret_scan(&mut term, &theme)?;
 
-        // Step 3: Security Configuration
-        self.step_security_config(&mut term, &theme)?;
+        // Step 3: Security Configuration (skip if no encryption)
+        if !self.no_encryption_mode {
+            self.step_security_config(&mut term, &theme)?;
+        }
 
         // Step 4: Site Configuration
         self.step_site_config(&mut term, &theme)?;
@@ -173,6 +199,67 @@ impl PagesWizard {
         self.step_deploy(&mut term)?;
 
         Ok(())
+    }
+
+    /// Step for unencrypted export warning and confirmation.
+    fn step_unencrypted_warning(&mut self, term: &mut Term, theme: &ColorfulTheme) -> Result<bool> {
+        writeln!(term)?;
+        writeln!(term, "{}", style("⚠️  SECURITY WARNING").red().bold())?;
+        writeln!(term, "{}", style("━".repeat(60)).red())?;
+        writeln!(term)?;
+
+        for line in unencrypted_warning_lines() {
+            if line.is_empty() {
+                writeln!(term)?;
+            } else {
+                writeln!(term, "  {}", line)?;
+            }
+        }
+
+        writeln!(term)?;
+        writeln!(term, "{}", style("━".repeat(60)).red())?;
+        writeln!(term)?;
+        writeln!(term, "To proceed with unencrypted export, type exactly:")?;
+        writeln!(term)?;
+        writeln!(term, "  {}", style(UNENCRYPTED_ACK_PHRASE).cyan().bold())?;
+        writeln!(term)?;
+
+        loop {
+            let input: String = Input::with_theme(theme)
+                .with_prompt("Your input (or \"cancel\" to abort)")
+                .interact_text()?;
+
+            if input.trim().to_lowercase() == "cancel" {
+                return Ok(false);
+            }
+
+            match validate_unencrypted_ack(&input) {
+                StepValidation::Passed => {
+                    // Additional y/N confirmation
+                    writeln!(term)?;
+                    let confirmed = Confirm::with_theme(theme)
+                        .with_prompt("Are you ABSOLUTELY SURE you want to export WITHOUT encryption?")
+                        .default(false)
+                        .interact()?;
+
+                    if !confirmed {
+                        writeln!(term)?;
+                        writeln!(term, "  {}", style("Good choice. Export cancelled.").green())?;
+                        writeln!(term, "  Remove --no-encryption to export with encryption (recommended).")?;
+                        return Ok(false);
+                    }
+
+                    self.state.unencrypted_confirmed = true;
+                    writeln!(term)?;
+                    writeln!(term, "  {} Unencrypted export acknowledged", style("⚠").yellow())?;
+                    writeln!(term, "  {}", style("Proceeding without encryption...").dim())?;
+                    return Ok(true);
+                }
+                StepValidation::Failed(msg) => {
+                    writeln!(term, "  {} {}", style("✗").red(), msg)?;
+                }
+            }
+        }
     }
 
     fn print_header(&self, term: &mut Term) -> Result<()> {
@@ -1439,41 +1526,70 @@ impl PagesWizard {
             stats.conversations_processed, stats.messages_processed
         ));
 
-        // Phase 2: Encryption
-        let pb2 = ProgressBar::new_spinner();
-        pb2.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
-        );
-        pb2.enable_steady_tick(Duration::from_millis(100));
-        pb2.set_message("Encrypting archive...");
+        // Phase 2: Encryption (skip if no_encryption mode)
+        if self.no_encryption_mode {
+            writeln!(term)?;
+            writeln!(
+                term,
+                "  {} Skipping encryption (unencrypted mode)",
+                style("⚠").yellow()
+            )?;
+            writeln!(
+                term,
+                "  {}",
+                style("WARNING: All content will be publicly readable!").red()
+            )?;
 
-        // Initialize encryption engine
-        let mut enc_engine = EncryptionEngine::default();
+            // For unencrypted mode, just copy the export.db to payload directory
+            let payload_dir = self.state.output_dir.join("payload");
+            std::fs::create_dir_all(&payload_dir)?;
+            let dest_db = payload_dir.join("data.db");
+            std::fs::copy(&export_db_path, &dest_db)?;
 
-        // Add password slot
-        if let Some(password) = &self.state.password {
-            enc_engine.add_password_slot(password)?;
+            // Write minimal config.json for unencrypted bundle
+            let config = serde_json::json!({
+                "encrypted": false,
+                "version": "1.0.0",
+                "warning": "UNENCRYPTED - All content is publicly readable"
+            });
+            let config_path = self.state.output_dir.join("config.json");
+            std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+        } else {
+            let pb2 = ProgressBar::new_spinner();
+            pb2.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.cyan} {msg}")
+                    .unwrap(),
+            );
+            pb2.enable_steady_tick(Duration::from_millis(100));
+            pb2.set_message("Encrypting archive...");
+
+            // Initialize encryption engine
+            let mut enc_engine = EncryptionEngine::default();
+
+            // Add password slot
+            if let Some(password) = &self.state.password {
+                enc_engine.add_password_slot(password)?;
+            }
+
+            // Generate and add recovery secret if requested
+            if self.state.generate_recovery {
+                let mut recovery_bytes = [0u8; 32];
+                use rand::RngCore;
+                rand::rngs::OsRng.fill_bytes(&mut recovery_bytes);
+                enc_engine.add_recovery_slot(&recovery_bytes)?;
+                self.state.recovery_secret = Some(recovery_bytes.to_vec());
+            }
+
+            // Encrypt the database
+            let config = enc_engine.encrypt_file(&export_db_path, &self.state.output_dir, |_, _| {})?;
+
+            // Write config.json
+            let config_path = self.state.output_dir.join("config.json");
+            std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+
+            pb2.finish_with_message("✓ Encryption complete");
         }
-
-        // Generate and add recovery secret if requested
-        if self.state.generate_recovery {
-            let mut recovery_bytes = [0u8; 32];
-            use rand::RngCore;
-            rand::rngs::OsRng.fill_bytes(&mut recovery_bytes);
-            enc_engine.add_recovery_slot(&recovery_bytes)?;
-            self.state.recovery_secret = Some(recovery_bytes.to_vec());
-        }
-
-        // Encrypt the database
-        let config = enc_engine.encrypt_file(&export_db_path, &self.state.output_dir, |_, _| {})?;
-
-        // Write config.json
-        let config_path = self.state.output_dir.join("config.json");
-        std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
-
-        pb2.finish_with_message("✓ Encryption complete");
 
         // Phase 3: Build static site bundle
         let pb3 = ProgressBar::new_spinner();
@@ -1485,6 +1601,35 @@ impl PagesWizard {
         pb3.enable_steady_tick(Duration::from_millis(100));
         pb3.set_message("Building static site bundle...");
 
+        // Generate documentation
+        let generated_docs = if let Some(ref summary) = self.state.last_summary {
+            // Determine target URL based on deployment target
+            let target_url = match self.state.target {
+                DeployTarget::GitHubPages => self
+                    .state
+                    .repo_name
+                    .as_ref()
+                    .map(|name| format!("https://{}.github.io/{}", "YOUR_USERNAME", name)),
+                DeployTarget::CloudflarePages => self
+                    .state
+                    .repo_name
+                    .as_ref()
+                    .map(|name| format!("https://{}.pages.dev", name)),
+                DeployTarget::Local => None,
+            };
+
+            let doc_config = if let Some(url) = target_url {
+                DocConfig::new().with_url(url)
+            } else {
+                DocConfig::new()
+            };
+
+            let doc_generator = DocumentationGenerator::new(doc_config, summary.clone());
+            doc_generator.generate_all()
+        } else {
+            Vec::new()
+        };
+
         // Create bundle configuration
         let bundle_config = BundleConfig {
             title: self.state.title.clone(),
@@ -1492,6 +1637,7 @@ impl PagesWizard {
             hide_metadata: self.state.hide_metadata,
             recovery_secret: self.state.recovery_secret.clone(),
             generate_qr: self.state.generate_qr,
+            generated_docs,
         };
 
         // Build the bundle - creates site/ and private/ directories

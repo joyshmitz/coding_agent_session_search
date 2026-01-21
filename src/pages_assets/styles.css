@@ -116,6 +116,88 @@ body {
 }
 
 /* ========================================
+   Accessibility
+   ======================================== */
+
+/* Skip link - visible only when focused */
+.skip-link {
+    position: absolute;
+    top: -100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--color-primary);
+    color: white;
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    text-decoration: none;
+    font-weight: 500;
+    z-index: 10000;
+    transition: top var(--transition-fast);
+}
+
+.skip-link:focus {
+    top: var(--space-sm);
+    outline: 3px solid var(--color-primary);
+    outline-offset: 2px;
+}
+
+/* Enhanced focus styles for keyboard navigation */
+:focus {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+}
+
+/* Only show focus outline for keyboard navigation, not mouse */
+:focus:not(:focus-visible) {
+    outline: none;
+}
+
+:focus-visible {
+    outline: 3px solid var(--color-primary);
+    outline-offset: 2px;
+}
+
+/* High contrast focus for interactive elements */
+button:focus-visible,
+input:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+    outline: 3px solid var(--color-primary);
+    box-shadow: 0 0 0 6px rgba(59, 130, 246, 0.25);
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+
+    .spinner {
+        animation: none !important;
+    }
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+    :root {
+        --color-border: currentColor;
+        --color-border-focus: currentColor;
+    }
+
+    button,
+    input,
+    .auth-card,
+    .error {
+        border: 2px solid currentColor;
+    }
+}
+
+/* ========================================
    Auth Screen
    ======================================== */
 .auth-container {

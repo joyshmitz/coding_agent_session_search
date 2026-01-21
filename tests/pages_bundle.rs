@@ -240,6 +240,7 @@ mod tests {
             hide_metadata: false,
             recovery_secret: Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
             generate_qr: false,
+            generated_docs: Vec::new(),
         };
 
         let builder = BundleBuilder::with_config(config);
@@ -278,6 +279,7 @@ mod tests {
             hide_metadata: false,
             recovery_secret: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             generate_qr: false,
+            generated_docs: Vec::new(),
         };
 
         let builder = BundleBuilder::with_config(config);

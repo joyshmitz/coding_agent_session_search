@@ -491,6 +491,14 @@ pub enum Commands {
         /// Verbose output (show detailed check results)
         #[arg(long, short)]
         verbose: bool,
+
+        /// Export without encryption (DANGEROUS - all content publicly readable)
+        #[arg(long)]
+        no_encryption: bool,
+
+        /// Acknowledge unencrypted export risks (required in robot/JSON mode with --no-encryption)
+        #[arg(long)]
+        i_understand_unencrypted_risks: bool,
     },
     /// Manage remote sources (P5.x)
     #[command(subcommand)]
@@ -2069,7 +2077,23 @@ async fn execute_cli(
                     secrets_deny,
                     json,
                     verbose,
+                    no_encryption,
+                    i_understand_unencrypted_risks,
                 } => {
+                    // Check for unencrypted export in robot mode
+                    if no_encryption && (json || robot_mode) {
+                        if !i_understand_unencrypted_risks {
+                            let error = crate::pages::confirmation::robot_mode_blocked_error();
+                            eprintln!("{}", serde_json::to_string_pretty(&error).unwrap());
+                            return Err(CliError {
+                                code: crate::pages::confirmation::EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED,
+                                kind: "pages",
+                                message: "Unencrypted exports are not allowed in robot mode".to_string(),
+                                hint: Some("Use --i-understand-unencrypted-risks flag if you really need this".to_string()),
+                                retryable: false,
+                            });
+                        }
+                    }
                     // Handle --verify first
                     if let Some(verify_path) = verify {
                         let result = crate::pages::verify::verify_bundle(&verify_path, verbose)
@@ -2152,6 +2176,77 @@ async fn execute_cli(
                             retryable: false,
                         })?;
                     } else if let Some(output_path) = export_only {
+                        // Interactive unencrypted export confirmation (non-robot mode)
+                        if no_encryption && !json && !robot_mode {
+                            use std::io::Write;
+                            use console::style;
+
+                            eprintln!("{}", style("⚠️  SECURITY WARNING").red().bold());
+                            eprintln!();
+                            for line in crate::pages::confirmation::unencrypted_warning_lines() {
+                                eprintln!("{}", line);
+                            }
+                            eprintln!();
+                            eprintln!("To proceed, type exactly:");
+                            eprintln!();
+                            eprintln!("  {}", style(crate::pages::confirmation::UNENCRYPTED_ACK_PHRASE).cyan());
+                            eprintln!();
+                            eprint!("Your input: ");
+                            std::io::stderr().flush().ok();
+
+                            let mut input = String::new();
+                            std::io::stdin().read_line(&mut input).map_err(|e| CliError {
+                                code: crate::pages::confirmation::EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED,
+                                kind: "pages",
+                                message: format!("Failed to read input: {e}"),
+                                hint: None,
+                                retryable: false,
+                            })?;
+
+                            match crate::pages::confirmation::validate_unencrypted_ack(&input) {
+                                crate::pages::confirmation::StepValidation::Passed => {
+                                    // Additional y/N confirmation
+                                    eprintln!();
+                                    eprint!("Are you ABSOLUTELY SURE? [y/N]: ");
+                                    std::io::stderr().flush().ok();
+
+                                    let mut confirm = String::new();
+                                    std::io::stdin().read_line(&mut confirm).map_err(|e| CliError {
+                                        code: crate::pages::confirmation::EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED,
+                                        kind: "pages",
+                                        message: format!("Failed to read input: {e}"),
+                                        hint: None,
+                                        retryable: false,
+                                    })?;
+
+                                    if confirm.trim().to_lowercase() != "y" {
+                                        eprintln!();
+                                        eprintln!("{}", style("Export cancelled.").green());
+                                        eprintln!("To export with encryption (recommended), remove --no-encryption");
+                                        return Err(CliError {
+                                            code: crate::pages::confirmation::EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED,
+                                            kind: "pages",
+                                            message: "Unencrypted export not confirmed".to_string(),
+                                            hint: Some("Remove --no-encryption to export with encryption (recommended)".to_string()),
+                                            retryable: false,
+                                        });
+                                    }
+                                }
+                                crate::pages::confirmation::StepValidation::Failed(msg) => {
+                                    eprintln!();
+                                    eprintln!("{}", style("Export cancelled.").green());
+                                    eprintln!("{}", msg);
+                                    return Err(CliError {
+                                        code: crate::pages::confirmation::EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED,
+                                        kind: "pages",
+                                        message: "Unencrypted export not confirmed".to_string(),
+                                        hint: Some("Remove --no-encryption to export with encryption (recommended)".to_string()),
+                                        retryable: false,
+                                    });
+                                }
+                            }
+                        }
+
                         crate::pages::export::run_pages_export(
                             cli.db.clone(),
                             output_path.clone(),
@@ -2170,8 +2265,12 @@ async fn execute_cli(
                             retryable: false,
                         })?;
                     } else {
-                        crate::pages::wizard::PagesWizard::new()
-                            .run()
+                        // Wizard mode: pass no_encryption flag
+                        let mut wizard = crate::pages::wizard::PagesWizard::new();
+                        if no_encryption {
+                            wizard.set_no_encryption(true);
+                        }
+                        wizard.run()
                             .map_err(|e| CliError {
                                 code: 9,
                                 kind: "pages",
