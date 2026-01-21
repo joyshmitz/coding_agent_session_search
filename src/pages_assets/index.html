@@ -25,11 +25,18 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>">
 </head>
 <body>
+    <!-- Skip link for keyboard users -->
+    <a href="#main-content" class="skip-link">Skip to main content</a>
+
+    <!-- Screen reader announcer for dynamic content -->
+    <div id="sr-announcer" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
+    <div id="sr-alert" class="visually-hidden" role="alert" aria-live="assertive"></div>
+
     <!-- COI status screen (shown during setup/reload check) -->
-    <div id="coi-status" class="coi-container hidden"></div>
+    <div id="coi-status" class="coi-container hidden" role="status" aria-live="polite"></div>
 
     <!-- Auth screen (shown after COI check passes) -->
-    <div id="auth-screen" class="auth-container">
+    <div id="auth-screen" class="auth-container" role="region" aria-label="Authentication">
         <div class="auth-card">
             <div class="auth-header">
                 <div class="logo">🔐</div>
@@ -49,31 +56,39 @@
                 This ensures the archive hasn't been tampered with.
             </div>
 
-            <div class="auth-form">
+            <form class="auth-form" id="auth-form" role="form" aria-label="Unlock archive">
                 <div class="form-group">
-                    <label for="password">Password</label>
+                    <label for="password" id="password-label">Password</label>
                     <div class="password-input-wrapper">
-                        <input type="password" id="password" autocomplete="off" placeholder="Enter your archive password">
-                        <button id="toggle-password" type="button" class="toggle-password" aria-label="Show password">
-                            <span class="eye-icon">👁</span>
+                        <input type="password" id="password" autocomplete="current-password"
+                               placeholder="Enter your archive password"
+                               aria-labelledby="password-label"
+                               aria-describedby="password-hint"
+                               required>
+                        <button id="toggle-password" type="button" class="toggle-password"
+                                aria-label="Show password" aria-pressed="false">
+                            <span class="eye-icon" aria-hidden="true">👁</span>
                         </button>
                     </div>
+                    <span id="password-hint" class="visually-hidden">
+                        Enter the password that was set when this archive was created
+                    </span>
                 </div>
 
-                <button id="unlock-btn" type="button" class="btn btn-primary">
+                <button id="unlock-btn" type="submit" class="btn btn-primary">
                     <span class="btn-text">Unlock Archive</span>
-                    <span class="btn-icon">🔓</span>
+                    <span class="btn-icon" aria-hidden="true">🔓</span>
                 </button>
 
-                <div class="divider">
+                <div class="divider" role="separator">
                     <span>or</span>
                 </div>
 
                 <button id="qr-btn" type="button" class="btn btn-secondary">
-                    <span class="btn-icon">📷</span>
+                    <span class="btn-icon" aria-hidden="true">📷</span>
                     <span class="btn-text">Scan Recovery QR Code</span>
                 </button>
-            </div>
+            </form>
 
             <div id="qr-scanner" class="qr-scanner hidden">
                 <div class="qr-scanner-header">
@@ -84,13 +99,13 @@
                 <p class="qr-instructions">Position the QR code within the frame</p>
             </div>
 
-            <div id="auth-error" class="error hidden">
-                <span class="error-icon">⚠️</span>
+            <div id="auth-error" class="error hidden" role="alert" aria-live="assertive">
+                <span class="error-icon" aria-hidden="true">⚠️</span>
                 <span class="error-message"></span>
             </div>
 
-            <div id="auth-progress" class="progress hidden">
-                <div class="progress-bar">
+            <div id="auth-progress" class="progress hidden" role="status" aria-live="polite">
+                <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
                     <div class="progress-fill"></div>
                 </div>
                 <span class="progress-text">Deriving key...</span>
@@ -105,23 +120,23 @@
     <!-- App screen (shown after unlock) -->
     <div id="app-screen" class="app-container hidden">
         <!-- Header -->
-        <header class="app-header">
+        <header class="app-header" role="banner">
             <div class="header-left">
-                <span class="logo-small">🔐</span>
+                <span class="logo-small" aria-hidden="true">🔐</span>
                 <h1>cass Archive</h1>
             </div>
-            <div class="header-right">
+            <nav class="header-right" role="navigation" aria-label="Main navigation">
                 <button id="lock-btn" type="button" class="btn btn-small">
-                    <span class="btn-icon">🔒</span>
+                    <span class="btn-icon" aria-hidden="true">🔒</span>
                     <span class="btn-text">Lock</span>
                 </button>
-            </div>
+            </nav>
         </header>
 
         <!-- Main content area (populated by viewer.js) -->
-        <main id="app-content">
-            <div class="loading-state">
-                <div class="spinner"></div>
+        <main id="main-content" role="main" aria-label="Archive content">
+            <div class="loading-state" role="status" aria-live="polite">
+                <div class="spinner" aria-hidden="true"></div>
                 <p>Loading database...</p>
             </div>
         </main>

@@ -484,6 +484,78 @@ pub fn count_required_steps(config: &ConfirmationConfig) -> usize {
     count
 }
 
+/// Required phrase for unencrypted export acknowledgment.
+pub const UNENCRYPTED_ACK_PHRASE: &str = "I UNDERSTAND AND ACCEPT THE RISKS";
+
+/// Exit code for unconfirmed unencrypted export.
+pub const EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED: i32 = 3;
+
+/// Result of unencrypted export confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnencryptedConfirmResult {
+    /// User confirmed with correct phrase.
+    Confirmed,
+    /// User cancelled (wrong phrase or explicit cancel).
+    Cancelled,
+    /// Blocked in robot mode (no override flag).
+    RobotModeBlocked,
+}
+
+/// Validate unencrypted export acknowledgment phrase.
+///
+/// Requires exact match (case-insensitive) of "I UNDERSTAND AND ACCEPT THE RISKS".
+pub fn validate_unencrypted_ack(input: &str) -> StepValidation {
+    let normalized = input.trim().to_uppercase();
+    if normalized == UNENCRYPTED_ACK_PHRASE {
+        StepValidation::Passed
+    } else {
+        StepValidation::Failed(format!(
+            "Please type exactly: \"{}\"",
+            UNENCRYPTED_ACK_PHRASE
+        ))
+    }
+}
+
+/// Check if robot mode allows unencrypted export.
+///
+/// In robot/JSON mode, unencrypted exports are blocked unless
+/// `--i-understand-unencrypted-risks` flag is provided.
+pub fn check_robot_mode_unencrypted(
+    is_robot_mode: bool,
+    has_override_flag: bool,
+) -> UnencryptedConfirmResult {
+    if is_robot_mode && !has_override_flag {
+        UnencryptedConfirmResult::RobotModeBlocked
+    } else {
+        UnencryptedConfirmResult::Confirmed
+    }
+}
+
+/// Generate the error JSON for blocked robot mode unencrypted export.
+pub fn robot_mode_blocked_error() -> serde_json::Value {
+    serde_json::json!({
+        "error": "unencrypted_blocked",
+        "message": "Unencrypted exports are not allowed in robot mode",
+        "suggestion": "Use --i-understand-unencrypted-risks flag if you really need this",
+        "exit_code": EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED
+    })
+}
+
+/// Format warning messages for unencrypted export.
+pub fn unencrypted_warning_lines() -> Vec<&'static str> {
+    vec![
+        "You are about to export WITHOUT ENCRYPTION.",
+        "",
+        "This means:",
+        "  • All conversation content will be publicly readable",
+        "  • Anyone with the URL can view your data",
+        "  • Search engines may index your content",
+        "  • There is NO way to restrict access later",
+        "",
+        "This is IRREVERSIBLE once deployed.",
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,5 +797,75 @@ mod tests {
         assert_eq!(summary.len(), 2);
         assert_eq!(summary[0].1, "Secrets acknowledged");
         assert_eq!(summary[1].1, "Content reviewed");
+    }
+
+    #[test]
+    fn test_unencrypted_ack_validation() {
+        // Correct phrase (exact match)
+        assert_eq!(
+            validate_unencrypted_ack("I UNDERSTAND AND ACCEPT THE RISKS"),
+            StepValidation::Passed
+        );
+
+        // Correct phrase (case insensitive)
+        assert_eq!(
+            validate_unencrypted_ack("i understand and accept the risks"),
+            StepValidation::Passed
+        );
+
+        // Correct phrase with whitespace
+        assert_eq!(
+            validate_unencrypted_ack("  I UNDERSTAND AND ACCEPT THE RISKS  "),
+            StepValidation::Passed
+        );
+
+        // Incorrect phrases
+        assert!(matches!(
+            validate_unencrypted_ack("I understand"),
+            StepValidation::Failed(_)
+        ));
+        assert!(matches!(
+            validate_unencrypted_ack("yes"),
+            StepValidation::Failed(_)
+        ));
+        assert!(matches!(
+            validate_unencrypted_ack("I ACCEPT THE RISKS"),
+            StepValidation::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn test_robot_mode_unencrypted_check() {
+        // Not robot mode - always allowed
+        assert_eq!(
+            check_robot_mode_unencrypted(false, false),
+            UnencryptedConfirmResult::Confirmed
+        );
+
+        // Robot mode with override flag - allowed
+        assert_eq!(
+            check_robot_mode_unencrypted(true, true),
+            UnencryptedConfirmResult::Confirmed
+        );
+
+        // Robot mode without override flag - blocked
+        assert_eq!(
+            check_robot_mode_unencrypted(true, false),
+            UnencryptedConfirmResult::RobotModeBlocked
+        );
+    }
+
+    #[test]
+    fn test_robot_mode_blocked_error() {
+        let error = robot_mode_blocked_error();
+        assert_eq!(error["error"], "unencrypted_blocked");
+        assert_eq!(error["exit_code"], EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED);
+    }
+
+    #[test]
+    fn test_unencrypted_warning_lines() {
+        let lines = unencrypted_warning_lines();
+        assert!(!lines.is_empty());
+        assert!(lines[0].contains("WITHOUT ENCRYPTION"));
     }
 }

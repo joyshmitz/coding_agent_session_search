@@ -154,6 +154,7 @@ fn main() -> Result<()> {
         hide_metadata: args.hide_metadata,
         recovery_secret: args.recovery_secret.as_ref().map(|s| s.as_bytes().to_vec()),
         generate_qr: false,
+        generated_docs: Vec::new(),
     };
 
     let builder = BundleBuilder::with_config(bundle_config);
