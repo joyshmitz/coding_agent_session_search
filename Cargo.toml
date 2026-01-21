@@ -162,3 +162,7 @@ harness = false
 [[test]]
 name = "docs"
 path = "tests/docs/mod.rs"
+
+[[test]]
+name = "upgrade"
+path = "tests/upgrade/mod.rs"
