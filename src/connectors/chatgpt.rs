@@ -480,9 +480,7 @@ impl Connector for ChatGptConnector {
                 .unwrap_or(false)
         };
 
-        let looks_like_base = |path: &PathBuf| {
-            has_conversation_dirs(path)
-        };
+        let looks_like_base = |path: &PathBuf| has_conversation_dirs(path);
 
         let base = if ctx.use_default_detection() {
             if looks_like_base(&ctx.data_dir) {
@@ -1396,13 +1394,13 @@ mod tests {
         // But for testing on Linux we can mock whatever app_support_dir returns or just ensure fallback works?
         // Wait, app_support_dir() returns None on Linux.
         // So scan() will return Ok(Vec::new()) if looks_like_base is false AND default_base is None.
-        
+
         // But if looks_like_base is TRUE (due to bug), it uses ctx.data_dir.
         // And scans it. And finds nothing.
-        
+
         // This test is tricky because on Linux, there is no "real" default ChatGPT home.
         // So we can't test "finding the real session" vs "finding nothing".
-        
+
         // However, we can test that it DOES NOT try to scan the confusing dir if it doesn't look like a base.
         // But scan() logic is:
         /*
@@ -1416,30 +1414,30 @@ mod tests {
             }
         }
         */
-        
+
         // If I'm on Linux, app_support_dir is None.
         // If I provide a confusing data_dir "project_openai".
         // If bug exists: looks_like_base is true. base = project_openai.
         // It scans project_openai. It finds nothing (find_conversation_dirs returns empty).
         // It returns Ok([]).
-        
+
         // If bug is fixed: looks_like_base is false.
         // app_support_dir is None.
         // It returns Ok([]).
-        
+
         // Result is the same!
-        
+
         // The regression only matters if app_support_dir IS valid (e.g. on macOS) OR if I mock app_support_dir behavior?
         // Or if I can force it to find something in the "real" location.
-        
+
         // I can't easily mock Self::app_support_dir() as it's a static method.
-        
+
         // However, I can test on macOS? The CI/env might be Linux.
         // "My operating system is: linux".
-        
+
         // So I can't verify the "missed real session" case on Linux easily for ChatGPT.
         // But I can verify that `looks_like_base` logic is correct if I could unit test `looks_like_base`... but it's inside `scan`.
-        
+
         // I'll just apply the fix blindly. It's consistent with the other fixes.
     }
 }

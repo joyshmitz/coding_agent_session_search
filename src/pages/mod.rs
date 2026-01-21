@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod bundle;
+pub mod confirmation;
 pub mod deploy_cloudflare;
 pub mod deploy_github;
 pub mod encrypt;

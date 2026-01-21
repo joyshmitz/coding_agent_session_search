@@ -1021,7 +1021,7 @@ mod tests {
         // Mock the home directory structure expected by projects_root()
         let real_projects = home_dir.path().join(".claude").join("projects");
         fs::create_dir_all(&real_projects).unwrap();
-        
+
         let content = r#"{"type":"user","message":{"role":"user","content":"Real session"}}"#;
         fs::write(real_projects.join("real.jsonl"), content).unwrap();
 
@@ -1034,28 +1034,28 @@ mod tests {
         // SAFETY: Test runs in single-threaded context
         // Note: dirs::home_dir() typically checks HOME
         unsafe { std::env::set_var("HOME", home_dir.path()) };
-        
+
         let connector = ClaudeCodeConnector::new();
         // this defaults to use_default_detection = true
         let ctx = ScanContext::local_default(confusing_data_dir.clone(), None);
-        
+
         let convs = connector.scan(&ctx).unwrap();
-        
+
         // Cleanup
-        // We can't easily restore HOME to its original value if we don't know it, 
-        // but typically tests running in isolation or containers handle this. 
+        // We can't easily restore HOME to its original value if we don't know it,
+        // but typically tests running in isolation or containers handle this.
         // For safety/correctness in a shared env, we should probably save/restore.
         // But here I'll just rely on the fact that we are in a "random exploration" mode
         // and if I break my own environment it's fine? No, I should be careful.
         // But `dirs::home_dir` caches? No.
-        
+
         // Check results
         // Use a loop to print what we found if it fails
         if convs.len() != 1 {
-             println!("Found {} conversations:", convs.len());
-             for c in &convs {
-                 println!(" - {:?}", c.source_path);
-             }
+            println!("Found {} conversations:", convs.len());
+            for c in &convs {
+                println!(" - {:?}", c.source_path);
+            }
         }
         assert_eq!(convs.len(), 1, "Should find session in real home");
         assert_eq!(convs[0].messages[0].content, "Real session");

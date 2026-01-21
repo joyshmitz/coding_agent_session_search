@@ -85,7 +85,7 @@ impl Connector for CodexConnector {
             .map(|s| s.contains(".codex") || s.ends_with("/codex") || s.ends_with("\\codex"))
             .unwrap_or(false)
             && ctx.data_dir.join("sessions").exists();
-        
+
         let looks_like_root = |path: &PathBuf| {
             path.to_str()
                 .map(|s| s.contains(".codex") || s.contains("codex"))
@@ -1171,18 +1171,23 @@ not valid json at all
 
         // SAFETY: Test runs in single-threaded context
         unsafe { std::env::set_var("CODEX_HOME", real_home.path()) };
-        
+
         let connector = CodexConnector::new();
         // this defaults to use_default_detection = true
         let ctx = ScanContext::local_default(confusing_data_dir.clone(), None);
-        
+
         let convs = connector.scan(&ctx).unwrap();
-        
+
         // Cleanup
         unsafe { std::env::remove_var("CODEX_HOME") };
 
         // Should find the real session
-        assert_eq!(convs.len(), 1, "Should find session in CODEX_HOME, but found {}", convs.len());
+        assert_eq!(
+            convs.len(),
+            1,
+            "Should find session in CODEX_HOME, but found {}",
+            convs.len()
+        );
         assert_eq!(convs[0].messages[0].content, "Real session");
     }
 }

@@ -1,9 +1,10 @@
-use assert_cmd::Command;
-use coding_agent_search::connectors::NormalizedConversation;
+use assert_cmd::cargo::cargo_bin_cmd;
 use coding_agent_search::model::types::{Agent, AgentKind};
-use coding_agent_search::pages::bundle::BundleBuilder;
-use coding_agent_search::pages::encrypt::EncryptionEngine;
+use coding_agent_search::pages::bundle::{BundleBuilder, BundleResult};
+use coding_agent_search::pages::encrypt::{DecryptionEngine, EncryptionEngine, load_config};
 use coding_agent_search::pages::export::{ExportEngine, ExportFilter, PathMode};
+use coding_agent_search::pages::key_management::{key_add_password, key_list, key_revoke};
+use coding_agent_search::pages::verify::verify_bundle;
 use coding_agent_search::storage::sqlite::SqliteStorage;
 use std::fs;
 use std::path::Path;
@@ -14,18 +15,23 @@ mod util;
 
 use util::ConversationFixtureBuilder;
 
-#[test]
-fn test_pages_export_pipeline_e2e() {
-    let temp_dir = TempDir::new().unwrap();
-    let data_dir = temp_dir.path().join("data");
+const TEST_PASSWORD: &str = "test-password";
+const TEST_PASSWORD_2: &str = "second-password";
+const TEST_RECOVERY_SECRET: &[u8] = b"recovery-secret-bytes";
 
+struct PipelineArtifacts {
+    export_db_path: std::path::PathBuf,
+    bundle: BundleResult,
+}
+
+fn build_pipeline(temp_dir: &TempDir) -> PipelineArtifacts {
+    let data_dir = temp_dir.path().join("data");
     fs::create_dir_all(&data_dir).unwrap();
 
-    // 1. Setup: Create fixtures and Populate DB
+    // 1. Setup: Create fixtures and populate DB
     setup_db(&data_dir);
 
-    // 2. Export (Simulating `cass pages --export-only`)
-    // Create unfiltered export of the database
+    // 2. Export (simulating `cass pages --export-only`)
     let export_staging = temp_dir.path().join("export_staging");
     fs::create_dir_all(&export_staging).unwrap();
     let export_db_path = export_staging.join("export.db");
@@ -43,62 +49,159 @@ fn test_pages_export_pipeline_e2e() {
     let stats = export_engine
         .execute(|_, _| {}, None)
         .expect("ExportEngine execution failed");
-
     assert_eq!(
         stats.conversations_processed, 1,
         "Should export 1 conversation"
     );
     assert!(export_db_path.exists(), "Export database should exist");
 
-    // 3. Encrypt (Simulating Wizard/Encrypt Step)
-    let encrypt_staging = temp_dir.path().join("encrypt_staging");
+    // 3. Encrypt (simulating Wizard/Encrypt Step)
+    let encrypt_dir = temp_dir.path().join("encrypt_staging");
     let mut enc_engine = EncryptionEngine::new(1024 * 1024); // 1MB chunks
     enc_engine
-        .add_password_slot("test-password")
+        .add_password_slot(TEST_PASSWORD)
         .expect("Failed to add password slot");
     enc_engine
-        .add_recovery_slot(b"recovery-secret-bytes")
+        .add_recovery_slot(TEST_RECOVERY_SECRET)
         .expect("Failed to add recovery slot");
 
     let _enc_config = enc_engine
-        .encrypt_file(&export_db_path, &encrypt_staging, |_, _| {})
+        .encrypt_file(&export_db_path, &encrypt_dir, |_, _| {})
         .expect("Encryption failed");
 
-    assert!(encrypt_staging.join("config.json").exists());
-    assert!(encrypt_staging.join("payload").exists());
+    assert!(encrypt_dir.join("config.json").exists());
+    assert!(encrypt_dir.join("payload").exists());
 
-    // 4. Bundle (Simulating Bundle Step)
+    // 4. Bundle (simulating Bundle Step)
     let bundle_dir = temp_dir.path().join("bundle");
     let builder = BundleBuilder::new()
         .title("E2E Test Archive")
         .description("Test archive for E2E pipeline")
-        .generate_qr(false) // Skip QR generation to avoid dependency issues if any
-        .recovery_secret(Some(b"recovery-secret-bytes".to_vec()));
+        .generate_qr(false) // Skip QR generation to avoid dependency issues
+        .recovery_secret(Some(TEST_RECOVERY_SECRET.to_vec()));
 
-    let bundle_result = builder
-        .build(&encrypt_staging, &bundle_dir, |_, _| {})
+    let bundle = builder
+        .build(&encrypt_dir, &bundle_dir, |_, _| {})
         .expect("Bundle failed");
 
-    assert!(bundle_result.site_dir.join("index.html").exists());
-    assert!(
-        bundle_result
-            .private_dir
-            .join("recovery-secret.txt")
-            .exists()
-    );
+    assert!(bundle.site_dir.join("index.html").exists());
+    assert!(bundle.private_dir.join("recovery-secret.txt").exists());
 
-    // 5. Verify (CLI)
+    PipelineArtifacts {
+        export_db_path,
+        bundle,
+    }
+}
+
+#[test]
+fn test_pages_export_pipeline_e2e() {
+    let temp_dir = TempDir::new().unwrap();
+    let artifacts = build_pipeline(&temp_dir);
+
+    // Verify (CLI)
     // Run `cass pages --verify <site_dir>` to validate the bundle integrity and structure
-    let site_dir = bundle_dir.join("site");
-    let mut cmd = Command::cargo_bin("cass").unwrap();
+    let site_dir = &artifacts.bundle.site_dir;
+    let mut cmd = cargo_bin_cmd!("cass");
     let assert = cmd
         .arg("pages")
         .arg("--verify")
-        .arg(&site_dir)
+        .arg(site_dir)
         .arg("--json")
         .assert();
 
     assert.success();
+}
+
+#[test]
+fn test_pages_pipeline_decrypt_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let artifacts = build_pipeline(&temp_dir);
+
+    // Unlock with password and decrypt
+    let config = load_config(&artifacts.bundle.site_dir).expect("load config");
+    let decryptor =
+        DecryptionEngine::unlock_with_password(config, TEST_PASSWORD).expect("unlock password");
+    let decrypted_path = temp_dir.path().join("decrypted.db");
+    decryptor
+        .decrypt_to_file(&artifacts.bundle.site_dir, &decrypted_path, |_, _| {})
+        .expect("decrypt with password");
+
+    assert_eq!(
+        fs::read(&artifacts.export_db_path).unwrap(),
+        fs::read(&decrypted_path).unwrap()
+    );
+
+    // Unlock with recovery secret and decrypt
+    let config = load_config(&artifacts.bundle.site_dir).expect("load config");
+    let decryptor = DecryptionEngine::unlock_with_recovery(config, TEST_RECOVERY_SECRET)
+        .expect("unlock recovery");
+    let decrypted_recovery_path = temp_dir.path().join("decrypted_recovery.db");
+    decryptor
+        .decrypt_to_file(
+            &artifacts.bundle.site_dir,
+            &decrypted_recovery_path,
+            |_, _| {},
+        )
+        .expect("decrypt with recovery");
+
+    assert_eq!(
+        fs::read(&artifacts.export_db_path).unwrap(),
+        fs::read(&decrypted_recovery_path).unwrap()
+    );
+}
+
+#[test]
+fn test_pages_bundle_key_add_revoke_cycle() {
+    let temp_dir = TempDir::new().unwrap();
+    let artifacts = build_pipeline(&temp_dir);
+    let site_dir = &artifacts.bundle.site_dir;
+
+    // Add second password slot
+    let slot_id = key_add_password(site_dir, TEST_PASSWORD, TEST_PASSWORD_2).unwrap();
+    assert_eq!(
+        slot_id, 2,
+        "Expected slot id 2 after password+recovery slots"
+    );
+
+    let list = key_list(site_dir).unwrap();
+    assert_eq!(list.active_slots, 3);
+
+    // Revoke original password slot using second password
+    let revoke = key_revoke(site_dir, TEST_PASSWORD_2, 0).unwrap();
+    assert_eq!(revoke.revoked_slot_id, 0);
+    assert_eq!(revoke.remaining_slots, 2);
+
+    // Original password should fail
+    let config = load_config(site_dir).unwrap();
+    assert!(DecryptionEngine::unlock_with_password(config, TEST_PASSWORD).is_err());
+
+    // Second password should still work
+    let config = load_config(site_dir).unwrap();
+    assert!(DecryptionEngine::unlock_with_password(config, TEST_PASSWORD_2).is_ok());
+}
+
+#[test]
+fn test_pages_bundle_verify_detects_corruption() {
+    let temp_dir = TempDir::new().unwrap();
+    let artifacts = build_pipeline(&temp_dir);
+    let site_dir = &artifacts.bundle.site_dir;
+
+    // Baseline: verify passes
+    let baseline = verify_bundle(site_dir, false).expect("verify baseline");
+    assert_eq!(baseline.status, "valid");
+
+    // Corrupt a payload chunk
+    let payload_dir = site_dir.join("payload");
+    let chunk = fs::read_dir(&payload_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.extension().map(|e| e == "bin").unwrap_or(false))
+        .expect("payload chunk");
+    fs::write(&chunk, b"corrupted payload").unwrap();
+
+    let result = verify_bundle(site_dir, false).expect("verify after corruption");
+    assert_eq!(result.status, "invalid");
 }
 
 #[test]
@@ -114,7 +217,7 @@ fn test_secret_scan_gating() {
     setup_db_with_secret(&cass_data_dir);
 
     // 1. Scan secrets (report only)
-    let mut cmd = Command::cargo_bin("cass").unwrap();
+    let mut cmd = cargo_bin_cmd!("cass");
     let output = cmd
         .env("XDG_DATA_HOME", &xdg_data_home)
         .arg("pages")
@@ -148,7 +251,7 @@ fn test_secret_scan_gating() {
     assert!(found_api_key, "Should detect the fake API key");
 
     // 2. Fail on secrets
-    let mut cmd_fail = Command::cargo_bin("cass").unwrap();
+    let mut cmd_fail = cargo_bin_cmd!("cass");
     cmd_fail
         .env("XDG_DATA_HOME", &xdg_data_home)
         .arg("pages")

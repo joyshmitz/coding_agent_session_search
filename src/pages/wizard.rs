@@ -9,13 +9,21 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::pages::bundle::{BundleBuilder, BundleConfig};
+use crate::pages::confirmation::{
+    ConfirmationConfig, ConfirmationFlow, ConfirmationStep, PasswordStrengthAction, StepValidation,
+    estimate_password_entropy, password_strength_label,
+};
 use crate::pages::encrypt::EncryptionEngine;
 use crate::pages::export::{ExportEngine, ExportFilter, PathMode};
 use crate::pages::secret_scan::{
     SecretScanConfig, SecretScanFilters, print_human_report, wizard_secret_scan,
 };
 use crate::pages::size::{BundleVerifier, SizeEstimate, SizeLimitResult};
+use crate::pages::summary::{
+    ExclusionSet, PrePublishSummary, SummaryFilters, SummaryGenerator, format_size,
+};
 use crate::storage::sqlite::SqliteStorage;
+use rusqlite::Connection;
 
 /// Deployment target for the export
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +69,18 @@ pub struct WizardState {
 
     // Database path
     pub db_path: PathBuf,
+
+    // Pre-publish summary and exclusions
+    pub exclusions: ExclusionSet,
+    pub last_summary: Option<PrePublishSummary>,
+
+    // Secret scan results
+    pub secret_scan_has_findings: bool,
+    pub secret_scan_has_critical: bool,
+    pub secret_scan_count: usize,
+
+    // Password entropy
+    pub password_entropy_bits: f64,
 }
 
 impl Default for WizardState {
@@ -85,6 +105,12 @@ impl Default for WizardState {
             output_dir: PathBuf::from("cass-export"),
             repo_name: None,
             db_path,
+            exclusions: ExclusionSet::new(),
+            last_summary: None,
+            secret_scan_has_findings: false,
+            secret_scan_has_critical: false,
+            secret_scan_count: 0,
+            password_entropy_bits: 0.0,
         }
     }
 }
@@ -134,10 +160,16 @@ impl PagesWizard {
             return Ok(());
         }
 
-        // Step 7: Export Progress
+        // Step 7: Safety Confirmation
+        if !self.step_confirmation(&mut term, &theme)? {
+            writeln!(term, "{}", style("Export cancelled.").yellow())?;
+            return Ok(());
+        }
+
+        // Step 8: Export Progress
         self.step_export(&mut term)?;
 
-        // Step 8: Deploy (if not local)
+        // Step 9: Deploy (if not local)
         self.step_deploy(&mut term)?;
 
         Ok(())
@@ -158,7 +190,7 @@ impl PagesWizard {
     }
 
     fn step_content_selection(&mut self, term: &mut Term, theme: &ColorfulTheme) -> Result<()> {
-        writeln!(term, "\n{}", style("Step 1 of 8: Content Selection").bold())?;
+        writeln!(term, "\n{}", style("Step 1 of 9: Content Selection").bold())?;
         writeln!(term, "{}", style("─".repeat(40)).dim())?;
 
         // Load agents dynamically from database
@@ -277,7 +309,7 @@ impl PagesWizard {
     }
 
     fn step_secret_scan(&mut self, term: &mut Term, theme: &ColorfulTheme) -> Result<()> {
-        writeln!(term, "\n{}", style("Step 2 of 8: Secret Scan").bold())?;
+        writeln!(term, "\n{}", style("Step 2 of 9: Secret Scan").bold())?;
         writeln!(term, "{}", style("─".repeat(40)).dim())?;
 
         let since_ts = self
@@ -311,6 +343,11 @@ impl PagesWizard {
         let report = wizard_secret_scan(&self.state.db_path, &filters, &config)?;
         print_human_report(term, &report, 3)?;
 
+        // Save secret scan results to state for confirmation flow
+        self.state.secret_scan_has_findings = report.summary.total > 0;
+        self.state.secret_scan_has_critical = report.summary.has_critical;
+        self.state.secret_scan_count = report.summary.total;
+
         if report.summary.has_critical {
             writeln!(
                 term,
@@ -333,7 +370,7 @@ impl PagesWizard {
         writeln!(
             term,
             "\n{}",
-            style("Step 3 of 8: Security Configuration").bold()
+            style("Step 3 of 9: Security Configuration").bold()
         )?;
         writeln!(term, "{}", style("─".repeat(40)).dim())?;
 
@@ -353,15 +390,24 @@ impl PagesWizard {
         self.state.password = Some(password);
         writeln!(term, "  {} Password set", style("✓").green())?;
 
-        // Show password strength indicator
-        let strength = self.estimate_password_strength(self.state.password.as_ref().unwrap());
-        let strength_color = match strength {
-            s if s >= 4 => style("Strong").green(),
-            s if s >= 3 => style("Good").yellow(),
-            s if s >= 2 => style("Fair").yellow(),
-            _ => style("Weak").red(),
+        // Calculate and save password entropy for confirmation flow
+        self.state.password_entropy_bits =
+            estimate_password_entropy(self.state.password.as_ref().unwrap());
+
+        // Show password strength indicator using entropy-based assessment
+        let entropy_label = password_strength_label(self.state.password_entropy_bits);
+        let strength_color = match entropy_label {
+            "Very Strong" => style(entropy_label).green().bold(),
+            "Strong" => style(entropy_label).green(),
+            "Fair" => style(entropy_label).yellow(),
+            "Weak" => style(entropy_label).red(),
+            _ => style(entropy_label).red().bold(),
         };
-        writeln!(term, "    Password strength: {}", strength_color)?;
+        writeln!(
+            term,
+            "    Password strength: {} ({:.0} bits)",
+            strength_color, self.state.password_entropy_bits
+        )?;
 
         // Recovery secret
         self.state.generate_recovery = Confirm::with_theme(theme)
@@ -394,7 +440,7 @@ impl PagesWizard {
         writeln!(
             term,
             "\n{}",
-            style("Step 4 of 8: Site Configuration").bold()
+            style("Step 4 of 9: Site Configuration").bold()
         )?;
         writeln!(term, "{}", style("─".repeat(40)).dim())?;
 
@@ -428,7 +474,7 @@ impl PagesWizard {
     }
 
     fn step_deployment_target(&mut self, term: &mut Term, theme: &ColorfulTheme) -> Result<()> {
-        writeln!(term, "\n{}", style("Step 5 of 8: Deployment Target").bold())?;
+        writeln!(term, "\n{}", style("Step 5 of 9: Deployment Target").bold())?;
         writeln!(term, "{}", style("─".repeat(40)).dim())?;
 
         let targets = vec![
@@ -492,27 +538,192 @@ impl PagesWizard {
         Ok(())
     }
 
-    fn step_summary(&self, term: &mut Term, theme: &ColorfulTheme) -> Result<bool> {
+    fn step_summary(&mut self, term: &mut Term, theme: &ColorfulTheme) -> Result<bool> {
         writeln!(
             term,
             "\n{}",
-            style("Step 6 of 8: Pre-Publish Summary").bold()
+            style("Step 6 of 9: Pre-Publish Summary").bold()
         )?;
         writeln!(term, "{}", style("─".repeat(40)).dim())?;
 
-        writeln!(term, "\n{}", style("Configuration Summary:").underlined())?;
-        writeln!(term, "  Agents: {}", self.state.agents.join(", "))?;
+        // Generate comprehensive summary from database
+        writeln!(term, "\n  Generating summary...")?;
+        let summary = self.generate_prepublish_summary()?;
+        self.state.last_summary = Some(summary.clone());
+
+        // Display content overview
+        writeln!(term, "\n{}", style("📊 CONTENT OVERVIEW").bold().cyan())?;
+        writeln!(term, "{}", style("─".repeat(40)).dim())?;
         writeln!(
             term,
-            "  Time range: {}",
-            self.state.time_range.as_deref().unwrap_or("All time")
+            "  Conversations: {}",
+            style(summary.total_conversations).green()
         )?;
+        writeln!(
+            term,
+            "  Messages:      {}",
+            style(summary.total_messages).green()
+        )?;
+        writeln!(
+            term,
+            "  Characters:    {} (~{})",
+            summary.total_characters,
+            format_size(summary.total_characters)
+        )?;
+        writeln!(
+            term,
+            "  Archive Size:  ~{} (estimated, compressed + encrypted)",
+            style(format_size(summary.estimated_size_bytes)).yellow()
+        )?;
+
+        // Display date range
+        writeln!(term, "\n{}", style("📅 DATE RANGE").bold().cyan())?;
+        writeln!(term, "{}", style("─".repeat(40)).dim())?;
+        if let (Some(earliest), Some(latest)) =
+            (&summary.earliest_timestamp, &summary.latest_timestamp)
+        {
+            let days = (*latest - *earliest).num_days();
+            writeln!(
+                term,
+                "  From: {}  To: {}  ({} days)",
+                style(earliest.format("%Y-%m-%d")).white(),
+                style(latest.format("%Y-%m-%d")).white(),
+                days
+            )?;
+
+            // Show activity histogram (simplified sparkline)
+            if !summary.date_histogram.is_empty() {
+                let bars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+                // Group by month for display
+                let mut months: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for entry in &summary.date_histogram {
+                    if entry.date.len() >= 7 {
+                        let month = &entry.date[0..7];
+                        *months.entry(month.to_string()).or_insert(0) += entry.message_count;
+                    }
+                }
+
+                if !months.is_empty() {
+                    let month_max = months.values().max().copied().unwrap_or(1);
+                    let sparkline: String = months
+                        .values()
+                        .map(|&count| {
+                            let idx = (count * 7 / month_max).min(7);
+                            bars[idx]
+                        })
+                        .collect();
+                    writeln!(term, "  Activity: {}", style(sparkline).cyan())?;
+                }
+            }
+        } else {
+            writeln!(term, "  No date information available")?;
+        }
+
+        // Display workspaces
+        writeln!(
+            term,
+            "\n{} ({})",
+            style("📁 WORKSPACES").bold().cyan(),
+            summary.workspaces.len()
+        )?;
+        writeln!(term, "{}", style("─".repeat(40)).dim())?;
+        for (_idx, ws) in summary.workspaces.iter().enumerate().take(5) {
+            let included_marker =
+                if ws.included && !self.state.exclusions.is_workspace_excluded(&ws.path) {
+                    style("✓").green()
+                } else {
+                    style("✗").red()
+                };
+            writeln!(
+                term,
+                "  {} {} ({} conversations)",
+                included_marker,
+                style(&ws.display_name).white(),
+                ws.conversation_count
+            )?;
+            if !ws.sample_titles.is_empty() {
+                let titles: Vec<_> = ws
+                    .sample_titles
+                    .iter()
+                    .take(2)
+                    .map(|t| {
+                        if t.len() > 30 {
+                            format!("{}...", &t[..27])
+                        } else {
+                            t.clone()
+                        }
+                    })
+                    .collect();
+                writeln!(
+                    term,
+                    "      {}",
+                    style(format!("\"{}\"", titles.join("\", \""))).dim()
+                )?;
+            }
+        }
+        if summary.workspaces.len() > 5 {
+            writeln!(
+                term,
+                "  {} and {} more...",
+                style("...").dim(),
+                summary.workspaces.len() - 5
+            )?;
+        }
+
+        // Display agents
+        writeln!(term, "\n{}", style("🤖 AGENTS").bold().cyan())?;
+        writeln!(term, "{}", style("─".repeat(40)).dim())?;
+        for agent in &summary.agents {
+            writeln!(
+                term,
+                "  • {}: {} conversations ({:.0}%)",
+                style(&agent.name).white(),
+                agent.conversation_count,
+                agent.percentage
+            )?;
+        }
+
+        // Display security status
+        writeln!(term, "\n{}", style("🔒 SECURITY").bold().cyan())?;
+        writeln!(term, "{}", style("─".repeat(40)).dim())?;
+        if let Some(enc) = &summary.encryption_config {
+            writeln!(term, "  Encryption: {}", enc.algorithm)?;
+            writeln!(term, "  Key Derivation: {}", enc.key_derivation)?;
+            writeln!(term, "  Key Slots: {}", enc.key_slot_count)?;
+        } else {
+            writeln!(term, "  Encryption: AES-256-GCM")?;
+            writeln!(term, "  Key Derivation: Argon2id")?;
+        }
+
+        // Secret scan status
+        let secret_status = if summary.secret_scan.total_findings == 0 {
+            style("✓ No secrets detected".to_string()).green()
+        } else if summary.secret_scan.has_critical {
+            style(format!(
+                "⚠️  {} issues (CRITICAL)",
+                summary.secret_scan.total_findings
+            ))
+            .red()
+        } else {
+            style(format!(
+                "⚠️  {} issues found",
+                summary.secret_scan.total_findings
+            ))
+            .yellow()
+        };
+        writeln!(term, "  Secret Scan: {}", secret_status)?;
+
+        // Configuration summary
+        writeln!(term, "\n{}", style("⚙️  CONFIGURATION").bold().cyan())?;
+        writeln!(term, "{}", style("─".repeat(40)).dim())?;
         writeln!(term, "  Title: {}", self.state.title)?;
         writeln!(term, "  Target: {}", self.state.target)?;
         writeln!(term, "  Output: {}", self.state.output_dir.display())?;
         writeln!(
             term,
-            "  Recovery secret: {}",
+            "  Recovery Key: {}",
             if self.state.generate_recovery {
                 "Yes"
             } else {
@@ -521,29 +732,602 @@ impl PagesWizard {
         )?;
         writeln!(
             term,
-            "  QR code: {}",
+            "  QR Code: {}",
             if self.state.generate_qr { "Yes" } else { "No" }
         )?;
-        writeln!(
-            term,
-            "  Hide metadata: {}",
-            if self.state.hide_metadata {
-                "Yes"
-            } else {
-                "No"
+
+        // Exclusion summary
+        let (ws_excluded, conv_excluded, pattern_excluded) =
+            self.state.exclusions.exclusion_counts();
+        if ws_excluded > 0 || conv_excluded > 0 || pattern_excluded > 0 {
+            writeln!(term, "\n{}", style("🚫 EXCLUSIONS").bold().yellow())?;
+            writeln!(term, "{}", style("─".repeat(40)).dim())?;
+            if ws_excluded > 0 {
+                writeln!(term, "  {} workspace(s) excluded", ws_excluded)?;
             }
-        )?;
+            if conv_excluded > 0 {
+                writeln!(term, "  {} conversation(s) excluded", conv_excluded)?;
+            }
+            if pattern_excluded > 0 {
+                writeln!(term, "  {} pattern(s) active", pattern_excluded)?;
+            }
+        }
 
         writeln!(term)?;
 
-        Ok(Confirm::with_theme(theme)
-            .with_prompt("Proceed with export?")
-            .default(true)
-            .interact()?)
+        // Options menu
+        loop {
+            let options = vec![
+                "✓ Proceed with export",
+                "📁 View/Edit workspace exclusions",
+                "✗ Cancel export",
+            ];
+
+            let selection = Select::with_theme(theme)
+                .with_prompt("What would you like to do?")
+                .items(&options)
+                .default(0)
+                .interact()?;
+
+            match selection {
+                0 => return Ok(true), // Proceed
+                1 => {
+                    // Edit workspace exclusions
+                    self.edit_workspace_exclusions(term, theme, &summary)?;
+                }
+                2 => return Ok(false), // Cancel
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// Generate the pre-publish summary from the database.
+    fn generate_prepublish_summary(&self) -> Result<PrePublishSummary> {
+        let conn = Connection::open(&self.state.db_path)
+            .context("Failed to open database for summary generation")?;
+
+        let since_ts = self
+            .state
+            .time_range
+            .as_deref()
+            .and_then(crate::ui::time_parser::parse_time_input);
+
+        let filters = SummaryFilters {
+            agents: if self.state.agents.is_empty() {
+                None
+            } else {
+                Some(self.state.agents.clone())
+            },
+            workspaces: self
+                .state
+                .workspaces
+                .as_ref()
+                .map(|ws| ws.iter().map(|p| p.to_string_lossy().to_string()).collect()),
+            since_ts,
+            until_ts: None,
+        };
+
+        let generator = SummaryGenerator::new(&conn);
+        let summary = generator.generate_with_exclusions(Some(&filters), &self.state.exclusions)?;
+
+        Ok(summary)
+    }
+
+    /// Interactive workspace exclusion editing.
+    fn edit_workspace_exclusions(
+        &mut self,
+        term: &mut Term,
+        theme: &ColorfulTheme,
+        summary: &PrePublishSummary,
+    ) -> Result<()> {
+        writeln!(term, "\n{}", style("Workspace Exclusions").bold())?;
+        writeln!(term, "{}", style("─".repeat(40)).dim())?;
+
+        if summary.workspaces.is_empty() {
+            writeln!(term, "  No workspaces to configure.")?;
+            return Ok(());
+        }
+
+        // Build list of workspaces with current inclusion status
+        let items: Vec<String> = summary
+            .workspaces
+            .iter()
+            .map(|ws| {
+                format!(
+                    "{} ({} conversations)",
+                    ws.display_name, ws.conversation_count
+                )
+            })
+            .collect();
+
+        // Determine which are currently selected (included)
+        let defaults: Vec<bool> = summary
+            .workspaces
+            .iter()
+            .map(|ws| !self.state.exclusions.is_workspace_excluded(&ws.path))
+            .collect();
+
+        let selections = MultiSelect::with_theme(theme)
+            .with_prompt("Select workspaces to INCLUDE (unselected will be excluded)")
+            .items(&items)
+            .defaults(&defaults)
+            .interact()?;
+
+        // Update exclusions based on selections
+        for (idx, ws) in summary.workspaces.iter().enumerate() {
+            if selections.contains(&idx) {
+                // Include this workspace (remove from exclusions)
+                self.state.exclusions.include_workspace(&ws.path);
+            } else {
+                // Exclude this workspace
+                self.state.exclusions.exclude_workspace(&ws.path);
+            }
+        }
+
+        let (ws_excluded, _, _) = self.state.exclusions.exclusion_counts();
+        writeln!(
+            term,
+            "  {} {} workspace(s) now excluded",
+            style("✓").green(),
+            ws_excluded
+        )?;
+
+        Ok(())
+    }
+
+    /// Multi-step safety confirmation flow.
+    fn step_confirmation(&mut self, term: &mut Term, theme: &ColorfulTheme) -> Result<bool> {
+        writeln!(
+            term,
+            "\n{}",
+            style("Step 7 of 9: Safety Confirmation").bold()
+        )?;
+        writeln!(term, "{}", style("─".repeat(40)).dim())?;
+
+        // Build confirmation configuration
+        let target_domain = if self.state.target != DeployTarget::Local {
+            self.state
+                .repo_name
+                .as_ref()
+                .map(|name| match self.state.target {
+                    DeployTarget::GitHubPages => format!("{}.github.io", name),
+                    DeployTarget::CloudflarePages => format!("{}.pages.dev", name),
+                    DeployTarget::Local => String::new(),
+                })
+        } else {
+            None
+        };
+
+        let config = ConfirmationConfig {
+            has_secrets: self.state.secret_scan_has_findings,
+            has_critical_secrets: self.state.secret_scan_has_critical,
+            secret_count: self.state.secret_scan_count,
+            target_domain,
+            is_remote_publish: self.state.target != DeployTarget::Local,
+            password_entropy_bits: self.state.password_entropy_bits,
+            has_recovery_key: self.state.generate_recovery,
+            recovery_key_phrase: None, // Will be set after generation
+            summary: self
+                .state
+                .last_summary
+                .clone()
+                .expect("Summary should be generated before confirmation"),
+        };
+
+        let mut flow = ConfirmationFlow::new(config);
+
+        // Process each confirmation step
+        loop {
+            match flow.current_step() {
+                ConfirmationStep::SecretScanAcknowledgment => {
+                    if !self.confirm_secret_ack(term, theme, &flow)? {
+                        return Ok(false);
+                    }
+                    flow.complete_current_step();
+                }
+                ConfirmationStep::ContentReview => {
+                    if !self.confirm_content_review(term, theme, &flow)? {
+                        return Ok(false);
+                    }
+                    flow.complete_current_step();
+                }
+                ConfirmationStep::PublicPublishingWarning => {
+                    if !self.confirm_public_warning(term, theme, &flow)? {
+                        return Ok(false);
+                    }
+                    flow.complete_current_step();
+                }
+                ConfirmationStep::PasswordStrengthWarning => {
+                    match self.confirm_password_strength(term, theme, &mut flow)? {
+                        PasswordStrengthAction::SetStronger => {
+                            // User wants to set a stronger password - go back
+                            writeln!(
+                                term,
+                                "\n  {} Returning to security configuration...",
+                                style("←").cyan()
+                            )?;
+                            return Ok(false);
+                        }
+                        PasswordStrengthAction::ProceedAnyway => {
+                            flow.complete_current_step();
+                        }
+                        PasswordStrengthAction::Abort => {
+                            return Ok(false);
+                        }
+                    }
+                }
+                ConfirmationStep::RecoveryKeyBackup => {
+                    if !self.confirm_recovery_key(term, theme, &flow)? {
+                        return Ok(false);
+                    }
+                    flow.complete_current_step();
+                }
+                ConfirmationStep::FinalConfirmation => {
+                    if !self.confirm_final(term, theme, &mut flow)? {
+                        return Ok(false);
+                    }
+                    flow.complete_current_step();
+                    break;
+                }
+            }
+        }
+
+        writeln!(
+            term,
+            "\n  {} All safety checks completed",
+            style("✓").green()
+        )?;
+        Ok(true)
+    }
+
+    /// Confirm acknowledgment of detected secrets.
+    fn confirm_secret_ack(
+        &self,
+        term: &mut Term,
+        theme: &ColorfulTheme,
+        flow: &ConfirmationFlow,
+    ) -> Result<bool> {
+        writeln!(
+            term,
+            "\n  {}",
+            style("⚠️  SECRETS DETECTED").yellow().bold()
+        )?;
+        writeln!(term)?;
+        writeln!(
+            term,
+            "  The secret scan found {} potential sensitive data item(s).",
+            flow.config().secret_count
+        )?;
+        writeln!(term)?;
+        writeln!(
+            term,
+            "  Even though the export will be encrypted, publishing content"
+        )?;
+        writeln!(term, "  containing secrets carries additional risk:")?;
+        writeln!(term)?;
+        writeln!(
+            term,
+            "  {} If your password is weak, secrets could be exposed",
+            style("⚠").yellow()
+        )?;
+        writeln!(
+            term,
+            "  {} Secrets may remain valid if encryption is ever compromised",
+            style("⚠").yellow()
+        )?;
+        writeln!(term)?;
+
+        loop {
+            let input: String = Input::with_theme(theme)
+                .with_prompt("Type \"I understand the risks\" to proceed (or \"abort\" to cancel)")
+                .interact_text()?;
+
+            if input.trim().to_lowercase() == "abort" {
+                return Ok(false);
+            }
+
+            match flow.validate_secret_ack(&input) {
+                StepValidation::Passed => {
+                    writeln!(term, "  {} Secrets acknowledged", style("✓").green())?;
+                    return Ok(true);
+                }
+                StepValidation::Failed(msg) => {
+                    writeln!(term, "  {} {}", style("✗").red(), msg)?;
+                }
+            }
+        }
+    }
+
+    /// Confirm review of content summary.
+    fn confirm_content_review(
+        &self,
+        term: &mut Term,
+        theme: &ColorfulTheme,
+        flow: &ConfirmationFlow,
+    ) -> Result<bool> {
+        writeln!(term, "\n  {}", style("📋 CONTENT REVIEW").cyan().bold())?;
+        writeln!(term)?;
+        writeln!(term, "  You are about to export:")?;
+        writeln!(term)?;
+        writeln!(
+            term,
+            "  • {} conversations from {} workspaces",
+            flow.config().summary.total_conversations,
+            flow.config().summary.workspaces.len()
+        )?;
+        writeln!(
+            term,
+            "  • {} messages",
+            flow.config().summary.total_messages
+        )?;
+        writeln!(
+            term,
+            "  • Content from: {}",
+            flow.config()
+                .summary
+                .agents
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+        writeln!(term)?;
+
+        let confirmed = Confirm::with_theme(theme)
+            .with_prompt("Have you reviewed the content summary?")
+            .default(false)
+            .interact()?;
+
+        if confirmed {
+            writeln!(term, "  {} Content reviewed", style("✓").green())?;
+        }
+        Ok(confirmed)
+    }
+
+    /// Confirm public publishing warning.
+    fn confirm_public_warning(
+        &self,
+        term: &mut Term,
+        theme: &ColorfulTheme,
+        flow: &ConfirmationFlow,
+    ) -> Result<bool> {
+        let domain = flow
+            .config()
+            .target_domain
+            .as_deref()
+            .unwrap_or("your-site");
+
+        writeln!(
+            term,
+            "\n  {}",
+            style("🌐 PUBLIC PUBLISHING WARNING").yellow().bold()
+        )?;
+        writeln!(term)?;
+        writeln!(term, "  You are about to publish to:")?;
+        writeln!(term, "    {}", style(format!("https://{}/", domain)).cyan())?;
+        writeln!(term)?;
+        writeln!(
+            term,
+            "  {} This URL will be publicly accessible on the internet",
+            style("⚠").yellow()
+        )?;
+        writeln!(
+            term,
+            "  {} Anyone with the URL can download the encrypted archive",
+            style("⚠").yellow()
+        )?;
+        writeln!(
+            term,
+            "  {} The security depends entirely on your password strength",
+            style("⚠").yellow()
+        )?;
+        writeln!(term)?;
+
+        loop {
+            let input: String = Input::with_theme(theme)
+                .with_prompt(format!(
+                    "Type \"publish to {}\" to confirm (or \"abort\" to cancel)",
+                    domain
+                ))
+                .interact_text()?;
+
+            if input.trim().to_lowercase() == "abort" {
+                return Ok(false);
+            }
+
+            match flow.validate_public_warning(&input) {
+                StepValidation::Passed => {
+                    writeln!(term, "  {} Public URL confirmed", style("✓").green())?;
+                    return Ok(true);
+                }
+                StepValidation::Failed(msg) => {
+                    writeln!(term, "  {} {}", style("✗").red(), msg)?;
+                }
+            }
+        }
+    }
+
+    /// Handle password strength warning.
+    fn confirm_password_strength(
+        &self,
+        term: &mut Term,
+        theme: &ColorfulTheme,
+        flow: &mut ConfirmationFlow,
+    ) -> Result<PasswordStrengthAction> {
+        writeln!(
+            term,
+            "\n  {}",
+            style("🔐 PASSWORD STRENGTH WARNING").yellow().bold()
+        )?;
+        writeln!(term)?;
+        writeln!(
+            term,
+            "  Your password has estimated entropy of {:.0} bits.",
+            self.state.password_entropy_bits
+        )?;
+        writeln!(term)?;
+        writeln!(term, "  Recommended minimum: 60 bits")?;
+        writeln!(term)?;
+        writeln!(
+            term,
+            "  A password with low entropy could potentially be cracked"
+        )?;
+        writeln!(
+            term,
+            "  by a determined attacker with sufficient resources."
+        )?;
+        writeln!(term)?;
+        writeln!(term, "  For long-term security, consider:")?;
+        writeln!(term, "  • Using a longer password (16+ characters)")?;
+        writeln!(term, "  • Including numbers, symbols, and mixed case")?;
+        writeln!(term, "  • Using a passphrase of 5+ random words")?;
+        writeln!(term)?;
+
+        let options = vec![
+            "[S] Set a stronger password",
+            "[P] Proceed with current password (not recommended)",
+            "[A] Abort export",
+        ];
+
+        let selection = Select::with_theme(theme)
+            .with_prompt("What would you like to do?")
+            .items(&options)
+            .default(0)
+            .interact()?;
+
+        let action = match selection {
+            0 => PasswordStrengthAction::SetStronger,
+            1 => {
+                writeln!(
+                    term,
+                    "  {} Password warning acknowledged",
+                    style("⚠").yellow()
+                )?;
+                PasswordStrengthAction::ProceedAnyway
+            }
+            _ => PasswordStrengthAction::Abort,
+        };
+
+        flow.set_password_action(action);
+        Ok(action)
+    }
+
+    /// Confirm recovery key backup.
+    fn confirm_recovery_key(
+        &self,
+        term: &mut Term,
+        theme: &ColorfulTheme,
+        _flow: &ConfirmationFlow,
+    ) -> Result<bool> {
+        writeln!(
+            term,
+            "\n  {}",
+            style("💾 RECOVERY KEY BACKUP").cyan().bold()
+        )?;
+        writeln!(term)?;
+        writeln!(
+            term,
+            "  A recovery key will be generated. This is the ONLY way"
+        )?;
+        writeln!(term, "  to recover your data if you forget your password.")?;
+        writeln!(term)?;
+        writeln!(
+            term,
+            "  {} If you lose both your password AND the recovery key,",
+            style("⚠").yellow()
+        )?;
+        writeln!(term, "     your data will be permanently inaccessible.")?;
+        writeln!(term)?;
+
+        let confirmed = Confirm::with_theme(theme)
+            .with_prompt("I understand that I must save the recovery key securely")
+            .default(false)
+            .interact()?;
+
+        if confirmed {
+            writeln!(
+                term,
+                "  {} Recovery key backup confirmed",
+                style("✓").green()
+            )?;
+        }
+        Ok(confirmed)
+    }
+
+    /// Final double-enter confirmation.
+    fn confirm_final(
+        &self,
+        term: &mut Term,
+        theme: &ColorfulTheme,
+        flow: &mut ConfirmationFlow,
+    ) -> Result<bool> {
+        writeln!(term, "\n  {}", style("✓ FINAL CONFIRMATION").green().bold())?;
+        writeln!(term)?;
+        writeln!(term, "  Ready to publish:")?;
+        writeln!(term)?;
+
+        // Show completed steps
+        for (_, label) in flow.completed_steps_summary() {
+            writeln!(term, "  {} {}", style("✓").green(), label)?;
+        }
+        writeln!(term)?;
+
+        // Show target info
+        if self.state.target != DeployTarget::Local {
+            if let Some(domain) = &flow.config().target_domain {
+                writeln!(term, "  Target: https://{}/", domain)?;
+            }
+        } else {
+            writeln!(
+                term,
+                "  Target: {} (local)",
+                self.state.output_dir.display()
+            )?;
+        }
+
+        if let Some(summary) = &self.state.last_summary {
+            writeln!(
+                term,
+                "  Size: ~{}",
+                format_size(summary.estimated_size_bytes)
+            )?;
+        }
+        writeln!(term)?;
+
+        writeln!(
+            term,
+            "  {}",
+            style("Press Enter TWICE to confirm and begin export").dim()
+        )?;
+        writeln!(term)?;
+
+        // First Enter
+        let _: String = Input::with_theme(theme)
+            .with_prompt("[First confirmation - press Enter]")
+            .allow_empty(true)
+            .interact_text()?;
+
+        flow.process_final_enter();
+        writeln!(term, "  {} First confirmation received", style("•").cyan())?;
+
+        // Second Enter
+        let _: String = Input::with_theme(theme)
+            .with_prompt("[Second confirmation - press Enter to proceed]")
+            .allow_empty(true)
+            .interact_text()?;
+
+        flow.process_final_enter();
+        writeln!(
+            term,
+            "  {} Second confirmation received",
+            style("✓").green()
+        )?;
+
+        Ok(true)
     }
 
     fn step_export(&mut self, term: &mut Term) -> Result<()> {
-        writeln!(term, "\n{}", style("Step 7 of 8: Export Progress").bold())?;
+        writeln!(term, "\n{}", style("Step 8 of 9: Export Progress").bold())?;
         writeln!(term, "{}", style("─".repeat(40)).dim())?;
 
         // Phase 0: Size estimation and limit checking
@@ -806,7 +1590,7 @@ impl PagesWizard {
     }
 
     fn step_deploy(&self, term: &mut Term) -> Result<()> {
-        writeln!(term, "\n{}", style("Step 8 of 8: Deployment").bold())?;
+        writeln!(term, "\n{}", style("Step 9 of 9: Deployment").bold())?;
         writeln!(term, "{}", style("─".repeat(40)).dim())?;
 
         match self.state.target {
@@ -877,38 +1661,5 @@ impl PagesWizard {
 
         writeln!(term)?;
         Ok(())
-    }
-
-    /// Estimate password strength (simple heuristic)
-    fn estimate_password_strength(&self, password: &str) -> u8 {
-        let mut score = 0u8;
-
-        // Length
-        if password.len() >= 12 {
-            score += 2;
-        } else if password.len() >= 8 {
-            score += 1;
-        }
-
-        // Character variety
-        let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
-        let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
-        let has_digit = password.chars().any(|c| c.is_ascii_digit());
-        let has_special = password.chars().any(|c| !c.is_alphanumeric());
-
-        if has_lower {
-            score += 1;
-        }
-        if has_upper {
-            score += 1;
-        }
-        if has_digit {
-            score += 1;
-        }
-        if has_special {
-            score += 1;
-        }
-
-        score.min(5)
     }
 }

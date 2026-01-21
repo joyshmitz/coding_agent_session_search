@@ -655,8 +655,7 @@ impl Connector for CursorConnector {
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Determine base directory
         let looks_like_base = |path: &PathBuf| {
-            path.join("globalStorage").exists()
-                || path.join("workspaceStorage").exists()
+            path.join("globalStorage").exists() || path.join("workspaceStorage").exists()
         };
 
         let base = if ctx.use_default_detection() {
@@ -718,9 +717,6 @@ mod tests {
     use serial_test::serial;
     use std::collections::HashSet;
     use std::fs;
-    use std::process::Command;
-    use std::thread;
-    use std::time::Duration;
     use tempfile::TempDir;
 
     /// Create a test SQLite database with the cursorDiskKV table
@@ -1536,14 +1532,15 @@ mod tests {
         // Linux: ~/.config/Cursor/User/globalStorage/state.vscdb
         let real_storage = home_dir.path().join(".config/Cursor/User/globalStorage");
         fs::create_dir_all(&real_storage).unwrap();
-        
+
         let db_path = real_storage.join("state.vscdb");
         let conn = create_test_db(&db_path);
         let value = json!({ "text": "Real cursor session" }).to_string();
         conn.execute(
             "INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)",
             ["composerData:real-123", &value],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
 
         // Setup CASS data dir that happens to have "Cursor" in path
@@ -1554,12 +1551,12 @@ mod tests {
 
         // Overwrite HOME to point to our temp home
         unsafe { std::env::set_var("HOME", home_dir.path()) };
-        
+
         let connector = CursorConnector::new();
         let ctx = ScanContext::local_default(confusing_data_dir.clone(), None);
-        
+
         let convs = connector.scan(&ctx).unwrap();
-        
+
         unsafe { std::env::remove_var("HOME") };
 
         assert_eq!(convs.len(), 1, "Should find session in real home");

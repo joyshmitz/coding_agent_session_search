@@ -932,7 +932,11 @@ mod tests {
 
         let connector = GeminiConnector::new();
         // Use explicit root to avoid fallback to real home
-        let ctx = ScanContext::with_roots(gemini_dir.clone(), vec![crate::connectors::ScanRoot::local(gemini_dir)], None);
+        let ctx = ScanContext::with_roots(
+            gemini_dir.clone(),
+            vec![crate::connectors::ScanRoot::local(gemini_dir)],
+            None,
+        );
         let convs = connector.scan(&ctx).unwrap();
 
         assert!(convs.is_empty());
@@ -1091,8 +1095,9 @@ mod tests {
         // Structure: .gemini/tmp/<hash>/chats/session.json
         let real_chats = home_dir.path().join(".gemini/tmp/hash123/chats");
         fs::create_dir_all(&real_chats).unwrap();
-        
-        let session_json = r#"{"sessionId": "real", "messages": [{"type": "user", "content": "Real session"}]}"#;
+
+        let session_json =
+            r#"{"sessionId": "real", "messages": [{"type": "user", "content": "Real session"}]}"#;
         fs::write(real_chats.join("session-real.json"), session_json).unwrap();
 
         // Setup CASS data dir that happens to have "gemini" in path
@@ -1104,12 +1109,12 @@ mod tests {
         // Overwrite HOME to point to our temp home
         // SAFETY: Test runs in single-threaded context
         unsafe { std::env::set_var("HOME", home_dir.path()) };
-        
+
         let connector = GeminiConnector::new();
         let ctx = ScanContext::local_default(confusing_data_dir.clone(), None);
-        
+
         let convs = connector.scan(&ctx).unwrap();
-        
+
         unsafe { std::env::remove_var("HOME") }; // Cleanup, though risky in shared env
 
         assert_eq!(convs.len(), 1, "Should find session in real home");
