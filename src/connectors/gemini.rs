@@ -926,12 +926,13 @@ mod tests {
     #[test]
     fn scan_handles_empty_directory() {
         let dir = TempDir::new().unwrap();
-        // Create a gemini-named subdir so scan uses it instead of real ~/.gemini/tmp
+        // Create a gemini-named subdir
         let gemini_dir = dir.path().join("gemini_test");
         fs::create_dir_all(&gemini_dir).unwrap();
 
         let connector = GeminiConnector::new();
-        let ctx = ScanContext::local_default(gemini_dir, None);
+        // Use explicit root to avoid fallback to real home
+        let ctx = ScanContext::with_roots(gemini_dir.clone(), vec![crate::connectors::ScanRoot::local(gemini_dir)], None);
         let convs = connector.scan(&ctx).unwrap();
 
         assert!(convs.is_empty());

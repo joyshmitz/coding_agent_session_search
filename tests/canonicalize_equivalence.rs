@@ -150,7 +150,7 @@ proptest! {
     }
 
     #[test]
-    fn proptest_links_text_preserved(link_text in "[a-zA-Z]{3,20}", url in "https?://[a-z]{5,15}.com") {
+    fn proptest_links_text_preserved(link_text in "[a-zA-Z]{3,20}", url in "https?://[a-z]{5,15}\\.com") {
         let input = format!("See [{link_text}]({url}) for details.");
         let canonical = canonicalize_for_embedding(&input);
         prop_assert!(
