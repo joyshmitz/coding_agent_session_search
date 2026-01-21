@@ -58,7 +58,10 @@ impl fmt::Display for DecryptError {
                 )
             }
             Self::NoMatchingKeySlot => {
-                write!(f, "No matching key slot found for the provided credentials.")
+                write!(
+                    f,
+                    "No matching key slot found for the provided credentials."
+                )
             }
             Self::CryptoError(_) => {
                 // Don't expose internal crypto details to users
@@ -90,7 +93,9 @@ impl DecryptError {
             Self::NoMatchingKeySlot => {
                 "The credentials you provided don't match any key slot in this archive."
             }
-            Self::CryptoError(_) => "Please try again. If the problem persists, the archive may be corrupted.",
+            Self::CryptoError(_) => {
+                "Please try again. If the problem persists, the archive may be corrupted."
+            }
         }
     }
 
@@ -157,9 +162,7 @@ impl DbError {
             Self::CorruptDatabase(_) => {
                 "The archive may be corrupted. Try downloading it again or use a backup."
             }
-            Self::MissingTable(_) => {
-                "The archive may be incomplete. Try exporting again."
-            }
+            Self::MissingTable(_) => "The archive may be incomplete. Try exporting again.",
             Self::InvalidQuery(_) => {
                 "Try simplifying your search query or removing special characters."
             }
@@ -232,12 +235,8 @@ impl BrowserError {
             Self::UnsupportedBrowser(_) => {
                 "Please use a modern browser like Chrome, Firefox, Edge, or Safari."
             }
-            Self::WasmNotSupported => {
-                "Please update your browser to the latest version."
-            }
-            Self::CryptoNotSupported => {
-                "Please use HTTPS or update your browser."
-            }
+            Self::WasmNotSupported => "Please update your browser to the latest version.",
+            Self::CryptoNotSupported => "Please use HTTPS or update your browser.",
             Self::StorageQuotaExceeded => {
                 "Clear some browser storage or use a browser with more available space."
             }
@@ -254,10 +253,7 @@ pub enum NetworkError {
     /// Failed to fetch resource.
     FetchFailed(String),
     /// Partial/incomplete download.
-    IncompleteDownload {
-        expected: u64,
-        received: u64,
-    },
+    IncompleteDownload { expected: u64, received: u64 },
     /// Connection timeout.
     Timeout,
     /// Server error.
@@ -289,21 +285,15 @@ impl NetworkError {
     /// Get a user-friendly recovery suggestion.
     pub fn suggestion(&self) -> &'static str {
         match self {
-            Self::FetchFailed(_) => {
-                "Check your internet connection and try again."
-            }
+            Self::FetchFailed(_) => "Check your internet connection and try again.",
             Self::IncompleteDownload { .. } => {
                 "Try downloading again. If the problem persists, the server may be having issues."
             }
-            Self::Timeout => {
-                "Check your internet connection and try again."
-            }
+            Self::Timeout => "Check your internet connection and try again.",
             Self::ServerError(code) if *code >= 500 => {
                 "The server is having issues. Please try again later."
             }
-            Self::ServerError(_) => {
-                "Please check the URL and try again."
-            }
+            Self::ServerError(_) => "Please check the URL and try again.",
         }
     }
 }
@@ -349,12 +339,8 @@ impl ExportError {
             Self::NoConversations => {
                 "Make sure you have some agent sessions recorded before exporting."
             }
-            Self::SourceDatabaseError(_) => {
-                "Check that the CASS database exists and is readable."
-            }
-            Self::OutputError(_) => {
-                "Check that you have write permission to the output directory."
-            }
+            Self::SourceDatabaseError(_) => "Check that the CASS database exists and is readable.",
+            Self::OutputError(_) => "Check that you have write permission to the output directory.",
             Self::FilterMatchedNothing => {
                 "Try broadening your filter criteria or removing some filters."
             }
@@ -564,11 +550,7 @@ mod tests {
 
         for error in decrypt_errors {
             let code = error.error_code();
-            assert!(
-                codes.insert(code),
-                "Duplicate error code: {}",
-                code
-            );
+            assert!(codes.insert(code), "Duplicate error code: {}", code);
         }
 
         let db_errors = vec![
@@ -581,11 +563,7 @@ mod tests {
 
         for error in db_errors {
             let code = error.error_code();
-            assert!(
-                codes.insert(code),
-                "Duplicate error code: {}",
-                code
-            );
+            assert!(codes.insert(code), "Duplicate error code: {}", code);
         }
     }
 

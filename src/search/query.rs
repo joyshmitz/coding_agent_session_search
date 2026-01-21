@@ -1729,6 +1729,17 @@ fn regex_query_for_pattern(field: Field, pattern: &str) -> Result<RegexQuery> {
     REGEX_CACHE.get_or_insert(field, pattern)
 }
 
+#[doc(hidden)]
+pub fn regex_query_cached(field: Field, pattern: &str) -> Result<RegexQuery> {
+    regex_query_for_pattern(field, pattern)
+}
+
+#[doc(hidden)]
+pub fn regex_query_uncached(field: Field, pattern: &str) -> Result<RegexQuery> {
+    RegexQuery::from_pattern(pattern, field)
+        .map_err(|e| anyhow!("regex query build failed: {e}"))
+}
+
 /// Build query clauses for a single term based on its wildcard pattern.
 /// Returns a Vec of (`Occur::Should`, Query) for use in a `BooleanQuery`.
 fn build_term_query_clauses(

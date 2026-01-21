@@ -810,7 +810,9 @@ impl<'a> SummaryGenerator<'a> {
             }
 
             // Check workspace inclusion
-            if let Some(ws) = &workspace && !included_workspaces.contains(ws) {
+            if let Some(ws) = &workspace
+                && !included_workspaces.contains(ws)
+            {
                 continue;
             }
 

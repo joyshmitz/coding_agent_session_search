@@ -12,7 +12,7 @@
 //! | Good | 40-60 bits | Most requirements met |
 //! | Strong | ≥60 bits | All requirements met, 12+ chars |
 
-use console::{style, Term};
+use console::{Term, style};
 use std::io::Write;
 
 /// Password strength levels with associated colors.
@@ -132,11 +132,8 @@ pub fn validate_password(password: &str) -> PasswordValidation {
     };
 
     // Total score (0-7)
-    let score = length_score
-        + has_upper as u8
-        + has_lower as u8
-        + has_digit as u8
-        + has_special as u8;
+    let score =
+        length_score + has_upper as u8 + has_lower as u8 + has_digit as u8 + has_special as u8;
 
     // Collect improvement suggestions
     let mut suggestions = Vec::new();
@@ -302,7 +299,11 @@ mod tests {
         assert_eq!(result.strength, PasswordStrength::Weak);
         assert!(result.suggestions.contains(&"Add uppercase letters"));
         assert!(result.suggestions.contains(&"Add numbers"));
-        assert!(result.suggestions.contains(&"Add special characters (!@#$%^&*)"));
+        assert!(
+            result
+                .suggestions
+                .contains(&"Add special characters (!@#$%^&*)")
+        );
     }
 
     #[test]

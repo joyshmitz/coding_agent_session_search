@@ -20,6 +20,43 @@ export const COI_STATE = {
     DEGRADED: 'DEGRADED',
 };
 
+// Local storage key for tracking setup completion
+const SETUP_COMPLETE_KEY = 'cass-coi-setup-complete';
+
+/**
+ * Check if COI setup has been completed before
+ * @returns {boolean}
+ */
+export function isSetupComplete() {
+    try {
+        return localStorage.getItem(SETUP_COMPLETE_KEY) === 'true';
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Mark COI setup as complete
+ */
+export function markSetupComplete() {
+    try {
+        localStorage.setItem(SETUP_COMPLETE_KEY, 'true');
+    } catch {
+        // localStorage not available
+    }
+}
+
+/**
+ * Clear setup complete flag (for testing)
+ */
+export function clearSetupComplete() {
+    try {
+        localStorage.removeItem(SETUP_COMPLETE_KEY);
+    } catch {
+        // localStorage not available
+    }
+}
+
 /**
  * Check if we're cross-origin isolated
  * @returns {boolean}
@@ -116,34 +153,109 @@ export function getArgon2Config() {
 }
 
 /**
- * Show installing UI while SW is being set up
+ * Show installing UI with progress steps
  * @param {HTMLElement} container - Container to render into
  */
 export function showInstallingUI(container) {
     container.innerHTML = `
         <div class="coi-status installing">
-            <div class="coi-spinner"></div>
-            <h3>Setting up secure environment...</h3>
-            <p class="coi-detail">Installing security enhancements for fast, secure decryption</p>
+            <div class="coi-header">
+                <span class="coi-logo" aria-hidden="true">&#x1F510;</span>
+                <h3>Setting Up Secure Environment</h3>
+            </div>
+            <p class="coi-detail">One-time setup for fast, secure decryption</p>
+
+            <div class="coi-progress-steps">
+                <div class="coi-step" id="coi-step-sw" data-status="loading">
+                    <span class="coi-step-icon" aria-hidden="true">&#x23F3;</span>
+                    <span class="coi-step-text">Installing security worker...</span>
+                </div>
+                <div class="coi-step" id="coi-step-headers" data-status="pending">
+                    <span class="coi-step-icon" aria-hidden="true">&#x25CB;</span>
+                    <span class="coi-step-text">Activating isolation headers...</span>
+                </div>
+            </div>
         </div>
     `;
     container.classList.remove('hidden');
 }
 
 /**
- * Show reload required UI when COI needs a page refresh
- * @param {HTMLElement} container - Container to render into
- * @param {Function} [onReload] - Optional callback before reload
+ * Update a progress step's status
+ * @param {string} stepId - Step element ID
+ * @param {'pending'|'loading'|'complete'|'error'} status - New status
  */
-export function showReloadRequiredUI(container, onReload = null) {
+export function updateProgressStep(stepId, status) {
+    const step = document.getElementById(stepId);
+    if (!step) return;
+
+    step.dataset.status = status;
+    const icon = step.querySelector('.coi-step-icon');
+    if (icon) {
+        switch (status) {
+            case 'loading':
+                icon.innerHTML = '&#x23F3;'; // Hourglass
+                break;
+            case 'complete':
+                icon.innerHTML = '&#x2705;'; // Check mark
+                break;
+            case 'error':
+                icon.innerHTML = '&#x274C;'; // X mark
+                break;
+            default:
+                icon.innerHTML = '&#x25CB;'; // Circle
+        }
+    }
+}
+
+/**
+ * Show reload required UI with auto-countdown
+ * @param {HTMLElement} container - Container to render into
+ * @param {Object} [options] - Configuration options
+ * @param {Function} [options.onReload] - Optional callback before reload
+ * @param {number} [options.countdownSeconds=3] - Countdown duration
+ * @param {boolean} [options.autoReload=true] - Whether to auto-reload
+ */
+export function showReloadRequiredUI(container, options = {}) {
+    const { onReload = null, countdownSeconds = 3, autoReload = true } = options;
+
     container.innerHTML = `
         <div class="coi-status needs-reload">
-            <div class="coi-icon">&#x1F504;</div>
-            <h3>One-time Setup Required</h3>
-            <p>To enable fast, secure decryption, please reload the page.</p>
-            <button id="coi-reload-btn" class="btn btn-primary coi-reload-btn">
-                Reload Now
-            </button>
+            <div class="coi-header">
+                <span class="coi-logo" aria-hidden="true">&#x1F510;</span>
+                <h3>Almost There!</h3>
+            </div>
+
+            <div class="coi-progress-steps">
+                <div class="coi-step" data-status="complete">
+                    <span class="coi-step-icon" aria-hidden="true">&#x2705;</span>
+                    <span class="coi-step-text">Security worker installed</span>
+                </div>
+                <div class="coi-step" data-status="loading">
+                    <span class="coi-step-icon" aria-hidden="true">&#x23F3;</span>
+                    <span class="coi-step-text">Activating isolation headers...</span>
+                </div>
+            </div>
+
+            <div class="coi-reload-section">
+                <p class="coi-reload-message">One-time page reload required to enable optimal performance.</p>
+
+                <div id="coi-countdown-wrapper" class="coi-countdown-wrapper ${autoReload ? '' : 'hidden'}">
+                    <span class="coi-countdown-text">Reloading in </span>
+                    <span id="coi-countdown-number" class="coi-countdown-number">${countdownSeconds}</span>
+                    <span class="coi-countdown-text">...</span>
+                </div>
+
+                <div class="coi-reload-buttons">
+                    <button id="coi-reload-btn" class="btn btn-primary coi-reload-btn">
+                        Reload Now
+                    </button>
+                    <button id="coi-cancel-btn" class="btn btn-secondary coi-cancel-btn ${autoReload ? '' : 'hidden'}">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+
             <details class="coi-details">
                 <summary>Why is this needed?</summary>
                 <p>
@@ -156,21 +268,69 @@ export function showReloadRequiredUI(container, onReload = null) {
                     <li>Support offline access</li>
                     <li>Use enhanced memory protection</li>
                 </ul>
-                <p class="coi-note">You only need to do this once per browser session.</p>
+                <p class="coi-note">This is a one-time setup per browser.</p>
             </details>
         </div>
     `;
     container.classList.remove('hidden');
 
     const reloadBtn = document.getElementById('coi-reload-btn');
+    const cancelBtn = document.getElementById('coi-cancel-btn');
+    const countdownWrapper = document.getElementById('coi-countdown-wrapper');
+    const countdownNumber = document.getElementById('coi-countdown-number');
+
+    let countdown = countdownSeconds;
+    let timerId = null;
+
+    const doReload = () => {
+        if (timerId) {
+            clearInterval(timerId);
+            timerId = null;
+        }
+        if (onReload) {
+            onReload();
+        }
+        window.location.reload();
+    };
+
+    const cancelCountdown = () => {
+        if (timerId) {
+            clearInterval(timerId);
+            timerId = null;
+        }
+        if (countdownWrapper) {
+            countdownWrapper.classList.add('hidden');
+        }
+        if (cancelBtn) {
+            cancelBtn.classList.add('hidden');
+        }
+    };
+
+    // Set up event listeners
     if (reloadBtn) {
-        reloadBtn.addEventListener('click', () => {
-            if (onReload) {
-                onReload();
-            }
-            window.location.reload();
-        });
+        reloadBtn.addEventListener('click', doReload);
     }
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', cancelCountdown);
+    }
+
+    // Start countdown if auto-reload is enabled
+    if (autoReload && countdownNumber) {
+        timerId = setInterval(() => {
+            countdown--;
+            if (countdown <= 0) {
+                doReload();
+            } else {
+                countdownNumber.textContent = countdown.toString();
+            }
+        }, 1000);
+    }
+
+    // Return control object for external management
+    return {
+        cancel: cancelCountdown,
+        reload: doReload,
+    };
 }
 
 /**
@@ -215,17 +375,28 @@ export function hideStatusUI(container) {
  * @param {HTMLElement} options.authContainer - Auth screen container
  * @param {Function} options.onReady - Callback when ready to proceed
  * @param {number} [options.maxWaitMs=5000] - Max time to wait for SW installation
+ * @param {boolean} [options.autoReload=true] - Whether to auto-reload when needed
+ * @param {number} [options.countdownSeconds=3] - Countdown duration before auto-reload
  */
 export async function initCOIDetection({
     statusContainer,
     authContainer,
     onReady,
     maxWaitMs = 5000,
+    autoReload = true,
+    countdownSeconds = 3,
 }) {
     let state = await getCOIState();
-    const startTime = Date.now();
 
     console.log('[COI] Initial state:', state);
+
+    // If already set up and ready, skip the setup flow
+    if (state === COI_STATE.READY && isSetupComplete()) {
+        console.log('[COI] Setup already complete - fast path');
+        hideStatusUI(statusContainer);
+        if (onReady) onReady();
+        return state;
+    }
 
     // Handle SW_INSTALLING state with timeout
     if (state === COI_STATE.SW_INSTALLING) {
@@ -240,6 +411,10 @@ export async function initCOIDetection({
                         setTimeout(() => reject(new Error('SW timeout')), maxWaitMs)
                     ),
                 ]);
+
+                // Update step status
+                updateProgressStep('coi-step-sw', 'complete');
+                updateProgressStep('coi-step-headers', 'loading');
 
                 // Recheck state after SW is ready
                 state = await getCOIState();
@@ -256,13 +431,18 @@ export async function initCOIDetection({
     switch (state) {
         case COI_STATE.READY:
             console.log('[COI] Ready - proceeding to auth');
+            markSetupComplete();
             hideStatusUI(statusContainer);
             if (onReady) onReady();
             break;
 
         case COI_STATE.NEEDS_RELOAD:
             console.log('[COI] Needs reload - showing prompt');
-            showReloadRequiredUI(statusContainer);
+            showReloadRequiredUI(statusContainer, {
+                autoReload,
+                countdownSeconds,
+                onReload: () => console.log('[COI] Reloading...'),
+            });
             // Hide auth screen while showing reload prompt
             if (authContainer) {
                 authContainer.classList.add('hidden');
@@ -271,6 +451,7 @@ export async function initCOIDetection({
 
         case COI_STATE.DEGRADED:
             console.log('[COI] Degraded mode - showing warning and proceeding');
+            markSetupComplete(); // Still mark complete so we don't keep showing setup
             hideStatusUI(statusContainer);
             showDegradedModeWarning();
             if (onReady) onReady();
@@ -281,11 +462,16 @@ export async function initCOIDetection({
             console.log('[COI] SW still installing - checking fallback');
             if (isSharedArrayBufferAvailable()) {
                 // Already have SAB somehow (maybe browser feature)
+                markSetupComplete();
                 hideStatusUI(statusContainer);
                 if (onReady) onReady();
             } else {
                 // Show reload prompt as SW should be active soon
-                showReloadRequiredUI(statusContainer);
+                showReloadRequiredUI(statusContainer, {
+                    autoReload,
+                    countdownSeconds,
+                    onReload: () => console.log('[COI] Reloading...'),
+                });
                 if (authContainer) {
                     authContainer.classList.add('hidden');
                 }
@@ -331,4 +517,8 @@ export default {
     hideStatusUI,
     initCOIDetection,
     onServiceWorkerActivated,
+    updateProgressStep,
+    isSetupComplete,
+    markSetupComplete,
+    clearSetupComplete,
 };

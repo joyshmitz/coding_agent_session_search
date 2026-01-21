@@ -348,9 +348,8 @@ impl AttachmentProcessor {
                 .map_err(|e| anyhow::anyhow!("Blob encryption failed: {}", e))?;
 
             // Write to file
-            let mut file = BufWriter::new(
-                File::create(&blob_path).context("Failed to create blob file")?,
-            );
+            let mut file =
+                BufWriter::new(File::create(&blob_path).context("Failed to create blob file")?);
             file.write_all(&ciphertext)?;
             file.flush()?;
 

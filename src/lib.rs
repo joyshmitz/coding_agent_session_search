@@ -2092,7 +2092,8 @@ async fn execute_cli(
                         return Err(CliError {
                             code: crate::pages::confirmation::EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED,
                             kind: "pages",
-                            message: "Unencrypted exports are not allowed in robot mode".to_string(),
+                            message: "Unencrypted exports are not allowed in robot mode"
+                                .to_string(),
                             hint: Some(
                                 "Use --i-understand-unencrypted-risks flag if you really need this"
                                     .to_string(),
@@ -2184,8 +2185,8 @@ async fn execute_cli(
                     } else if let Some(output_path) = export_only {
                         // Interactive unencrypted export confirmation (non-robot mode)
                         if no_encryption && !json && !robot_mode {
-                            use std::io::Write;
                             use console::style;
+                            use std::io::Write;
 
                             eprintln!("{}", style("⚠️  SECURITY WARNING").red().bold());
                             eprintln!();
@@ -2195,7 +2196,10 @@ async fn execute_cli(
                             eprintln!();
                             eprintln!("To proceed, type exactly:");
                             eprintln!();
-                            eprintln!("  {}", style(crate::pages::confirmation::UNENCRYPTED_ACK_PHRASE).cyan());
+                            eprintln!(
+                                "  {}",
+                                style(crate::pages::confirmation::UNENCRYPTED_ACK_PHRASE).cyan()
+                            );
                             eprintln!();
                             eprint!("Your input: ");
                             std::io::stderr().flush().ok();
@@ -2228,7 +2232,9 @@ async fn execute_cli(
                                     if confirm.trim().to_lowercase() != "y" {
                                         eprintln!();
                                         eprintln!("{}", style("Export cancelled.").green());
-                                        eprintln!("To export with encryption (recommended), remove --no-encryption");
+                                        eprintln!(
+                                            "To export with encryption (recommended), remove --no-encryption"
+                                        );
                                         return Err(CliError {
                                             code: crate::pages::confirmation::EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED,
                                             kind: "pages",
@@ -2279,14 +2285,13 @@ async fn execute_cli(
                         if include_attachments {
                             wizard.set_include_attachments(true);
                         }
-                        wizard.run()
-                            .map_err(|e| CliError {
-                                code: 9,
-                                kind: "pages",
-                                message: format!("Wizard failed: {e}"),
-                                hint: None,
-                                retryable: false,
-                            })?;
+                        wizard.run().map_err(|e| CliError {
+                            code: 9,
+                            kind: "pages",
+                            message: format!("Wizard failed: {e}"),
+                            hint: None,
+                            retryable: false,
+                        })?;
                     }
                 }
                 _ => {}

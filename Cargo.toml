@@ -159,6 +159,10 @@ harness = false
 name = "cache_micro"
 harness = false
 
+[[bench]]
+name = "regex_cache"
+harness = false
+
 [[test]]
 name = "docs"
 path = "tests/docs/mod.rs"

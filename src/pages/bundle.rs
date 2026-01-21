@@ -267,7 +267,8 @@ impl BundleBuilder {
             }
         } else {
             // Fallback to basic README.md
-            let public_readme = generate_public_readme(&self.config.title, &self.config.description);
+            let public_readme =
+                generate_public_readme(&self.config.title, &self.config.description);
             fs::write(site_dir.join("README.md"), public_readme)?;
         }
 

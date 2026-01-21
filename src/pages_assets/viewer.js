@@ -2,26 +2,45 @@
  * cass Archive Viewer - Main Application Module
  *
  * Ties together search, conversation viewer, and database modules.
- * Manages application state and view transitions.
+ * Manages application state and view transitions with hash-based routing.
+ *
+ * Routes:
+ *   #/                      -> home / search
+ *   #/search?q=auth+bug     -> search query
+ *   #/c/12345               -> conversation 12345
+ *   #/c/12345/m/67          -> message 67 in conversation 12345
+ *   #/settings              -> settings panel
+ *   #/stats                 -> analytics dashboard
  */
 
 import { isDatabaseReady, getStatistics, closeDatabase } from './database.js';
-import { initSearch, clearSearch } from './search.js';
-import { initConversationViewer, loadConversation, clearViewer } from './conversation.js';
+import { initSearch, clearSearch, getSearchState } from './search.js';
+import { initConversationViewer, loadConversation, clearViewer, getCurrentConversation } from './conversation.js';
+import { createRouter, getRouter, parseSearchParams, buildConversationPath } from './router.js';
+import { getConversationLink, copyConversationLink, isWebShareAvailable, shareConversation } from './share.js';
 
 // Application state
 const state = {
-    view: 'search', // 'search' | 'conversation'
+    view: 'search', // 'search' | 'conversation' | 'settings' | 'stats' | 'not-found'
     conversationId: null,
     messageId: null,
+    searchQuery: '',
+    initialized: false,
 };
+
+// Router instance
+let router = null;
 
 // DOM element references
 let elements = {
     appContent: null,
     searchView: null,
     conversationView: null,
+    settingsView: null,
+    statsView: null,
+    notFoundView: null,
     statsDisplay: null,
+    navBar: null,
 };
 
 /**
@@ -75,13 +94,15 @@ function initializeViews() {
     // Initialize conversation viewer
     initConversationViewer(elements.conversationView, handleBackToSearch);
 
-    // Show search view by default
-    showView('search');
+    // Create router with navigation handler
+    router = createRouter({
+        onNavigate: handleRouteChange,
+    });
 
-    // Display stats
-    displayStats();
+    // Mark as initialized
+    state.initialized = true;
 
-    console.log('[Viewer] Initialized');
+    console.log('[Viewer] Initialized with hash-based routing');
 }
 
 /**
@@ -89,18 +110,250 @@ function initializeViews() {
  */
 function createViewContainers() {
     elements.appContent.innerHTML = `
+        <nav id="nav-bar" class="nav-bar">
+            <div class="nav-brand">
+                <a href="#/" class="nav-logo">cass Archive</a>
+            </div>
+            <div class="nav-links">
+                <a href="#/" class="nav-link" data-view="search">Search</a>
+                <a href="#/stats" class="nav-link" data-view="stats">Stats</a>
+                <a href="#/settings" class="nav-link" data-view="settings">Settings</a>
+            </div>
+        </nav>
         <div id="stats-display" class="stats-display"></div>
         <div id="search-view" class="view-container"></div>
         <div id="conversation-view" class="view-container hidden"></div>
+        <div id="settings-view" class="view-container hidden"></div>
+        <div id="stats-view" class="view-container hidden"></div>
+        <div id="not-found-view" class="view-container hidden"></div>
     `;
 
+    elements.navBar = document.getElementById('nav-bar');
     elements.searchView = document.getElementById('search-view');
     elements.conversationView = document.getElementById('conversation-view');
+    elements.settingsView = document.getElementById('settings-view');
+    elements.statsView = document.getElementById('stats-view');
+    elements.notFoundView = document.getElementById('not-found-view');
     elements.statsDisplay = document.getElementById('stats-display');
+
+    // Set up nav link highlighting
+    setupNavLinks();
 }
 
 /**
- * Display archive statistics
+ * Set up navigation link click handling
+ */
+function setupNavLinks() {
+    const navLinks = elements.navBar.querySelectorAll('.nav-link');
+    navLinks.forEach(link => {
+        link.addEventListener('click', (e) => {
+            // Update active state (router handles actual navigation)
+            updateActiveNavLink(link.dataset.view);
+        });
+    });
+}
+
+/**
+ * Update active navigation link
+ */
+function updateActiveNavLink(activeView) {
+    const navLinks = elements.navBar.querySelectorAll('.nav-link');
+    navLinks.forEach(link => {
+        if (link.dataset.view === activeView) {
+            link.classList.add('active');
+        } else {
+            link.classList.remove('active');
+        }
+    });
+}
+
+/**
+ * Handle route changes from the router
+ */
+function handleRouteChange(route) {
+    console.debug('[Viewer] Route change:', route);
+
+    const { view, params, query } = route;
+
+    switch (view) {
+        case 'search':
+            handleSearchRoute(query);
+            break;
+
+        case 'conversation':
+            handleConversationRoute(params.conversationId, params.messageId);
+            break;
+
+        case 'settings':
+            handleSettingsRoute();
+            break;
+
+        case 'stats':
+            handleStatsRoute();
+            break;
+
+        case 'not-found':
+        default:
+            handleNotFoundRoute(params.path || route.raw);
+            break;
+    }
+}
+
+/**
+ * Handle search route
+ */
+function handleSearchRoute(query = {}) {
+    state.view = 'search';
+    state.conversationId = null;
+    state.messageId = null;
+    state.searchQuery = query.q || '';
+
+    // Show search view
+    showViewContainer('search');
+
+    // Display stats header
+    displayStats();
+
+    // Update nav
+    updateActiveNavLink('search');
+
+    // If there's a search query, we could trigger the search
+    // This would require exposing a setQuery function from search.js
+    if (state.searchQuery) {
+        console.debug('[Viewer] Search query from URL:', state.searchQuery);
+        // TODO: Trigger search with query
+    }
+}
+
+/**
+ * Handle conversation route
+ */
+function handleConversationRoute(conversationId, messageId = null) {
+    if (!conversationId) {
+        handleNotFoundRoute('/c/');
+        return;
+    }
+
+    state.view = 'conversation';
+    state.conversationId = conversationId;
+    state.messageId = messageId;
+
+    // Show conversation view
+    showViewContainer('conversation');
+
+    // Load conversation
+    loadConversation(conversationId, messageId);
+
+    // Hide stats header
+    if (elements.statsDisplay) {
+        elements.statsDisplay.classList.add('hidden');
+    }
+
+    // Update nav (no specific nav for conversation)
+    updateActiveNavLink(null);
+}
+
+/**
+ * Handle settings route
+ */
+function handleSettingsRoute() {
+    state.view = 'settings';
+    state.conversationId = null;
+    state.messageId = null;
+
+    // Show settings view
+    showViewContainer('settings');
+
+    // Render settings panel
+    renderSettingsPanel();
+
+    // Hide stats header
+    if (elements.statsDisplay) {
+        elements.statsDisplay.classList.add('hidden');
+    }
+
+    // Update nav
+    updateActiveNavLink('settings');
+}
+
+/**
+ * Handle stats route
+ */
+function handleStatsRoute() {
+    state.view = 'stats';
+    state.conversationId = null;
+    state.messageId = null;
+
+    // Show stats view
+    showViewContainer('stats');
+
+    // Render stats panel
+    renderStatsPanel();
+
+    // Hide stats header
+    if (elements.statsDisplay) {
+        elements.statsDisplay.classList.add('hidden');
+    }
+
+    // Update nav
+    updateActiveNavLink('stats');
+}
+
+/**
+ * Handle not-found route
+ */
+function handleNotFoundRoute(path) {
+    state.view = 'not-found';
+
+    // Show not found view
+    showViewContainer('not-found');
+
+    // Render 404 content
+    renderNotFoundPanel(path);
+
+    // Hide stats header
+    if (elements.statsDisplay) {
+        elements.statsDisplay.classList.add('hidden');
+    }
+
+    // Update nav
+    updateActiveNavLink(null);
+}
+
+/**
+ * Show a specific view container
+ */
+function showViewContainer(viewName) {
+    // Hide all views
+    elements.searchView.classList.add('hidden');
+    elements.conversationView.classList.add('hidden');
+    elements.settingsView.classList.add('hidden');
+    elements.statsView.classList.add('hidden');
+    elements.notFoundView.classList.add('hidden');
+
+    // Show requested view
+    switch (viewName) {
+        case 'search':
+            elements.searchView.classList.remove('hidden');
+            elements.statsDisplay.classList.remove('hidden');
+            break;
+        case 'conversation':
+            elements.conversationView.classList.remove('hidden');
+            break;
+        case 'settings':
+            elements.settingsView.classList.remove('hidden');
+            break;
+        case 'stats':
+            elements.statsView.classList.remove('hidden');
+            break;
+        case 'not-found':
+            elements.notFoundView.classList.remove('hidden');
+            break;
+    }
+}
+
+/**
+ * Display archive statistics (header bar)
  */
 function displayStats() {
     try {
@@ -122,6 +375,7 @@ function displayStats() {
                 </div>
             </div>
         `;
+        elements.statsDisplay.classList.remove('hidden');
     } catch (error) {
         console.error('[Viewer] Failed to display stats:', error);
         elements.statsDisplay.innerHTML = '';
@@ -129,37 +383,188 @@ function displayStats() {
 }
 
 /**
- * Show a specific view
+ * Render settings panel
  */
-function showView(viewName) {
-    state.view = viewName;
+function renderSettingsPanel() {
+    elements.settingsView.innerHTML = `
+        <div class="panel settings-panel">
+            <header class="panel-header">
+                <h2>Settings</h2>
+            </header>
+            <div class="panel-content">
+                <section class="settings-section">
+                    <h3>Storage</h3>
+                    <div class="setting-item">
+                        <label>Clear local cache</label>
+                        <button type="button" class="btn btn-secondary" id="clear-cache-btn">
+                            Clear Cache
+                        </button>
+                    </div>
+                </section>
 
-    if (viewName === 'search') {
-        elements.searchView.classList.remove('hidden');
-        elements.conversationView.classList.add('hidden');
-        elements.statsDisplay.classList.remove('hidden');
-    } else if (viewName === 'conversation') {
-        elements.searchView.classList.add('hidden');
-        elements.conversationView.classList.remove('hidden');
-        elements.statsDisplay.classList.add('hidden');
+                <section class="settings-section">
+                    <h3>Display</h3>
+                    <div class="setting-item">
+                        <label for="theme-select">Theme</label>
+                        <select id="theme-select" class="settings-select">
+                            <option value="auto">Auto (System)</option>
+                            <option value="light">Light</option>
+                            <option value="dark">Dark</option>
+                        </select>
+                    </div>
+                </section>
+
+                <section class="settings-section">
+                    <h3>About</h3>
+                    <p class="settings-info">
+                        cass Archive Viewer<br>
+                        <small>Viewing exported conversations from cass (coding agent session search)</small>
+                    </p>
+                </section>
+            </div>
+        </div>
+    `;
+
+    // Set up settings event handlers
+    setupSettingsEventHandlers();
+}
+
+/**
+ * Set up settings panel event handlers
+ */
+function setupSettingsEventHandlers() {
+    const clearCacheBtn = document.getElementById('clear-cache-btn');
+    if (clearCacheBtn) {
+        clearCacheBtn.addEventListener('click', () => {
+            if (confirm('Clear all cached conversation data? This cannot be undone.')) {
+                // Clear caches
+                clearViewer();
+                clearSearch();
+                showNotification('Cache cleared successfully', 'success');
+            }
+        });
     }
 
-    // Update URL (without triggering navigation)
-    updateUrl();
+    const themeSelect = document.getElementById('theme-select');
+    if (themeSelect) {
+        // Load saved theme
+        const savedTheme = localStorage.getItem('cass-theme') || 'auto';
+        themeSelect.value = savedTheme;
+
+        themeSelect.addEventListener('change', (e) => {
+            const theme = e.target.value;
+            localStorage.setItem('cass-theme', theme);
+            applyTheme(theme);
+        });
+    }
+}
+
+/**
+ * Apply theme
+ */
+function applyTheme(theme) {
+    const root = document.documentElement;
+
+    if (theme === 'auto') {
+        root.removeAttribute('data-theme');
+    } else {
+        root.setAttribute('data-theme', theme);
+    }
+}
+
+/**
+ * Render stats panel (full analytics view)
+ */
+function renderStatsPanel() {
+    try {
+        const stats = getStatistics();
+
+        elements.statsView.innerHTML = `
+            <div class="panel stats-panel">
+                <header class="panel-header">
+                    <h2>Archive Statistics</h2>
+                </header>
+                <div class="panel-content">
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-card-value">${stats.conversations}</div>
+                            <div class="stat-card-label">Total Conversations</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-value">${stats.messages}</div>
+                            <div class="stat-card-label">Total Messages</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-value">${stats.agents.length}</div>
+                            <div class="stat-card-label">Agents</div>
+                        </div>
+                    </div>
+
+                    ${stats.agents.length > 0 ? `
+                        <section class="stats-section">
+                            <h3>Agents</h3>
+                            <div class="agents-list">
+                                ${stats.agents.map(agent => `
+                                    <div class="agent-item">
+                                        <span class="agent-name">${escapeHtml(formatAgentName(agent.agent))}</span>
+                                        <span class="agent-count">${agent.count} conversations</span>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </section>
+                    ` : ''}
+
+                    ${stats.timeRange ? `
+                        <section class="stats-section">
+                            <h3>Time Range</h3>
+                            <p class="time-range">
+                                <strong>Oldest:</strong> ${formatDate(stats.timeRange.oldest)}<br>
+                                <strong>Newest:</strong> ${formatDate(stats.timeRange.newest)}
+                            </p>
+                        </section>
+                    ` : ''}
+                </div>
+            </div>
+        `;
+    } catch (error) {
+        console.error('[Viewer] Failed to render stats panel:', error);
+        elements.statsView.innerHTML = `
+            <div class="panel stats-panel">
+                <header class="panel-header">
+                    <h2>Archive Statistics</h2>
+                </header>
+                <div class="panel-content">
+                    <p class="error-message">Failed to load statistics</p>
+                </div>
+            </div>
+        `;
+    }
+}
+
+/**
+ * Render 404 not found panel
+ */
+function renderNotFoundPanel(path) {
+    elements.notFoundView.innerHTML = `
+        <div class="panel not-found-panel">
+            <div class="not-found-content">
+                <div class="not-found-icon">404</div>
+                <h2>Page Not Found</h2>
+                <p>The requested page <code>${escapeHtml(path || 'unknown')}</code> could not be found.</p>
+                <a href="#/" class="btn btn-primary">Go to Search</a>
+            </div>
+        </div>
+    `;
 }
 
 /**
  * Handle search result selection
  */
 function handleResultSelect(conversationId, messageId = null) {
-    state.conversationId = conversationId;
-    state.messageId = messageId;
-
-    // Load conversation
-    loadConversation(conversationId, messageId);
-
-    // Show conversation view
-    showView('conversation');
+    // Navigate using router
+    if (router) {
+        router.goToConversation(conversationId, messageId);
+    }
 }
 
 /**
@@ -167,67 +572,144 @@ function handleResultSelect(conversationId, messageId = null) {
  */
 function handleBackToSearch() {
     clearViewer();
-    state.conversationId = null;
-    state.messageId = null;
 
-    showView('search');
+    // Navigate using router
+    if (router) {
+        router.goHome();
+    }
 }
 
 /**
- * Update URL without navigation
+ * Navigate to a conversation (public API)
  */
-function updateUrl() {
-    const url = new URL(window.location.href);
+export function navigateToConversation(conversationId, messageId = null) {
+    if (router) {
+        router.goToConversation(conversationId, messageId);
+    }
+}
 
+/**
+ * Navigate to search (public API)
+ */
+export function navigateToSearch(query = null) {
+    if (router) {
+        router.goHome(query);
+    }
+}
+
+/**
+ * Get share link for current conversation
+ */
+export function getCurrentShareLink() {
     if (state.view === 'conversation' && state.conversationId) {
-        url.searchParams.set('conv', state.conversationId);
-        if (state.messageId) {
-            url.searchParams.set('msg', state.messageId);
+        return getConversationLink(state.conversationId, state.messageId);
+    }
+    return null;
+}
+
+/**
+ * Copy current conversation link to clipboard
+ */
+export async function copyCurrentLink() {
+    if (state.view === 'conversation' && state.conversationId) {
+        const result = await copyConversationLink(state.conversationId, state.messageId);
+        if (result.success) {
+            showNotification('Link copied to clipboard', 'success');
         } else {
-            url.searchParams.delete('msg');
+            showNotification('Failed to copy link', 'error');
         }
-    } else {
-        url.searchParams.delete('conv');
-        url.searchParams.delete('msg');
+        return result;
     }
-
-    window.history.replaceState({}, '', url);
+    return { success: false, link: null };
 }
 
 /**
- * Handle browser back/forward navigation
+ * Share current conversation (using Web Share API)
  */
-function handlePopState() {
-    const url = new URL(window.location.href);
-    const convId = url.searchParams.get('conv');
-    const msgId = url.searchParams.get('msg');
-
-    if (convId) {
-        handleResultSelect(parseInt(convId, 10), msgId ? parseInt(msgId, 10) : null);
-    } else {
-        handleBackToSearch();
+export async function shareCurrentConversation() {
+    if (state.view === 'conversation' && state.conversationId) {
+        const conv = getCurrentConversation();
+        const title = conv?.title || 'Conversation';
+        const success = await shareConversation(state.conversationId, title, state.messageId);
+        return success;
     }
+    return false;
 }
 
 /**
- * Check URL on init for deep linking
+ * Show a notification toast
  */
-function checkDeepLink() {
-    const url = new URL(window.location.href);
-    const convId = url.searchParams.get('conv');
-    const msgId = url.searchParams.get('msg');
+function showNotification(message, type = 'info') {
+    // Check if toast container exists
+    let toastContainer = document.getElementById('toast-container');
+    if (!toastContainer) {
+        toastContainer = document.createElement('div');
+        toastContainer.id = 'toast-container';
+        toastContainer.className = 'toast-container';
+        document.body.appendChild(toastContainer);
+    }
 
-    if (convId) {
+    // Create toast
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+
+    toastContainer.appendChild(toast);
+
+    // Auto-remove after delay
+    setTimeout(() => {
+        toast.classList.add('toast-fade-out');
         setTimeout(() => {
-            handleResultSelect(parseInt(convId, 10), msgId ? parseInt(msgId, 10) : null);
-        }, 100);
-    }
+            toast.remove();
+        }, 300);
+    }, 3000);
+}
+
+/**
+ * Format agent name for display
+ */
+function formatAgentName(agent) {
+    if (!agent) return 'Unknown';
+    // Capitalize first letter
+    return agent.charAt(0).toUpperCase() + agent.slice(1).replace(/_/g, ' ');
+}
+
+/**
+ * Format date for display
+ */
+function formatDate(timestamp) {
+    if (!timestamp) return 'Unknown';
+
+    const date = new Date(timestamp);
+    return date.toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+}
+
+/**
+ * Escape HTML special characters
+ */
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 /**
  * Clean up resources
  */
 export function cleanup() {
+    // Destroy router
+    if (router) {
+        router.destroy();
+        router = null;
+    }
+
     closeDatabase();
     clearSearch();
     clearViewer();
@@ -241,14 +723,11 @@ export function getState() {
     return { ...state };
 }
 
-// Set up navigation handler
-window.addEventListener('popstate', handlePopState);
-
-// Check for deep links on page load
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', checkDeepLink);
-} else {
-    checkDeepLink();
+/**
+ * Get router instance
+ */
+export function getViewerRouter() {
+    return router;
 }
 
 // Export default
@@ -256,4 +735,10 @@ export default {
     init,
     cleanup,
     getState,
+    getViewerRouter,
+    navigateToConversation,
+    navigateToSearch,
+    getCurrentShareLink,
+    copyCurrentLink,
+    shareCurrentConversation,
 };

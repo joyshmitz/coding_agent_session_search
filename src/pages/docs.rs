@@ -131,7 +131,9 @@ impl DocumentationGenerator {
 
         let argon_params = format!(
             "m={}KB, t={}, p={}",
-            self.config.argon_memory_kb, self.config.argon_iterations, self.config.argon_parallelism
+            self.config.argon_memory_kb,
+            self.config.argon_iterations,
+            self.config.argon_parallelism
         );
 
         let slot_count = self.summary.key_slots.len();
@@ -140,7 +142,10 @@ impl DocumentationGenerator {
 
         let content = README_TEMPLATE
             .replace("{url}", url_display)
-            .replace("{conversation_count}", &self.summary.total_conversations.to_string())
+            .replace(
+                "{conversation_count}",
+                &self.summary.total_conversations.to_string(),
+            )
             .replace("{agent_list}", &agent_list)
             .replace("{start_date}", &start_date)
             .replace("{end_date}", &end_date)
@@ -172,7 +177,12 @@ impl DocumentationGenerator {
                     .created_at
                     .map(|dt| dt.format("%Y-%m-%d").to_string())
                     .unwrap_or_else(|| "N/A".to_string());
-                format!("- Slot {}: {} (created {})", slot.slot_index + 1, slot_type_label, created_str)
+                format!(
+                    "- Slot {}: {} (created {})",
+                    slot.slot_index + 1,
+                    slot_type_label,
+                    created_str
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -893,8 +903,14 @@ mod tests {
         assert!(filenames.contains(&"about.txt"));
 
         // Check locations
-        let repo_root_count = docs.iter().filter(|d| d.location == DocLocation::RepoRoot).count();
-        let web_root_count = docs.iter().filter(|d| d.location == DocLocation::WebRoot).count();
+        let repo_root_count = docs
+            .iter()
+            .filter(|d| d.location == DocLocation::RepoRoot)
+            .count();
+        let web_root_count = docs
+            .iter()
+            .filter(|d| d.location == DocLocation::WebRoot)
+            .count();
         assert_eq!(repo_root_count, 2); // README.md, SECURITY.md
         assert_eq!(web_root_count, 3); // help.html, recovery.html, about.txt
     }

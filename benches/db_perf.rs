@@ -20,9 +20,9 @@
 
 use coding_agent_search::connectors::{NormalizedConversation, NormalizedMessage};
 use coding_agent_search::indexer::persist::persist_conversation;
-use coding_agent_search::search::tantivy::{index_dir, TantivyIndex};
+use coding_agent_search::search::tantivy::{TantivyIndex, index_dir};
 use coding_agent_search::storage::sqlite::SqliteStorage;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::path::PathBuf;
 use tempfile::TempDir;

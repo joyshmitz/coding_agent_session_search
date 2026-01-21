@@ -6,7 +6,7 @@
  * Uses virtual scrolling for long conversations with 50+ messages.
  */
 
-import { getConversation, getConversationMessages } from './database.js';
+import { getConversation, getConversationMessages, checkMemoryPressure, getMemoryUsage } from './database.js';
 import { VariableHeightVirtualList } from './virtual-list.js';
 
 // Virtual scrolling configuration
@@ -15,6 +15,17 @@ const VIRTUAL_CONFIG = {
     ESTIMATED_MESSAGE_HEIGHT: 150, // Estimated average message height
     OVERSCAN: 3, // Extra items to render above/below viewport
 };
+
+// Memory management configuration
+const MEMORY_CONFIG = {
+    MAX_LOADED_CONVERSATIONS: 5, // Maximum conversations to keep in memory
+    MEMORY_CHECK_INTERVAL: 30000, // Check memory every 30 seconds
+    MEMORY_WARNING_THRESHOLD: 80, // Warn at 80% memory usage
+};
+
+// LRU cache for loaded conversations
+const loadedConversations = new Map();
+let memoryCheckIntervalId = null;
 
 // DOMPurify configuration for XSS prevention
 const SANITIZE_CONFIG = {
@@ -53,21 +64,50 @@ export function initConversationViewer(container, backCallback) {
 }
 
 /**
- * Load and display a conversation
+ * Load and display a conversation with LRU caching
  * @param {number} conversationId - Conversation ID
  * @param {number|null} highlightMessageId - Message ID to highlight/scroll to
  */
 export async function loadConversation(conversationId, highlightMessageId = null) {
-    // Load conversation metadata
-    currentConversation = getConversation(conversationId);
+    // Check if conversation is already in cache
+    if (loadedConversations.has(conversationId)) {
+        const cached = loadedConversations.get(conversationId);
+        // Move to end of map (most recently used)
+        loadedConversations.delete(conversationId);
+        loadedConversations.set(conversationId, cached);
+        currentConversation = cached.conversation;
+        currentMessages = cached.messages;
+        console.debug(`[Conversation] Using cached conversation ${conversationId}`);
+    } else {
+        // Unload oldest conversation if at limit
+        if (loadedConversations.size >= MEMORY_CONFIG.MAX_LOADED_CONVERSATIONS) {
+            unloadOldestConversation();
+        }
 
-    if (!currentConversation) {
-        showError('Conversation not found');
-        return;
+        // Load conversation metadata
+        currentConversation = getConversation(conversationId);
+
+        if (!currentConversation) {
+            showError('Conversation not found');
+            return;
+        }
+
+        // Load messages
+        currentMessages = getConversationMessages(conversationId);
+
+        // Cache the loaded data
+        loadedConversations.set(conversationId, {
+            conversation: currentConversation,
+            messages: currentMessages,
+            loadedAt: Date.now(),
+        });
+        console.debug(`[Conversation] Loaded and cached conversation ${conversationId} (cache size: ${loadedConversations.size})`);
     }
 
-    // Load messages
-    currentMessages = getConversationMessages(conversationId);
+    // Check memory pressure
+    if (checkMemoryPressure()) {
+        showMemoryWarning();
+    }
 
     // Render the view
     render(currentConversation, currentMessages, highlightMessageId);
@@ -613,6 +653,123 @@ export function getCurrentConversation() {
 }
 
 /**
+ * Unload the oldest (least recently used) conversation from cache
+ * @private
+ */
+function unloadOldestConversation() {
+    const oldest = loadedConversations.keys().next().value;
+    if (oldest !== undefined) {
+        loadedConversations.delete(oldest);
+        console.debug(`[Conversation] Unloaded oldest conversation ${oldest} (cache size: ${loadedConversations.size})`);
+    }
+}
+
+/**
+ * Clear old conversations from cache to free memory
+ * @param {number} [keepCount=1] - Number of recent conversations to keep
+ */
+export function clearOldConversations(keepCount = 1) {
+    const entries = Array.from(loadedConversations.entries());
+    const toRemove = entries.length - keepCount;
+
+    if (toRemove > 0) {
+        // Remove oldest entries (first ones in the Map)
+        for (let i = 0; i < toRemove; i++) {
+            loadedConversations.delete(entries[i][0]);
+        }
+        console.debug(`[Conversation] Cleared ${toRemove} old conversations (cache size: ${loadedConversations.size})`);
+    }
+}
+
+/**
+ * Show memory warning banner
+ */
+function showMemoryWarning() {
+    // Check if warning already exists
+    if (document.getElementById('memory-warning')) return;
+
+    const usage = getMemoryUsage();
+    const percent = usage ? usage.percent.toFixed(1) : 'N/A';
+
+    const banner = document.createElement('div');
+    banner.id = 'memory-warning';
+    banner.className = 'memory-warning-banner';
+    banner.setAttribute('role', 'alert');
+    banner.innerHTML = `
+        <span class="memory-warning-icon" aria-hidden="true">&#x26A0;&#xFE0F;</span>
+        <span class="memory-warning-text">Memory usage is high (${percent}%). Consider closing some conversations.</span>
+        <button id="memory-clear-btn" type="button" class="btn btn-small memory-clear-btn">
+            Clear Cache
+        </button>
+        <button class="memory-dismiss-btn" type="button" aria-label="Dismiss">&#x2715;</button>
+    `;
+
+    // Add to page
+    document.body.prepend(banner);
+
+    // Event listeners
+    const clearBtn = document.getElementById('memory-clear-btn');
+    clearBtn?.addEventListener('click', () => {
+        clearOldConversations(1);
+        hideMemoryWarning();
+    });
+
+    const dismissBtn = banner.querySelector('.memory-dismiss-btn');
+    dismissBtn?.addEventListener('click', hideMemoryWarning);
+}
+
+/**
+ * Hide memory warning banner
+ */
+function hideMemoryWarning() {
+    const banner = document.getElementById('memory-warning');
+    if (banner) {
+        banner.remove();
+    }
+}
+
+/**
+ * Start periodic memory monitoring
+ */
+export function startMemoryMonitoring() {
+    if (memoryCheckIntervalId) return; // Already running
+
+    memoryCheckIntervalId = setInterval(() => {
+        if (checkMemoryPressure()) {
+            showMemoryWarning();
+        }
+    }, MEMORY_CONFIG.MEMORY_CHECK_INTERVAL);
+
+    console.debug('[Conversation] Memory monitoring started');
+}
+
+/**
+ * Stop periodic memory monitoring
+ */
+export function stopMemoryMonitoring() {
+    if (memoryCheckIntervalId) {
+        clearInterval(memoryCheckIntervalId);
+        memoryCheckIntervalId = null;
+        console.debug('[Conversation] Memory monitoring stopped');
+    }
+}
+
+/**
+ * Get conversation cache statistics
+ * @returns {Object} Cache stats
+ */
+export function getCacheStats() {
+    const memory = getMemoryUsage();
+    return {
+        cachedCount: loadedConversations.size,
+        maxCached: MEMORY_CONFIG.MAX_LOADED_CONVERSATIONS,
+        memoryUsed: memory?.used || 0,
+        memoryLimit: memory?.limit || 0,
+        memoryPercent: memory?.percent || 0,
+    };
+}
+
+/**
  * Clear the viewer
  */
 export function clearViewer() {
@@ -624,6 +781,15 @@ export function clearViewer() {
     elements.container.innerHTML = '';
 }
 
+/**
+ * Clear all cached conversations
+ */
+export function clearAllCache() {
+    loadedConversations.clear();
+    hideMemoryWarning();
+    console.debug('[Conversation] All cached conversations cleared');
+}
+
 // Export default
 export default {
     initConversationViewer,
@@ -631,4 +797,9 @@ export default {
     getCurrentConversationId,
     getCurrentConversation,
     clearViewer,
+    clearAllCache,
+    clearOldConversations,
+    getCacheStats,
+    startMemoryMonitoring,
+    stopMemoryMonitoring,
 };

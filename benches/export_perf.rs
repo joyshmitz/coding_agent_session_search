@@ -17,10 +17,10 @@
 //! | Chunked process 10MB | < 1s | 256KB chunks |
 //! | Full pipeline 10MB | < 2s | With encryption |
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use flate2::Compression;
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
-use flate2::Compression;
 use rand::Rng;
 use std::hint::black_box;
 use std::io::{Read, Write};
