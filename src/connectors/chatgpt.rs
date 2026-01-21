@@ -579,6 +579,7 @@ impl Connector for ChatGptConnector {
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -1357,7 +1358,7 @@ mod tests {
         let conv_dir = dir.path().join("conversations-uuid123");
         fs::create_dir_all(&conv_dir).unwrap();
 
-        let conv_json = json!( {
+        let conv_json = json!({
             "id": "test-conv",
             "title": "Direct Base",
             "mapping": {
@@ -1390,7 +1391,7 @@ mod tests {
     #[cfg(target_os = "linux")] // Test logic is platform-independent but mocking HOME is easier here
     fn scan_respects_chatgpt_home_even_if_data_dir_contains_openai_string() {
         // Setup real chatgpt home
-        let home_dir = TempDir::new().unwrap();
+        let _home_dir = TempDir::new().unwrap();
         // macOS path structure: Library/Application Support/com.openai.chat/
         // But for testing on Linux we can mock whatever app_support_dir returns or just ensure fallback works?
         // Wait, app_support_dir() returns None on Linux.
