@@ -154,6 +154,8 @@ function renderSearchUI() {
  */
 function cacheElements() {
     elements.searchInput = document.getElementById('search-input');
+    elements.searchModeToggle = document.getElementById('search-mode-toggle');
+    elements.searchModeIndicator = document.getElementById('search-mode-indicator');
     elements.agentFilter = document.getElementById('agent-filter');
     elements.timeFilter = document.getElementById('time-filter');
     elements.resultsContainer = elements.container.querySelector('.search-results');
@@ -201,6 +203,21 @@ function setupEventListeners() {
         handleSearch(currentQuery);
     });
 
+    // Search mode toggle
+    if (elements.searchModeToggle) {
+        elements.searchModeToggle.addEventListener('click', (e) => {
+            const btn = e.target.closest('.search-mode-btn');
+            if (btn) {
+                const mode = btn.dataset.mode;
+                setSearchMode(mode);
+                // Re-run search with new mode if there's a query
+                if (currentQuery) {
+                    handleSearch(currentQuery);
+                }
+            }
+        });
+    }
+
     // Result click delegation
     elements.resultsList.addEventListener('click', (e) => {
         const resultCard = e.target.closest('.result-card');
@@ -243,6 +260,54 @@ async function populateFilters() {
     } catch (error) {
         console.error('[Search] Failed to populate filters:', error);
     }
+}
+
+/**
+ * Set search mode and update UI
+ * @param {'auto' | 'prose' | 'code'} mode - Search mode
+ */
+function setSearchMode(mode) {
+    currentSearchMode = mode;
+
+    // Update button states
+    if (elements.searchModeToggle) {
+        const buttons = elements.searchModeToggle.querySelectorAll('.search-mode-btn');
+        buttons.forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.mode === mode);
+        });
+    }
+}
+
+/**
+ * Update search mode indicator (shows which FTS table is being used)
+ * @param {string} query - Current search query
+ */
+function updateSearchModeIndicator(query) {
+    if (!elements.searchModeIndicator || !query) {
+        if (elements.searchModeIndicator) {
+            elements.searchModeIndicator.classList.add('hidden');
+        }
+        return;
+    }
+
+    let activeMode;
+    let modeLabel;
+
+    if (currentSearchMode === 'auto') {
+        activeMode = detectSearchMode(query);
+        modeLabel = activeMode === 'code'
+            ? '🔍 Code search (detected)'
+            : '🔍 Prose search (detected)';
+    } else {
+        activeMode = currentSearchMode;
+        modeLabel = activeMode === 'code'
+            ? '🔍 Code search'
+            : '🔍 Prose search';
+    }
+
+    elements.searchModeIndicator.textContent = modeLabel;
+    elements.searchModeIndicator.classList.remove('hidden');
+    elements.searchModeIndicator.dataset.mode = activeMode;
 }
 
 /**
@@ -308,10 +373,14 @@ async function performSearch() {
         limit: SEARCH_CONFIG.PAGE_SIZE,
         offset: currentPage * SEARCH_CONFIG.PAGE_SIZE,
         agent: currentFilters.agent,
+        searchMode: currentSearchMode,
     };
 
     // Pass raw query - searchConversations handles escaping and FTS table routing
     currentResults = searchConversations(currentQuery, options);
+
+    // Update search mode indicator
+    updateSearchModeIndicator(currentQuery);
 
     // Apply time filter post-query if needed
     if (currentFilters.since || currentFilters.until) {
@@ -645,6 +714,7 @@ function escapeHtml(text) {
 export function clearSearch() {
     currentQuery = '';
     currentFilters = { agent: null, since: null, until: null };
+    currentSearchMode = 'auto';
     currentResults = [];
     currentPage = 0;
 
@@ -660,6 +730,12 @@ export function clearSearch() {
     if (elements.timeFilter) {
         elements.timeFilter.value = '';
     }
+    if (elements.searchModeIndicator) {
+        elements.searchModeIndicator.classList.add('hidden');
+    }
+
+    // Reset search mode toggle
+    setSearchMode('auto');
 
     loadRecentConversations();
 }
@@ -671,6 +747,7 @@ export function getSearchState() {
     return {
         query: currentQuery,
         filters: { ...currentFilters },
+        searchMode: currentSearchMode,
         resultCount: currentResults.length,
     };
 }
