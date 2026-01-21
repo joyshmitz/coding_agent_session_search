@@ -54,6 +54,17 @@ pub enum Fts5SearchMode {
 /// - Dots (file extensions, method calls)
 /// - camelCase patterns (lowercase followed by uppercase)
 /// - File path separators
+/// - Colons (namespaces, type annotations)
+/// - Hashes (CSS selectors, preprocessor directives)
+/// - At-signs (decorators, email-like patterns)
+/// - Dollar signs (variables in shell/PHP)
+/// - Percent signs (URL encoding, format specifiers)
+/// - Hyphens between letters (kebab-case)
+///
+/// Uses prose indicators to avoid false positives:
+/// - Question words (how, what, why, when, where)
+/// - Common articles (the, is, are, was, were)
+/// - Multiple space-separated words (>3 words)
 ///
 /// Otherwise returns `NaturalLanguage` mode.
 ///
@@ -66,20 +77,65 @@ pub enum Fts5SearchMode {
 /// assert_eq!(detect_search_mode("my_function"), Fts5SearchMode::Code);
 /// assert_eq!(detect_search_mode("AuthController.ts"), Fts5SearchMode::Code);
 /// assert_eq!(detect_search_mode("getUserById"), Fts5SearchMode::Code);
+/// assert_eq!(detect_search_mode("std::io::Result"), Fts5SearchMode::Code);
+/// assert_eq!(detect_search_mode("my-component"), Fts5SearchMode::Code);
+/// assert_eq!(detect_search_mode("how does auth work"), Fts5SearchMode::NaturalLanguage);
 /// ```
 pub fn detect_search_mode(query: &str) -> Fts5SearchMode {
     // Check for code-like patterns
-    let is_code_query = query.contains('_')
+    let has_code_chars = query.contains('_')
         || query.contains('.')
         || query.contains('/')
         || query.contains('\\')
-        || has_camel_case(query);
+        || query.contains("::")
+        || query.contains('#')
+        || query.contains('@')
+        || query.contains('$')
+        || query.contains('%');
 
-    if is_code_query {
+    let has_code_patterns = has_camel_case(query) || has_kebab_case(query);
+
+    let is_code_query = has_code_chars || has_code_patterns;
+
+    // Check for prose indicators (to avoid false positives)
+    let words: Vec<&str> = query.split_whitespace().collect();
+    let word_count = words.len();
+    let lower = query.to_lowercase();
+
+    let has_prose_indicators = word_count > 3
+        || lower.starts_with("how ")
+        || lower.starts_with("what ")
+        || lower.starts_with("why ")
+        || lower.starts_with("when ")
+        || lower.starts_with("where ")
+        || lower.contains(" the ")
+        || lower.contains(" is ")
+        || lower.contains(" are ")
+        || lower.contains(" was ")
+        || lower.contains(" were ");
+
+    // Code patterns win unless prose indicators are strong
+    if is_code_query && !has_prose_indicators {
+        Fts5SearchMode::Code
+    } else if has_prose_indicators && !is_code_query {
+        Fts5SearchMode::NaturalLanguage
+    } else if is_code_query {
+        // Both indicators present - code chars are more specific
         Fts5SearchMode::Code
     } else {
         Fts5SearchMode::NaturalLanguage
     }
+}
+
+/// Check if string contains kebab-case pattern (letter-hyphen-letter).
+fn has_kebab_case(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    for i in 2..chars.len() {
+        if chars[i - 1] == '-' && chars[i - 2].is_alphabetic() && chars[i].is_alphabetic() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Check if string contains camelCase pattern (lowercase followed by uppercase).
@@ -295,6 +351,61 @@ mod tests {
     fn test_detect_search_mode_code_path() {
         assert_eq!(detect_search_mode("src/lib.rs"), Fts5SearchMode::Code);
         assert_eq!(detect_search_mode("path\\to\\file"), Fts5SearchMode::Code);
+    }
+
+    #[test]
+    fn test_detect_search_mode_code_namespace() {
+        assert_eq!(detect_search_mode("std::io::Result"), Fts5SearchMode::Code);
+        assert_eq!(detect_search_mode("Vec::new()"), Fts5SearchMode::Code);
+    }
+
+    #[test]
+    fn test_detect_search_mode_code_kebab() {
+        assert_eq!(detect_search_mode("my-component"), Fts5SearchMode::Code);
+        assert_eq!(detect_search_mode("button-primary"), Fts5SearchMode::Code);
+    }
+
+    #[test]
+    fn test_detect_search_mode_code_special_chars() {
+        assert_eq!(detect_search_mode("#define"), Fts5SearchMode::Code);
+        assert_eq!(detect_search_mode("@decorator"), Fts5SearchMode::Code);
+        assert_eq!(detect_search_mode("$variable"), Fts5SearchMode::Code);
+        assert_eq!(detect_search_mode("%s"), Fts5SearchMode::Code);
+    }
+
+    #[test]
+    fn test_detect_search_mode_prose_questions() {
+        assert_eq!(
+            detect_search_mode("how does auth work"),
+            Fts5SearchMode::NaturalLanguage
+        );
+        assert_eq!(
+            detect_search_mode("what is the error"),
+            Fts5SearchMode::NaturalLanguage
+        );
+        assert_eq!(
+            detect_search_mode("why is it failing"),
+            Fts5SearchMode::NaturalLanguage
+        );
+    }
+
+    #[test]
+    fn test_detect_search_mode_prose_multiword() {
+        assert_eq!(
+            detect_search_mode("the quick brown fox jumps"),
+            Fts5SearchMode::NaturalLanguage
+        );
+    }
+
+    #[test]
+    fn test_has_kebab_case() {
+        assert!(has_kebab_case("my-component"));
+        assert!(has_kebab_case("button-primary"));
+        assert!(has_kebab_case("a-b"));
+        assert!(!has_kebab_case("hello"));
+        assert!(!has_kebab_case("-start"));
+        assert!(!has_kebab_case("end-"));
+        assert!(!has_kebab_case("1-2"));
     }
 
     #[test]

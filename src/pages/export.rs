@@ -118,7 +118,7 @@ impl ExportEngine {
                 content,
                 content='messages',
                 content_rowid='id',
-                tokenize='porter'
+                tokenize='porter unicode61 remove_diacritics 2'
             )",
             [],
         )
@@ -129,7 +129,7 @@ impl ExportEngine {
                 content,
                 content='messages',
                 content_rowid='id',
-                tokenize="unicode61 tokenchars '_./'"
+                tokenize="unicode61 tokenchars '-_./:@#$%\\'"
             )"#,
             [],
         )

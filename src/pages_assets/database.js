@@ -231,19 +231,80 @@ export function getConversationMessages(convId) {
 }
 
 /**
+ * Search mode for FTS5 query routing
+ * @typedef {'auto' | 'prose' | 'code'} SearchMode
+ */
+
+/**
  * Detect if query looks like code (for FTS table routing)
+ *
+ * Checks for code patterns:
+ * - Underscores (snake_case)
+ * - Dots (file extensions, method calls)
+ * - Path separators (/ or \)
+ * - Namespaces (::)
+ * - Special chars (#, @, $, %)
+ * - camelCase (lowercase followed by uppercase)
+ * - kebab-case (letter-hyphen-letter)
+ *
+ * Also checks for prose indicators to reduce false positives:
+ * - Question words (how, what, why, when, where)
+ * - Common articles (the, is, are, was, were)
+ * - Multiple words (>3 space-separated words)
+ *
  * @param {string} query - Search query
  * @returns {boolean} True if query contains code patterns
  */
 function isCodeQuery(query) {
-    // Check for underscores (snake_case)
-    if (query.includes('_')) return true;
-    // Check for dots (file extensions)
-    if (query.includes('.')) return true;
-    // Check for path separators
-    if (query.includes('/') || query.includes('\\')) return true;
+    // Check for code-like characters
+    const hasCodeChars =
+        query.includes('_') ||
+        query.includes('.') ||
+        query.includes('/') ||
+        query.includes('\\') ||
+        query.includes('::') ||
+        query.includes('#') ||
+        query.includes('@') ||
+        query.includes('$') ||
+        query.includes('%');
+
     // Check for camelCase (lowercase followed by uppercase)
-    if (/[a-z][A-Z]/.test(query)) return true;
+    const hasCamelCase = /[a-z][A-Z]/.test(query);
+
+    // Check for kebab-case (letter-hyphen-letter)
+    const hasKebabCase = /[a-zA-Z]-[a-zA-Z]/.test(query);
+
+    const isCode = hasCodeChars || hasCamelCase || hasKebabCase;
+
+    // Check for prose indicators
+    const words = query.trim().split(/\s+/);
+    const wordCount = words.length;
+    const lower = query.toLowerCase();
+
+    const hasProseIndicators =
+        wordCount > 3 ||
+        lower.startsWith('how ') ||
+        lower.startsWith('what ') ||
+        lower.startsWith('why ') ||
+        lower.startsWith('when ') ||
+        lower.startsWith('where ') ||
+        lower.includes(' the ') ||
+        lower.includes(' is ') ||
+        lower.includes(' are ') ||
+        lower.includes(' was ') ||
+        lower.includes(' were ');
+
+    // Code patterns win unless prose indicators are strong
+    if (isCode && !hasProseIndicators) {
+        return true;
+    }
+    if (hasProseIndicators && !isCode) {
+        return false;
+    }
+    if (isCode) {
+        // Both indicators present - code chars are more specific
+        return true;
+    }
     return false;
 }
 
@@ -266,12 +327,17 @@ function escapeFts5Query(query) {
  * Automatically routes to the appropriate FTS table:
  * - messages_fts (porter stemmer) for natural language
  * - messages_code_fts (unicode61) for code identifiers/paths
+ *
  * @param {string} query - Search query
  * @param {Object} options - Search options
+ * @param {number} [options.limit=50] - Maximum results
+ * @param {number} [options.offset=0] - Result offset for pagination
+ * @param {string|null} [options.agent=null] - Filter by agent name
+ * @param {SearchMode} [options.searchMode='auto'] - Search mode: 'auto', 'prose', or 'code'
  * @returns {Array<Object>} Search results
  */
 export function searchConversations(query, options = {}) {
-    const { limit = 50, offset = 0, agent = null, forceCodeSearch = false } = options;
+    const { limit = 50, offset = 0, agent = null, searchMode = 'auto' } = options;
 
     // Escape query for FTS5
     const escapedQuery = escapeFts5Query(query);
@@ -279,10 +345,16 @@ export function searchConversations(query, options = {}) {
         return [];
     }
 
-    // Route to appropriate FTS table based on query type
-    const ftsTable = (forceCodeSearch || isCodeQuery(query))
-        ? 'messages_code_fts'
-        : 'messages_fts';
+    // Route to appropriate FTS table based on search mode
+    let ftsTable;
+    if (searchMode === 'code') {
+        ftsTable = 'messages_code_fts';
+    } else if (searchMode === 'prose') {
+        ftsTable = 'messages_fts';
+    } else {
+        // Auto mode - detect based on query content
+        ftsTable = isCodeQuery(query) ? 'messages_code_fts' : 'messages_fts';
+    }
 
     let sql = `
         SELECT
