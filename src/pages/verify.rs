@@ -373,16 +373,14 @@ fn check_payload_manifest(site_dir: &Path) -> CheckResult {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str.starts_with("chunk-") && name_str.ends_with(".bin") {
-                // Extract chunk number
-                if let Some(num_str) = name_str
+            if name_str.starts_with("chunk-")
+                && name_str.ends_with(".bin")
+                && let Some(num_str) = name_str
                     .strip_prefix("chunk-")
                     .and_then(|s| s.strip_suffix(".bin"))
-                {
-                    if let Ok(num) = num_str.parse::<u32>() {
-                        found_chunks.insert(num);
-                    }
-                }
+                && let Ok(num) = num_str.parse::<u32>()
+            {
+                found_chunks.insert(num);
             }
         }
     }
@@ -415,16 +413,15 @@ fn check_size_limits(site_dir: &Path) -> CheckResult {
     if let Ok(entries) = fs::read_dir(&payload_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map(|e| e == "bin").unwrap_or(false) {
-                if let Ok(meta) = path.metadata() {
-                    if meta.len() > MAX_CHUNK_SIZE {
-                        errors.push(format!(
-                            "{} exceeds 100MB limit ({} bytes)",
-                            path.file_name().unwrap_or_default().to_string_lossy(),
-                            meta.len()
-                        ));
-                    }
-                }
+            if path.extension().map(|e| e == "bin").unwrap_or(false)
+                && let Ok(meta) = path.metadata()
+                && meta.len() > MAX_CHUNK_SIZE
+            {
+                errors.push(format!(
+                    "{} exceeds 100MB limit ({} bytes)",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    meta.len()
+                ));
             }
         }
     }
@@ -522,25 +519,23 @@ fn check_no_secrets(site_dir: &Path) -> CheckResult {
     // Check config.json doesn't contain plaintext secrets
     // Note: We're looking for actual secret values, not field names like "total_plaintext_size"
     let config_path = site_dir.join("config.json");
-    if config_path.exists() {
-        if let Ok(content) = fs::read_to_string(&config_path) {
-            let content_lower = content.to_lowercase();
-            // Check for patterns that indicate actual secrets being stored
-            // These patterns look for JSON keys that shouldn't exist in public config
-            let forbidden_patterns = [
-                ("\"password\":", "password field"), // Password stored in config
-                ("\"secret\":", "secret field"),     // Secret stored directly
-                ("\"private_key\":", "private_key field"), // Private key in config
-                ("\"master_key\":", "master_key field"), // Master key exposed
-                ("\"recovery_secret\":", "recovery_secret"), // Recovery secret in config
-            ];
-            for (pattern, description) in forbidden_patterns {
-                if content_lower.contains(pattern) {
-                    errors.push(format!(
-                        "config.json contains forbidden pattern: {}",
-                        description
-                    ));
-                }
+    if config_path.exists() && let Ok(content) = fs::read_to_string(&config_path) {
+        let content_lower = content.to_lowercase();
+        // Check for patterns that indicate actual secrets being stored
+        // These patterns look for JSON keys that shouldn't exist in public config
+        let forbidden_patterns = [
+            ("\"password\":", "password field"), // Password stored in config
+            ("\"secret\":", "secret field"),     // Secret stored directly
+            ("\"private_key\":", "private_key field"), // Private key in config
+            ("\"master_key\":", "master_key field"), // Master key exposed
+            ("\"recovery_secret\":", "recovery_secret"), // Recovery secret in config
+        ];
+        for (pattern, description) in forbidden_patterns {
+            if content_lower.contains(pattern) {
+                errors.push(format!(
+                    "config.json contains forbidden pattern: {}",
+                    description
+                ));
             }
         }
     }

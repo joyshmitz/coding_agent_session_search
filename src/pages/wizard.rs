@@ -156,11 +156,9 @@ impl PagesWizard {
         self.print_header(&mut term)?;
 
         // If no-encryption mode, show explicit warning at the start
-        if self.no_encryption_mode {
-            if !self.step_unencrypted_warning(&mut term, &theme)? {
-                writeln!(term, "{}", style("Export cancelled.").yellow())?;
-                return Ok(());
-            }
+        if self.no_encryption_mode && !self.step_unencrypted_warning(&mut term, &theme)? {
+            writeln!(term, "{}", style("Export cancelled.").yellow())?;
+            return Ok(());
         }
 
         // Step 1: Content Selection

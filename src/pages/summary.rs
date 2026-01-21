@@ -360,10 +360,10 @@ impl ExclusionSet {
         conversation_id: i64,
         title: &str,
     ) -> bool {
-        if let Some(ws) = workspace {
-            if self.is_workspace_excluded(ws) {
-                return true;
-            }
+        if let Some(ws) = workspace
+            && self.is_workspace_excluded(ws)
+        {
+            return true;
         }
         if self.is_conversation_excluded(conversation_id) {
             return true;
@@ -509,23 +509,23 @@ impl<'a> SummaryGenerator<'a> {
         let mut clauses = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        if let Some(agents) = &filters.agents {
-            if !agents.is_empty() {
-                let placeholders: Vec<&str> = (0..agents.len()).map(|_| "?").collect();
-                clauses.push(format!("c.agent IN ({})", placeholders.join(", ")));
-                for agent in agents {
-                    params.push(Box::new(agent.clone()));
-                }
+        if let Some(agents) = &filters.agents
+            && !agents.is_empty()
+        {
+            let placeholders: Vec<&str> = (0..agents.len()).map(|_| "?").collect();
+            clauses.push(format!("c.agent IN ({})", placeholders.join(", ")));
+            for agent in agents {
+                params.push(Box::new(agent.clone()));
             }
         }
 
-        if let Some(workspaces) = &filters.workspaces {
-            if !workspaces.is_empty() {
-                let placeholders: Vec<&str> = (0..workspaces.len()).map(|_| "?").collect();
-                clauses.push(format!("c.workspace IN ({})", placeholders.join(", ")));
-                for ws in workspaces {
-                    params.push(Box::new(ws.clone()));
-                }
+        if let Some(workspaces) = &filters.workspaces
+            && !workspaces.is_empty()
+        {
+            let placeholders: Vec<&str> = (0..workspaces.len()).map(|_| "?").collect();
+            clauses.push(format!("c.workspace IN ({})", placeholders.join(", ")));
+            for ws in workspaces {
+                params.push(Box::new(ws.clone()));
             }
         }
 
@@ -810,10 +810,8 @@ impl<'a> SummaryGenerator<'a> {
             }
 
             // Check workspace inclusion
-            if let Some(ws) = &workspace {
-                if !included_workspaces.contains(ws) {
-                    continue;
-                }
+            if let Some(ws) = &workspace && !included_workspaces.contains(ws) {
+                continue;
             }
 
             conv_count += 1;
@@ -945,8 +943,10 @@ impl PrePublishSummary {
 
     /// Update with encryption config.
     pub fn set_encryption_config(&mut self, key_slots: &[KeySlot]) {
-        let mut enc = EncryptionSummary::default();
-        enc.key_slot_count = key_slots.len();
+        let enc = EncryptionSummary {
+            key_slot_count: key_slots.len(),
+            ..Default::default()
+        };
 
         self.key_slots = key_slots
             .iter()

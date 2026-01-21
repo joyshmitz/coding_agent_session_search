@@ -2081,18 +2081,19 @@ async fn execute_cli(
                     i_understand_unencrypted_risks,
                 } => {
                     // Check for unencrypted export in robot mode
-                    if no_encryption && (json || robot_mode) {
-                        if !i_understand_unencrypted_risks {
-                            let error = crate::pages::confirmation::robot_mode_blocked_error();
-                            eprintln!("{}", serde_json::to_string_pretty(&error).unwrap());
-                            return Err(CliError {
-                                code: crate::pages::confirmation::EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED,
-                                kind: "pages",
-                                message: "Unencrypted exports are not allowed in robot mode".to_string(),
-                                hint: Some("Use --i-understand-unencrypted-risks flag if you really need this".to_string()),
-                                retryable: false,
-                            });
-                        }
+                    if no_encryption && (json || robot_mode) && !i_understand_unencrypted_risks {
+                        let error = crate::pages::confirmation::robot_mode_blocked_error();
+                        eprintln!("{}", serde_json::to_string_pretty(&error).unwrap());
+                        return Err(CliError {
+                            code: crate::pages::confirmation::EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED,
+                            kind: "pages",
+                            message: "Unencrypted exports are not allowed in robot mode".to_string(),
+                            hint: Some(
+                                "Use --i-understand-unencrypted-risks flag if you really need this"
+                                    .to_string(),
+                            ),
+                            retryable: false,
+                        });
                     }
                     // Handle --verify first
                     if let Some(verify_path) = verify {
