@@ -657,9 +657,6 @@ impl Connector for CursorConnector {
         let looks_like_base = |path: &PathBuf| {
             path.join("globalStorage").exists()
                 || path.join("workspaceStorage").exists()
-                || path
-                    .file_name()
-                    .is_some_and(|n| n.to_str().unwrap_or("").contains("Cursor"))
         };
 
         let base = if ctx.use_default_detection() {
@@ -718,8 +715,12 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
     use serde_json::json;
+    use serial_test::serial;
     use std::collections::HashSet;
     use std::fs;
+    use std::process::Command;
+    use std::thread;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     /// Create a test SQLite database with the cursorDiskKV table
@@ -1053,10 +1054,7 @@ mod tests {
     #[test]
     fn parse_composer_data_skips_duplicates() {
         let key = "composerData:dup-123";
-        let value = json!({
-            "text": "Content"
-        })
-        .to_string();
+        let value = json!({ "text": "Content" }).to_string();
 
         let mut seen = HashSet::new();
         let conv1 = CursorConnector::parse_composer_data(
@@ -1216,10 +1214,7 @@ mod tests {
         let db_path = dir.path().join("state.vscdb");
 
         let conn = create_test_db(&db_path);
-        let value = json!({
-            "text": "Database test"
-        })
-        .to_string();
+        let value = json!({ "text": "Database test" }).to_string();
         conn.execute(
             "INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)",
             ["composerData:db-test-123", &value],
@@ -1431,10 +1426,7 @@ mod tests {
     fn conversation_title_truncates_long_lines() {
         let key = "composerData:long-title";
         let long_text = "x".repeat(200);
-        let value = json!({
-            "text": long_text
-        })
-        .to_string();
+        let value = json!({ "text": long_text }).to_string();
 
         let mut seen = HashSet::new();
         let conv = CursorConnector::parse_composer_data(
@@ -1533,5 +1525,44 @@ mod tests {
             assert!(expected.starts_with("/mnt/c/Users"));
             assert!(expected.ends_with("Cursor/User"));
         }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(target_os = "linux")] // Only test on Linux where XDG_DATA_HOME/HOME manipulation is predictable
+    fn scan_respects_cursor_home_even_if_data_dir_contains_cursor_string() {
+        // Setup real cursor home with data
+        let home_dir = TempDir::new().unwrap();
+        // Linux: ~/.config/Cursor/User/globalStorage/state.vscdb
+        let real_storage = home_dir.path().join(".config/Cursor/User/globalStorage");
+        fs::create_dir_all(&real_storage).unwrap();
+        
+        let db_path = real_storage.join("state.vscdb");
+        let conn = create_test_db(&db_path);
+        let value = json!({ "text": "Real cursor session" }).to_string();
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)",
+            ["composerData:real-123", &value],
+        ).unwrap();
+        drop(conn);
+
+        // Setup CASS data dir that happens to have "Cursor" in path
+        let project_dir = TempDir::new().unwrap();
+        // The LEAF directory must contain "Cursor" to trigger the bug
+        let confusing_data_dir = project_dir.path().join("project_Cursor");
+        fs::create_dir_all(&confusing_data_dir).unwrap();
+
+        // Overwrite HOME to point to our temp home
+        unsafe { std::env::set_var("HOME", home_dir.path()) };
+        
+        let connector = CursorConnector::new();
+        let ctx = ScanContext::local_default(confusing_data_dir.clone(), None);
+        
+        let convs = connector.scan(&ctx).unwrap();
+        
+        unsafe { std::env::remove_var("HOME") };
+
+        assert_eq!(convs.len(), 1, "Should find session in real home");
+        assert_eq!(convs[0].messages[0].content, "Real cursor session");
     }
 }
