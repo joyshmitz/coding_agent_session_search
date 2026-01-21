@@ -179,15 +179,19 @@ impl Connector for AiderConnector {
             ctx.data_dir.clone()
         };
 
+        // Check if data_root is actually the CASS DB directory
+        let is_cass_db_dir = data_root.join("agent_search.db").exists();
+
         if ctx.use_default_detection() {
             // Check for override env var first
             if let Ok(override_root) = dotenvy::var("CASS_AIDER_DATA_ROOT") {
                 add_root(PathBuf::from(override_root));
-            } else if data_root.exists() && data_root.is_dir() {
+            } else if !is_cass_db_dir && data_root.exists() && data_root.is_dir() {
                 // Use data_root for recursive search (will find history files in subdirs)
+                // BUT skip if it looks like the CASS DB directory to avoid wasteful scanning
                 add_root(data_root);
             } else {
-                // Only fall back to CWD/home when data_root doesn't exist
+                // Only fall back to CWD/home when data_root doesn't exist or is the DB dir
                 if let Ok(cwd) = std::env::current_dir() {
                     add_root(cwd);
                 }
