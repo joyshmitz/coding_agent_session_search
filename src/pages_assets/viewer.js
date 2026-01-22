@@ -18,6 +18,7 @@ import { initSearch, clearSearch, getSearchState } from './search.js';
 import { initConversationViewer, loadConversation, clearViewer, getCurrentConversation } from './conversation.js';
 import { createRouter, getRouter, parseSearchParams, buildConversationPath } from './router.js';
 import { getConversationLink, copyConversationLink, isWebShareAvailable, shareConversation } from './share.js';
+import { initStats, renderStatsDashboard, clearStatsCache } from './stats.js';
 
 // Application state
 const state = {
@@ -93,6 +94,9 @@ function initializeViews() {
 
     // Initialize conversation viewer
     initConversationViewer(elements.conversationView, handleBackToSearch);
+
+    // Initialize stats module
+    initStats(elements.statsView);
 
     // Create router with navigation handler
     router = createRouter({
@@ -474,71 +478,11 @@ function applyTheme(theme) {
 
 /**
  * Render stats panel (full analytics view)
+ * Delegates to the stats module for precomputed analytics
  */
 function renderStatsPanel() {
-    try {
-        const stats = getStatistics();
-
-        elements.statsView.innerHTML = `
-            <div class="panel stats-panel">
-                <header class="panel-header">
-                    <h2>Archive Statistics</h2>
-                </header>
-                <div class="panel-content">
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <div class="stat-card-value">${stats.conversations}</div>
-                            <div class="stat-card-label">Total Conversations</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-value">${stats.messages}</div>
-                            <div class="stat-card-label">Total Messages</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-value">${stats.agents.length}</div>
-                            <div class="stat-card-label">Agents</div>
-                        </div>
-                    </div>
-
-                    ${stats.agents.length > 0 ? `
-                        <section class="stats-section">
-                            <h3>Agents</h3>
-                            <div class="agents-list">
-                                ${stats.agents.map(agent => `
-                                    <div class="agent-item">
-                                        <span class="agent-name">${escapeHtml(formatAgentName(agent.agent))}</span>
-                                        <span class="agent-count">${agent.count} conversations</span>
-                                    </div>
-                                `).join('')}
-                            </div>
-                        </section>
-                    ` : ''}
-
-                    ${stats.timeRange ? `
-                        <section class="stats-section">
-                            <h3>Time Range</h3>
-                            <p class="time-range">
-                                <strong>Oldest:</strong> ${formatDate(stats.timeRange.oldest)}<br>
-                                <strong>Newest:</strong> ${formatDate(stats.timeRange.newest)}
-                            </p>
-                        </section>
-                    ` : ''}
-                </div>
-            </div>
-        `;
-    } catch (error) {
-        console.error('[Viewer] Failed to render stats panel:', error);
-        elements.statsView.innerHTML = `
-            <div class="panel stats-panel">
-                <header class="panel-header">
-                    <h2>Archive Statistics</h2>
-                </header>
-                <div class="panel-content">
-                    <p class="error-message">Failed to load statistics</p>
-                </div>
-            </div>
-        `;
-    }
+    // Use the stats module for rendering
+    renderStatsDashboard();
 }
 
 /**
