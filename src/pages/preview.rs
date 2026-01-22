@@ -248,7 +248,7 @@ pub async fn start_preview_server(config: PreviewConfig) -> Result<(), PreviewEr
         config
             .site_dir
             .canonicalize()
-            .map_err(|e| PreviewError::SiteDirectoryNotFound(config.site_dir.clone()))?,
+            .map_err(|_| PreviewError::SiteDirectoryNotFound(config.site_dir.clone()))?,
     );
 
     // Bind to the address

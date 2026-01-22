@@ -515,6 +515,18 @@ pub enum Commands {
         /// Don't auto-open browser when starting preview server
         #[arg(long)]
         no_open: bool,
+
+        /// JSON config file for non-interactive export (use "-" for stdin)
+        #[arg(long)]
+        config: Option<String>,
+
+        /// Validate config file without running export
+        #[arg(long)]
+        validate_config: bool,
+
+        /// Show example config file
+        #[arg(long)]
+        example_config: bool,
     },
     /// Manage remote sources (P5.x)
     #[command(subcommand)]
@@ -2099,7 +2111,132 @@ async fn execute_cli(
                     preview,
                     port,
                     no_open,
+                    config,
+                    validate_config,
+                    example_config,
                 } => {
+                    // Handle --example-config (show example config and exit)
+                    if example_config {
+                        println!("{}", crate::pages::config_input::example_config());
+                        return Ok(());
+                    }
+
+                    // Handle --config based export
+                    if let Some(ref config_path) = config {
+                        let mut pages_config = crate::pages::config_input::PagesConfig::load(config_path)
+                            .map_err(|e| CliError {
+                                code: 2,
+                                kind: "pages",
+                                message: format!("Failed to load config: {e}"),
+                                hint: Some("Check config file syntax with --example-config".to_string()),
+                                retryable: false,
+                            })?;
+
+                        // Resolve environment variables
+                        pages_config.resolve_env_vars().map_err(|e| CliError {
+                            code: 2,
+                            kind: "pages",
+                            message: format!("Failed to resolve env vars: {e}"),
+                            hint: Some("Ensure referenced environment variables are set".to_string()),
+                            retryable: false,
+                        })?;
+
+                        // Validate configuration
+                        let validation = pages_config.validate();
+
+                        if validate_config {
+                            // Just validate and output result
+                            println!("{}", serde_json::to_string_pretty(&validation).unwrap());
+                            if !validation.valid {
+                                return Err(CliError {
+                                    code: 2,
+                                    kind: "pages",
+                                    message: "Configuration validation failed".to_string(),
+                                    hint: Some("Review errors in JSON output".to_string()),
+                                    retryable: false,
+                                });
+                            }
+                            return Ok(());
+                        }
+
+                        if !validation.valid {
+                            if json || robot_mode {
+                                println!("{}", serde_json::to_string_pretty(&validation).unwrap());
+                            } else {
+                                eprintln!("Configuration errors:");
+                                for err in &validation.errors {
+                                    eprintln!("  - {}", err);
+                                }
+                            }
+                            return Err(CliError {
+                                code: 2,
+                                kind: "pages",
+                                message: "Configuration validation failed".to_string(),
+                                hint: Some("Fix errors listed above".to_string()),
+                                retryable: false,
+                            });
+                        }
+
+                        // Print warnings
+                        if !validation.warnings.is_empty() && !json && !robot_mode {
+                            eprintln!("Warnings:");
+                            for warn in &validation.warnings {
+                                eprintln!("  - {}", warn);
+                            }
+                            eprintln!();
+                        }
+
+                        // Get database path
+                        let db_path = cli.db.clone().unwrap_or_else(|| {
+                            directories::ProjectDirs::from(
+                                "com",
+                                "dicklesworthstone",
+                                "coding-agent-search",
+                            )
+                            .map(|dirs| dirs.data_dir().join("agent_search.db"))
+                            .unwrap_or_else(default_db_path)
+                        });
+
+                        // Convert config to WizardState and run export
+                        let wizard_state = pages_config.to_wizard_state(db_path.clone())
+                            .map_err(|e| CliError {
+                                code: 9,
+                                kind: "pages",
+                                message: format!("Failed to create wizard state: {e}"),
+                                hint: None,
+                                retryable: false,
+                            })?;
+
+                        // Run the export using the config
+                        run_config_based_export(
+                            &pages_config,
+                            &wizard_state,
+                            &db_path,
+                            dry_run,
+                            json || robot_mode,
+                            verbose,
+                        ).map_err(|e| CliError {
+                            code: 9,
+                            kind: "pages",
+                            message: format!("Export failed: {e}"),
+                            hint: None,
+                            retryable: false,
+                        })?;
+
+                        return Ok(());
+                    }
+
+                    // Handle --validate-config without --config
+                    if validate_config {
+                        return Err(CliError {
+                            code: 2,
+                            kind: "pages",
+                            message: "--validate-config requires --config".to_string(),
+                            hint: Some("Use --config <path> --validate-config".to_string()),
+                            retryable: false,
+                        });
+                    }
+
                     // Handle --preview first (starts local preview server)
                     if let Some(preview_dir) = preview {
                         let config = crate::pages::preview::PreviewConfig {
@@ -6905,6 +7042,157 @@ fn run_introspect(json: bool) -> CliResult<()> {
         for name in response.response_schemas.keys() {
             println!("  - {name}");
         }
+    }
+
+    Ok(())
+}
+
+/// Run export based on JSON config file.
+fn run_config_based_export(
+    config: &crate::pages::config_input::PagesConfig,
+    wizard_state: &crate::pages::wizard::WizardState,
+    db_path: &std::path::Path,
+    dry_run: bool,
+    json_output: bool,
+    _verbose: bool,
+) -> anyhow::Result<()> {
+    use chrono::DateTime;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    if dry_run {
+        if json_output {
+            let result = serde_json::json!({
+                "status": "dry_run",
+                "output_dir": wizard_state.output_dir,
+                "config_valid": true,
+            });
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!("Dry run: would export to {:?}", wizard_state.output_dir);
+        }
+        return Ok(());
+    }
+
+    // Create output directory
+    let output_dir = &wizard_state.output_dir;
+    std::fs::create_dir_all(output_dir)?;
+
+    // Create temp directory for intermediate export
+    let temp_dir = tempfile::tempdir()?;
+    let export_db_path = temp_dir.path().join("export.db");
+
+    // Parse time filters to DateTime<Utc>
+    let since_dt = config
+        .since_ts()
+        .and_then(DateTime::from_timestamp_millis);
+    let until_dt = config
+        .until_ts()
+        .and_then(DateTime::from_timestamp_millis);
+
+    // Build export filter
+    let filter = crate::pages::export::ExportFilter {
+        agents: if wizard_state.agents.is_empty() {
+            None
+        } else {
+            Some(wizard_state.agents.clone())
+        },
+        workspaces: wizard_state.workspaces.clone(),
+        since: since_dt,
+        until: until_dt,
+        path_mode: config.path_mode(),
+    };
+
+    // Run export
+    let export_engine = crate::pages::export::ExportEngine::new(
+        db_path,
+        &export_db_path,
+        filter,
+    );
+
+    let running = Arc::new(AtomicBool::new(true));
+    let stats = export_engine.execute(|_current, _total| {}, Some(running))?;
+
+    // Handle encryption if enabled
+    let encryption_enabled = !wizard_state.no_encryption && wizard_state.password.is_some();
+
+    if encryption_enabled {
+        let password = wizard_state.password.as_ref().unwrap();
+        let chunk_size = config.encryption.chunk_size.unwrap_or(8 * 1024 * 1024) as usize;
+        let mut enc_engine = crate::pages::encrypt::EncryptionEngine::new(chunk_size);
+        enc_engine.add_password_slot(password)?;
+
+        // Add recovery slot if requested
+        if wizard_state.generate_recovery {
+            let recovery_bytes: [u8; 32] = rand::random();
+            enc_engine.add_recovery_slot(&recovery_bytes)?;
+        }
+
+        // Encrypt the database
+        let enc_config = enc_engine.encrypt_file(&export_db_path, output_dir, |_, _| {})?;
+
+        // Write config.json
+        let config_path = output_dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&enc_config)?)?;
+
+        // Generate QR code if requested
+        #[cfg(feature = "qr")]
+        if wizard_state.generate_qr {
+            let qr_path = output_dir.join("password-qr.png");
+            crate::pages::qr::generate_qr_png(password, &qr_path)?;
+        }
+    } else {
+        // No encryption - just copy the database
+        std::fs::copy(&export_db_path, output_dir.join("export.db"))?;
+    }
+
+    // Build bundle
+    let bundle_config = crate::pages::bundle::BundleConfig {
+        title: wizard_state.title.clone(),
+        description: wizard_state.description.clone(),
+        hide_metadata: wizard_state.hide_metadata,
+        recovery_secret: None, // Already handled via encryption slots
+        generate_qr: wizard_state.generate_qr,
+        generated_docs: vec![],
+    };
+
+    let bundle_output_dir = output_dir.join("bundle");
+    let bundle_builder = crate::pages::bundle::BundleBuilder::with_config(bundle_config);
+    let bundle_result = bundle_builder.build(output_dir, &bundle_output_dir, |_phase, _msg| {})?;
+
+    // Output results
+    if json_output {
+        let result = serde_json::json!({
+            "status": "success",
+            "output_dir": output_dir,
+            "bundle_dir": bundle_output_dir,
+            "stats": {
+                "conversations": stats.conversations_processed,
+                "messages": stats.messages_processed,
+            },
+            "encryption": {
+                "enabled": encryption_enabled,
+                "generate_recovery": wizard_state.generate_recovery,
+                "generate_qr": wizard_state.generate_qr,
+            },
+            "bundle": {
+                "total_files": bundle_result.total_files,
+                "fingerprint": bundle_result.fingerprint,
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Export complete:");
+        println!("  Output: {}", output_dir.display());
+        println!("  Bundle: {}", bundle_output_dir.display());
+        println!("  Conversations: {}", stats.conversations_processed);
+        println!("  Messages: {}", stats.messages_processed);
+        if encryption_enabled {
+            println!("  Encryption: enabled");
+        } else {
+            println!("  Encryption: DISABLED (content is public)");
+        }
+        println!("  Fingerprint: {}", &bundle_result.fingerprint[..8]);
     }
 
     Ok(())

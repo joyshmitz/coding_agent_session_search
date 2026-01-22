@@ -25,6 +25,10 @@ pub struct Prerequisites {
     pub wrangler_authenticated: bool,
     /// Cloudflare account email if authenticated
     pub account_email: Option<String>,
+    /// Whether API credentials (token + account ID) are available
+    pub api_credentials_present: bool,
+    /// Account ID if provided (safe to display)
+    pub account_id: Option<String>,
     /// Available disk space in MB
     pub disk_space_mb: u64,
 }
@@ -32,7 +36,8 @@ pub struct Prerequisites {
 impl Prerequisites {
     /// Check if all prerequisites are met
     pub fn is_ready(&self) -> bool {
-        self.wrangler_version.is_some() && self.wrangler_authenticated
+        self.wrangler_version.is_some()
+            && (self.wrangler_authenticated || self.api_credentials_present)
     }
 
     /// Get a list of missing prerequisites
@@ -41,8 +46,10 @@ impl Prerequisites {
         if self.wrangler_version.is_none() {
             missing.push("wrangler CLI not installed (install with: npm install -g wrangler)");
         }
-        if !self.wrangler_authenticated {
-            missing.push("wrangler CLI not authenticated (run: wrangler login)");
+        if !self.wrangler_authenticated && !self.api_credentials_present {
+            missing.push(
+                "wrangler CLI not authenticated and no API token provided (set CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID)",
+            );
         }
         missing
     }
@@ -72,6 +79,12 @@ pub struct CloudflareConfig {
     pub custom_domain: Option<String>,
     /// Whether to create project if it doesn't exist
     pub create_if_missing: bool,
+    /// Production branch for Pages deployments
+    pub branch: String,
+    /// Optional Cloudflare account ID (fallback auth for CI)
+    pub account_id: Option<String>,
+    /// Optional Cloudflare API token (fallback auth for CI)
+    pub api_token: Option<String>,
 }
 
 impl Default for CloudflareConfig {
@@ -80,6 +93,9 @@ impl Default for CloudflareConfig {
             project_name: "cass-archive".to_string(),
             custom_domain: None,
             create_if_missing: true,
+            branch: "main".to_string(),
+            account_id: None,
+            api_token: None,
         }
     }
 }
@@ -118,6 +134,24 @@ impl CloudflareDeployer {
     /// Set whether to create project if missing
     pub fn create_if_missing(mut self, create: bool) -> Self {
         self.config.create_if_missing = create;
+        self
+    }
+
+    /// Set deployment branch (defaults to "main")
+    pub fn branch(mut self, branch: impl Into<String>) -> Self {
+        self.config.branch = branch.into();
+        self
+    }
+
+    /// Set Cloudflare account ID (for API-token auth)
+    pub fn account_id(mut self, account_id: impl Into<String>) -> Self {
+        self.config.account_id = Some(account_id.into());
+        self
+    }
+
+    /// Set Cloudflare API token (for API-token auth)
+    pub fn api_token(mut self, api_token: impl Into<String>) -> Self {
+        self.config.api_token = Some(api_token.into());
         self
     }
 
