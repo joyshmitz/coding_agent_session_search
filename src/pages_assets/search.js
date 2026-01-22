@@ -129,21 +129,23 @@ function renderSearchUI() {
                 </div>
             </div>
 
-            <div class="search-results">
+            <div class="search-results" role="region" aria-label="Search results">
                 <div class="search-results-header">
-                    <div id="result-count" class="result-count"></div>
-                    <div id="search-mode-indicator" class="search-mode-indicator hidden"></div>
+                    <div id="result-count" class="result-count" aria-live="polite" aria-atomic="true"></div>
+                    <div id="search-mode-indicator" class="search-mode-indicator hidden" aria-live="polite"></div>
                 </div>
-                <div id="loading-indicator" class="loading-indicator hidden">
-                    <div class="spinner-small"></div>
+                <div id="loading-indicator" class="loading-indicator hidden" role="status" aria-live="polite">
+                    <div class="spinner-small" aria-hidden="true"></div>
                     <span>Searching...</span>
                 </div>
-                <div id="no-results" class="no-results hidden">
-                    <span class="no-results-icon">🔍</span>
+                <div id="no-results" class="no-results hidden" role="status" aria-live="polite">
+                    <span class="no-results-icon" aria-hidden="true">🔍</span>
                     <p>No results found</p>
                     <p class="no-results-hint">Try different keywords or adjust filters</p>
                 </div>
-                <div id="results-list" class="results-list"></div>
+                <!-- Screen reader announcer for search results -->
+                <div id="search-announcer" class="visually-hidden" aria-live="assertive" aria-atomic="true"></div>
+                <div id="results-list" class="results-list" role="listbox" aria-label="Search results list"></div>
             </div>
         </div>
     `;
@@ -230,13 +232,73 @@ function setupEventListeners() {
         }
     });
 
-    // Keyboard navigation
+    // Keyboard navigation for results list
     elements.resultsList.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            const focused = document.activeElement;
-            if (focused?.classList.contains('result-card')) {
-                focused.click();
-            }
+        const focused = document.activeElement;
+        const isResultCard = focused?.classList.contains('result-card');
+
+        switch (e.key) {
+            case 'Enter':
+            case ' ':
+                if (isResultCard) {
+                    e.preventDefault();
+                    focused.click();
+                }
+                break;
+
+            case 'ArrowDown':
+                e.preventDefault();
+                if (isResultCard) {
+                    // Move to next result
+                    const next = focused.nextElementSibling;
+                    if (next?.classList.contains('result-card')) {
+                        next.focus();
+                    }
+                } else {
+                    // Focus first result
+                    const first = elements.resultsList.querySelector('.result-card');
+                    first?.focus();
+                }
+                break;
+
+            case 'ArrowUp':
+                e.preventDefault();
+                if (isResultCard) {
+                    // Move to previous result
+                    const prev = focused.previousElementSibling;
+                    if (prev?.classList.contains('result-card')) {
+                        prev.focus();
+                    } else {
+                        // Move focus back to search input
+                        elements.searchInput?.focus();
+                    }
+                }
+                break;
+
+            case 'Home':
+                if (isResultCard) {
+                    e.preventDefault();
+                    const first = elements.resultsList.querySelector('.result-card');
+                    first?.focus();
+                }
+                break;
+
+            case 'End':
+                if (isResultCard) {
+                    e.preventDefault();
+                    const cards = elements.resultsList.querySelectorAll('.result-card');
+                    cards[cards.length - 1]?.focus();
+                }
+                break;
+        }
+    });
+
+    // Allow arrow down from search input to results
+    elements.searchInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            const first = elements.resultsList.querySelector('.result-card');
+            first?.focus();
         }
     });
 }
@@ -509,8 +571,10 @@ function createResultCard(result, index) {
     article.dataset.conversationId = result.conversation_id;
     article.dataset.messageId = result.message_id || '';
     article.tabIndex = 0;
-    article.setAttribute('role', 'button');
-    article.setAttribute('aria-label', `Open conversation: ${result.title || 'Untitled'}`);
+    article.setAttribute('role', 'option');
+    article.setAttribute('aria-selected', 'false');
+    article.id = `result-${result.conversation_id}`;
+    article.setAttribute('aria-label', `${result.title || 'Untitled conversation'}, ${formatAgentName(result.agent)}${result.workspace ? ', ' + formatWorkspace(result.workspace) : ''}, ${formatTime(result.started_at)}`);
 
     article.innerHTML = `
         <div class="result-header">
@@ -543,14 +607,17 @@ function createResultCard(result, index) {
  * @private
  */
 function createResultCardHtml(result) {
+    const ariaLabel = `${escapeHtml(result.title || 'Untitled conversation')}, ${formatAgentName(result.agent)}${result.workspace ? ', ' + formatWorkspace(result.workspace) : ''}, ${formatTime(result.started_at)}`;
     return `
         <article
             class="result-card"
+            id="result-${result.conversation_id}"
             data-conversation-id="${result.conversation_id}"
             data-message-id="${result.message_id || ''}"
             tabindex="0"
-            role="button"
-            aria-label="Open conversation: ${escapeHtml(result.title || 'Untitled')}"
+            role="option"
+            aria-selected="false"
+            aria-label="${ariaLabel}"
         >
             <div class="result-header">
                 <span class="result-title">${escapeHtml(result.title || 'Untitled conversation')}</span>
@@ -579,18 +646,40 @@ function destroyVirtualList() {
 }
 
 /**
- * Update result count display
+ * Update result count display and announce to screen readers
  */
 function updateResultCount() {
     const count = currentResults.length;
     const hasMore = count >= SEARCH_CONFIG.PAGE_SIZE;
 
+    let message;
     if (currentQuery) {
-        elements.resultCount.textContent = hasMore
+        message = hasMore
             ? `${count}+ results for "${currentQuery}"`
             : `${count} result${count !== 1 ? 's' : ''} for "${currentQuery}"`;
     } else {
-        elements.resultCount.textContent = `${count} recent conversation${count !== 1 ? 's' : ''}`;
+        message = `${count} recent conversation${count !== 1 ? 's' : ''}`;
+    }
+
+    elements.resultCount.textContent = message;
+
+    // Announce to screen readers
+    announceToScreenReader(message);
+}
+
+/**
+ * Announce message to screen readers via the live region
+ * @param {string} message - Message to announce
+ */
+function announceToScreenReader(message) {
+    const announcer = document.getElementById('search-announcer');
+    if (announcer) {
+        // Clear and set to trigger announcement
+        announcer.textContent = '';
+        // Use setTimeout to ensure the clear is processed first
+        setTimeout(() => {
+            announcer.textContent = message;
+        }, 50);
     }
 }
 
