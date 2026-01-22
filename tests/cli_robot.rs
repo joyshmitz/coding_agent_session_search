@@ -7,8 +7,8 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
-use clap::{self, CommandFactory};
-use coding_agent_search::Cli;
+use clap::{self, CommandFactory, Parser};
+use coding_agent_search::{Cli, Commands};
 
 fn base_cmd() -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cass"));
@@ -3364,6 +3364,67 @@ fn introspect_index_watch_once_repeatable_path() {
         watch_once["value_type"], "path",
         "index --watch-once should be path type"
     );
+}
+
+/// Index command semantic flag should be documented as a flag.
+#[test]
+fn introspect_index_semantic_flag() {
+    let json = fetch_introspect_json();
+    let index = find_command(&json, "index");
+    let semantic = find_arg(index, "semantic");
+
+    assert_eq!(
+        semantic["arg_type"], "flag",
+        "index --semantic should be a flag"
+    );
+}
+
+/// Index command embedder should default to fastembed.
+#[test]
+fn introspect_index_embedder_default() {
+    let json = fetch_introspect_json();
+    let index = find_command(&json, "index");
+    let embedder = find_arg(index, "embedder");
+
+    assert_eq!(
+        embedder["value_type"], "string",
+        "index --embedder should be string type"
+    );
+    assert_eq!(
+        embedder["default"], "fastembed",
+        "index --embedder should default to fastembed"
+    );
+}
+
+/// Index command parsing should accept semantic + embedder flags.
+#[test]
+fn parse_index_semantic_embedder_flags() {
+    let cli =
+        Cli::try_parse_from(["cass", "index", "--semantic", "--embedder", "fastembed"]).unwrap();
+    match cli.command {
+        Some(Commands::Index {
+            semantic, embedder, ..
+        }) => {
+            assert!(semantic, "semantic flag should be set");
+            assert_eq!(embedder, "fastembed");
+        }
+        other => panic!("expected index command, got {other:?}"),
+    }
+}
+
+/// Index command parsing should default embedder to fastembed.
+#[test]
+fn parse_index_embedder_default() {
+    let cli = Cli::try_parse_from(["cass", "index", "--semantic"]).unwrap();
+    match cli.command {
+        Some(Commands::Index {
+            semantic, embedder, ..
+        }) => {
+            assert!(semantic, "semantic flag should be set");
+            assert_eq!(embedder, "fastembed");
+        }
+        other => panic!("expected index command, got {other:?}"),
+    }
 }
 
 /// Search command aggregate parameter should be repeatable

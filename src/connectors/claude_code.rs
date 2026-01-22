@@ -135,7 +135,15 @@ impl Connector for ClaudeCodeConnector {
 
                     // Filter to user/assistant entries only (skip summary, file-history-snapshot, etc.)
                     let entry_type = val.get("type").and_then(|v| v.as_str());
-                    if !matches!(entry_type, Some("user" | "assistant")) {
+                    let role_hint = val
+                        .get("message")
+                        .and_then(|m| m.get("role"))
+                        .and_then(|v| v.as_str())
+                        .or_else(|| val.get("role").and_then(|v| v.as_str()));
+                    let is_user_assistant = matches!(entry_type, Some("user" | "assistant"))
+                        || (entry_type == Some("message")
+                            && matches!(role_hint, Some("user" | "assistant")));
+                    if !is_user_assistant {
                         continue;
                     }
 
@@ -152,13 +160,8 @@ impl Connector for ClaudeCodeConnector {
                     started_at = started_at.or(created);
                     ended_at = created.or(ended_at);
 
-                    // Role from message.role or entry type
-                    let role = val
-                        .get("message")
-                        .and_then(|m| m.get("role"))
-                        .and_then(|v| v.as_str())
-                        .or(entry_type)
-                        .unwrap_or("agent");
+                    // Role from message.role, top-level role, or entry type
+                    let role = role_hint.or(entry_type).unwrap_or("agent");
 
                     // Content from message.content (may be string or array)
                     let content_val = val.get("message").and_then(|m| m.get("content"));

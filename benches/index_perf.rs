@@ -22,6 +22,8 @@ fn bench_index_full(c: &mut Criterion) {
         watch_once_paths: None,
         db_path,
         data_dir: data_dir.clone(),
+        semantic: false,
+        embedder: "fastembed".to_string(),
         progress: None,
     };
 

@@ -795,6 +795,14 @@ fn index_help_includes_options() {
         "Help should mention --force-rebuild"
     );
     assert!(
+        stdout.contains("--semantic"),
+        "Help should mention --semantic"
+    );
+    assert!(
+        stdout.contains("--embedder"),
+        "Help should mention --embedder"
+    );
+    assert!(
         stdout.contains("--data-dir"),
         "Help should mention --data-dir"
     );
