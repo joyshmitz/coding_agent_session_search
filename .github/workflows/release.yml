@@ -30,7 +30,7 @@ jobs:
             artifact_name: cass
             asset_name: cass-linux-arm64
           # macOS Intel
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
             artifact_name: cass
             asset_name: cass-darwin-amd64
