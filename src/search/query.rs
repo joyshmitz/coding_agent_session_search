@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow, bail};
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
@@ -108,6 +109,38 @@ static CACHE_KEY_INTERNER: Lazy<StringInterner> = Lazy::new(|| StringInterner::n
 #[inline]
 fn intern_cache_key(s: &str) -> Arc<str> {
     CACHE_KEY_INTERNER.intern(s)
+}
+
+// ============================================================================
+// SQL Placeholder Builder (Opt 4.5: Pre-sized String Buffers)
+// ============================================================================
+
+/// Build a comma-separated list of SQL placeholders with pre-allocated capacity.
+///
+/// For `n` items, produces "?,?,?..." (n "?" with n-1 ",").
+/// Uses pre-sized String to avoid reallocations.
+///
+/// # Examples
+/// ```ignore
+/// assert_eq!(sql_placeholders(0), "");
+/// assert_eq!(sql_placeholders(1), "?");
+/// assert_eq!(sql_placeholders(3), "?,?,?");
+/// ```
+#[inline]
+pub fn sql_placeholders(count: usize) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    // Capacity: n "?" + (n-1) "," = 2n - 1
+    let capacity = count * 2 - 1;
+    let mut result = String::with_capacity(capacity);
+    for i in 0..count {
+        if i > 0 {
+            result.push(',');
+        }
+        result.push('?');
+    }
+    result
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -1447,14 +1480,18 @@ enum QueryToken {
     Not,
 }
 
+/// Type alias for query token list - most queries have 1-4 tokens (Opt 4.4)
+/// SmallVec keeps small lists on the stack, avoiding heap allocation.
+type QueryTokenList = SmallVec<[QueryToken; 4]>;
+
 /// Parse a query string into boolean tokens.
 /// Supports:
 /// - AND, && for explicit AND (implicit between terms)
 /// - OR, || for OR
 /// - NOT, - prefix for exclusion
 /// - "quoted phrases" for exact matching
-fn parse_boolean_query(query: &str) -> Vec<QueryToken> {
-    let mut tokens = Vec::new();
+fn parse_boolean_query(query: &str) -> QueryTokenList {
+    let mut tokens = SmallVec::new();
     let mut chars = query.chars().peekable();
     let mut current_word = String::new();
 
@@ -2173,7 +2210,9 @@ impl SearchClient {
             .as_ref()
             .ok_or_else(|| anyhow!("semantic search requires database connection"))?;
 
-        let mut placeholders = String::new();
+        // Pre-size: n "?" chars + (n-1) "," chars = 2n-1 total
+        let placeholder_capacity = results.len().saturating_mul(2).saturating_sub(1);
+        let mut placeholders = String::with_capacity(placeholder_capacity);
         let mut params: Vec<i64> = Vec::with_capacity(results.len());
         for (idx, result) in results.iter().enumerate() {
             if idx > 0 {
@@ -2816,10 +2855,7 @@ impl SearchClient {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
 
         if !filters.agents.is_empty() {
-            let placeholders = (0..filters.agents.len())
-                .map(|_| "?".to_string())
-                .collect::<Vec<_>>()
-                .join(",");
+            let placeholders = sql_placeholders(filters.agents.len());
             sql.push_str(&format!(" AND f.agent IN ({placeholders})"));
             for a in filters.agents {
                 params.push(Box::new(a));
@@ -2827,10 +2863,7 @@ impl SearchClient {
         }
 
         if !filters.workspaces.is_empty() {
-            let placeholders = (0..filters.workspaces.len())
-                .map(|_| "?".to_string())
-                .collect::<Vec<_>>()
-                .join(",");
+            let placeholders = sql_placeholders(filters.workspaces.len());
             sql.push_str(&format!(" AND f.workspace IN ({placeholders})"));
             for w in filters.workspaces {
                 params.push(Box::new(w));
@@ -7549,6 +7582,48 @@ mod tests {
     }
 
     // =============================================================================
+    // SQL Placeholder Builder Tests (Opt 4.5: Pre-sized String Buffers)
+    // =============================================================================
+
+    #[test]
+    fn sql_placeholders_empty() {
+        assert_eq!(sql_placeholders(0), "");
+    }
+
+    #[test]
+    fn sql_placeholders_single() {
+        assert_eq!(sql_placeholders(1), "?");
+    }
+
+    #[test]
+    fn sql_placeholders_multiple() {
+        assert_eq!(sql_placeholders(3), "?,?,?");
+        assert_eq!(sql_placeholders(5), "?,?,?,?,?");
+    }
+
+    #[test]
+    fn sql_placeholders_capacity_efficient() {
+        // For count=3, capacity should be exactly 2*3-1=5 ("?,?,?" = 5 chars)
+        let result = sql_placeholders(3);
+        assert_eq!(result.len(), 5);
+        assert!(result.capacity() >= 5); // Should have allocated at least 5
+
+        // For count=10, capacity should be exactly 2*10-1=19
+        let result = sql_placeholders(10);
+        assert_eq!(result.len(), 19);
+        assert!(result.capacity() >= 19);
+    }
+
+    #[test]
+    fn sql_placeholders_large_count() {
+        // Test with a large count to ensure no off-by-one errors
+        let result = sql_placeholders(100);
+        assert_eq!(result.len(), 199); // 100 "?" + 99 ","
+        assert_eq!(result.chars().filter(|c| *c == '?').count(), 100);
+        assert_eq!(result.chars().filter(|c| *c == ',').count(), 99);
+    }
+
+    // =============================================================================
     // RRF (Reciprocal Rank Fusion) Tests
     // =============================================================================
 
@@ -7723,5 +7798,83 @@ mod tests {
         for hit in &fused {
             assert!(seen.insert(&hit.title), "Duplicate hit: {}", hit.title);
         }
+    }
+
+    // ==========================================================================
+    // QueryTokenList SmallVec Tests (Opt 4.4)
+    // ==========================================================================
+
+    #[test]
+    fn query_token_list_stays_on_stack_for_small_queries() {
+        // Single term - should not spill
+        let tokens = parse_boolean_query("hello");
+        assert!(!tokens.spilled(), "Single term should stay on stack");
+        assert_eq!(tokens.len(), 1);
+
+        // Two terms - should not spill
+        let tokens = parse_boolean_query("hello world");
+        assert!(!tokens.spilled(), "Two terms should stay on stack");
+        assert_eq!(tokens.len(), 2);
+
+        // Three terms with operator - should not spill
+        let tokens = parse_boolean_query("hello AND world");
+        assert!(!tokens.spilled(), "Three tokens should stay on stack");
+        assert_eq!(tokens.len(), 3);
+
+        // Four tokens - exactly at capacity
+        let tokens = parse_boolean_query("hello world foo bar");
+        assert!(!tokens.spilled(), "Four terms at capacity should stay on stack");
+        assert_eq!(tokens.len(), 4);
+    }
+
+    #[test]
+    fn query_token_list_spills_to_heap_for_large_queries() {
+        // Five or more tokens should spill to heap
+        let tokens = parse_boolean_query("a b c d e f g h");
+        assert!(tokens.spilled(), "Eight terms should spill to heap");
+        assert_eq!(tokens.len(), 8);
+    }
+
+    #[test]
+    fn query_token_list_handles_quoted_phrases() {
+        let tokens = parse_boolean_query("\"hello world\" test");
+        assert!(!tokens.spilled(), "Phrase and term should stay on stack");
+        assert_eq!(tokens.len(), 2);
+
+        // Verify the phrase is correctly parsed
+        if let QueryToken::Phrase(phrase) = &tokens[0] {
+            assert_eq!(phrase, "hello world");
+        } else {
+            panic!("Expected Phrase token");
+        }
+    }
+
+    #[test]
+    fn query_token_list_handles_operators() {
+        let tokens = parse_boolean_query("foo AND bar OR baz");
+        assert!(!tokens.spilled(), "Query with operators should stay on stack");
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[1], QueryToken::And);
+        assert_eq!(tokens[3], QueryToken::Or);
+    }
+
+    #[test]
+    fn query_token_list_empty_query() {
+        let tokens = parse_boolean_query("");
+        assert!(!tokens.spilled());
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn query_token_list_iteration_works() {
+        let tokens = parse_boolean_query("a b c");
+        let terms: Vec<_> = tokens
+            .iter()
+            .filter_map(|t| match t {
+                QueryToken::Term(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terms, vec!["a", "b", "c"]);
     }
 }

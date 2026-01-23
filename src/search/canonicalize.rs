@@ -91,7 +91,10 @@ pub fn canonicalize_for_embedding(text: &str) -> String {
     }
 }
 
-fn canonicalize_for_embedding_legacy(text: &str) -> String {
+/// Legacy canonicalization pipeline (pre-streaming).
+///
+/// Exposed for benchmarks and regression comparisons.
+pub fn canonicalize_for_embedding_legacy(text: &str) -> String {
     // Step 1: Unicode NFC normalization (CRITICAL for hash stability)
     let normalized: String = text.nfc().collect();
 
@@ -108,7 +111,10 @@ fn canonicalize_for_embedding_legacy(text: &str) -> String {
     truncate_to_chars(&filtered, MAX_EMBED_CHARS)
 }
 
-fn canonicalize_for_embedding_streaming(text: &str) -> String {
+/// Streaming canonicalization pipeline with reduced allocations.
+///
+/// Exposed for benchmarks and regression comparisons.
+pub fn canonicalize_for_embedding_streaming(text: &str) -> String {
     // Step 1: Unicode NFC normalization (CRITICAL for hash stability)
     let normalized: String = text.nfc().collect();
 
@@ -792,5 +798,242 @@ See [docs](http://docs.rs) for more.
             canonical.contains("unbalanced"),
             "Should not swallow content"
         );
+    }
+
+    // =========================================================================
+    // EQUIVALENCE ORACLE TESTS: Legacy vs Streaming
+    // bd-5p55: Verify streaming canonicalization produces byte-for-byte
+    // identical output to legacy implementation
+    // =========================================================================
+
+    /// Helper: Assert legacy and streaming implementations produce identical output
+    fn assert_equivalence(text: &str) {
+        let legacy = canonicalize_for_embedding_legacy(text);
+        let streaming = canonicalize_for_embedding_streaming(text);
+
+        assert_eq!(
+            legacy,
+            streaming,
+            "\n\nEquivalence oracle FAILED!\n\
+             Input ({} chars): {:?}\n\
+             Legacy ({} chars): {:?}\n\
+             Streaming ({} chars): {:?}\n",
+            text.len(),
+            text,
+            legacy.len(),
+            legacy,
+            streaming.len(),
+            streaming
+        );
+
+        // Also verify content hashes match (critical for deduplication)
+        let legacy_hash = content_hash(&legacy);
+        let streaming_hash = content_hash(&streaming);
+        assert_eq!(
+            legacy_hash, streaming_hash,
+            "Content hash mismatch for input: {:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_equivalence_empty_input() {
+        assert_equivalence("");
+    }
+
+    #[test]
+    fn test_equivalence_simple_text() {
+        assert_equivalence("Hello, world!");
+        assert_equivalence("Simple text without any markdown.");
+        assert_equivalence("Multiple words with spaces.");
+    }
+
+    #[test]
+    fn test_equivalence_whitespace() {
+        assert_equivalence("   leading spaces");
+        assert_equivalence("trailing spaces   ");
+        assert_equivalence("   both sides   ");
+        assert_equivalence("multiple    internal    spaces");
+        assert_equivalence("\n\nmultiple\n\n\nnewlines\n\n");
+        assert_equivalence("\t\ttabs\t\teverywhere\t\t");
+    }
+
+    #[test]
+    fn test_equivalence_markdown_formatting() {
+        assert_equivalence("**bold text**");
+        assert_equivalence("*italic text*");
+        assert_equivalence("__also bold__");
+        assert_equivalence("`inline code`");
+        assert_equivalence("# Header 1");
+        assert_equivalence("## Header 2");
+        assert_equivalence("> Blockquote");
+        assert_equivalence("- List item");
+        assert_equivalence("1. Ordered item");
+        assert_equivalence("**bold** and *italic* and __underline__");
+    }
+
+    #[test]
+    fn test_equivalence_links() {
+        assert_equivalence("[link text](http://example.com)");
+        assert_equivalence("[nested (parens)](http://example.com/path(1))");
+        assert_equivalence("Check [this](http://x.com) and [that](http://y.com).");
+        assert_equivalence("[broken link](url( unbalanced");
+    }
+
+    #[test]
+    fn test_equivalence_code_blocks_short() {
+        assert_equivalence("```\ncode\n```");
+        assert_equivalence("```rust\nfn main() {}\n```");
+        assert_equivalence("```python\ndef hello():\n    print('hi')\n```");
+    }
+
+    #[test]
+    fn test_equivalence_code_blocks_long() {
+        // Code block with more than HEAD + TAIL lines (needs collapsing)
+        let lines: Vec<String> = (0..50).map(|i| format!("line {i}")).collect();
+        let code = format!("```rust\n{}\n```", lines.join("\n"));
+        assert_equivalence(&code);
+    }
+
+    #[test]
+    fn test_equivalence_code_blocks_unclosed() {
+        assert_equivalence("```rust\nfn main() {}\n// no closing fence");
+    }
+
+    #[test]
+    fn test_equivalence_low_signal() {
+        assert_equivalence("OK");
+        assert_equivalence("Done.");
+        assert_equivalence("Got it.");
+        assert_equivalence("Thanks");
+        assert_equivalence("ok"); // lowercase
+        assert_equivalence("DONE"); // uppercase
+    }
+
+    #[test]
+    fn test_equivalence_unicode() {
+        assert_equivalence("café");
+        assert_equivalence("caf\u{00E9}"); // NFC composed
+        assert_equivalence("cafe\u{0301}"); // NFD decomposed
+        assert_equivalence("Hello 👋 World 🌍");
+        assert_equivalence("日本語テスト");
+        assert_equivalence("مرحبا");
+    }
+
+    #[test]
+    fn test_equivalence_long_text() {
+        // Text longer than MAX_EMBED_CHARS
+        let long_text: String = "a".repeat(5000);
+        assert_equivalence(&long_text);
+
+        let long_words: String = (0..1000).map(|i| format!("word{i} ")).collect();
+        assert_equivalence(&long_words);
+    }
+
+    #[test]
+    fn test_equivalence_mixed_content() {
+        let text = r#"# Welcome to the Project
+
+**This is bold** and *this is italic*.
+
+Here's some code:
+
+```rust
+fn main() {
+    println!("Hello, world!");
+}
+```
+
+And a [link](http://example.com).
+
+> A blockquote with multiple lines
+> spanning here.
+
+1. First item
+2. Second item
+3. Third item
+
+Thanks for reading!"#;
+        assert_equivalence(text);
+    }
+
+    #[test]
+    fn test_equivalence_real_agent_output() {
+        // Simulate typical AI agent output patterns
+        let text1 = r#"I'll help you implement that feature. Here's my plan:
+
+1. First, I'll read the existing code
+2. Then, I'll make the necessary changes
+3. Finally, I'll run the tests
+
+```python
+def implement_feature():
+    # Step 1: Read config
+    config = load_config()
+
+    # Step 2: Process data
+    result = process(config)
+
+    # Step 3: Save result
+    save_result(result)
+```
+
+Let me know if you have any questions!"#;
+        assert_equivalence(text1);
+
+        let text2 = "I've made the changes you requested. The file has been updated at `src/main.rs:42`. Please run `cargo test` to verify.";
+        assert_equivalence(text2);
+    }
+
+    #[test]
+    fn test_equivalence_numbers_not_list_markers() {
+        // Numbers that look like list markers but aren't
+        assert_equivalence("3.14159 is pi");
+        assert_equivalence("Version 2.0 released");
+        assert_equivalence("The ratio is 1.5 to 1");
+    }
+
+    #[test]
+    fn test_equivalence_stress_many_inputs() {
+        // Run through many different inputs to catch edge cases
+        let test_cases = [
+            "",
+            " ",
+            "  ",
+            "\n",
+            "\n\n",
+            "\t",
+            "a",
+            "ab",
+            "abc",
+            "a b",
+            "a  b",
+            "a   b",
+            "a\nb",
+            "a\n\nb",
+            "```\n```",
+            "```x\n```",
+            "```\na\n```",
+            "**",
+            "****",
+            "``",
+            "[]",
+            "[]()",
+            "[a]()",
+            "[](b)",
+            "[a](b)",
+            "# ",
+            "## ",
+            "### ",
+            "> ",
+            "- ",
+            "1. ",
+            "1.a",
+            "1.2.3",
+        ];
+
+        for text in test_cases {
+            assert_equivalence(text);
+        }
     }
 }
