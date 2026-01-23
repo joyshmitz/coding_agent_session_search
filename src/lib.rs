@@ -125,7 +125,7 @@ pub enum Commands {
         watch_once: Option<Vec<PathBuf>>,
 
         /// Build semantic vector index after text indexing
-        #[arg(long, default_value_t = false)]
+        #[arg(long)]
         semantic: bool,
 
         /// Embedder to use for semantic indexing (hash, fastembed)
