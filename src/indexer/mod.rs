@@ -27,7 +27,7 @@ use crate::search::vector_index::{
 use crate::sources::config::{Platform, SourcesConfig};
 use crate::sources::provenance::{LOCAL_SOURCE_ID, Origin, Source};
 use crate::sources::sync::path_to_safe_dirname;
-use crate::storage::sqlite::{MessageForEmbedding, SqliteStorage, StatsAggregator};
+use crate::storage::sqlite::{SqliteStorage, StatsAggregator};
 use semantic::{EmbeddingInput, SemanticIndexer};
 
 #[derive(Debug, Clone)]
