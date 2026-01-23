@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow, bail};
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec}
 use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
@@ -6449,14 +6449,14 @@ mod tests {
         let tokens = parse_boolean_query("-world");
         assert_eq!(
             tokens,
-            vec![QueryToken::Not, QueryToken::Term("world".into())]
+            smallvec![QueryToken::Not, QueryToken::Term("world".into())]
         );
 
         // Prefix minus after space should trigger NOT
         let tokens = parse_boolean_query("hello -world");
         assert_eq!(
             tokens,
-            vec![
+            smallvec![
                 QueryToken::Term("hello".into()),
                 QueryToken::Not,
                 QueryToken::Term("world".into())
@@ -6472,7 +6472,7 @@ mod tests {
         let tokens = parse_boolean_query("foo \"\" bar");
         assert_eq!(
             tokens,
-            vec![
+            smallvec![
                 QueryToken::Term("foo".into()),
                 QueryToken::Term("bar".into())
             ]
@@ -6483,7 +6483,7 @@ mod tests {
     fn parse_boolean_query_unclosed_quote() {
         // Unclosed quote should collect until end
         let tokens = parse_boolean_query("\"hello world");
-        assert_eq!(tokens, vec![QueryToken::Phrase("hello world".into())]);
+        assert_eq!(tokens, smallvec![QueryToken::Phrase("hello world".into())]);
     }
 
     // --- levenshtein_distance tests ---
