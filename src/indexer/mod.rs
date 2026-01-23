@@ -1168,6 +1168,9 @@ fn reindex_paths(
 
             // Commit to Tantivy immediately to ensure index consistency before advancing watch state.
             t_index.commit()?;
+
+            // Keep last_indexed_at current so `cass status` doesn't report stale during watch mode
+            storage.set_last_indexed_at(SqliteStorage::now_millis())?;
         }
 
         if let Some(ts_val) = ts {
