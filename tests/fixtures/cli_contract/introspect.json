@@ -158,6 +158,25 @@
           "repeatable": true
         },
         {
+          "name": "semantic",
+          "description": "Build semantic vector index after text indexing",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "embedder",
+          "description": "Embedder to use for semantic indexing (hash, fastembed)",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false,
+          "default": "fastembed"
+        },
+        {
           "name": "data-dir",
           "description": "Override data dir (index + db). Defaults to platform data dir",
           "arg_type": "option",

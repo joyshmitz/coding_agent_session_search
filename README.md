@@ -1986,6 +1986,22 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_ses
   | bash -s -- --easy-mode --verify
 ```
 
+**Alternative: GitHub Release Binaries**
+1. Download the asset for your platform from GitHub Releases.
+2. Verify `SHA256SUMS.txt` against the downloaded archive.
+3. Extract and move `cass` into your PATH.
+
+Example (Linux x86_64):
+```bash
+curl -L -o cass-linux-amd64.tar.gz \
+  https://github.com/Dicklesworthstone/coding_agent_session_search/releases/latest/download/cass-linux-amd64.tar.gz
+curl -L -o SHA256SUMS.txt \
+  https://github.com/Dicklesworthstone/coding_agent_session_search/releases/latest/download/SHA256SUMS.txt
+sha256sum -c SHA256SUMS.txt
+tar -xzf cass-linux-amd64.tar.gz
+install -m 755 cass ~/.local/bin/cass
+```
+
 ### 2. Launch
 ```bash
 cass
