@@ -6447,21 +6447,17 @@ mod tests {
     fn parse_boolean_query_prefix_minus_not() {
         // Prefix minus at start of query should trigger NOT
         let tokens = parse_boolean_query("-world");
-        assert_eq!(
-            tokens,
-            smallvec![QueryToken::Not, QueryToken::Term("world".into())]
-        );
+        let expected: QueryTokenList = SmallVec::from_vec(vec![QueryToken::Not, QueryToken::Term("world".into())]);
+        assert_eq!(tokens, expected);
 
         // Prefix minus after space should trigger NOT
         let tokens = parse_boolean_query("hello -world");
-        assert_eq!(
-            tokens,
-            smallvec![
-                QueryToken::Term("hello".into()),
-                QueryToken::Not,
-                QueryToken::Term("world".into())
-            ]
-        );
+        let expected: QueryTokenList = SmallVec::from_vec(vec![
+            QueryToken::Term("hello".into()),
+            QueryToken::Not,
+            QueryToken::Term("world".into())
+        ]);
+        assert_eq!(tokens, expected);
     }
 
     #[test]
@@ -6470,20 +6466,19 @@ mod tests {
         assert!(tokens.is_empty());
 
         let tokens = parse_boolean_query("foo \"\" bar");
-        assert_eq!(
-            tokens,
-            smallvec![
-                QueryToken::Term("foo".into()),
-                QueryToken::Term("bar".into())
-            ]
-        );
+        let expected: QueryTokenList = SmallVec::from_vec(vec![
+            QueryToken::Term("foo".into()),
+            QueryToken::Term("bar".into())
+        ]);
+        assert_eq!(tokens, expected);
     }
 
     #[test]
     fn parse_boolean_query_unclosed_quote() {
         // Unclosed quote should collect until end
         let tokens = parse_boolean_query("\"hello world");
-        assert_eq!(tokens, smallvec![QueryToken::Phrase("hello world".into())]);
+        let expected: QueryTokenList = SmallVec::from_vec(vec![QueryToken::Phrase("hello world".into())]);
+        assert_eq!(tokens, expected);
     }
 
     // --- levenshtein_distance tests ---
