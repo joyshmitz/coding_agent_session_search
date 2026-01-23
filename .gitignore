@@ -30,8 +30,9 @@ temp_*.rs
 # Local backup directories
 .local_backup_*/
 
-# Benchmark target directories
-target_bench_*/
+# Alternative target directories (benchmarks, tests, checks)
+target_*/
+target-*/
 
 # Web test artifacts
 web/node_modules/
