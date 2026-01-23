@@ -7,13 +7,16 @@
 //! - Missing optional fields have sensible defaults
 
 use coding_agent_search::pages::encrypt::{EncryptionConfig, KdfAlgorithm, SlotType};
-use coding_agent_search::storage::sqlite::{MigrationError, SqliteStorage, CURRENT_SCHEMA_VERSION};
+use coding_agent_search::storage::sqlite::{CURRENT_SCHEMA_VERSION, MigrationError, SqliteStorage};
 use rusqlite::Connection;
 use serde_json::json;
 use tempfile::TempDir;
 
 const _: () = {
-    assert!(CURRENT_SCHEMA_VERSION > 0, "Schema version should be positive");
+    assert!(
+        CURRENT_SCHEMA_VERSION > 0,
+        "Schema version should be positive"
+    );
     assert!(
         CURRENT_SCHEMA_VERSION < 100,
         "Schema version should be reasonable"
@@ -58,11 +61,8 @@ fn test_detects_older_schema() {
     // Create a minimal old-style database
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute(
-            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
-            [],
-        )
-        .unwrap();
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)", [])
+            .unwrap();
         // Simulate an older schema version
         conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', '1')",
@@ -88,10 +88,7 @@ fn test_detects_older_schema() {
         Err(e) => {
             // Migration error is acceptable for very old schemas
             if let MigrationError::RebuildRequired { reason, .. } = e {
-                assert!(
-                    !reason.is_empty(),
-                    "Rebuild reason should not be empty"
-                );
+                assert!(!reason.is_empty(), "Rebuild reason should not be empty");
             }
         }
     }
@@ -385,11 +382,8 @@ fn test_reject_schema_version_0() {
 
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute(
-            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
-            [],
-        )
-        .unwrap();
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', '0')",
             [],
@@ -406,19 +400,17 @@ fn test_reject_schema_version_0() {
             let storage = SqliteStorage::open(&db_path).unwrap();
             assert!(storage.schema_version().unwrap() >= CURRENT_SCHEMA_VERSION);
         }
-        Err(e) => {
-            match e {
-                MigrationError::RebuildRequired { reason, .. } => {
-                    assert!(
-                        reason.to_lowercase().contains("rebuild")
-                            || reason.to_lowercase().contains("schema"),
-                        "Rebuild reason should be informative: {}",
-                        reason
-                    );
-                }
-                other => panic!("Unexpected error type: {:?}", other),
+        Err(e) => match e {
+            MigrationError::RebuildRequired { reason, .. } => {
+                assert!(
+                    reason.to_lowercase().contains("rebuild")
+                        || reason.to_lowercase().contains("schema"),
+                    "Rebuild reason should be informative: {}",
+                    reason
+                );
             }
-        }
+            other => panic!("Unexpected error type: {:?}", other),
+        },
     }
 }
 

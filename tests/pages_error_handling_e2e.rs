@@ -14,9 +14,7 @@
 //! cargo test --test pages_error_handling_e2e
 //! ```
 
-use coding_agent_search::pages::encrypt::{
-    DecryptionEngine, EncryptionEngine, load_config,
-};
+use coding_agent_search::pages::encrypt::{DecryptionEngine, EncryptionEngine, load_config};
 use coding_agent_search::pages::errors::{
     BrowserError, DbError, DecryptError, ErrorCode, ExportError, NetworkError,
 };
@@ -39,7 +37,11 @@ const TEST_RECOVERY_SECRET: &[u8] = b"test-recovery-secret-32-bytes!!";
 /// Create a test archive with password encryption.
 fn create_test_archive(temp_dir: &Path, password: &str) -> std::path::PathBuf {
     let input_path = temp_dir.join("input.db");
-    fs::write(&input_path, b"Test database content for error handling tests").unwrap();
+    fs::write(
+        &input_path,
+        b"Test database content for error handling tests",
+    )
+    .unwrap();
 
     let encrypt_dir = temp_dir.join("encrypted");
     let mut engine = EncryptionEngine::new(1024);
@@ -53,7 +55,11 @@ fn create_test_archive(temp_dir: &Path, password: &str) -> std::path::PathBuf {
 }
 
 /// Create a test archive with both password and recovery slots.
-fn create_test_archive_with_recovery(temp_dir: &Path, password: &str, recovery: &[u8]) -> std::path::PathBuf {
+fn create_test_archive_with_recovery(
+    temp_dir: &Path,
+    password: &str,
+    recovery: &[u8],
+) -> std::path::PathBuf {
     let input_path = temp_dir.join("input.db");
     fs::write(&input_path, b"Test database content").unwrap();
 
@@ -89,7 +95,9 @@ fn test_wrong_password_error() {
         Err(e) => {
             let err_msg = e.to_string();
             assert!(
-                err_msg.contains("password") || err_msg.contains("Invalid") || err_msg.contains("key slot"),
+                err_msg.contains("password")
+                    || err_msg.contains("Invalid")
+                    || err_msg.contains("key slot"),
                 "Error should mention password issue: {}",
                 err_msg
             );
@@ -176,11 +184,8 @@ fn test_password_error_no_timing_leak() {
 #[test]
 fn test_wrong_recovery_key_error() {
     let temp_dir = TempDir::new().unwrap();
-    let archive_dir = create_test_archive_with_recovery(
-        temp_dir.path(),
-        TEST_PASSWORD,
-        TEST_RECOVERY_SECRET,
-    );
+    let archive_dir =
+        create_test_archive_with_recovery(temp_dir.path(), TEST_PASSWORD, TEST_RECOVERY_SECRET);
 
     let config = load_config(&archive_dir).expect("Should load config");
     let result = DecryptionEngine::unlock_with_recovery(config, b"wrong-recovery-key");
@@ -322,7 +327,8 @@ fn test_invalid_format_error() {
 
     // User-facing message should be friendly
     assert!(
-        message.to_lowercase().contains("not a valid") || message.to_lowercase().contains("archive"),
+        message.to_lowercase().contains("not a valid")
+            || message.to_lowercase().contains("archive"),
         "Format error should be user-friendly: {}",
         message
     );
@@ -446,8 +452,18 @@ fn test_error_messages_no_technical_jargon() {
     ];
 
     let jargon = [
-        "GCM", "AES", "AEAD", "nonce", "cipher", "tag", "MAC",
-        "sqlite", "FTS", "FTS5", "SQL", "query syntax",
+        "GCM",
+        "AES",
+        "AEAD",
+        "nonce",
+        "cipher",
+        "tag",
+        "MAC",
+        "sqlite",
+        "FTS",
+        "FTS5",
+        "SQL",
+        "query syntax",
     ];
 
     for error in errors {
@@ -545,7 +561,11 @@ fn test_error_codes_exist_and_unique() {
 
     for error in decrypt_errors {
         let code = error.error_code();
-        assert!(code.starts_with("E"), "Error code should start with 'E': {}", code);
+        assert!(
+            code.starts_with("E"),
+            "Error code should start with 'E': {}",
+            code
+        );
         assert!(
             codes.insert(code.to_string()),
             "Duplicate error code: {}",
@@ -563,7 +583,11 @@ fn test_error_codes_exist_and_unique() {
 
     for error in db_errors {
         let code = error.error_code();
-        assert!(code.starts_with("E"), "Error code should start with 'E': {}", code);
+        assert!(
+            code.starts_with("E"),
+            "Error code should start with 'E': {}",
+            code
+        );
         assert!(
             codes.insert(code.to_string()),
             "Duplicate error code: {}",
@@ -586,10 +610,7 @@ fn test_browser_error_messages() {
         (BrowserError::WasmNotSupported, "webassembly"),
         (BrowserError::CryptoNotSupported, "cryptography"),
         (BrowserError::StorageQuotaExceeded, "storage"),
-        (
-            BrowserError::SharedArrayBufferNotAvailable,
-            "cross-origin",
-        ),
+        (BrowserError::SharedArrayBufferNotAvailable, "cross-origin"),
     ];
 
     for (error, expected) in errors {
@@ -637,7 +658,10 @@ fn test_browser_error_suggestions_actionable() {
 #[test]
 fn test_network_error_messages() {
     let errors = vec![
-        (NetworkError::FetchFailed("connection refused".into()), "download"),
+        (
+            NetworkError::FetchFailed("connection refused".into()),
+            "download",
+        ),
         (
             NetworkError::IncompleteDownload {
                 expected: 1000,
@@ -689,7 +713,10 @@ fn test_export_error_messages() {
             ExportError::SourceDatabaseError("file not found".into()),
             "database",
         ),
-        (ExportError::OutputError("permission denied".into()), "output"),
+        (
+            ExportError::OutputError("permission denied".into()),
+            "output",
+        ),
         (ExportError::FilterMatchedNothing, "filter"),
     ];
 
@@ -731,11 +758,8 @@ fn test_export_error_suggestions() {
 fn test_error_chain_authentication_to_recovery() {
     // Simulate: user enters wrong password, gets error, uses recovery key
     let temp_dir = TempDir::new().unwrap();
-    let archive_dir = create_test_archive_with_recovery(
-        temp_dir.path(),
-        TEST_PASSWORD,
-        TEST_RECOVERY_SECRET,
-    );
+    let archive_dir =
+        create_test_archive_with_recovery(temp_dir.path(), TEST_PASSWORD, TEST_RECOVERY_SECRET);
 
     // Step 1: Wrong password
     let config = load_config(&archive_dir).unwrap();

@@ -20,10 +20,15 @@ use crate::connectors::{
     opencode::OpenCodeConnector, pi_agent::PiAgentConnector,
 };
 use crate::search::tantivy::{TantivyIndex, index_dir, schema_hash_matches};
+use crate::search::vector_index::{
+    Quantization, ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_USER, VectorIndex, vector_index_path,
+};
+
 use crate::sources::config::{Platform, SourcesConfig};
 use crate::sources::provenance::{LOCAL_SOURCE_ID, Origin, Source};
 use crate::sources::sync::path_to_safe_dirname;
-use crate::storage::sqlite::{SqliteStorage, StatsAggregator};
+use crate::storage::sqlite::{MessageForEmbedding, SqliteStorage, StatsAggregator};
+use semantic::{EmbeddingInput, SemanticIndexer};
 
 #[derive(Debug, Clone)]
 pub enum ReindexCommand {
@@ -682,6 +687,79 @@ pub fn run_index(
     }
 
     t_index.commit()?;
+
+    // Semantic indexing (if enabled)
+    if opts.semantic {
+        tracing::info!(embedder = %opts.embedder, "starting semantic indexing");
+
+        let semantic_indexer = SemanticIndexer::new(&opts.embedder, Some(&opts.data_dir))?;
+
+        // Fetch all messages with metadata from SQLite
+        let raw_messages = storage.fetch_messages_for_embedding()?;
+        tracing::info!(
+            message_count = raw_messages.len(),
+            "fetched messages for embedding"
+        );
+
+        // Convert to EmbeddingInput format
+        let embedding_inputs: Vec<EmbeddingInput> = raw_messages
+            .into_iter()
+            .map(|msg| {
+                let role_u8 = match msg.role.as_str() {
+                    "user" => ROLE_USER,
+                    "agent" | "assistant" => ROLE_ASSISTANT,
+                    "system" => ROLE_SYSTEM,
+                    "tool" => ROLE_TOOL,
+                    _ => ROLE_USER, // default to user for unknown roles
+                };
+
+                EmbeddingInput {
+                    message_id: msg.message_id as u64,
+                    created_at_ms: msg.created_at.unwrap_or(0),
+                    agent_id: msg.agent_id as u32,
+                    workspace_id: msg.workspace_id.unwrap_or(0) as u32,
+                    source_id: msg.source_id_hash,
+                    role: role_u8,
+                    chunk_idx: 0,
+                    content: msg.content,
+                }
+            })
+            .collect();
+
+        // Generate embeddings
+        let embedded_messages = semantic_indexer.embed_messages(&embedding_inputs)?;
+        tracing::info!(
+            embedded_count = embedded_messages.len(),
+            "generated embeddings"
+        );
+
+        if !embedded_messages.is_empty() {
+            // Convert to VectorEntry and build index
+            let entries = embedded_messages
+                .into_iter()
+                .map(|em| em.into_vector_entry());
+
+            let vector_index = VectorIndex::build(
+                semantic_indexer.embedder_id(),
+                "1.0", // revision
+                semantic_indexer.embedder_dimension(),
+                Quantization::F32,
+                entries,
+            )?;
+
+            // Save to disk
+            let index_path = vector_index_path(&opts.data_dir, semantic_indexer.embedder_id());
+            if let Some(parent) = index_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            vector_index.save(&index_path)?;
+            tracing::info!(
+                path = %index_path.display(),
+                embedder = semantic_indexer.embedder_id(),
+                "saved semantic vector index"
+            );
+        }
+    }
 
     // Update last_scan_ts after successful scan and commit
     storage.set_last_scan_ts(scan_start_ts)?;

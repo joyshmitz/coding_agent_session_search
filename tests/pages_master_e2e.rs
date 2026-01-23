@@ -36,7 +36,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-use tracing::{debug, info, instrument, Level};
+use tracing::{Level, debug, info, instrument};
 
 #[path = "util/mod.rs"]
 mod util;
@@ -103,7 +103,10 @@ fn build_pipeline(config: &E2EConfig) -> PipelineArtifacts {
     fs::create_dir_all(&data_dir).expect("Failed to create data directory");
 
     // Step 1: Setup database with fixtures
-    debug!("Step 1: Setting up database with {} conversations", config.conversation_count);
+    debug!(
+        "Step 1: Setting up database with {} conversations",
+        config.conversation_count
+    );
     let source_db_path = setup_test_db(&data_dir, config);
     info!("Database created at: {}", source_db_path.display());
 
@@ -123,11 +126,14 @@ fn build_pipeline(config: &E2EConfig) -> PipelineArtifacts {
 
     let export_engine = ExportEngine::new(&source_db_path, &export_db_path, filter);
     let stats = export_engine
-        .execute(|current, total| {
-            if total > 0 {
-                debug!("Export progress: {}/{}", current, total);
-            }
-        }, None)
+        .execute(
+            |current, total| {
+                if total > 0 {
+                    debug!("Export progress: {}/{}", current, total);
+                }
+            },
+            None,
+        )
         .expect("Export failed");
 
     info!(
@@ -153,8 +159,14 @@ fn build_pipeline(config: &E2EConfig) -> PipelineArtifacts {
         })
         .expect("Encryption failed");
 
-    assert!(encrypt_dir.join("config.json").exists(), "config.json should exist");
-    assert!(encrypt_dir.join("payload").exists(), "payload directory should exist");
+    assert!(
+        encrypt_dir.join("config.json").exists(),
+        "config.json should exist"
+    );
+    assert!(
+        encrypt_dir.join("payload").exists(),
+        "payload directory should exist"
+    );
     info!("Encryption complete");
 
     // Step 4: Bundle
@@ -172,7 +184,10 @@ fn build_pipeline(config: &E2EConfig) -> PipelineArtifacts {
         })
         .expect("Bundle failed");
 
-    assert!(bundle.site_dir.join("index.html").exists(), "index.html should exist");
+    assert!(
+        bundle.site_dir.join("index.html").exists(),
+        "index.html should exist"
+    );
     assert!(
         bundle.private_dir.join("recovery-secret.txt").exists(),
         "recovery-secret.txt should exist"
@@ -203,7 +218,9 @@ fn setup_test_db(data_dir: &Path, config: &E2EConfig) -> std::path::PathBuf {
         version: Some("1.0".to_string()),
         kind: AgentKind::Cli,
     };
-    let agent_id = storage.ensure_agent(&agent).expect("Failed to ensure agent");
+    let agent_id = storage
+        .ensure_agent(&agent)
+        .expect("Failed to ensure agent");
 
     // Create workspace
     let workspace_path = Path::new("/home/user/projects/e2e-test");
@@ -249,8 +266,7 @@ fn test_full_export_workflow() {
     let artifacts = build_pipeline(&config);
 
     // Verify bundle integrity
-    let result = verify_bundle(&artifacts.bundle.site_dir, false)
-        .expect("Verification failed");
+    let result = verify_bundle(&artifacts.bundle.site_dir, false).expect("Verification failed");
     assert_eq!(result.status, "valid", "Bundle should be valid");
 
     // Verify CLI verification
@@ -373,8 +389,7 @@ fn test_multi_key_slot_management() {
     );
 
     // Revoke original password
-    let revoke = key_revoke(site_dir, TEST_PASSWORD_2, 0)
-        .expect("Failed to revoke password");
+    let revoke = key_revoke(site_dir, TEST_PASSWORD_2, 0).expect("Failed to revoke password");
     assert_eq!(revoke.revoked_slot_id, 0);
     assert_eq!(revoke.remaining_slots, 2);
     info!("Revoked slot 0, remaining: {}", revoke.remaining_slots);
@@ -425,7 +440,10 @@ fn test_corruption_detection() {
 
     // Verification should now fail
     let result = verify_bundle(site_dir, false).expect("Verification should complete");
-    assert_eq!(result.status, "invalid", "Corrupted bundle should be invalid");
+    assert_eq!(
+        result.status, "invalid",
+        "Corrupted bundle should be invalid"
+    );
     info!("Corrupted verification: {}", result.status);
 
     info!("=== Corruption Detection Test PASSED ===");
@@ -450,15 +468,14 @@ fn test_large_archive_handling() {
     info!("Built large archive in {:?}", build_duration);
 
     // Verify it's still valid
-    let result = verify_bundle(&artifacts.bundle.site_dir, false)
-        .expect("Verification failed");
+    let result = verify_bundle(&artifacts.bundle.site_dir, false).expect("Verification failed");
     assert_eq!(result.status, "valid", "Large bundle should be valid");
 
     // Test decryption performance
     let decrypt_start = Instant::now();
     let enc_config = load_config(&artifacts.bundle.site_dir).expect("Failed to load config");
-    let decryptor = DecryptionEngine::unlock_with_password(enc_config, TEST_PASSWORD)
-        .expect("Should unlock");
+    let decryptor =
+        DecryptionEngine::unlock_with_password(enc_config, TEST_PASSWORD).expect("Should unlock");
 
     let decrypted_path = artifacts.temp_dir.path().join("large_decrypted.db");
     decryptor
@@ -493,8 +510,7 @@ fn test_empty_archive_handling() {
     let artifacts = build_pipeline(&config);
 
     // Verify it's still valid
-    let result = verify_bundle(&artifacts.bundle.site_dir, false)
-        .expect("Verification failed");
+    let result = verify_bundle(&artifacts.bundle.site_dir, false).expect("Verification failed");
     assert_eq!(result.status, "valid", "Minimal bundle should be valid");
 
     info!("=== Empty Archive Handling Test PASSED ===");
@@ -522,7 +538,9 @@ fn test_export_with_filters() {
         version: None,
         kind: AgentKind::Cli,
     };
-    let claude_id = storage.ensure_agent(&claude_agent).expect("ensure claude agent");
+    let claude_id = storage
+        .ensure_agent(&claude_agent)
+        .expect("ensure claude agent");
 
     let codex_agent = Agent {
         id: None,
@@ -531,7 +549,9 @@ fn test_export_with_filters() {
         version: None,
         kind: AgentKind::Cli,
     };
-    let codex_id = storage.ensure_agent(&codex_agent).expect("ensure codex agent");
+    let codex_id = storage
+        .ensure_agent(&codex_agent)
+        .expect("ensure codex agent");
 
     // Create workspace
     let workspace_path = Path::new("/home/user/projects/test");
@@ -543,7 +563,11 @@ fn test_export_with_filters() {
 
     // Create conversations for each agent
     for agent_id in [claude_id, codex_id] {
-        let agent_slug = if agent_id == claude_id { "claude_code" } else { "codex" };
+        let agent_slug = if agent_id == claude_id {
+            "claude_code"
+        } else {
+            "codex"
+        };
         let conversation = ConversationFixtureBuilder::new(agent_slug)
             .title(format!("Conversation from {}", agent_slug))
             .workspace(workspace_path)
@@ -577,7 +601,10 @@ fn test_export_with_filters() {
         stats.conversations_processed, 1,
         "Should export only 1 conversation with agent filter"
     );
-    info!("Filtered export: {} conversations", stats.conversations_processed);
+    info!(
+        "Filtered export: {} conversations",
+        stats.conversations_processed
+    );
 
     info!("=== Export with Filters Test PASSED ===");
 }

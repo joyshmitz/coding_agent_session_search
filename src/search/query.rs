@@ -1773,8 +1773,7 @@ pub fn regex_query_cached(field: Field, pattern: &str) -> Result<RegexQuery> {
 
 #[doc(hidden)]
 pub fn regex_query_uncached(field: Field, pattern: &str) -> Result<RegexQuery> {
-    RegexQuery::from_pattern(pattern, field)
-        .map_err(|e| anyhow!("regex query build failed: {e}"))
+    RegexQuery::from_pattern(pattern, field).map_err(|e| anyhow!("regex query build failed: {e}"))
 }
 
 /// Build query clauses for a single term based on its wildcard pattern.
@@ -6447,7 +6446,8 @@ mod tests {
     fn parse_boolean_query_prefix_minus_not() {
         // Prefix minus at start of query should trigger NOT
         let tokens = parse_boolean_query("-world");
-        let expected: QueryTokenList = SmallVec::from_vec(vec![QueryToken::Not, QueryToken::Term("world".into())]);
+        let expected: QueryTokenList =
+            SmallVec::from_vec(vec![QueryToken::Not, QueryToken::Term("world".into())]);
         assert_eq!(tokens, expected);
 
         // Prefix minus after space should trigger NOT
@@ -6455,7 +6455,7 @@ mod tests {
         let expected: QueryTokenList = SmallVec::from_vec(vec![
             QueryToken::Term("hello".into()),
             QueryToken::Not,
-            QueryToken::Term("world".into())
+            QueryToken::Term("world".into()),
         ]);
         assert_eq!(tokens, expected);
     }
@@ -6468,7 +6468,7 @@ mod tests {
         let tokens = parse_boolean_query("foo \"\" bar");
         let expected: QueryTokenList = SmallVec::from_vec(vec![
             QueryToken::Term("foo".into()),
-            QueryToken::Term("bar".into())
+            QueryToken::Term("bar".into()),
         ]);
         assert_eq!(tokens, expected);
     }
@@ -6477,7 +6477,8 @@ mod tests {
     fn parse_boolean_query_unclosed_quote() {
         // Unclosed quote should collect until end
         let tokens = parse_boolean_query("\"hello world");
-        let expected: QueryTokenList = SmallVec::from_vec(vec![QueryToken::Phrase("hello world".into())]);
+        let expected: QueryTokenList =
+            SmallVec::from_vec(vec![QueryToken::Phrase("hello world".into())]);
         assert_eq!(tokens, expected);
     }
 
@@ -7818,7 +7819,10 @@ mod tests {
 
         // Four tokens - exactly at capacity
         let tokens = parse_boolean_query("hello world foo bar");
-        assert!(!tokens.spilled(), "Four terms at capacity should stay on stack");
+        assert!(
+            !tokens.spilled(),
+            "Four terms at capacity should stay on stack"
+        );
         assert_eq!(tokens.len(), 4);
     }
 
@@ -7847,7 +7851,10 @@ mod tests {
     #[test]
     fn query_token_list_handles_operators() {
         let tokens = parse_boolean_query("foo AND bar OR baz");
-        assert!(!tokens.spilled(), "Query with operators should stay on stack");
+        assert!(
+            !tokens.spilled(),
+            "Query with operators should stay on stack"
+        );
         assert_eq!(tokens.len(), 5);
         assert_eq!(tokens[1], QueryToken::And);
         assert_eq!(tokens[3], QueryToken::Or);

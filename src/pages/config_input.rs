@@ -409,7 +409,9 @@ impl PagesConfig {
         }
 
         // Validate time formats
-        if let Some(ref since) = self.filters.since && parse_time_input(since).is_none() {
+        if let Some(ref since) = self.filters.since
+            && parse_time_input(since).is_none()
+        {
             errors.push(format!(
                 "Invalid filters.since time format: '{}'. \
                  Use ISO 8601 (2025-01-06), relative (30 days ago), or keywords (today, yesterday).",
@@ -417,7 +419,9 @@ impl PagesConfig {
             ));
         }
 
-        if let Some(ref until) = self.filters.until && parse_time_input(until).is_none() {
+        if let Some(ref until) = self.filters.until
+            && parse_time_input(until).is_none()
+        {
             errors.push(format!(
                 "Invalid filters.until time format: '{}'. \
                  Use ISO 8601 (2025-01-06), relative (30 days ago), or keywords (today, yesterday).",
@@ -426,7 +430,12 @@ impl PagesConfig {
         }
 
         // Warnings
-        if self.encryption.password.as_ref().is_some_and(|p| p.len() < 12) {
+        if self
+            .encryption
+            .password
+            .as_ref()
+            .is_some_and(|p| p.len() < 12)
+        {
             warnings.push(
                 "Password is less than 12 characters. Consider using a stronger password."
                     .to_string(),
@@ -460,12 +469,7 @@ impl PagesConfig {
         ResolvedConfig {
             filters: ResolvedFilters {
                 agents: self.filters.agents.clone(),
-                workspaces: self
-                    .filters
-                    .workspaces
-                    .iter()
-                    .map(PathBuf::from)
-                    .collect(),
+                workspaces: self.filters.workspaces.iter().map(PathBuf::from).collect(),
                 since_ts: self.filters.since.as_deref().and_then(parse_time_input),
                 until_ts: self.filters.until.as_deref().and_then(parse_time_input),
                 path_mode: self
@@ -523,13 +527,7 @@ impl PagesConfig {
         let workspaces = if self.filters.workspaces.is_empty() {
             None
         } else {
-            Some(
-                self.filters
-                    .workspaces
-                    .iter()
-                    .map(PathBuf::from)
-                    .collect(),
-            )
+            Some(self.filters.workspaces.iter().map(PathBuf::from).collect())
         };
 
         Ok(WizardState {
@@ -651,7 +649,12 @@ mod tests {
         config.encryption.i_understand_risks = false;
         let result = config.validate();
         assert!(!result.valid);
-        assert!(result.errors.iter().any(|e| e.contains("i_understand_risks")));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("i_understand_risks"))
+        );
     }
 
     #[test]

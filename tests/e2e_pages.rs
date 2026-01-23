@@ -48,7 +48,10 @@ const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB chunks
 /// Log a test phase with timing for CI parsing.
 fn log_phase(phase: &str, start: Instant) {
     let duration_ms = start.elapsed().as_millis();
-    eprintln!("{{\"phase\":\"{}\",\"duration_ms\":{},\"status\":\"PASS\"}}", phase, duration_ms);
+    eprintln!(
+        "{{\"phase\":\"{}\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        phase, duration_ms
+    );
 }
 
 /// Setup a test database with conversations.
@@ -80,7 +83,10 @@ fn setup_test_db(data_dir: &Path, conversation_count: usize) -> std::path::PathB
         let conversation = ConversationFixtureBuilder::new("claude_code")
             .title(format!("Test Conversation {}", i))
             .workspace(workspace_path)
-            .source_path(format!("/home/user/.claude/projects/test/session-{}.jsonl", i))
+            .source_path(format!(
+                "/home/user/.claude/projects/test/session-{}.jsonl",
+                i
+            ))
             .messages(10)
             .with_content(0, format!("User message {} - requesting help with code", i))
             .with_content(1, format!("Assistant response {} - here's the solution", i))
@@ -201,8 +207,14 @@ fn test_full_export_pipeline_password_only() {
     let site = &artifacts.bundle.site_dir;
     assert!(site.join("index.html").exists(), "index.html should exist");
     assert!(site.join("sw.js").exists(), "sw.js should exist");
-    assert!(site.join("config.json").exists(), "config.json should exist");
-    assert!(site.join("payload").exists(), "payload directory should exist");
+    assert!(
+        site.join("config.json").exists(),
+        "config.json should exist"
+    );
+    assert!(
+        site.join("payload").exists(),
+        "payload directory should exist"
+    );
 
     // Verify config.json has single key slot
     let config_str = fs::read_to_string(site.join("config.json")).expect("read config");
@@ -216,7 +228,10 @@ fn test_full_export_pipeline_password_only() {
     );
 
     log_phase("verify_structure", start);
-    eprintln!("{{\"test\":\"test_full_export_pipeline_password_only\",\"duration_ms\":{},\"status\":\"PASS\"}}", start.elapsed().as_millis());
+    eprintln!(
+        "{{\"test\":\"test_full_export_pipeline_password_only\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        start.elapsed().as_millis()
+    );
 }
 
 // =============================================================================
@@ -253,11 +268,18 @@ fn test_full_export_pipeline_dual_auth() {
 
     // Verify private directory has recovery secret
     assert!(
-        artifacts.bundle.private_dir.join("recovery-secret.txt").exists(),
+        artifacts
+            .bundle
+            .private_dir
+            .join("recovery-secret.txt")
+            .exists(),
         "recovery-secret.txt should exist"
     );
 
-    eprintln!("{{\"test\":\"test_full_export_pipeline_dual_auth\",\"duration_ms\":{},\"status\":\"PASS\"}}", start.elapsed().as_millis());
+    eprintln!(
+        "{{\"test\":\"test_full_export_pipeline_dual_auth\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        start.elapsed().as_millis()
+    );
 }
 
 // =============================================================================
@@ -291,7 +313,10 @@ fn test_integrity_decrypt_roundtrip_password() {
     );
 
     log_phase("decrypt_password", start);
-    eprintln!("{{\"test\":\"test_integrity_decrypt_roundtrip_password\",\"duration_ms\":{},\"status\":\"PASS\"}}", start.elapsed().as_millis());
+    eprintln!(
+        "{{\"test\":\"test_integrity_decrypt_roundtrip_password\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        start.elapsed().as_millis()
+    );
 }
 
 /// Test that decrypted payload matches original using recovery key.
@@ -320,7 +345,10 @@ fn test_integrity_decrypt_roundtrip_recovery() {
         "Decrypted content should match original"
     );
 
-    eprintln!("{{\"test\":\"test_integrity_decrypt_roundtrip_recovery\",\"duration_ms\":{},\"status\":\"PASS\"}}", start.elapsed().as_millis());
+    eprintln!(
+        "{{\"test\":\"test_integrity_decrypt_roundtrip_recovery\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        start.elapsed().as_millis()
+    );
 }
 
 // =============================================================================
@@ -352,9 +380,15 @@ fn test_tampering_fails_authentication() {
 
     // Verify should now detect corruption
     let result = verify_bundle(site_dir, false).expect("verify after corruption");
-    assert_eq!(result.status, "invalid", "Corrupted bundle should be invalid");
+    assert_eq!(
+        result.status, "invalid",
+        "Corrupted bundle should be invalid"
+    );
 
-    eprintln!("{{\"test\":\"test_tampering_fails_authentication\",\"duration_ms\":{},\"status\":\"PASS\"}}", start.elapsed().as_millis());
+    eprintln!(
+        "{{\"test\":\"test_tampering_fails_authentication\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        start.elapsed().as_millis()
+    );
 }
 
 // =============================================================================
@@ -384,7 +418,10 @@ fn test_cli_verify_command() {
 
     assert.success();
 
-    eprintln!("{{\"test\":\"test_cli_verify_command\",\"duration_ms\":{},\"status\":\"PASS\"}}", start.elapsed().as_millis());
+    eprintln!(
+        "{{\"test\":\"test_cli_verify_command\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        start.elapsed().as_millis()
+    );
 }
 
 // =============================================================================
@@ -402,8 +439,7 @@ fn test_search_in_decrypted_archive() {
 
     // Decrypt
     let config = load_config(&artifacts.bundle.site_dir).expect("load config");
-    let decryptor =
-        DecryptionEngine::unlock_with_password(config, TEST_PASSWORD).expect("unlock");
+    let decryptor = DecryptionEngine::unlock_with_password(config, TEST_PASSWORD).expect("unlock");
     let decrypted_path = temp_dir.path().join("decrypted.db");
     decryptor
         .decrypt_to_file(&artifacts.bundle.site_dir, &decrypted_path, |_, _| {})
@@ -434,5 +470,8 @@ fn test_search_in_decrypted_archive() {
         .expect("get schema version");
     assert_eq!(schema_version, "1", "Export schema version should be 1");
 
-    eprintln!("{{\"test\":\"test_search_in_decrypted_archive\",\"duration_ms\":{},\"status\":\"PASS\"}}", start.elapsed().as_millis());
+    eprintln!(
+        "{{\"test\":\"test_search_in_decrypted_archive\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        start.elapsed().as_millis()
+    );
 }

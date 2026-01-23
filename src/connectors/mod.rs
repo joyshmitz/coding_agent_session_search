@@ -1438,20 +1438,28 @@ mod tests {
         let cache = WorkspaceCache::new(workspaces);
 
         // Files under known workspaces
-        assert!(cache
-            .is_under_workspace(&PathBuf::from("/home/user/project/src/main.rs"))
-            .is_some());
-        assert!(cache
-            .is_under_workspace(&PathBuf::from("/opt/apps/myapp/config.json"))
-            .is_some());
+        assert!(
+            cache
+                .is_under_workspace(&PathBuf::from("/home/user/project/src/main.rs"))
+                .is_some()
+        );
+        assert!(
+            cache
+                .is_under_workspace(&PathBuf::from("/opt/apps/myapp/config.json"))
+                .is_some()
+        );
 
         // Files not under any workspace
-        assert!(cache
-            .is_under_workspace(&PathBuf::from("/var/log/app.log"))
-            .is_none());
-        assert!(cache
-            .is_under_workspace(&PathBuf::from("/home/other/file.txt"))
-            .is_none());
+        assert!(
+            cache
+                .is_under_workspace(&PathBuf::from("/var/log/app.log"))
+                .is_none()
+        );
+        assert!(
+            cache
+                .is_under_workspace(&PathBuf::from("/home/other/file.txt"))
+                .is_none()
+        );
     }
 
     #[test]

@@ -257,7 +257,10 @@ fn check_heading_structure(html: &str, audit: &mut AccessibilityAudit) {
     } else if h1_count > 1 {
         audit.add_warning(
             "page-has-heading-one",
-            &format!("Page has {} <h1> elements - consider using only one", h1_count),
+            &format!(
+                "Page has {} <h1> elements - consider using only one",
+                h1_count
+            ),
         );
     } else {
         audit.add_pass("page-has-heading-one: Page has exactly one h1");
@@ -290,7 +293,8 @@ fn check_interactive_elements(html: &str, audit: &mut AccessibilityAudit) {
     let button_count = html.matches("<button").count();
     if button_count > 0 {
         // Count buttons with text content or aria-label
-        let has_aria_label = html.matches(r#"<button"#)
+        let has_aria_label = html
+            .matches(r#"<button"#)
             .zip(html.match_indices("aria-label"))
             .count();
 
@@ -393,18 +397,9 @@ pub fn generate_report(audit: &AccessibilityAudit) -> String {
 
     // Summary
     report.push_str("## Summary\n\n");
-    report.push_str(&format!(
-        "- **Violations**: {}\n",
-        audit.violations.len()
-    ));
-    report.push_str(&format!(
-        "- **Warnings**: {}\n",
-        audit.warnings.len()
-    ));
-    report.push_str(&format!(
-        "- **Passed**: {}\n",
-        audit.passed_checks.len()
-    ));
+    report.push_str(&format!("- **Violations**: {}\n", audit.violations.len()));
+    report.push_str(&format!("- **Warnings**: {}\n", audit.warnings.len()));
+    report.push_str(&format!("- **Passed**: {}\n", audit.passed_checks.len()));
     report.push_str(&format!(
         "- **Compliant**: {}\n\n",
         if audit.is_compliant() { "Yes" } else { "No" }
@@ -459,19 +454,28 @@ mod tests {
 
         // Should have language attribute
         assert!(
-            audit.passed_checks.iter().any(|p| p.contains("html-has-lang")),
+            audit
+                .passed_checks
+                .iter()
+                .any(|p| p.contains("html-has-lang")),
             "index.html should have lang attribute"
         );
 
         // Should have main landmark
         assert!(
-            audit.passed_checks.iter().any(|p| p.contains("landmark-main")),
+            audit
+                .passed_checks
+                .iter()
+                .any(|p| p.contains("landmark-main")),
             "index.html should have main landmark"
         );
 
         // Should have document title
         assert!(
-            audit.passed_checks.iter().any(|p| p.contains("document-title")),
+            audit
+                .passed_checks
+                .iter()
+                .any(|p| p.contains("document-title")),
             "index.html should have document title"
         );
     }

@@ -11,11 +11,11 @@
 use coding_agent_search::connectors::{NormalizedConversation, NormalizedMessage};
 use coding_agent_search::indexer::persist::persist_conversation;
 use coding_agent_search::search::query::{FieldMask, SearchClient, SearchFilters};
-use coding_agent_search::search::tantivy::{index_dir, TantivyIndex};
+use coding_agent_search::search::tantivy::{TantivyIndex, index_dir};
 use coding_agent_search::storage::sqlite::SqliteStorage;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -43,7 +43,10 @@ fn generate_conversation(conv_id: i64, msg_count: i64) -> NormalizedConversation
         agent_slug: format!("concurrent-agent-{}", conv_id % 10),
         external_id: Some(format!("concurrent-conv-{}", conv_id)),
         title: Some(format!("Concurrent Test Conversation {}", conv_id)),
-        workspace: Some(PathBuf::from(format!("/workspace/project-{}", conv_id % 20))),
+        workspace: Some(PathBuf::from(format!(
+            "/workspace/project-{}",
+            conv_id % 20
+        ))),
         source_path: PathBuf::from(format!("/tmp/concurrent-test/conv-{}.jsonl", conv_id)),
         started_at: Some(base_ts),
         ended_at: Some(base_ts + msg_count * 1000),
@@ -270,10 +273,7 @@ fn concurrent_varied_queries() {
 
     let total_success: usize = results.iter().map(|(c, _)| c).sum();
     let expected_total = thread_count * searches_per_thread;
-    println!(
-        "  Total: {}/{} successful",
-        total_success, expected_total
-    );
+    println!("  Total: {}/{} successful", total_success, expected_total);
 
     // Allow some failures for complex queries that may not match
     assert!(
@@ -425,9 +425,17 @@ fn concurrent_stress_high_threads() {
     let total = thread_count * searches_per_thread;
     let successes = success_count.load(Ordering::SeqCst);
 
-    println!("  {} threads x {} searches = {}", thread_count, searches_per_thread, total);
+    println!(
+        "  {} threads x {} searches = {}",
+        thread_count, searches_per_thread, total
+    );
     println!("  Duration: {:?}", duration);
-    println!("  Success rate: {}/{} ({:.1}%)", successes, total, 100.0 * successes as f64 / total as f64);
+    println!(
+        "  Success rate: {}/{} ({:.1}%)",
+        successes,
+        total,
+        100.0 * successes as f64 / total as f64
+    );
     println!(
         "  Throughput: {:.1} searches/sec",
         total as f64 / duration.as_secs_f64()

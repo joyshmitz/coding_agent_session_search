@@ -11,12 +11,12 @@ use std::time::Duration;
 use crate::pages::bundle::{BundleBuilder, BundleConfig};
 use crate::pages::confirmation::{
     ConfirmationConfig, ConfirmationFlow, ConfirmationStep, PasswordStrengthAction, StepValidation,
-    validate_unencrypted_ack, unencrypted_warning_lines, UNENCRYPTED_ACK_PHRASE,
+    UNENCRYPTED_ACK_PHRASE, unencrypted_warning_lines, validate_unencrypted_ack,
 };
-use crate::pages::password::{validate_password, format_strength_inline, PasswordStrength};
 use crate::pages::docs::{DocConfig, DocumentationGenerator};
 use crate::pages::encrypt::EncryptionEngine;
 use crate::pages::export::{ExportEngine, ExportFilter, PathMode};
+use crate::pages::password::{PasswordStrength, format_strength_inline, validate_password};
 use crate::pages::secret_scan::{
     SecretScanConfig, SecretScanFilters, print_human_report, wizard_secret_scan,
 };
@@ -245,21 +245,38 @@ impl PagesWizard {
                     // Additional y/N confirmation
                     writeln!(term)?;
                     let confirmed = Confirm::with_theme(theme)
-                        .with_prompt("Are you ABSOLUTELY SURE you want to export WITHOUT encryption?")
+                        .with_prompt(
+                            "Are you ABSOLUTELY SURE you want to export WITHOUT encryption?",
+                        )
                         .default(false)
                         .interact()?;
 
                     if !confirmed {
                         writeln!(term)?;
-                        writeln!(term, "  {}", style("Good choice. Export cancelled.").green())?;
-                        writeln!(term, "  Remove --no-encryption to export with encryption (recommended).")?;
+                        writeln!(
+                            term,
+                            "  {}",
+                            style("Good choice. Export cancelled.").green()
+                        )?;
+                        writeln!(
+                            term,
+                            "  Remove --no-encryption to export with encryption (recommended)."
+                        )?;
                         return Ok(false);
                     }
 
                     self.state.unencrypted_confirmed = true;
                     writeln!(term)?;
-                    writeln!(term, "  {} Unencrypted export acknowledged", style("⚠").yellow())?;
-                    writeln!(term, "  {}", style("Proceeding without encryption...").dim())?;
+                    writeln!(
+                        term,
+                        "  {} Unencrypted export acknowledged",
+                        style("⚠").yellow()
+                    )?;
+                    writeln!(
+                        term,
+                        "  {}",
+                        style("Proceeding without encryption...").dim()
+                    )?;
                     return Ok(true);
                 }
                 StepValidation::Failed(msg) => {
@@ -496,17 +513,18 @@ impl PagesWizard {
             "    Password strength: {}",
             format_strength_inline(&validation)
         )?;
-        writeln!(
-            term,
-            "    Entropy: {:.0} bits",
-            validation.entropy_bits
-        )?;
+        writeln!(term, "    Entropy: {:.0} bits", validation.entropy_bits)?;
 
         // Show improvement suggestions if not strong
         if validation.strength != PasswordStrength::Strong && !validation.suggestions.is_empty() {
             writeln!(term, "    {}", style("Suggestions:").dim())?;
             for suggestion in &validation.suggestions {
-                writeln!(term, "      {} {}", style("•").dim(), style(suggestion).dim())?;
+                writeln!(
+                    term,
+                    "      {} {}",
+                    style("•").dim(),
+                    style(suggestion).dim()
+                )?;
             }
         }
 
@@ -1596,7 +1614,8 @@ impl PagesWizard {
             }
 
             // Encrypt the database
-            let config = enc_engine.encrypt_file(&export_db_path, &self.state.output_dir, |_, _| {})?;
+            let config =
+                enc_engine.encrypt_file(&export_db_path, &self.state.output_dir, |_, _| {})?;
 
             // Write config.json
             let config_path = self.state.output_dir.join("config.json");

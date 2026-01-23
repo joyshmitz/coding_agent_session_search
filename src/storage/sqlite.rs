@@ -527,6 +527,17 @@ pub struct InsertOutcome {
     pub inserted_indices: Vec<i64>,
 }
 
+/// Message data needed for semantic embedding generation.
+pub struct MessageForEmbedding {
+    pub message_id: i64,
+    pub created_at: Option<i64>,
+    pub agent_id: i64,
+    pub workspace_id: Option<i64>,
+    pub source_id_hash: u32,
+    pub role: String,
+    pub content: String,
+}
+
 impl SqliteStorage {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -1176,6 +1187,44 @@ impl SqliteStorage {
                 snippets: Vec::new(),
             })
         })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Fetch all messages with their conversation metadata for semantic indexing.
+    ///
+    /// Returns MessageForEmbedding records with all metadata needed for vector indexing.
+    pub fn fetch_messages_for_embedding(&self) -> Result<Vec<MessageForEmbedding>> {
+        let mut stmt = self.conn.prepare(
+            r"SELECT m.id, m.created_at, c.agent_id, c.workspace_id, c.source_id, m.role, m.content
+              FROM messages m
+              JOIN conversations c ON m.conversation_id = c.id
+              ORDER BY m.id",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let source_id_str: String = row
+                .get::<_, Option<String>>(4)?
+                .unwrap_or_else(|| "local".to_string());
+            // CRC32 hash of source_id string for compact storage
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(source_id_str.as_bytes());
+            let source_id_hash = hasher.finalize();
+
+            Ok(MessageForEmbedding {
+                message_id: row.get(0)?,
+                created_at: row.get(1)?,
+                agent_id: row.get(2)?,
+                workspace_id: row.get(3)?,
+                source_id_hash,
+                role: row.get(5)?,
+                content: row.get(6)?,
+            })
+        })?;
+
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);

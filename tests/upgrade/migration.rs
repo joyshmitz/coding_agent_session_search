@@ -6,7 +6,7 @@
 //! - Failed migrations are handled gracefully
 //! - Backup is created before destructive operations
 
-use coding_agent_search::storage::sqlite::{MigrationError, SqliteStorage, CURRENT_SCHEMA_VERSION};
+use coding_agent_search::storage::sqlite::{CURRENT_SCHEMA_VERSION, MigrationError, SqliteStorage};
 use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
@@ -208,11 +208,8 @@ fn test_migration_handles_corruption() {
     // Create a "corrupted" database (incomplete schema)
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute(
-            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
-            [],
-        )
-        .unwrap();
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', '5')",
             [],
@@ -448,7 +445,11 @@ fn test_fts_rebuild() {
     let mut storage = SqliteStorage::open(&db_path).unwrap();
     let result = storage.rebuild_fts();
 
-    assert!(result.is_ok(), "FTS rebuild should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "FTS rebuild should succeed: {:?}",
+        result.err()
+    );
 }
 
 // =============================================================================

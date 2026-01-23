@@ -18,7 +18,7 @@
 use coding_agent_search::connectors::{NormalizedConversation, NormalizedMessage};
 use coding_agent_search::indexer::persist::persist_conversation;
 use coding_agent_search::search::query::{FieldMask, SearchClient, SearchFilters};
-use coding_agent_search::search::tantivy::{index_dir, TantivyIndex};
+use coding_agent_search::search::tantivy::{TantivyIndex, index_dir};
 use coding_agent_search::storage::sqlite::SqliteStorage;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -45,7 +45,8 @@ fn generate_conversation(
                     "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
                      Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. \
                      Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris \
-                     nisi ut aliquip ex ea commodo consequat. ".repeat(5)
+                     nisi ut aliquip ex ea commodo consequat. "
+                        .repeat(5)
                 ),
                 ContentSize::Large => format!(
                     "Conv {} msg {}: {}",
@@ -57,7 +58,8 @@ fn generate_conversation(
                      nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in \
                      reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla \
                      pariatur. Excepteur sint occaecat cupidatat non proident, sunt in \
-                     culpa qui officia deserunt mollit anim id est laborum. ".repeat(50)
+                     culpa qui officia deserunt mollit anim id est laborum. "
+                        .repeat(50)
                 ),
                 ContentSize::Mixed => {
                     let factor = (m % 10 + 1) as usize;
@@ -85,8 +87,15 @@ fn generate_conversation(
     NormalizedConversation {
         agent_slug: format!("load-test-agent-{}", conv_id % 10),
         external_id: Some(format!("load-conv-{}", conv_id)),
-        title: Some(format!("Load Test Conversation {} - {}", conv_id, msg_size.as_str())),
-        workspace: Some(PathBuf::from(format!("/workspace/project-{}", conv_id % 50))),
+        title: Some(format!(
+            "Load Test Conversation {} - {}",
+            conv_id,
+            msg_size.as_str()
+        )),
+        workspace: Some(PathBuf::from(format!(
+            "/workspace/project-{}",
+            conv_id % 50
+        ))),
         source_path: PathBuf::from(format!("/tmp/load-test/conv-{}.jsonl", conv_id)),
         started_at: Some(base_ts),
         ended_at: Some(base_ts + msg_count * 1000),
@@ -184,11 +193,7 @@ fn get_memory_mb() -> f64 {
 }
 
 /// Run a search and measure latency.
-fn measure_search(
-    client: &SearchClient,
-    query: &str,
-    limit: usize,
-) -> (usize, Duration) {
+fn measure_search(client: &SearchClient, query: &str, limit: usize) -> (usize, Duration) {
     let filters = SearchFilters::default();
     let start = Instant::now();
     let results = client
@@ -383,7 +388,10 @@ fn load_memory_bounded_search() {
     let after = get_memory_mb();
     let growth = after - baseline;
 
-    println!("  Baseline: {:.1}MB, After: {:.1}MB, Growth: {:.1}MB", baseline, after, growth);
+    println!(
+        "  Baseline: {:.1}MB, After: {:.1}MB, Growth: {:.1}MB",
+        baseline, after, growth
+    );
 
     // Allow up to 100MB growth for caching, but flag excessive growth
     assert!(

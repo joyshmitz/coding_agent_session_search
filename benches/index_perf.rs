@@ -40,9 +40,9 @@
 //! - Throughput: No more than 10% regression
 //! - Memory timeline: Streaming should show flat profile vs batch's spike
 
-use coding_agent_search::indexer::{run_index, IndexOptions};
+use coding_agent_search::indexer::{IndexOptions, run_index};
 use coding_agent_search::search::tantivy::index_dir;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::fs;
 use std::io::Write;
 use tempfile::TempDir;

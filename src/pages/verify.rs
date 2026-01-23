@@ -519,7 +519,9 @@ fn check_no_secrets(site_dir: &Path) -> CheckResult {
     // Check config.json doesn't contain plaintext secrets
     // Note: We're looking for actual secret values, not field names like "total_plaintext_size"
     let config_path = site_dir.join("config.json");
-    if config_path.exists() && let Ok(content) = fs::read_to_string(&config_path) {
+    if config_path.exists()
+        && let Ok(content) = fs::read_to_string(&config_path)
+    {
         let content_lower = content.to_lowercase();
         // Check for patterns that indicate actual secrets being stored
         // These patterns look for JSON keys that shouldn't exist in public config

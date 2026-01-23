@@ -2135,21 +2135,27 @@ async fn execute_cli(
 
                     // Handle --config based export
                     if let Some(ref config_path) = config {
-                        let mut pages_config = crate::pages::config_input::PagesConfig::load(config_path)
-                            .map_err(|e| CliError {
-                                code: 2,
-                                kind: "pages",
-                                message: format!("Failed to load config: {e}"),
-                                hint: Some("Check config file syntax with --example-config".to_string()),
-                                retryable: false,
-                            })?;
+                        let mut pages_config = crate::pages::config_input::PagesConfig::load(
+                            config_path,
+                        )
+                        .map_err(|e| CliError {
+                            code: 2,
+                            kind: "pages",
+                            message: format!("Failed to load config: {e}"),
+                            hint: Some(
+                                "Check config file syntax with --example-config".to_string(),
+                            ),
+                            retryable: false,
+                        })?;
 
                         // Resolve environment variables
                         pages_config.resolve_env_vars().map_err(|e| CliError {
                             code: 2,
                             kind: "pages",
                             message: format!("Failed to resolve env vars: {e}"),
-                            hint: Some("Ensure referenced environment variables are set".to_string()),
+                            hint: Some(
+                                "Ensure referenced environment variables are set".to_string(),
+                            ),
                             retryable: false,
                         })?;
 
@@ -2210,13 +2216,15 @@ async fn execute_cli(
                         });
 
                         // Convert config to WizardState and run export
-                        let wizard_state = pages_config.to_wizard_state(db_path.clone())
-                            .map_err(|e| CliError {
-                                code: 9,
-                                kind: "pages",
-                                message: format!("Failed to create wizard state: {e}"),
-                                hint: None,
-                                retryable: false,
+                        let wizard_state =
+                            pages_config.to_wizard_state(db_path.clone()).map_err(|e| {
+                                CliError {
+                                    code: 9,
+                                    kind: "pages",
+                                    message: format!("Failed to create wizard state: {e}"),
+                                    hint: None,
+                                    retryable: false,
+                                }
                             })?;
 
                         // Run the export using the config
@@ -2227,7 +2235,8 @@ async fn execute_cli(
                             dry_run,
                             json || robot_mode,
                             verbose,
-                        ).map_err(|e| CliError {
+                        )
+                        .map_err(|e| CliError {
                             code: 9,
                             kind: "pages",
                             message: format!("Export failed: {e}"),
@@ -2262,7 +2271,10 @@ async fn execute_cli(
                                 code: 9,
                                 kind: "pages",
                                 message: format!("Preview server failed: {e}"),
-                                hint: Some("Check that the directory exists and port is available".to_string()),
+                                hint: Some(
+                                    "Check that the directory exists and port is available"
+                                        .to_string(),
+                                ),
                                 retryable: false,
                             })?;
                         return Ok(());
@@ -7097,12 +7109,8 @@ fn run_config_based_export(
     let export_db_path = temp_dir.path().join("export.db");
 
     // Parse time filters to DateTime<Utc>
-    let since_dt = config
-        .since_ts()
-        .and_then(DateTime::from_timestamp_millis);
-    let until_dt = config
-        .until_ts()
-        .and_then(DateTime::from_timestamp_millis);
+    let since_dt = config.since_ts().and_then(DateTime::from_timestamp_millis);
+    let until_dt = config.until_ts().and_then(DateTime::from_timestamp_millis);
 
     // Build export filter
     let filter = crate::pages::export::ExportFilter {
@@ -7118,11 +7126,7 @@ fn run_config_based_export(
     };
 
     // Run export
-    let export_engine = crate::pages::export::ExportEngine::new(
-        db_path,
-        &export_db_path,
-        filter,
-    );
+    let export_engine = crate::pages::export::ExportEngine::new(db_path, &export_db_path, filter);
 
     let running = Arc::new(AtomicBool::new(true));
     let stats = export_engine.execute(|_current, _total| {}, Some(running))?;

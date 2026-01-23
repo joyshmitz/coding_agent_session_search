@@ -22,7 +22,10 @@ pub enum PreviewError {
     /// The site directory does not exist.
     SiteDirectoryNotFound(PathBuf),
     /// Failed to read a file.
-    FileReadError { path: PathBuf, source: std::io::Error },
+    FileReadError {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// Failed to open browser.
     BrowserOpenFailed(String),
     /// Server error.
@@ -138,7 +141,10 @@ fn build_response(status: u16, content_type: &str, body: Vec<u8>) -> Vec<u8> {
          Cache-Control: no-cache\r\n\
          Connection: close\r\n\
          \r\n",
-        status, status_text, content_type, body.len()
+        status,
+        status_text,
+        content_type,
+        body.len()
     );
 
     let mut response = headers.into_bytes();
@@ -147,10 +153,7 @@ fn build_response(status: u16, content_type: &str, body: Vec<u8>) -> Vec<u8> {
 }
 
 /// Handle a single HTTP request.
-async fn handle_request(
-    site_dir: &std::path::Path,
-    request: &str,
-) -> Vec<u8> {
+async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
     // Parse the request line
     let request_line = request.lines().next().unwrap_or("");
     let parts: Vec<&str> = request_line.split_whitespace().collect();
@@ -221,9 +224,7 @@ async fn handle_request(
                 build_response(200, mime, contents)
             }
         }
-        Err(_) => {
-            build_response(404, "text/plain", b"Not Found".to_vec())
-        }
+        Err(_) => build_response(404, "text/plain", b"Not Found".to_vec()),
     }
 }
 
@@ -269,10 +270,7 @@ pub async fn start_preview_server(config: PreviewConfig) -> Result<(), PreviewEr
         "\x1b[1;32m\u{1F310}\x1b[0m Preview server running at \x1b[1;36mhttp://localhost:{}\x1b[0m",
         config.port
     );
-    eprintln!(
-        "   Serving: \x1b[33m{}\x1b[0m",
-        site_dir.display()
-    );
+    eprintln!("   Serving: \x1b[33m{}\x1b[0m", site_dir.display());
     eprintln!("   Press \x1b[1mCtrl+C\x1b[0m to stop");
     eprintln!();
 
@@ -280,10 +278,7 @@ pub async fn start_preview_server(config: PreviewConfig) -> Result<(), PreviewEr
     if config.open_browser {
         let url = format!("http://localhost:{}", config.port);
         if let Err(e) = open_browser(&url) {
-            eprintln!(
-                "\x1b[33mWarning:\x1b[0m Could not open browser: {}",
-                e
-            );
+            eprintln!("\x1b[33mWarning:\x1b[0m Could not open browser: {}", e);
             eprintln!("   Please open \x1b[1;36m{}\x1b[0m manually", url);
         }
     }
@@ -355,15 +350,17 @@ fn open_browser(url: &str) -> Result<(), PreviewError> {
     #[cfg(target_os = "linux")]
     {
         // Try xdg-open first, fall back to common browsers
-        let browsers = ["xdg-open", "firefox", "chromium", "google-chrome", "x-www-browser"];
+        let browsers = [
+            "xdg-open",
+            "firefox",
+            "chromium",
+            "google-chrome",
+            "x-www-browser",
+        ];
         let mut opened = false;
 
         for browser in browsers {
-            if std::process::Command::new(browser)
-                .arg(url)
-                .spawn()
-                .is_ok()
-            {
+            if std::process::Command::new(browser).arg(url).spawn().is_ok() {
                 opened = true;
                 break;
             }

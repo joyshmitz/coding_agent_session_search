@@ -33,14 +33,8 @@ fn index_help_prints_usage() {
 
 #[test]
 fn index_parses_semantic_flags() {
-    let cli = Cli::try_parse_from([
-        "cass",
-        "index",
-        "--semantic",
-        "--embedder",
-        "fastembed",
-    ])
-    .expect("parse index flags");
+    let cli = Cli::try_parse_from(["cass", "index", "--semantic", "--embedder", "fastembed"])
+        .expect("parse index flags");
 
     match cli.command {
         Some(Commands::Index {

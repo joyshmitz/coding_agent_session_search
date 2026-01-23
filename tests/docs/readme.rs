@@ -6,11 +6,11 @@
 //! Run with:
 //!   cargo test --test docs
 
+use chrono::{TimeZone, Utc};
 use coding_agent_search::pages::docs::{DocConfig, DocLocation, DocumentationGenerator};
 use coding_agent_search::pages::summary::{
     AgentSummaryItem, KeySlotSummary, KeySlotType, PrePublishSummary, ScanReportSummary,
 };
-use chrono::{TimeZone, Utc};
 use regex::Regex;
 use std::collections::HashMap;
 
@@ -187,7 +187,9 @@ fn test_readme_url_included() {
     let readme_doc = generator.generate_readme();
 
     assert!(
-        readme_doc.content.contains("https://my-archive.example.com"),
+        readme_doc
+            .content
+            .contains("https://my-archive.example.com"),
         "README should include configured URL"
     );
 }
@@ -224,13 +226,16 @@ fn test_readme_has_required_sections() {
 
     // Check for standard README sections (case-insensitive)
     let has_archive_section = content.to_lowercase().contains("archive");
-    let has_security_section = content.to_lowercase().contains("security")
-        || content.to_lowercase().contains("encrypt");
+    let has_security_section =
+        content.to_lowercase().contains("security") || content.to_lowercase().contains("encrypt");
     let has_usage_section = content.to_lowercase().contains("usage")
         || content.to_lowercase().contains("access")
         || content.to_lowercase().contains("how to");
 
-    assert!(has_archive_section, "README should have archive information");
+    assert!(
+        has_archive_section,
+        "README should have archive information"
+    );
     assert!(
         has_security_section,
         "README should mention security/encryption"

@@ -3,7 +3,7 @@
 //! Deploys encrypted archives to Cloudflare Pages using the wrangler CLI.
 //! Supports native COOP/COEP headers, no file size limits, and private repos.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -262,7 +262,10 @@ impl CloudflareDeployer {
 
         // Step 6: Configure custom domain if specified
         if let Some(ref domain) = self.config.custom_domain {
-            progress("domain", &format!("Configuring custom domain: {}...", domain));
+            progress(
+                "domain",
+                &format!("Configuring custom domain: {}...", domain),
+            );
             configure_custom_domain(&self.config.project_name, domain)?;
         }
 
@@ -379,14 +382,23 @@ fn check_project_exists(project_name: &str) -> bool {
 /// Create a new Cloudflare Pages project
 fn create_project(project_name: &str) -> Result<()> {
     let output = Command::new("wrangler")
-        .args(["pages", "project", "create", project_name, "--production-branch", "main"])
+        .args([
+            "pages",
+            "project",
+            "create",
+            project_name,
+            "--production-branch",
+            "main",
+        ])
         .output()
         .context("Failed to run wrangler pages project create")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Ignore if project already exists
-        if !stderr.contains("already exists") && !stderr.contains("A project with this name already exists") {
+        if !stderr.contains("already exists")
+            && !stderr.contains("A project with this name already exists")
+        {
             bail!("Failed to create project: {}", stderr);
         }
     }
@@ -458,9 +470,12 @@ fn deploy_with_wrangler(deploy_dir: &Path, project_name: &str) -> Result<(String
                 if line.contains(".pages.dev") {
                     line.split_whitespace()
                         .find(|word| word.contains(".pages.dev"))
-                        .map(|url| url.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != ':' && c != '/'))
-                }
-                else {
+                        .map(|url| {
+                            url.trim_matches(|c: char| {
+                                !c.is_alphanumeric() && c != '.' && c != ':' && c != '/'
+                            })
+                        })
+                } else {
                     None
                 }
             })
@@ -472,9 +487,7 @@ fn deploy_with_wrangler(deploy_dir: &Path, project_name: &str) -> Result<(String
             .lines()
             .find_map(|line| {
                 if line.contains("Deployment ID:") || line.contains("deployment_id") {
-                    line.split_whitespace()
-                        .last()
-                        .map(|s| s.to_string())
+                    line.split_whitespace().last().map(|s| s.to_string())
                 } else {
                     None
                 }

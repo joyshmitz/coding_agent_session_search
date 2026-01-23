@@ -180,10 +180,12 @@ fn test_sources_sync_e2e_real_ssh() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(home_dir.join(".ssh"), std::fs::Permissions::from_mode(0o700))
-            .unwrap();
-        std::fs::set_permissions(&ssh_config_path, std::fs::Permissions::from_mode(0o600))
-            .unwrap();
+        std::fs::set_permissions(
+            home_dir.join(".ssh"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh_config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     // Seed a session with workspace metadata for path mapping verification.
@@ -311,7 +313,9 @@ EOF
         .expect("remote source should exist");
     assert_eq!(remote_source.kind, SourceKind::Ssh);
 
-    let conversations = storage.list_conversations(200, 0).expect("list conversations");
+    let conversations = storage
+        .list_conversations(200, 0)
+        .expect("list conversations");
     let remote_conv = conversations
         .into_iter()
         .find(|c| c.source_id == "cass-test")
