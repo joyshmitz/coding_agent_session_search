@@ -1480,9 +1480,9 @@ enum QueryToken {
     Not,
 }
 
-/// Type alias for query token list - most queries have 1-4 tokens (Opt 4.4)
+/// Type alias for query token list - most queries with operators have up to 8 tokens (Opt 4.4)
 /// SmallVec keeps small lists on the stack, avoiding heap allocation.
-type QueryTokenList = SmallVec<[QueryToken; 4]>;
+type QueryTokenList = SmallVec<[QueryToken; 8]>;
 
 /// Parse a query string into boolean tokens.
 /// Supports:
@@ -7828,10 +7828,10 @@ mod tests {
 
     #[test]
     fn query_token_list_spills_to_heap_for_large_queries() {
-        // Five or more tokens should spill to heap
-        let tokens = parse_boolean_query("a b c d e f g h");
-        assert!(tokens.spilled(), "Eight terms should spill to heap");
-        assert_eq!(tokens.len(), 8);
+        // More than 8 tokens should spill to heap
+        let tokens = parse_boolean_query("a b c d e f g h i");
+        assert!(tokens.spilled(), "Nine terms should spill to heap");
+        assert_eq!(tokens.len(), 9);
     }
 
     #[test]
