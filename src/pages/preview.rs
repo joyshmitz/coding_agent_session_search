@@ -266,8 +266,7 @@ pub async fn start_preview_server(config: PreviewConfig) -> Result<(), PreviewEr
     // Print startup message
     eprintln!();
     eprintln!(
-        "\x1b[1;32m{}\x1b[0m Preview server running at \x1b[1;36mhttp://localhost:{}\x1b[0m",
-        "\u{1F310}",  // Globe emoji
+        "\x1b[1;32m\u{1F310}\x1b[0m Preview server running at \x1b[1;36mhttp://localhost:{}\x1b[0m",
         config.port
     );
     eprintln!(

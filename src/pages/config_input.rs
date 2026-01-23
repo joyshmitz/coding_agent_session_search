@@ -39,7 +39,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use thiserror::Error;
 
 use super::export::PathMode;
@@ -334,13 +334,13 @@ impl PagesConfig {
     /// Values starting with "env:" are resolved to the corresponding
     /// environment variable value.
     pub fn resolve_env_vars(&mut self) -> Result<(), ConfigError> {
-        if let Some(ref password) = self.encryption.password {
-            if let Some(env_var) = password.strip_prefix("env:") {
-                self.encryption.password = Some(
-                    std::env::var(env_var)
-                        .map_err(|_| ConfigError::EnvVarNotFound(env_var.to_string()))?,
-                );
-            }
+        if let Some(ref password) = self.encryption.password
+            && let Some(env_var) = password.strip_prefix("env:")
+        {
+            self.encryption.password = Some(
+                std::env::var(env_var)
+                    .map_err(|_| ConfigError::EnvVarNotFound(env_var.to_string()))?,
+            );
         }
 
         // Resolve env vars in output_dir if prefixed
@@ -409,24 +409,20 @@ impl PagesConfig {
         }
 
         // Validate time formats
-        if let Some(ref since) = self.filters.since {
-            if parse_time_input(since).is_none() {
-                errors.push(format!(
-                    "Invalid filters.since time format: '{}'. \
-                     Use ISO 8601 (2025-01-06), relative (30 days ago), or keywords (today, yesterday).",
-                    since
-                ));
-            }
+        if let Some(ref since) = self.filters.since && parse_time_input(since).is_none() {
+            errors.push(format!(
+                "Invalid filters.since time format: '{}'. \
+                 Use ISO 8601 (2025-01-06), relative (30 days ago), or keywords (today, yesterday).",
+                since
+            ));
         }
 
-        if let Some(ref until) = self.filters.until {
-            if parse_time_input(until).is_none() {
-                errors.push(format!(
-                    "Invalid filters.until time format: '{}'. \
-                     Use ISO 8601 (2025-01-06), relative (30 days ago), or keywords (today, yesterday).",
-                    until
-                ));
-            }
+        if let Some(ref until) = self.filters.until && parse_time_input(until).is_none() {
+            errors.push(format!(
+                "Invalid filters.until time format: '{}'. \
+                 Use ISO 8601 (2025-01-06), relative (30 days ago), or keywords (today, yesterday).",
+                until
+            ));
         }
 
         // Warnings

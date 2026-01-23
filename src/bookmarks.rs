@@ -282,28 +282,26 @@ impl BookmarkStore {
 
         let tx = self.conn.unchecked_transaction()?;
 
-        for mut bookmark in bookmarks {
-            // Check for duplicates
-            // We can't use self.is_bookmarked here easily because it borrows self.conn immutably,
-            // but we are inside a transaction.
-            // Actually, unchecked_transaction allows us to use the connection?
-            // No, Transaction borrows Connection mutably.
-            // We need to implement duplicate check manually or use INSERT OR IGNORE / INSERT ... ON CONFLICT
-            // But logic says "merges, doesn't overwrite".
-
-            // Re-implement check using the transaction
-            let exists: bool = tx.query_row(
+        {
+            let mut check_stmt = tx.prepare(
                 "SELECT EXISTS(SELECT 1 FROM bookmarks WHERE source_path = ?1 AND line_number IS ?2)",
-                params![bookmark.source_path, bookmark.line_number.map(|n| n as i64)],
-                |row| row.get(0),
             )?;
 
-            if !exists {
-                bookmark.id = 0; // Reset ID for new insert
-                tx.execute(
-                    "INSERT INTO bookmarks (title, source_path, line_number, agent, workspace, note, tags, created_at, updated_at, snippet)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
+            let mut insert_stmt = tx.prepare(
+                "INSERT INTO bookmarks (title, source_path, line_number, agent, workspace, note, tags, created_at, updated_at, snippet)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+
+            for mut bookmark in bookmarks {
+                // Check for duplicates
+                let exists: bool = check_stmt.query_row(
+                    params![bookmark.source_path, bookmark.line_number.map(|n| n as i64)],
+                    |row| row.get(0),
+                )?;
+
+                if !exists {
+                    bookmark.id = 0; // Reset ID for new insert
+                    insert_stmt.execute(params![
                         bookmark.title,
                         bookmark.source_path,
                         bookmark.line_number.map(|n| n as i64),
@@ -314,9 +312,9 @@ impl BookmarkStore {
                         bookmark.created_at,
                         bookmark.updated_at,
                         bookmark.snippet,
-                    ],
-                )?;
-                imported += 1;
+                    ])?;
+                    imported += 1;
+                }
             }
         }
 
