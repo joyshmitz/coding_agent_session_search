@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow, bail};
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use smallvec::{SmallVec, smallvec}
+use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
