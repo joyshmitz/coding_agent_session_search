@@ -29,11 +29,12 @@ jobs:
             target: aarch64-unknown-linux-gnu
             artifact_name: cass
             asset_name: cass-linux-arm64
-          # macOS Intel
-          - os: macos-15
-            target: x86_64-apple-darwin
-            artifact_name: cass
-            asset_name: cass-darwin-amd64
+          # macOS Intel - DISABLED: ort-sys doesn't provide prebuilt ONNX Runtime binaries
+          # for x86_64-apple-darwin. Intel Mac users can build from source.
+          # - os: macos-15
+          #   target: x86_64-apple-darwin
+          #   artifact_name: cass
+          #   asset_name: cass-darwin-amd64
           # macOS Apple Silicon
           - os: macos-14
             target: aarch64-apple-darwin
