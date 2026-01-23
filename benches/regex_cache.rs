@@ -1,6 +1,7 @@
 use coding_agent_search::search::query::{regex_query_cached, regex_query_uncached};
 use coding_agent_search::search::tantivy::{build_schema, fields_from_schema};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use tantivy::schema::Field;
 
 fn content_field() -> Field {

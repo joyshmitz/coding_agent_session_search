@@ -1,5 +1,8 @@
 use coding_agent_search::default_data_dir;
-use coding_agent_search::search::canonicalize::canonicalize_for_embedding;
+use coding_agent_search::search::canonicalize::{
+    MAX_EMBED_CHARS, canonicalize_for_embedding, canonicalize_for_embedding_legacy,
+    canonicalize_for_embedding_streaming,
+};
 use coding_agent_search::search::embedder::Embedder;
 use coding_agent_search::search::hash_embedder::HashEmbedder;
 use coding_agent_search::search::query::{
@@ -55,9 +58,9 @@ fn bench_hash_embed_batch(c: &mut Criterion) {
 // =============================================================================
 
 /// Benchmark canonicalization of a long message.
-fn bench_canonicalize_long_message(c: &mut Criterion) {
+fn make_long_message() -> String {
     // Create a realistic long message (~10KB)
-    let long_message: String = (0..100)
+    (0..100)
         .map(|i| {
             format!(
                 "Paragraph {}: Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
@@ -66,10 +69,31 @@ fn bench_canonicalize_long_message(c: &mut Criterion) {
                 i
             )
         })
-        .collect();
+        .collect()
+}
 
+fn make_sized_message(target_len: usize) -> String {
+    let chunk = "This is a sample sentence for canonicalization benchmarks. ";
+    let mut msg = String::with_capacity(target_len + chunk.len());
+    while msg.len() < target_len {
+        msg.push_str(chunk);
+    }
+    msg.truncate(target_len);
+    msg
+}
+
+fn bench_canonicalize_long_message(c: &mut Criterion) {
+    let long_message = make_long_message();
     c.bench_function("canonicalize_long_message", |b| {
-        b.iter(|| black_box(canonicalize_for_embedding(&long_message)))
+        b.iter(|| black_box(canonicalize_for_embedding_legacy(&long_message)))
+    });
+}
+
+/// Benchmark streaming canonicalization of a long message.
+fn bench_canonicalize_long_message_streaming(c: &mut Criterion) {
+    let long_message = make_long_message();
+    c.bench_function("canonicalize_long_message_streaming", |b| {
+        b.iter(|| black_box(canonicalize_for_embedding_streaming(&long_message)))
     });
 }
 
@@ -101,6 +125,23 @@ This has O(log n) time complexity and O(1) space complexity.
     c.bench_function("canonicalize_with_code", |b| {
         b.iter(|| black_box(canonicalize_for_embedding(message_with_code)))
     });
+}
+
+/// Benchmark canonicalization across input sizes (legacy vs streaming).
+fn bench_canonicalize_streaming_vs_legacy_sizes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("canonicalize_streaming_vs_legacy_sizes");
+    let sizes = [100usize, 1_000, 10_000, MAX_EMBED_CHARS + 500];
+
+    for size in sizes {
+        let text = make_sized_message(size);
+        group.bench_with_input(BenchmarkId::new("legacy", size), &text, |b, input| {
+            b.iter(|| black_box(canonicalize_for_embedding_legacy(input)))
+        });
+        group.bench_with_input(BenchmarkId::new("streaming", size), &text, |b, input| {
+            b.iter(|| black_box(canonicalize_for_embedding_streaming(input)))
+        });
+    }
+    group.finish();
 }
 
 // =============================================================================
@@ -468,7 +509,9 @@ criterion_group!(
     bench_hash_embed_batch,
     // Canonicalization benchmarks
     bench_canonicalize_long_message,
+    bench_canonicalize_long_message_streaming,
     bench_canonicalize_with_code,
+    bench_canonicalize_streaming_vs_legacy_sizes,
     // RRF fusion benchmarks
     bench_rrf_fusion_100_results,
     bench_rrf_fusion_overlapping,
