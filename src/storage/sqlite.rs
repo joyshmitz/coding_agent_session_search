@@ -1272,6 +1272,15 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// Set the timestamp of the last successful index completion (milliseconds since epoch).
+    pub fn set_last_indexed_at(&mut self, ts: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('last_indexed_at', ?)",
+            params![ts.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// Get current time as milliseconds since epoch.
     pub fn now_millis() -> i64 {
         SystemTime::now()
