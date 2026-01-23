@@ -768,6 +768,11 @@ pub fn run_index(
         "updated last_scan_ts for incremental indexing"
     );
 
+    // Update last_indexed_at so `cass status` reflects the latest index time
+    let now_ms = SqliteStorage::now_millis();
+    storage.set_last_indexed_at(now_ms)?;
+    tracing::info!(now_ms, "updated last_indexed_at for status display");
+
     if let Some(p) = &opts.progress {
         p.phase.store(0, Ordering::Relaxed); // Idle
         p.is_rebuilding.store(false, Ordering::Relaxed);
