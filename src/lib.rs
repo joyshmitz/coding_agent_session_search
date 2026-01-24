@@ -5037,10 +5037,17 @@ fn run_stats(
             .collect()
     };
 
-    // Get date range with source filter
-    let date_sql = format!(
-        "SELECT MIN(started_at), MAX(started_at) FROM conversations c{source_where} WHERE started_at IS NOT NULL"
-    );
+    // Get date range with source filter.
+    // Note: source_where already includes a leading " WHERE ...", so when it is present we must
+    // append additional conditions with " AND ..." (not another WHERE).
+    let date_sql = if source_where.is_empty() {
+        "SELECT MIN(started_at), MAX(started_at) FROM conversations c WHERE started_at IS NOT NULL"
+            .to_string()
+    } else {
+        format!(
+            "SELECT MIN(started_at), MAX(started_at) FROM conversations c{source_where} AND started_at IS NOT NULL"
+        )
+    };
     let (oldest, newest): (Option<i64>, Option<i64>) = if let Some(ref param) = source_param {
         conn.query_row(&date_sql, [param], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap_or((None, None))
@@ -5051,25 +5058,40 @@ fn run_stats(
 
     // Get per-source breakdown if requested (P3.7)
     let source_rows: Vec<(String, i64, i64)> = if by_source {
-        let mut stmt = conn
-            .prepare(
-                "SELECT c.source_id, COUNT(DISTINCT c.id) as convs, COUNT(m.id) as msgs
+        let source_sql = format!(
+            "SELECT c.source_id, COUNT(DISTINCT c.id) as convs, COUNT(m.id) as msgs
              FROM conversations c
              LEFT JOIN messages m ON m.conversation_id = c.id
+             {source_where}
              GROUP BY c.source_id
-             ORDER BY convs DESC",
-            )
+             ORDER BY convs DESC"
+        );
+        let mut stmt = conn
+            .prepare(&source_sql)
             .map_err(|e| CliError::unknown(format!("query prep: {e}")))?;
-        stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })
-        .map_err(|e| CliError::unknown(format!("query: {e}")))?
-        .filter_map(std::result::Result::ok)
-        .collect()
+        if let Some(ref param) = source_param {
+            stmt.query_map([param], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| CliError::unknown(format!("query: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .collect()
+        } else {
+            stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| CliError::unknown(format!("query: {e}")))?
+            .filter_map(std::result::Result::ok)
+            .collect()
+        }
     } else {
         Vec::new()
     };
