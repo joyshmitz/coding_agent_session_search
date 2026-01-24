@@ -91,6 +91,8 @@ fn index_full_creates_artifacts() {
     cargo_bin_cmd!("cass")
         .args(["index", "--full", "--data-dir"])
         .arg(&data_dir)
+        // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+        .current_dir(home)
         .env("CODEX_HOME", &codex_home)
         .env("HOME", home)
         .assert()
@@ -134,6 +136,8 @@ fn incremental_reindex_preserves_and_appends_messages() {
     cargo_bin_cmd!("cass")
         .args(["index", "--full", "--data-dir"])
         .arg(&data_dir)
+        // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+        .current_dir(home)
         .env("CODEX_HOME", &codex_home)
         .env("HOME", home)
         .assert()
@@ -146,6 +150,8 @@ fn incremental_reindex_preserves_and_appends_messages() {
     let baseline = cargo_bin_cmd!("cass")
         .args(["search", "initial_keep_token", "--robot", "--data-dir"])
         .arg(&data_dir)
+        // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+        .current_dir(home)
         .env("HOME", home)
         .output()
         .expect("baseline search");
@@ -169,6 +175,8 @@ fn incremental_reindex_preserves_and_appends_messages() {
     cargo_bin_cmd!("cass")
         .args(["index", "--data-dir"])
         .arg(&data_dir)
+        // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+        .current_dir(home)
         .env("CODEX_HOME", &codex_home)
         .env("HOME", home)
         .assert()
@@ -178,6 +186,8 @@ fn incremental_reindex_preserves_and_appends_messages() {
     let preserved = cargo_bin_cmd!("cass")
         .args(["search", "initial_keep_token", "--robot", "--data-dir"])
         .arg(&data_dir)
+        // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+        .current_dir(home)
         .env("HOME", home)
         .output()
         .expect("preserved search");
@@ -197,6 +207,8 @@ fn incremental_reindex_preserves_and_appends_messages() {
     let appended = cargo_bin_cmd!("cass")
         .args(["search", "appended_token_beta", "--robot", "--data-dir"])
         .arg(&data_dir)
+        // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+        .current_dir(home)
         .env("HOME", home)
         .output()
         .expect("appended search");

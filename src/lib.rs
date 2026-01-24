@@ -3719,35 +3719,11 @@ fn run_cli_search(
     // Priority: robot_format CLI > json flag > CASS_OUTPUT_FORMAT > TOON_DEFAULT_FORMAT > robot_auto > None
     let effective_robot = robot_format
         .or(if *json { Some(RobotFormat::Json) } else { None })
-        .or_else(|| {
-            // Check CASS_OUTPUT_FORMAT env var
-            std::env::var("CASS_OUTPUT_FORMAT").ok().and_then(|val| {
-                match val.to_lowercase().as_str() {
-                    "json" => Some(RobotFormat::Json),
-                    "jsonl" => Some(RobotFormat::Jsonl),
-                    "compact" => Some(RobotFormat::Compact),
-                    "sessions" => Some(RobotFormat::Sessions),
-                    "toon" => Some(RobotFormat::Toon),
-                    _ => None,
-                }
-            })
-        })
-        .or_else(|| {
-            // Check TOON_DEFAULT_FORMAT env var (global fallback)
-            std::env::var("TOON_DEFAULT_FORMAT").ok().and_then(|val| {
-                match val.to_lowercase().as_str() {
-                    "toon" => Some(RobotFormat::Toon),
-                    "json" => Some(RobotFormat::Json),
-                    _ => None,
-                }
-            })
-        })
-        .or({
-            if robot_auto {
-                Some(RobotFormat::Json)
-            } else {
-                None
-            }
+        .or_else(robot_format_from_env)
+        .or(if robot_auto {
+            Some(RobotFormat::Json)
+        } else {
+            None
         });
     let field_mask = resolve_field_mask(&fields, effective_robot, display_format);
 
@@ -4378,7 +4354,7 @@ fn clamp_hits_to_budget(
 fn robot_format_from_env() -> Option<RobotFormat> {
     std::env::var("CASS_OUTPUT_FORMAT")
         .ok()
-        .and_then(|val| match val.to_lowercase().as_str() {
+        .and_then(|val| match val.trim().to_ascii_lowercase().as_str() {
             "json" => Some(RobotFormat::Json),
             "jsonl" => Some(RobotFormat::Jsonl),
             "compact" => Some(RobotFormat::Compact),
@@ -4388,7 +4364,7 @@ fn robot_format_from_env() -> Option<RobotFormat> {
         })
         .or_else(|| {
             std::env::var("TOON_DEFAULT_FORMAT").ok().and_then(|val| {
-                match val.to_lowercase().as_str() {
+                match val.trim().to_ascii_lowercase().as_str() {
                     "toon" => Some(RobotFormat::Toon),
                     "json" => Some(RobotFormat::Json),
                     _ => None,
@@ -5118,8 +5094,8 @@ fn run_stats(
             "by_agent": agent_rows.iter().map(|(a, c)| serde_json::json!({"agent": a, "count": c})).collect::<Vec<_>>(),
             "top_workspaces": ws_rows.iter().map(|(w, c)| serde_json::json!({"workspace": w, "count": c})).collect::<Vec<_>>(),
             "date_range": {
-                "oldest": oldest.map(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
-                "newest": newest.map(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
+                "oldest": oldest.and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
+                "newest": newest.and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
             },
             "db_path": db_path.display().to_string(),
         });

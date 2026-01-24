@@ -40,6 +40,8 @@ fn index_then_tui_once_headless() {
         .arg("--full")
         .arg("--data-dir")
         .arg(&data_dir)
+        // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+        .current_dir(&home)
         .assert()
         .success();
 
@@ -49,6 +51,8 @@ fn index_then_tui_once_headless() {
         .arg("--data-dir")
         .arg(&data_dir)
         .arg("--once")
+        // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+        .current_dir(&home)
         .env("TUI_HEADLESS", "1")
         .assert()
         .success();

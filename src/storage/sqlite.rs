@@ -900,12 +900,11 @@ impl StatsAggregator {
     /// - (agent, "all") - specific agent, all sources
     /// - ("all", "all") - totals
     ///
-    /// Returns a Vec for predictable ordering in batch INSERT.
+    /// Returns entries sorted by (day_id, agent_slug, source_id) for deterministic batching.
     pub fn expand(&self) -> Vec<(i64, String, String, StatsDelta)> {
         let mut expanded: HashMap<(i64, String, String), StatsDelta> = HashMap::new();
 
         for ((day_id, agent, source), delta) in &self.deltas {
-            // Generate 4 permutations
             let permutations = [
                 (agent.as_str(), source.as_str()),
                 ("all", source.as_str()),
@@ -913,7 +912,12 @@ impl StatsAggregator {
                 ("all", "all"),
             ];
 
-            for (a, s) in permutations {
+            // Ensure we don't double-apply deltas if agent/source is already "all".
+            for idx in 0..permutations.len() {
+                let (a, s) = permutations[idx];
+                if permutations[..idx].contains(&(a, s)) {
+                    continue;
+                }
                 let key = (*day_id, a.to_owned(), s.to_owned());
                 let entry = expanded.entry(key).or_default();
                 entry.session_count_delta += delta.session_count_delta;
@@ -922,10 +926,14 @@ impl StatsAggregator {
             }
         }
 
-        expanded
+        let mut out: Vec<(i64, String, String, StatsDelta)> = expanded
             .into_iter()
             .map(|((d, a, s), delta)| (d, a, s, delta))
-            .collect()
+            .collect();
+        out.sort_by(|(d1, a1, s1, _), (d2, a2, s2, _)| {
+            d1.cmp(d2).then_with(|| a1.cmp(a2)).then_with(|| s1.cmp(s2))
+        });
+        out
     }
 
     /// Check if the aggregator is empty (no data recorded).
