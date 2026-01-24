@@ -888,7 +888,7 @@ pub enum RobotFormat {
     Compact,
     /// Session paths only: one source_path per line (for chained searches)
     Sessions,
-    /// Token-Optimized Object Notation (pipes JSON through tru binary)
+    /// Token-Optimized Object Notation (encodes via toon_rust crate)
     Toon,
 }
 
@@ -4824,52 +4824,44 @@ fn output_robot_results(
                 retryable: false,
             })?;
 
-            // Find tru binary: TOON_TRU_BIN > TOON_BIN > PATH lookup
-            let tru_bin = std::env::var("TOON_TRU_BIN")
-                .or_else(|_| std::env::var("TOON_BIN"))
-                .unwrap_or_else(|_| "tru".to_string());
+            let indent = match std::env::var("TOON_INDENT") {
+                Ok(v) if !v.trim().is_empty() => match v.parse::<usize>() {
+                    Ok(n) => Some(n),
+                    Err(e) => {
+                        warn!("invalid TOON_INDENT={v}: {e} (ignoring)");
+                        None
+                    }
+                },
+                _ => None,
+            };
 
-            // Pipe JSON through tru --encode
-            match std::process::Command::new(&tru_bin)
-                .arg("--encode")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-            {
-                Ok(mut child) => {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        use std::io::Write;
-                        if let Err(e) = stdin.write_all(json_str.as_bytes()) {
-                            warn!("tru stdin write failed: {e}, falling back to JSON");
-                            println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-                            return Ok(());
-                        }
-                        drop(stdin); // Close stdin to signal EOF to tru
+            let key_folding = match std::env::var("TOON_KEY_FOLDING") {
+                Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                    "" | "off" | "0" | "false" => Some(toon_rust::options::KeyFoldingMode::Off),
+                    "safe" => Some(toon_rust::options::KeyFoldingMode::Safe),
+                    other => {
+                        warn!("invalid TOON_KEY_FOLDING={other} (expected off|safe); ignoring");
+                        None
                     }
-                    match child.wait_with_output() {
-                        Ok(output) if output.status.success() => {
-                            let toon_str = String::from_utf8_lossy(&output.stdout);
-                            print!("{toon_str}");
-                        }
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            warn!("tru encode failed (exit {:?}): {stderr}, falling back to JSON", output.status.code());
-                            println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-                        }
-                        Err(e) => {
-                            warn!("tru wait failed: {e}, falling back to JSON");
-                            println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-                        }
-                    }
-                }
-                Err(e) => {
-                    // tru not found or failed to spawn - fall back to JSON with warning
-                    warn!("tru binary not found or failed to spawn: {e}, falling back to JSON");
-                    eprintln!("[warn] tru binary not found, outputting JSON. Install: brew install dicklesworthstone/tap/tru");
-                    println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-                }
-            }
+                },
+                Err(_) => None,
+            };
+
+            let toon_str = toon_rust::encode(
+                payload,
+                Some(toon_rust::EncodeOptions {
+                    indent,
+                    delimiter: None,
+                    key_folding,
+                    flatten_depth: None,
+                    replacer: None,
+                }),
+            );
+
+            // Preserve the existing "compact JSON" behavior by first ensuring the payload is
+            // valid JSON (serde_json::to_string above). We don't need the string itself here.
+            drop(json_str);
+            print!("{toon_str}");
         }
         RobotFormat::Sessions => {
             unreachable!("RobotFormat::Sessions is handled above to avoid building hit payloads");
