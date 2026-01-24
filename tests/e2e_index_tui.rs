@@ -18,6 +18,11 @@ fn make_codex_fixture(root: &Path) {
 #[test]
 fn index_then_tui_once_headless() {
     let tmp = tempfile::TempDir::new().unwrap();
+    // Isolate from the developer machine's real session dirs (HOME-based connectors).
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());

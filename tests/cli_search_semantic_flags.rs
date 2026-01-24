@@ -21,8 +21,8 @@ fn search_parses_model_flag() {
 
 #[test]
 fn search_parses_rerank_flag() {
-    let cli = Cli::try_parse_from(["cass", "search", "query", "--rerank"])
-        .expect("parse search flags");
+    let cli =
+        Cli::try_parse_from(["cass", "search", "query", "--rerank"]).expect("parse search flags");
 
     match cli.command {
         Some(Commands::Search { rerank, .. }) => {
@@ -100,13 +100,7 @@ fn search_default_flags_are_false() {
 #[test]
 fn search_combines_mode_and_model_flags() {
     let cli = Cli::try_parse_from([
-        "cass",
-        "search",
-        "query",
-        "--mode",
-        "semantic",
-        "--model",
-        "minilm",
+        "cass", "search", "query", "--mode", "semantic", "--model", "minilm",
     ])
     .expect("parse search flags");
 

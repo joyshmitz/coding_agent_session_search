@@ -221,6 +221,10 @@ fn reindex_does_not_drop_messages_in_db_or_search() {
     let codex_home = home.join(".codex");
     let data_dir = home.join("cass_data");
     fs::create_dir_all(&data_dir).unwrap();
+    let xdg_data = home.join(".local/share");
+    let xdg_config = home.join(".config");
+    fs::create_dir_all(&xdg_data).unwrap();
+    fs::create_dir_all(&xdg_config).unwrap();
 
     let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
     let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
@@ -239,8 +243,12 @@ fn reindex_does_not_drop_messages_in_db_or_search() {
     cargo_bin_cmd!("cass")
         .args(["index", "--full", "--data-dir"])
         .arg(&data_dir)
+        // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+        .current_dir(home)
         .env("CODEX_HOME", &codex_home)
         .env("HOME", home)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("XDG_CONFIG_HOME", &xdg_config)
         .assert()
         .success();
 
@@ -257,8 +265,12 @@ fn reindex_does_not_drop_messages_in_db_or_search() {
     cargo_bin_cmd!("cass")
         .args(["index", "--data-dir"])
         .arg(&data_dir)
+        // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+        .current_dir(home)
         .env("CODEX_HOME", &codex_home)
         .env("HOME", home)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("XDG_CONFIG_HOME", &xdg_config)
         .assert()
         .success();
 
@@ -274,7 +286,11 @@ fn reindex_does_not_drop_messages_in_db_or_search() {
         let out = cargo_bin_cmd!("cass")
             .args(["search", term, "--robot", "--data-dir"])
             .arg(&data_dir)
+            // Avoid connector detection from the repository CWD (e.g. `.aider.chat.history.md`).
+            .current_dir(home)
             .env("HOME", home)
+            .env("XDG_DATA_HOME", &xdg_data)
+            .env("XDG_CONFIG_HOME", &xdg_config)
             .output()
             .expect("search");
         assert!(out.status.success(), "search should succeed for {term}");

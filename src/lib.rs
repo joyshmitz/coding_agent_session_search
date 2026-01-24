@@ -177,7 +177,7 @@ pub enum Commands {
         /// Output as JSON (--robot also works). Equivalent to --robot-format json
         #[arg(long, visible_alias = "robot")]
         json: bool,
-        /// Robot output format: json (pretty), jsonl (streaming), compact (single-line)
+        /// Robot output format: json (pretty), jsonl (streaming), compact (single-line), sessions (paths), toon (token-optimized)
         #[arg(long, value_enum)]
         robot_format: Option<RobotFormat>,
         /// Include extended metadata in robot output (`elapsed_ms`, `wildcard_fallback`, `cache_stats`)
@@ -2066,13 +2066,18 @@ async fn execute_cli(
                     if daemon && no_daemon {
                         return Err(CliError::usage(
                             "Cannot specify both --daemon and --no-daemon",
-                            Some("Use --daemon to enable daemon or --no-daemon to disable it".to_string()),
+                            Some(
+                                "Use --daemon to enable daemon or --no-daemon to disable it"
+                                    .to_string(),
+                            ),
                         ));
                     }
 
                     // Warn about reranker without rerank flag
                     if reranker.is_some() && !rerank {
-                        eprintln!("Warning: --reranker specified but --rerank not enabled; reranker will be ignored");
+                        eprintln!(
+                            "Warning: --reranker specified but --rerank not enabled; reranker will be ignored"
+                        );
                     }
 
                     // Build semantic options from new flags
@@ -2828,10 +2833,8 @@ fn describe_command(cli: &Cli) -> String {
 /// Returns true if the command is using robot/JSON output mode.
 /// Used to auto-suppress INFO logs for clean machine-parseable output.
 fn is_robot_mode(command: &Commands) -> bool {
-    // Check for env var defaults that would trigger robot mode
-    let env_robot_mode = std::env::var("CASS_OUTPUT_FORMAT")
-        .or_else(|_| std::env::var("TOON_DEFAULT_FORMAT"))
-        .is_ok();
+    // Env-driven output formats should behave like robot mode (suppresses INFO logs).
+    let env_robot_mode = robot_format_from_env().is_some();
 
     match command {
         Commands::Search {
@@ -2840,18 +2843,29 @@ fn is_robot_mode(command: &Commands) -> bool {
             robot_meta,
             ..
         } => *json || robot_format.is_some() || *robot_meta || env_robot_mode,
-        Commands::Index { json, .. } => *json,
-        Commands::Stats { json, .. } => *json,
-        Commands::Diag { json, .. } => *json,
-        Commands::Status { json, .. } => *json,
-        Commands::Health { json, .. } => *json,
-        Commands::Doctor { json, .. } => *json,
-        Commands::ApiVersion { json, .. } => *json,
-        Commands::State { json, .. } => *json,
-        Commands::View { json, .. } => *json,
-        Commands::Capabilities { json, .. } => *json,
-        Commands::Introspect { json, .. } => *json,
-        Commands::Context { json, .. } => *json,
+        Commands::Index { json, .. } => *json || env_robot_mode,
+        Commands::Stats { json, .. } => *json || env_robot_mode,
+        Commands::Diag { json, .. } => *json || env_robot_mode,
+        Commands::Status { json, .. } => *json || env_robot_mode,
+        Commands::Health { json, .. } => *json || env_robot_mode,
+        Commands::Doctor { json, .. } => *json || env_robot_mode,
+        Commands::ApiVersion { json, .. } => *json || env_robot_mode,
+        Commands::State { json, .. } => *json || env_robot_mode,
+        Commands::View { json, .. } => *json || env_robot_mode,
+        Commands::Capabilities { json, .. } => *json || env_robot_mode,
+        Commands::Introspect { json, .. } => *json || env_robot_mode,
+        Commands::Context { json, .. } => *json || env_robot_mode,
+        Commands::Expand { json, .. } => *json || env_robot_mode,
+        Commands::Timeline { json, .. } => *json || env_robot_mode,
+        Commands::Sources(cmd) => match cmd {
+            // Only `sources list` honors env-based structured output today.
+            SourcesCommand::List { json, .. } => *json || env_robot_mode,
+            SourcesCommand::Doctor { json, .. }
+            | SourcesCommand::Sync { json, .. }
+            | SourcesCommand::Discover { json, .. }
+            | SourcesCommand::Setup { json, .. } => *json,
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -3136,6 +3150,10 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  TUI_HEADLESS=1                           skip update prompt".to_string(),
             "  CASS_DATA_DIR                            override data dir".to_string(),
             "  CASS_DB_PATH                             override db path".to_string(),
+            "  CASS_OUTPUT_FORMAT=json|jsonl|compact|sessions|toon  default structured output".to_string(),
+            "  TOON_DEFAULT_FORMAT=toon|json            fallback structured output for all tools".to_string(),
+            "  TOON_INDENT=<N>                           pretty-print TOON with indent".to_string(),
+            "  TOON_KEY_FOLDING=off|safe                 TOON key folding mode".to_string(),
             "  NO_COLOR / CASS_NO_COLOR                 disable color".to_string(),
             "  CASS_TRACE_FILE                          default trace path".to_string(),
         ],
@@ -3150,7 +3168,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
         RobotTopic::Guide => vec![
             "guide:".to_string(),
             "  Robot-mode handbook: docs/ROBOT_MODE.md (automation quickstart)".to_string(),
-            "  Output: --robot/--json; JSONL via --robot-format jsonl; compact via --robot-format compact".to_string(),
+            "  Output: --robot/--json; formats via --robot-format json|jsonl|compact|toon".to_string(),
             "  Logging: INFO auto-suppressed in robot mode; add -v to re-enable".to_string(),
             "  Args: accepts --robot-docs=topic and misplaced globals; detailed errors with examples on parse failure".to_string(),
             "  Safety: prefer --color=never in non-TTY; use --trace-file for spans; reset TUI via `cass tui --reset-state`".to_string(),
@@ -4357,6 +4375,80 @@ fn clamp_hits_to_budget(
     (kept, est, clamped)
 }
 
+fn robot_format_from_env() -> Option<RobotFormat> {
+    std::env::var("CASS_OUTPUT_FORMAT")
+        .ok()
+        .and_then(|val| match val.to_lowercase().as_str() {
+            "json" => Some(RobotFormat::Json),
+            "jsonl" => Some(RobotFormat::Jsonl),
+            "compact" => Some(RobotFormat::Compact),
+            "sessions" => Some(RobotFormat::Sessions),
+            "toon" => Some(RobotFormat::Toon),
+            _ => None,
+        })
+        .or_else(|| {
+            std::env::var("TOON_DEFAULT_FORMAT").ok().and_then(|val| {
+                match val.to_lowercase().as_str() {
+                    "toon" => Some(RobotFormat::Toon),
+                    "json" => Some(RobotFormat::Json),
+                    _ => None,
+                }
+            })
+        })
+}
+
+fn toon_encode_options_from_env() -> toon_rust::EncodeOptions {
+    let indent = match std::env::var("TOON_INDENT") {
+        Ok(v) if !v.trim().is_empty() => match v.parse::<usize>() {
+            Ok(n) => Some(n),
+            Err(e) => {
+                warn!("invalid TOON_INDENT={v}: {e} (ignoring)");
+                None
+            }
+        },
+        _ => None,
+    };
+
+    let key_folding = match std::env::var("TOON_KEY_FOLDING") {
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "" | "off" | "0" | "false" => Some(toon_rust::options::KeyFoldingMode::Off),
+            "safe" => Some(toon_rust::options::KeyFoldingMode::Safe),
+            other => {
+                warn!("invalid TOON_KEY_FOLDING={other} (expected off|safe); ignoring");
+                None
+            }
+        },
+        Err(_) => None,
+    };
+
+    toon_rust::EncodeOptions {
+        indent,
+        delimiter: None,
+        key_folding,
+        flatten_depth: None,
+        replacer: None,
+    }
+}
+
+fn output_structured_value(payload: serde_json::Value, format: RobotFormat) -> CliResult<()> {
+    match format {
+        RobotFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&payload).unwrap_or_default()
+            );
+        }
+        RobotFormat::Jsonl | RobotFormat::Compact | RobotFormat::Sessions => {
+            println!("{}", serde_json::to_string(&payload).unwrap_or_default());
+        }
+        RobotFormat::Toon => {
+            let toon_str = toon_rust::encode(payload, Some(toon_encode_options_from_env()));
+            print!("{toon_str}");
+        }
+    }
+    Ok(())
+}
+
 /// Output search results in robot-friendly format
 #[allow(clippy::too_many_arguments, unused_variables)]
 fn output_robot_results(
@@ -4728,7 +4820,7 @@ fn output_robot_results(
         }
         RobotFormat::Toon => {
             // TOON: Token-Optimized Object Notation
-            // Pipes JSON through tru binary for token-efficient output
+            // Encodes via toon_rust crate for token-efficient output
             let mut payload = serde_json::json!({
                 "query": query,
                 "limit": limit,
@@ -4824,39 +4916,7 @@ fn output_robot_results(
                 retryable: false,
             })?;
 
-            let indent = match std::env::var("TOON_INDENT") {
-                Ok(v) if !v.trim().is_empty() => match v.parse::<usize>() {
-                    Ok(n) => Some(n),
-                    Err(e) => {
-                        warn!("invalid TOON_INDENT={v}: {e} (ignoring)");
-                        None
-                    }
-                },
-                _ => None,
-            };
-
-            let key_folding = match std::env::var("TOON_KEY_FOLDING") {
-                Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-                    "" | "off" | "0" | "false" => Some(toon_rust::options::KeyFoldingMode::Off),
-                    "safe" => Some(toon_rust::options::KeyFoldingMode::Safe),
-                    other => {
-                        warn!("invalid TOON_KEY_FOLDING={other} (expected off|safe); ignoring");
-                        None
-                    }
-                },
-                Err(_) => None,
-            };
-
-            let toon_str = toon_rust::encode(
-                payload,
-                Some(toon_rust::EncodeOptions {
-                    indent,
-                    delimiter: None,
-                    key_folding,
-                    flatten_depth: None,
-                    replacer: None,
-                }),
-            );
+            let toon_str = toon_rust::encode(payload, Some(toon_encode_options_from_env()));
 
             // Preserve the existing "compact JSON" behavior by first ensuring the payload is
             // valid JSON (serde_json::to_string above). We don't need the string itself here.
@@ -5038,7 +5098,20 @@ fn run_stats(
         Vec::new()
     };
 
-    if json {
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
         let mut payload = serde_json::json!({
             "conversations": conversation_count,
             "messages": message_count,
@@ -5072,61 +5145,58 @@ fn run_stats(
             );
         }
 
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
-        );
+        return output_structured_value(payload, fmt);
+    }
+
+    // Header with source filter indicator
+    let title = if let Some(ref filter) = source_filter {
+        format!("CASS Index Statistics (source: {})", filter)
     } else {
-        // Header with source filter indicator
-        let title = if let Some(ref filter) = source_filter {
-            format!("CASS Index Statistics (source: {})", filter)
-        } else {
-            "CASS Index Statistics".to_string()
-        };
-        println!("{title}");
-        println!("{}", "=".repeat(title.len()));
-        println!("Database: {}", db_path.display());
-        println!();
+        "CASS Index Statistics".to_string()
+    };
+    println!("{title}");
+    println!("{}", "=".repeat(title.len()));
+    println!("Database: {}", db_path.display());
+    println!();
 
-        // Show by_source breakdown if requested (P3.7)
-        if by_source && !source_rows.is_empty() {
-            println!("By Source:");
-            println!("  {:20} {:>10} {:>12}", "Source", "Convs", "Messages");
-            println!("  {}", "-".repeat(44));
-            for (src, convs, msgs) in &source_rows {
-                println!("  {:20} {:>10} {:>12}", src, convs, msgs);
-            }
-            println!();
+    // Show by_source breakdown if requested (P3.7)
+    if by_source && !source_rows.is_empty() {
+        println!("By Source:");
+        println!("  {:20} {:>10} {:>12}", "Source", "Convs", "Messages");
+        println!("  {}", "-".repeat(44));
+        for (src, convs, msgs) in &source_rows {
+            println!("  {:20} {:>10} {:>12}", src, convs, msgs);
         }
+        println!();
+    }
 
-        println!("Totals:");
-        println!("  Conversations: {conversation_count}");
-        println!("  Messages: {message_count}");
-        println!();
-        println!("By Agent:");
-        for (agent, count) in &agent_rows {
-            println!("  {agent}: {count}");
+    println!("Totals:");
+    println!("  Conversations: {conversation_count}");
+    println!("  Messages: {message_count}");
+    println!();
+    println!("By Agent:");
+    for (agent, count) in &agent_rows {
+        println!("  {agent}: {count}");
+    }
+    println!();
+    if !ws_rows.is_empty() {
+        println!("Top Workspaces:");
+        for (ws, count) in &ws_rows {
+            println!("  {ws}: {count}");
         }
         println!();
-        if !ws_rows.is_empty() {
-            println!("Top Workspaces:");
-            for (ws, count) in &ws_rows {
-                println!("  {ws}: {count}");
-            }
-            println!();
-        }
-        if let (Some(old), Some(new)) = (oldest, newest)
-            && let (Some(old_dt), Some(new_dt)) = (
-                chrono::DateTime::from_timestamp_millis(old),
-                chrono::DateTime::from_timestamp_millis(new),
-            )
-        {
-            println!(
-                "Date Range: {} to {}",
-                old_dt.format("%Y-%m-%d"),
-                new_dt.format("%Y-%m-%d")
-            );
-        }
+    }
+    if let (Some(old), Some(new)) = (oldest, newest)
+        && let (Some(old_dt), Some(new_dt)) = (
+            chrono::DateTime::from_timestamp_millis(old),
+            chrono::DateTime::from_timestamp_millis(new),
+        )
+    {
+        println!(
+            "Date Range: {} to {}",
+            old_dt.format("%Y-%m-%d"),
+            new_dt.format("%Y-%m-%d")
+        );
     }
 
     Ok(())
@@ -5204,7 +5274,20 @@ fn run_diag(
     let platform = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
 
-    if json {
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
         let payload = serde_json::json!({
             "version": version,
             "platform": { "os": platform, "arch": arch },
@@ -5231,51 +5314,48 @@ fn run_diag(
                 })
             }).collect::<Vec<_>>(),
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
-        );
+        return output_structured_value(payload, fmt);
+    }
+
+    println!("CASS Diagnostic Report");
+    println!("======================");
+    println!();
+    println!("Version: {version}");
+    println!("Platform: {platform} ({arch})");
+    println!();
+    println!("Paths:");
+    println!("  Data directory: {}", data_dir.display());
+    println!("  Database: {}", db_path.display());
+    println!("  Tantivy index: {}", index_path.display());
+    println!();
+    println!("Database Status:");
+    if db_exists {
+        println!("  Status: OK");
+        if verbose {
+            println!("  Size: {}", format_bytes(db_size));
+        }
+        println!("  Conversations: {conversation_count}");
+        println!("  Messages: {message_count}");
     } else {
-        println!("CASS Diagnostic Report");
-        println!("======================");
-        println!();
-        println!("Version: {version}");
-        println!("Platform: {platform} ({arch})");
-        println!();
-        println!("Paths:");
-        println!("  Data directory: {}", data_dir.display());
-        println!("  Database: {}", db_path.display());
-        println!("  Tantivy index: {}", index_path.display());
-        println!();
-        println!("Database Status:");
-        if db_exists {
-            println!("  Status: OK");
-            if verbose {
-                println!("  Size: {}", format_bytes(db_size));
-            }
-            println!("  Conversations: {conversation_count}");
-            println!("  Messages: {message_count}");
-        } else {
-            println!("  Status: NOT FOUND");
-            println!("  Hint: Run 'cass index --full' to create the database");
+        println!("  Status: NOT FOUND");
+        println!("  Hint: Run 'cass index --full' to create the database");
+    }
+    println!();
+    println!("Index Status:");
+    if index_exists {
+        println!("  Status: OK");
+        if verbose {
+            println!("  Size: {}", format_bytes(index_size));
         }
-        println!();
-        println!("Index Status:");
-        if index_exists {
-            println!("  Status: OK");
-            if verbose {
-                println!("  Size: {}", format_bytes(index_size));
-            }
-        } else {
-            println!("  Status: NOT FOUND");
-            println!("  Hint: Run 'cass index --full' to create the index");
-        }
-        println!();
-        println!("Connector Search Paths:");
-        for (name, path, exists) in &agent_paths {
-            let status = if *exists { "✓" } else { "✗" };
-            println!("  {} {}: {}", status, name, path.display());
-        }
+    } else {
+        println!("  Status: NOT FOUND");
+        println!("  Hint: Run 'cass index --full' to create the index");
+    }
+    println!();
+    println!("Connector Search Paths:");
+    for (name, path, exists) in &agent_paths {
+        let status = if *exists { "✓" } else { "✗" };
+        println!("  {} {}: {}", status, name, path.display());
     }
 
     Ok(())
@@ -5444,7 +5524,20 @@ fn run_status(
         None
     };
 
-    if json {
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
         let ts_str = chrono::DateTime::from_timestamp(now_secs as i64, 0)
             .unwrap_or_else(chrono::Utc::now)
             .to_rfc3339();
@@ -5478,65 +5571,62 @@ fn run_status(
                 "db_path": db_path.display().to_string(),
             },
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
-        );
+        return output_structured_value(payload, fmt);
+    }
+
+    // Human-readable output
+    let status_icon = if healthy { "✓" } else { "!" };
+    let status_word = if healthy {
+        "Healthy"
     } else {
-        // Human-readable output
-        let status_icon = if healthy { "✓" } else { "!" };
-        let status_word = if healthy {
-            "Healthy"
-        } else {
-            "Attention needed"
-        };
+        "Attention needed"
+    };
 
-        println!("{status_icon} CASS Status: {status_word}");
-        println!();
+    println!("{status_icon} CASS Status: {status_word}");
+    println!();
 
-        // Index info
-        println!("Index:");
-        if index_exists {
-            if let Some(age) = index_age_secs {
-                let age_str = if age < 60 {
-                    format!("{age} seconds ago")
-                } else if age < 3600 {
-                    format!("{} minutes ago", age / 60)
-                } else if age < 86400 {
-                    format!("{} hours ago", age / 3600)
-                } else {
-                    format!("{} days ago", age / 86400)
-                };
-                let stale_indicator = if is_stale { " (stale)" } else { "" };
-                println!("  Last indexed: {age_str}{stale_indicator}");
+    // Index info
+    println!("Index:");
+    if index_exists {
+        if let Some(age) = index_age_secs {
+            let age_str = if age < 60 {
+                format!("{age} seconds ago")
+            } else if age < 3600 {
+                format!("{} minutes ago", age / 60)
+            } else if age < 86400 {
+                format!("{} hours ago", age / 3600)
             } else {
-                println!("  Last indexed: unknown");
-            }
+                format!("{} days ago", age / 86400)
+            };
+            let stale_indicator = if is_stale { " (stale)" } else { "" };
+            println!("  Last indexed: {age_str}{stale_indicator}");
         } else {
-            println!("  Not found - run 'cass index --full'");
+            println!("  Last indexed: unknown");
         }
+    } else {
+        println!("  Not found - run 'cass index --full'");
+    }
 
-        // Database info
+    // Database info
+    println!();
+    println!("Database:");
+    if db_exists {
+        println!("  Conversations: {conversation_count}");
+        println!("  Messages: {message_count}");
+    } else {
+        println!("  Not found");
+    }
+
+    // Pending
+    if pending_sessions > 0 {
         println!();
-        println!("Database:");
-        if db_exists {
-            println!("  Conversations: {conversation_count}");
-            println!("  Messages: {message_count}");
-        } else {
-            println!("  Not found");
-        }
+        println!("Pending: {pending_sessions} sessions awaiting indexing");
+    }
 
-        // Pending
-        if pending_sessions > 0 {
-            println!();
-            println!("Pending: {pending_sessions} sessions awaiting indexing");
-        }
-
-        // Recommended action
-        if let Some(action) = &recommended_action {
-            println!();
-            println!("Recommended: {action}");
-        }
+    // Recommended action
+    if let Some(action) = &recommended_action {
+        println!();
+        println!("Recommended: {action}");
     }
 
     Ok(())
@@ -5584,16 +5674,26 @@ fn run_health(
     let healthy = db_exists && index_exists;
     let latency_ms = start.elapsed().as_millis() as u64;
 
-    if json {
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
         let payload = serde_json::json!({
             "healthy": healthy,
             "latency_ms": latency_ms,
             "state": state
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
-        );
+        output_structured_value(payload, fmt)?;
     } else if healthy {
         println!("✓ Healthy ({latency_ms}ms)");
         // Show informational warnings even when healthy
@@ -6549,7 +6649,20 @@ fn run_doctor(
     let all_pass = checks.iter().all(|c| c.status == "pass");
 
     // Output
-    if json {
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
         let payload = serde_json::json!({
             "healthy": fail_count == 0,
             "issues_found": issues_found,
@@ -6567,10 +6680,7 @@ fn run_doctor(
                 "fix_mode": fix,
             }
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
-        );
+        output_structured_value(payload, fmt)?;
     } else {
         // Human-readable output
         println!("{}", "CASS Doctor".bold());
@@ -6815,7 +6925,20 @@ fn run_context(
         .collect()
     };
 
-    if json {
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
         let format_ts = |ts: Option<i64>| -> Option<String> {
             ts.and_then(|t| chrono::DateTime::from_timestamp_millis(t).map(|d| d.to_rfc3339()))
         };
@@ -6859,85 +6982,82 @@ fn run_context(
                 "same_agent": same_agent.len(),
             }
         });
+        return output_structured_value(payload, fmt);
+    }
+
+    use colored::Colorize;
+
+    println!("{}", "Session Context".bold().cyan());
+    println!("{}", "===============".cyan());
+    println!();
+    println!("{}: {}", "Source".bold(), path_str);
+    println!("  Title: {}", title.as_str().yellow());
+    println!("  Agent: {}", agent_slug.as_str().green());
+    if let Some(ws) = &workspace_path {
+        println!("  Workspace: {}", ws.as_str().blue());
+    }
+    if let Some(ts) = started_at
+        && let Some(dt) = chrono::DateTime::from_timestamp_millis(ts)
+    {
+        println!("  Started: {}", dt.format("%Y-%m-%d %H:%M:%S"));
+    }
+    println!();
+
+    if !same_workspace.is_empty() {
         println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
+            "{} ({}):",
+            "Same Workspace".bold().blue(),
+            same_workspace.len()
         );
-    } else {
-        use colored::Colorize;
-
-        println!("{}", "Session Context".bold().cyan());
-        println!("{}", "===============".cyan());
-        println!();
-        println!("{}: {}", "Source".bold(), path_str);
-        println!("  Title: {}", title.as_str().yellow());
-        println!("  Agent: {}", agent_slug.as_str().green());
-        if let Some(ws) = &workspace_path {
-            println!("  Workspace: {}", ws.as_str().blue());
-        }
-        if let Some(ts) = started_at
-            && let Some(dt) = chrono::DateTime::from_timestamp_millis(ts)
-        {
-            println!("  Started: {}", dt.format("%Y-%m-%d %H:%M:%S"));
-        }
-        println!();
-
-        if !same_workspace.is_empty() {
+        for (path, title_str, agent, timestamp) in &same_workspace {
+            let ts_str = timestamp
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
             println!(
-                "{} ({}):",
-                "Same Workspace".bold().blue(),
-                same_workspace.len()
+                "  • {} [{}] {}",
+                title_str.as_str().yellow(),
+                agent.as_str().green(),
+                ts_str.dimmed()
             );
-            for (path, title_str, agent, timestamp) in &same_workspace {
-                let ts_str = timestamp
-                    .and_then(chrono::DateTime::from_timestamp_millis)
-                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_default();
-                println!(
-                    "  • {} [{}] {}",
-                    title_str.as_str().yellow(),
-                    agent.as_str().green(),
-                    ts_str.dimmed()
-                );
-                println!("    {}", path.as_str().dimmed());
-            }
-            println!();
+            println!("    {}", path.as_str().dimmed());
         }
+        println!();
+    }
 
-        if !same_day.is_empty() {
-            println!("{} ({}):", "Same Day".bold().magenta(), same_day.len());
-            for (path, title_str, agent, timestamp) in &same_day {
-                let ts_str = timestamp
-                    .and_then(chrono::DateTime::from_timestamp_millis)
-                    .map(|d| d.format("%H:%M").to_string())
-                    .unwrap_or_default();
-                println!(
-                    "  • {} [{}] {}",
-                    title_str.as_str().yellow(),
-                    agent.as_str().green(),
-                    ts_str.dimmed()
-                );
-                println!("    {}", path.as_str().dimmed());
-            }
-            println!();
+    if !same_day.is_empty() {
+        println!("{} ({}):", "Same Day".bold().magenta(), same_day.len());
+        for (path, title_str, agent, timestamp) in &same_day {
+            let ts_str = timestamp
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|d| d.format("%H:%M").to_string())
+                .unwrap_or_default();
+            println!(
+                "  • {} [{}] {}",
+                title_str.as_str().yellow(),
+                agent.as_str().green(),
+                ts_str.dimmed()
+            );
+            println!("    {}", path.as_str().dimmed());
         }
+        println!();
+    }
 
-        if !same_agent.is_empty() {
-            println!("{} ({}):", "Same Agent".bold().green(), same_agent.len());
-            for (path, title_str, timestamp) in &same_agent {
-                let ts_str = timestamp
-                    .and_then(chrono::DateTime::from_timestamp_millis)
-                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_default();
-                println!("  • {} {}", title_str.as_str().yellow(), ts_str.dimmed());
-                println!("    {}", path.as_str().dimmed());
-            }
-            println!();
+    if !same_agent.is_empty() {
+        println!("{} ({}):", "Same Agent".bold().green(), same_agent.len());
+        for (path, title_str, timestamp) in &same_agent {
+            let ts_str = timestamp
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
+            println!("  • {} {}", title_str.as_str().yellow(), ts_str.dimmed());
+            println!("    {}", path.as_str().dimmed());
         }
+        println!();
+    }
 
-        if same_workspace.is_empty() && same_day.is_empty() && same_agent.is_empty() {
-            println!("{}", "No related sessions found.".dimmed());
-        }
+    if same_workspace.is_empty() && same_day.is_empty() && same_agent.is_empty() {
+        println!("{}", "No related sessions found.".dimmed());
     }
 
     Ok(())
@@ -7197,40 +7317,52 @@ fn run_capabilities(json: bool) -> CliResult<()> {
         },
     };
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&response).unwrap_or_default()
-        );
+    let structured_format = if json {
+        Some(RobotFormat::Json)
     } else {
-        // Human-readable output
-        println!("CASS Capabilities");
-        println!("=================");
-        println!();
-        println!(
-            "Version: {} (api v{}, contract v{})",
-            response.crate_version, response.api_version, response.contract_version
-        );
-        println!();
-        println!("Features:");
-        for feature in &response.features {
-            println!("  - {feature}");
-        }
-        println!();
-        println!("Connectors:");
-        for connector in &response.connectors {
-            println!("  - {connector}");
-        }
-        println!();
-        println!("Limits:");
-        println!("  max_limit: {}", response.limits.max_limit);
-        println!(
-            "  max_content_length: {} (0 = unlimited)",
-            response.limits.max_content_length
-        );
-        println!("  max_fields: {}", response.limits.max_fields);
-        println!("  max_agg_buckets: {}", response.limits.max_agg_buckets);
+        robot_format_from_env()
     }
+    .map(|fmt| {
+        // sessions is search-only; for other commands treat it as compact JSON.
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
+        let payload = serde_json::to_value(&response).unwrap_or_default();
+        return output_structured_value(payload, fmt);
+    }
+
+    // Human-readable output
+    println!("CASS Capabilities");
+    println!("=================");
+    println!();
+    println!(
+        "Version: {} (api v{}, contract v{})",
+        response.crate_version, response.api_version, response.contract_version
+    );
+    println!();
+    println!("Features:");
+    for feature in &response.features {
+        println!("  - {feature}");
+    }
+    println!();
+    println!("Connectors:");
+    for connector in &response.connectors {
+        println!("  - {connector}");
+    }
+    println!();
+    println!("Limits:");
+    println!("  max_limit: {}", response.limits.max_limit);
+    println!(
+        "  max_content_length: {} (0 = unlimited)",
+        response.limits.max_content_length
+    );
+    println!("  max_fields: {}", response.limits.max_fields);
+    println!("  max_agg_buckets: {}", response.limits.max_agg_buckets);
 
     Ok(())
 }
@@ -7249,83 +7381,94 @@ fn run_introspect(json: bool) -> CliResult<()> {
         response_schemas,
     };
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&response).unwrap_or_default()
-        );
+    let structured_format = if json {
+        Some(RobotFormat::Json)
     } else {
-        // Human-readable output
-        println!("CASS API Introspection");
-        println!("======================");
-        println!();
-        println!("API Version: {}", response.api_version);
-        println!("Contract Version: {}", response.contract_version);
-        println!();
-        println!("Global Flags:");
-        println!("-------------");
-        for flag in &response.global_flags {
-            let required = if flag.required { " (required)" } else { "" };
-            let default = flag
-                .default
-                .as_ref()
-                .map(|d| format!(" [default: {d}]"))
-                .unwrap_or_default();
-            let enum_values = flag
-                .enum_values
-                .as_ref()
-                .map(|vals| format!(" [values: {}]", vals.join(",")))
-                .unwrap_or_default();
-            let short = flag.short.map(|s| format!("-{s}, ")).unwrap_or_default();
-            let prefix = if flag.arg_type == "positional" {
-                String::new()
-            } else {
-                format!("{short}--")
-            };
-            println!(
-                "  {}{}: {}{}{}{}",
-                prefix, flag.name, flag.description, required, default, enum_values
-            );
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
         }
-        println!();
-        println!("Commands:");
-        println!("---------");
-        for cmd in &response.commands {
-            println!();
-            println!("  {} - {}", cmd.name, cmd.description);
-            if cmd.has_json_output {
-                println!("    [supports --json output]");
-            }
-            if !cmd.arguments.is_empty() {
-                println!("    Arguments:");
-                for arg in &cmd.arguments {
-                    let required = if arg.required { " (required)" } else { "" };
-                    let default = arg
-                        .default
-                        .as_ref()
-                        .map(|d| format!(" [default: {d}]"))
-                        .unwrap_or_default();
-                    let short = arg.short.map(|s| format!("-{s}, ")).unwrap_or_default();
-                    let prefix = if arg.arg_type == "positional" {
-                        String::new()
-                    } else {
-                        format!("{short}--")
-                    };
-                    println!(
-                        "      {}{}: {}{}{}",
-                        prefix, arg.name, arg.description, required, default
-                    );
-                }
-            }
-        }
-        println!();
+    });
+
+    if let Some(fmt) = structured_format {
+        let payload = serde_json::to_value(&response).unwrap_or_default();
+        return output_structured_value(payload, fmt);
+    }
+
+    // Human-readable output
+    println!("CASS API Introspection");
+    println!("======================");
+    println!();
+    println!("API Version: {}", response.api_version);
+    println!("Contract Version: {}", response.contract_version);
+    println!();
+    println!("Global Flags:");
+    println!("-------------");
+    for flag in &response.global_flags {
+        let required = if flag.required { " (required)" } else { "" };
+        let default = flag
+            .default
+            .as_ref()
+            .map(|d| format!(" [default: {d}]"))
+            .unwrap_or_default();
+        let enum_values = flag
+            .enum_values
+            .as_ref()
+            .map(|vals| format!(" [values: {}]", vals.join(",")))
+            .unwrap_or_default();
+        let short = flag.short.map(|s| format!("-{s}, ")).unwrap_or_default();
+        let prefix = if flag.arg_type == "positional" {
+            String::new()
+        } else {
+            format!("{short}--")
+        };
         println!(
-            "Response Schemas: {} defined",
-            response.response_schemas.len()
+            "  {}{}: {}{}{}{}",
+            prefix, flag.name, flag.description, required, default, enum_values
         );
-        for name in response.response_schemas.keys() {
-            println!("  - {name}");
+    }
+    println!();
+    println!("Commands:");
+    println!("---------");
+    for cmd in &response.commands {
+        println!();
+        println!("  {} - {}", cmd.name, cmd.description);
+        if cmd.has_json_output {
+            println!("    [supports --json output]");
         }
+        if !cmd.arguments.is_empty() {
+            println!("    Arguments:");
+            for arg in &cmd.arguments {
+                let required = if arg.required { " (required)" } else { "" };
+                let default = arg
+                    .default
+                    .as_ref()
+                    .map(|d| format!(" [default: {d}]"))
+                    .unwrap_or_default();
+                let short = arg.short.map(|s| format!("-{s}, ")).unwrap_or_default();
+                let prefix = if arg.arg_type == "positional" {
+                    String::new()
+                } else {
+                    format!("{short}--")
+                };
+                println!(
+                    "      {}{}: {}{}{}",
+                    prefix, arg.name, arg.description, required, default
+                );
+            }
+        }
+    }
+    println!();
+    println!(
+        "Response Schemas: {} defined",
+        response.response_schemas.len()
+    );
+    for name in response.response_schemas.keys() {
+        println!("  - {name}");
     }
 
     Ok(())
@@ -7483,18 +7626,28 @@ fn run_api_version(json: bool) -> CliResult<()> {
         "contract_version": CONTRACT_VERSION,
     });
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
-        );
+    let structured_format = if json {
+        Some(RobotFormat::Json)
     } else {
-        println!("CASS API Version");
-        println!("================");
-        println!("crate: {}", env!("CARGO_PKG_VERSION"));
-        println!("api:   v{}", 1);
-        println!("contract: v{CONTRACT_VERSION}");
+        robot_format_from_env()
     }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
+        return output_structured_value(payload, fmt);
+    }
+
+    println!("CASS API Version");
+    println!("================");
+    println!("crate: {}", env!("CARGO_PKG_VERSION"));
+    println!("api:   v{}", 1);
+    println!("contract: v{CONTRACT_VERSION}");
 
     Ok(())
 }
@@ -8190,7 +8343,20 @@ fn run_view(path: &PathBuf, line: Option<usize>, context: usize, json: bool) -> 
     // Only highlight a specific line if -n was explicitly provided
     let highlight_line = line.is_some();
 
-    if json {
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
         let content_lines: Vec<serde_json::Value> = lines
             .iter()
             .enumerate()
@@ -8212,29 +8378,26 @@ fn run_view(path: &PathBuf, line: Option<usize>, context: usize, json: bool) -> 
             "lines": content_lines,
             "total_lines": lines.len(),
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
-        );
-    } else {
-        println!("File: {}", path.display());
-        if highlight_line {
-            println!("Line: {target_line} (context: {context})");
-        }
-        println!("----------------------------------------");
-        for (i, l) in lines.iter().enumerate().skip(start).take(end - start) {
-            let line_num = i + 1;
-            let marker = if highlight_line && line_num == target_line {
-                ">"
-            } else {
-                " "
-            };
-            println!("{marker}{line_num:5} | {l}");
-        }
-        println!("----------------------------------------");
-        if lines.len() > end {
-            println!("... ({} more lines)", lines.len() - end);
-        }
+        return output_structured_value(payload, fmt);
+    }
+
+    println!("File: {}", path.display());
+    if highlight_line {
+        println!("Line: {target_line} (context: {context})");
+    }
+    println!("----------------------------------------");
+    for (i, l) in lines.iter().enumerate().skip(start).take(end - start) {
+        let line_num = i + 1;
+        let marker = if highlight_line && line_num == target_line {
+            ">"
+        } else {
+            " "
+        };
+        println!("{marker}{line_num:5} | {l}");
+    }
+    println!("----------------------------------------");
+    if lines.len() > end {
+        println!("... ({} more lines)", lines.len() - end);
     }
 
     Ok(())
@@ -8300,6 +8463,20 @@ fn run_index_with_data(
     let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
 
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+    let structured_output = structured_format.is_some();
+
     // Generate params hash for idempotency validation
     let params_hash = {
         use std::hash::{Hash, Hasher};
@@ -8349,12 +8526,12 @@ fn run_index_with_data(
             // Verify params match
             if stored_hash == params_hash.to_string() {
                 // Return cached result
-                if json {
+                if let Some(fmt) = structured_format {
                     // Parse and augment with cached flag
                     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&result_json) {
                         val["cached"] = serde_json::json!(true);
                         val["idempotency_key"] = serde_json::json!(key);
-                        println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+                        output_structured_value(val, fmt)?;
                         return Ok(());
                     }
                 } else {
@@ -8402,8 +8579,8 @@ fn run_index_with_data(
     };
 
     // Set up progress display
-    let show_progress = !json && matches!(progress, ProgressResolved::Bars);
-    let show_plain = !json && matches!(progress, ProgressResolved::Plain);
+    let show_progress = !structured_output && matches!(progress, ProgressResolved::Bars);
+    let show_plain = !structured_output && matches!(progress, ProgressResolved::Plain);
 
     if show_plain {
         eprintln!(
@@ -8635,20 +8812,17 @@ fn run_index_with_data(
     let elapsed_ms = start.elapsed().as_millis();
 
     if let Err(err) = &res {
-        if json {
+        if let Some(fmt) = structured_format {
             let payload = serde_json::json!({
                 "success": false,
                 "error": err.message,
                 "elapsed_ms": elapsed_ms,
             });
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&payload).unwrap_or_default()
-            );
+            output_structured_value(payload, fmt)?;
         } else {
             eprintln!("index debug error: {err:?}");
         }
-    } else if json {
+    } else if let Some(fmt) = structured_format {
         // Get stats after successful indexing
         let (conversations, messages) = if let Ok(conn) = Connection::open(&db_path) {
             let convs: i64 = conn
@@ -8688,10 +8862,7 @@ fn run_index_with_data(
             }
         }
 
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_default()
-        );
+        output_structured_value(payload, fmt)?;
     }
 
     if show_plain {
@@ -9515,7 +9686,20 @@ fn run_expand(path: &Path, line: usize, context: usize, json: bool) -> CliResult
         })
         .collect();
 
-    if json {
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
         let output: Vec<serde_json::Value> = context_messages
             .iter()
             .map(|(line_num, msg, is_target)| {
@@ -9529,47 +9713,44 @@ fn run_expand(path: &Path, line: usize, context: usize, json: bool) -> CliResult
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).unwrap_or_default()
-        );
-    } else {
-        println!("\n📍 Context around line {} in {}\n", line, path.display());
-        println!("{}", "─".repeat(60));
-
-        for (line_num, msg, is_target) in context_messages {
-            let role = extract_role(msg);
-            let content = extract_text_content(msg);
-            let preview: String = content.chars().take(300).collect();
-            let marker = if is_target { ">>>" } else { "   " };
-            let role_icon = match role.as_str() {
-                "user" => "👤",
-                "assistant" => "🤖",
-                _ => "📝",
-            };
-
-            println!(
-                "{} L{:>4} {} {}",
-                marker,
-                line_num,
-                role_icon,
-                role.to_uppercase()
-            );
-            println!("        {}", preview.replace('\n', " "));
-            if content.len() > 300 {
-                println!("        ... ({} more chars)", content.len() - 300);
-            }
-            println!();
-        }
-
-        println!("{}", "─".repeat(60));
-        println!(
-            "Showing messages {} to {} of {} total",
-            start + 1,
-            end,
-            messages.len()
-        );
+        return output_structured_value(serde_json::Value::Array(output), fmt);
     }
+
+    println!("\n📍 Context around line {} in {}\n", line, path.display());
+    println!("{}", "─".repeat(60));
+
+    for (line_num, msg, is_target) in context_messages {
+        let role = extract_role(msg);
+        let content = extract_text_content(msg);
+        let preview: String = content.chars().take(300).collect();
+        let marker = if is_target { ">>>" } else { "   " };
+        let role_icon = match role.as_str() {
+            "user" => "👤",
+            "assistant" => "🤖",
+            _ => "📝",
+        };
+
+        println!(
+            "{} L{:>4} {} {}",
+            marker,
+            line_num,
+            role_icon,
+            role.to_uppercase()
+        );
+        println!("        {}", preview.replace('\n', " "));
+        if content.len() > 300 {
+            println!("        ... ({} more chars)", content.len() - 300);
+        }
+        println!();
+    }
+
+    println!("{}", "─".repeat(60));
+    println!(
+        "Showing messages {} to {} of {} total",
+        start + 1,
+        end,
+        messages.len()
+    );
     Ok(())
 }
 
@@ -9794,7 +9975,20 @@ fn run_timeline(
         sessions.push(r);
     }
 
-    if json {
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
         let output = match group_by {
             TimelineGrouping::None => {
                 let items: Vec<serde_json::Value> = sessions
@@ -9877,109 +10071,106 @@ fn run_timeline(
                 })
             }
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).unwrap_or_default()
-        );
-    } else {
-        let start_dt = Utc
-            .timestamp_millis_opt(start_ts)
-            .single()
-            .unwrap_or_else(Utc::now);
-        let end_dt = Utc
-            .timestamp_millis_opt(end_ts)
-            .single()
-            .unwrap_or_else(Utc::now);
-
-        println!("\n📅 Activity Timeline");
-        println!(
-            "   {} to {}",
-            start_dt.format("%Y-%m-%d %H:%M"),
-            end_dt.format("%Y-%m-%d %H:%M")
-        );
-        println!("{}", "─".repeat(70));
-
-        if sessions.is_empty() {
-            println!("\n   No sessions found in this time range.\n");
-            return Ok(());
-        }
-
-        let mut current_group = String::new();
-        for (
-            _id,
-            agent,
-            title,
-            started,
-            ended,
-            _path,
-            msg_count,
-            source_id,
-            origin_host,
-            _origin_kind,
-        ) in &sessions
-        {
-            let dt = Utc
-                .timestamp_millis_opt(*started)
-                .single()
-                .unwrap_or_else(Utc::now);
-
-            let group_key = match group_by {
-                TimelineGrouping::Hour => dt.format("%Y-%m-%d %H:00").to_string(),
-                TimelineGrouping::Day => dt.format("%Y-%m-%d (%A)").to_string(),
-                TimelineGrouping::None => String::new(),
-            };
-
-            if group_key != current_group && group_by != TimelineGrouping::None {
-                println!("\n  📆 {}", group_key);
-                current_group = group_key;
-            }
-
-            let duration = ended.map(|e| {
-                // Timestamps are in milliseconds, divide by 60_000 to get minutes
-                let mins = (e - started) / 60_000;
-                if mins < 60 {
-                    format!("{}m", mins)
-                } else {
-                    format!("{}h{}m", mins / 60, mins % 60)
-                }
-            });
-
-            let title_str = title.as_deref().unwrap_or("(untitled)");
-            let title_preview: String = title_str.chars().take(40).collect();
-
-            let agent_icon = match agent.as_str() {
-                "claude_code" => "🟣",
-                "codex" => "🟢",
-                "gemini" => "🔵",
-                "amp" => "🟡",
-                "cursor" => "⚪",
-                "pi_agent" => "🟠",
-                _ => "⚫",
-            };
-
-            // Source badge for remote sessions (P3.2, P3.5)
-            // Prefer origin_host if available, otherwise use source_id
-            let source_badge = if source_id != "local" {
-                let label = origin_host.as_deref().unwrap_or(source_id.as_str());
-                format!(" [{}]", label)
-            } else {
-                String::new()
-            };
-
-            println!(
-                "     {} {} {:>5} │ {:>3} msgs │ {}{}",
-                dt.format("%H:%M"),
-                agent_icon,
-                duration.as_deref().unwrap_or(""),
-                msg_count,
-                title_preview,
-                source_badge
-            );
-        }
-
-        println!("\n{}", "─".repeat(70));
-        println!("   Total: {} sessions\n", sessions.len());
+        return output_structured_value(output, fmt);
     }
+
+    let start_dt = Utc
+        .timestamp_millis_opt(start_ts)
+        .single()
+        .unwrap_or_else(Utc::now);
+    let end_dt = Utc
+        .timestamp_millis_opt(end_ts)
+        .single()
+        .unwrap_or_else(Utc::now);
+
+    println!("\n📅 Activity Timeline");
+    println!(
+        "   {} to {}",
+        start_dt.format("%Y-%m-%d %H:%M"),
+        end_dt.format("%Y-%m-%d %H:%M")
+    );
+    println!("{}", "─".repeat(70));
+
+    if sessions.is_empty() {
+        println!("\n   No sessions found in this time range.\n");
+        return Ok(());
+    }
+
+    let mut current_group = String::new();
+    for (
+        _id,
+        agent,
+        title,
+        started,
+        ended,
+        _path,
+        msg_count,
+        source_id,
+        origin_host,
+        _origin_kind,
+    ) in &sessions
+    {
+        let dt = Utc
+            .timestamp_millis_opt(*started)
+            .single()
+            .unwrap_or_else(Utc::now);
+
+        let group_key = match group_by {
+            TimelineGrouping::Hour => dt.format("%Y-%m-%d %H:00").to_string(),
+            TimelineGrouping::Day => dt.format("%Y-%m-%d (%A)").to_string(),
+            TimelineGrouping::None => String::new(),
+        };
+
+        if group_key != current_group && group_by != TimelineGrouping::None {
+            println!("\n  📆 {}", group_key);
+            current_group = group_key;
+        }
+
+        let duration = ended.map(|e| {
+            // Timestamps are in milliseconds, divide by 60_000 to get minutes
+            let mins = (e - started) / 60_000;
+            if mins < 60 {
+                format!("{}m", mins)
+            } else {
+                format!("{}h{}m", mins / 60, mins % 60)
+            }
+        });
+
+        let title_str = title.as_deref().unwrap_or("(untitled)");
+        let title_preview: String = title_str.chars().take(40).collect();
+
+        let agent_icon = match agent.as_str() {
+            "claude_code" => "🟣",
+            "codex" => "🟢",
+            "gemini" => "🔵",
+            "amp" => "🟡",
+            "cursor" => "⚪",
+            "pi_agent" => "🟠",
+            _ => "⚫",
+        };
+
+        // Source badge for remote sessions (P3.2, P3.5)
+        // Prefer origin_host if available, otherwise use source_id
+        let source_badge = if source_id != "local" {
+            let label = origin_host.as_deref().unwrap_or(source_id.as_str());
+            format!(" [{}]", label)
+        } else {
+            String::new()
+        };
+
+        println!(
+            "     {} {} {:>5} │ {:>3} msgs │ {}{}",
+            dt.format("%H:%M"),
+            agent_icon,
+            duration.as_deref().unwrap_or(""),
+            msg_count,
+            title_preview,
+            source_badge
+        );
+    }
+
+    println!("\n{}", "─".repeat(70));
+    println!("   Total: {} sessions\n", sessions.len());
     Ok(())
 }
 
@@ -10070,7 +10261,20 @@ fn run_sources_list(verbose: bool, json: bool) -> CliResult<()> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "unknown".into());
 
-    if json {
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
         let sources_json: Vec<serde_json::Value> = config
             .sources
             .iter()
@@ -10091,83 +10295,80 @@ fn run_sources_list(verbose: bool, json: bool) -> CliResult<()> {
             "sources": sources_json,
             "total": config.sources.len(),
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).unwrap_or_default()
-        );
-    } else {
-        println!("CASS Sources Configuration");
-        println!("===========================");
-        println!("Config: {config_path}");
-        println!();
-
-        if config.sources.is_empty() {
-            println!("No sources configured.");
-            println!();
-            println!("To add a source, run:");
-            println!("  cass sources add user@hostname --preset macos-defaults");
-            return Ok(());
-        }
-
-        if verbose {
-            // Verbose output with full details
-            for source in &config.sources {
-                println!("Source: {}", source.name);
-                println!("  Type: {}", source.source_type);
-                if let Some(ref host) = source.host {
-                    println!("  Host: {host}");
-                }
-                println!("  Schedule: {}", source.sync_schedule);
-                if let Some(platform) = source.platform {
-                    println!("  Platform: {platform}");
-                }
-                if !source.paths.is_empty() {
-                    println!("  Paths:");
-                    for path in &source.paths {
-                        println!("    - {path}");
-                    }
-                }
-                if !source.path_mappings.is_empty() {
-                    println!("  Path Mappings:");
-                    for mapping in &source.path_mappings {
-                        if let Some(agents) = &mapping.agents {
-                            println!(
-                                "    {} -> {} (agents: {})",
-                                mapping.from,
-                                mapping.to,
-                                agents.join(", ")
-                            );
-                        } else {
-                            println!("    {} -> {}", mapping.from, mapping.to);
-                        }
-                    }
-                }
-                println!();
-            }
-        } else {
-            // Table output
-            println!("  {:15} {:8} {:30} {:>5}", "NAME", "TYPE", "HOST", "PATHS");
-            println!("  {}", "-".repeat(62));
-            for source in &config.sources {
-                let host = source.host.as_deref().unwrap_or("-");
-                let host_truncated = if host.len() > 30 {
-                    format!("{}...", &host[..27])
-                } else {
-                    host.to_string()
-                };
-                println!(
-                    "  {:15} {:8} {:30} {:>5}",
-                    source.name,
-                    source.source_type.as_str(),
-                    host_truncated,
-                    source.paths.len()
-                );
-            }
-            println!();
-        }
-
-        println!("Total: {} source(s)", config.sources.len());
+        return output_structured_value(output, fmt);
     }
+
+    println!("CASS Sources Configuration");
+    println!("===========================");
+    println!("Config: {config_path}");
+    println!();
+
+    if config.sources.is_empty() {
+        println!("No sources configured.");
+        println!();
+        println!("To add a source, run:");
+        println!("  cass sources add user@hostname --preset macos-defaults");
+        return Ok(());
+    }
+
+    if verbose {
+        // Verbose output with full details
+        for source in &config.sources {
+            println!("Source: {}", source.name);
+            println!("  Type: {}", source.source_type);
+            if let Some(ref host) = source.host {
+                println!("  Host: {host}");
+            }
+            println!("  Schedule: {}", source.sync_schedule);
+            if let Some(platform) = source.platform {
+                println!("  Platform: {platform}");
+            }
+            if !source.paths.is_empty() {
+                println!("  Paths:");
+                for path in &source.paths {
+                    println!("    - {path}");
+                }
+            }
+            if !source.path_mappings.is_empty() {
+                println!("  Path Mappings:");
+                for mapping in &source.path_mappings {
+                    if let Some(agents) = &mapping.agents {
+                        println!(
+                            "    {} -> {} (agents: {})",
+                            mapping.from,
+                            mapping.to,
+                            agents.join(", ")
+                        );
+                    } else {
+                        println!("    {} -> {}", mapping.from, mapping.to);
+                    }
+                }
+            }
+            println!();
+        }
+    } else {
+        // Table output
+        println!("  {:15} {:8} {:30} {:>5}", "NAME", "TYPE", "HOST", "PATHS");
+        println!("  {}", "-".repeat(62));
+        for source in &config.sources {
+            let host = source.host.as_deref().unwrap_or("-");
+            let host_truncated = if host.len() > 30 {
+                format!("{}...", &host[..27])
+            } else {
+                host.to_string()
+            };
+            println!(
+                "  {:15} {:8} {:30} {:>5}",
+                source.name,
+                source.source_type.as_str(),
+                host_truncated,
+                source.paths.len()
+            );
+        }
+        println!();
+    }
+
+    println!("Total: {} source(s)", config.sources.len());
 
     Ok(())
 }

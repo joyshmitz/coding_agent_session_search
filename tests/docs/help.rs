@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
+use tempfile::TempDir;
 
 // =============================================================================
 // CLI Help Tests
@@ -192,7 +193,12 @@ fn test_help_mentions_use_cases() {
 /// Test that invalid commands produce helpful errors.
 #[test]
 fn test_invalid_command_error() {
+    // This CLI has a heuristic that treats unknown first args as an implicit `search` query.
+    // Force a fresh, empty data dir so the command reliably fails (missing index/db) instead
+    // of succeeding if the developer machine happens to have an existing index.
+    let tmp = TempDir::new().expect("create temp CASS_DATA_DIR");
     let output = Command::new(env!("CARGO_BIN_EXE_cass"))
+        .env("CASS_DATA_DIR", tmp.path().as_os_str())
         .arg("nonexistent-command-xyz")
         .output();
 

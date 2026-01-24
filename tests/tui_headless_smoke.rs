@@ -44,12 +44,7 @@ fn setup_indexed_data_dir(temp_home: &Path) -> std::path::PathBuf {
 
     // Run index command to create DB and index
     let mut index_cmd = base_cmd(temp_home);
-    index_cmd.args([
-        "index",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-        "--json",
-    ]);
+    index_cmd.args(["index", "--data-dir", data_dir.to_str().unwrap(), "--json"]);
     index_cmd.assert().success();
 
     data_dir
@@ -66,16 +61,13 @@ fn tui_headless_exits_cleanly_with_index() {
     let data_dir = setup_indexed_data_dir(tmp.path());
 
     let mut cmd = base_cmd(tmp.path());
-    cmd.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    cmd.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
 
-    cmd.assert()
-        .success()
-        .stderr(predicate::str::is_empty().not().or(predicate::str::is_empty())); // Allow logs or no logs
+    cmd.assert().success().stderr(
+        predicate::str::is_empty()
+            .not()
+            .or(predicate::str::is_empty()),
+    ); // Allow logs or no logs
 }
 
 #[test]
@@ -87,12 +79,7 @@ fn tui_headless_handles_empty_data_dir() {
     setup_empty_data_dir(&data_dir);
 
     let mut cmd = base_cmd(tmp.path());
-    cmd.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    cmd.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
 
     // Should succeed - headless mode creates db/index as needed
     cmd.assert().success();
@@ -102,7 +89,10 @@ fn tui_headless_handles_empty_data_dir() {
         data_dir.join("agent_search.db").exists(),
         "DB should be created"
     );
-    assert!(data_dir.join("index").exists(), "Index dir should be created");
+    assert!(
+        data_dir.join("index").exists(),
+        "Index dir should be created"
+    );
 }
 
 #[test]
@@ -112,12 +102,7 @@ fn tui_headless_no_panic_on_empty_dataset() {
     let data_dir = setup_indexed_data_dir(tmp.path());
 
     let mut cmd = base_cmd(tmp.path());
-    cmd.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    cmd.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
 
     // Should succeed even with empty dataset
     cmd.assert().success();
@@ -141,12 +126,7 @@ fn tui_headless_exit_code_success() {
     let data_dir = setup_indexed_data_dir(tmp.path());
 
     let mut cmd = base_cmd(tmp.path());
-    cmd.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    cmd.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
 
     cmd.assert().code(0);
 }
@@ -159,12 +139,7 @@ fn tui_headless_exit_code_success_empty_data_dir() {
     setup_empty_data_dir(&data_dir);
 
     let mut cmd = base_cmd(tmp.path());
-    cmd.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    cmd.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
 
     cmd.assert().code(0);
 }
@@ -181,12 +156,7 @@ fn tui_headless_reset_state_flag() {
 
     // First, create some state by running TUI
     let mut cmd1 = base_cmd(tmp.path());
-    cmd1.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    cmd1.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
     cmd1.assert().success();
 
     // Run with --reset-state
@@ -213,12 +183,7 @@ fn tui_headless_emits_debug_logs_when_enabled() {
 
     let mut cmd = base_cmd(tmp.path());
     cmd.env("RUST_LOG", "debug");
-    cmd.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    cmd.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
 
     // Just verify it runs without crashing with debug logging
     cmd.assert().success();
@@ -237,12 +202,7 @@ fn tui_headless_completes_quickly() {
     let start = std::time::Instant::now();
 
     let mut cmd = base_cmd(tmp.path());
-    cmd.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    cmd.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
     cmd.assert().success();
 
     let elapsed = start.elapsed();
@@ -265,12 +225,7 @@ fn tui_once_flag_recognized() {
     let data_dir = setup_indexed_data_dir(tmp.path());
 
     let mut cmd = base_cmd(tmp.path());
-    cmd.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    cmd.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
 
     // Should not fail with "unknown flag" error
     let output = cmd.output().expect("get output");
@@ -322,12 +277,7 @@ fn tui_after_index_works() {
 
     // Run index
     let mut index_cmd = base_cmd(tmp.path());
-    index_cmd.args([
-        "index",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-        "--json",
-    ]);
+    index_cmd.args(["index", "--data-dir", data_dir.to_str().unwrap(), "--json"]);
     index_cmd.assert().success();
 
     // Verify DB and index exist
@@ -336,12 +286,7 @@ fn tui_after_index_works() {
 
     // Run TUI
     let mut tui_cmd = base_cmd(tmp.path());
-    tui_cmd.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    tui_cmd.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
     tui_cmd.assert().success();
 }
 
@@ -364,11 +309,6 @@ fn tui_and_search_use_same_index() {
 
     // Run TUI (should also work with same index)
     let mut tui_cmd = base_cmd(tmp.path());
-    tui_cmd.args([
-        "tui",
-        "--once",
-        "--data-dir",
-        data_dir.to_str().unwrap(),
-    ]);
+    tui_cmd.args(["tui", "--once", "--data-dir", data_dir.to_str().unwrap()]);
     tui_cmd.assert().success();
 }

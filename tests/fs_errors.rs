@@ -10,7 +10,7 @@
 use coding_agent_search::connectors::claude_code::ClaudeCodeConnector;
 use coding_agent_search::connectors::codex::CodexConnector;
 use coding_agent_search::connectors::gemini::GeminiConnector;
-use coding_agent_search::connectors::{Connector, ScanContext};
+use coding_agent_search::connectors::{Connector, ScanContext, ScanRoot};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
@@ -24,7 +24,9 @@ use tempfile::TempDir;
 #[test]
 fn scan_nonexistent_directory_handles_gracefully() {
     let tmp = TempDir::new().unwrap();
-    let nonexistent = tmp.path().join("does-not-exist");
+    // Make the path "look like" a Claude root so the connector doesn't fall back to
+    // scanning the real ~/.claude directory on developer machines.
+    let nonexistent = tmp.path().join("mock-claude");
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
@@ -395,8 +397,9 @@ fn gemini_handles_missing_chats_dir() {
 
     let conn = GeminiConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().to_path_buf(),
-        scan_roots: Vec::new(),
+        data_dir: hash_dir.clone(),
+        // Avoid falling back to the user's real Gemini directory.
+        scan_roots: vec![ScanRoot::local(hash_dir)],
         since_ts: None,
     };
 
@@ -420,8 +423,9 @@ fn codex_handles_missing_sessions_dir() {
 
     let conn = CodexConnector::new();
     let ctx = ScanContext {
-        data_dir: codex_home,
-        scan_roots: Vec::new(),
+        data_dir: codex_home.clone(),
+        // Avoid falling back to the user's real CODEX_HOME when sessions/ is missing.
+        scan_roots: vec![ScanRoot::local(codex_home)],
         since_ts: None,
     };
 

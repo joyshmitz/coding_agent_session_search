@@ -134,6 +134,10 @@ impl Connector for AiderConnector {
         }
 
         if let Ok(override_root) = dotenvy::var("CASS_AIDER_DATA_ROOT") {
+            // Treat empty string as unset to avoid surprising behavior and test flakiness.
+            if override_root.trim().is_empty() {
+                return DetectionResult::not_found();
+            }
             let override_path = std::path::PathBuf::from(&override_root);
             let override_history = override_path.join(".aider.chat.history.md");
             if override_history.exists() {
@@ -184,8 +188,10 @@ impl Connector for AiderConnector {
 
         if ctx.use_default_detection() {
             // Check for override env var first
-            if let Ok(override_root) = dotenvy::var("CASS_AIDER_DATA_ROOT") {
-                add_root(PathBuf::from(override_root));
+            if let Ok(override_root) = dotenvy::var("CASS_AIDER_DATA_ROOT")
+                && !override_root.trim().is_empty()
+            {
+                add_root(PathBuf::from(override_root.trim()));
             } else if !is_cass_db_dir && data_root.exists() && data_root.is_dir() {
                 // Use data_root for recursive search (will find history files in subdirs)
                 // BUT skip if it looks like the CASS DB directory to avoid wasteful scanning

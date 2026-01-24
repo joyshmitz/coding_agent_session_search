@@ -15,7 +15,18 @@ use coding_agent_search::search::query::{FieldMask, SearchClient, SearchFilters}
 use coding_agent_search::search::tantivy::{TantivyIndex, index_dir};
 use coding_agent_search::storage::sqlite::SqliteStorage;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
+
+/// These tests use RSS-based assertions and should not run concurrently.
+static MEMORY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn memory_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    MEMORY_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("memory test mutex poisoned")
+}
 
 /// Generate a sample conversation for testing.
 fn sample_conv(i: i64, msgs: i64) -> NormalizedConversation {
@@ -116,6 +127,7 @@ fn get_process_memory_bytes() -> usize {
 /// grow unboundedly. Some growth is acceptable due to caching.
 #[test]
 fn test_search_memory_no_leak() {
+    let _guard = memory_test_guard();
     // Create index with 100 conversations
     let (_tmp, client) = setup_test_index(100, 10);
     let filters = SearchFilters::default();
@@ -172,6 +184,7 @@ fn test_search_memory_no_leak() {
 /// Test that repeated indexing operations don't leak memory.
 #[test]
 fn test_indexing_memory_no_leak() {
+    let _guard = memory_test_guard();
     let temp = TempDir::new().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     let db_path = data_dir.join("memory_index_test.db");
@@ -231,6 +244,7 @@ fn test_indexing_memory_no_leak() {
 /// Test that vector search operations don't leak memory.
 #[test]
 fn test_vector_search_memory_no_leak() {
+    let _guard = memory_test_guard();
     use coding_agent_search::search::vector_index::{Quantization, VectorEntry, VectorIndex};
 
     let dimension = 384;

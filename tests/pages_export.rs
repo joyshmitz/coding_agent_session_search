@@ -11,16 +11,28 @@ mod tests {
 
         conn.execute_batch(
             r#"
+            CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                slug TEXT NOT NULL
+            );
+
+            CREATE TABLE workspaces (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL
+            );
+
             CREATE TABLE conversations (
                 id INTEGER PRIMARY KEY,
-                agent TEXT NOT NULL,
-                workspace TEXT,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
                 title TEXT,
                 source_path TEXT NOT NULL,
                 started_at INTEGER,
                 ended_at INTEGER,
                 message_count INTEGER,
-                metadata_json TEXT
+                metadata_json TEXT,
+                FOREIGN KEY (agent_id) REFERENCES agents(id),
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
             );
 
             CREATE TABLE messages (
@@ -31,15 +43,28 @@ mod tests {
                 content TEXT NOT NULL,
                 created_at INTEGER,
                 updated_at INTEGER,
-                model TEXT
+                model TEXT,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id)
             );
             "#,
         )?;
 
+        // Agents + workspaces
+        conn.execute("INSERT INTO agents (id, slug) VALUES (1, 'claude')", [])?;
+        conn.execute("INSERT INTO agents (id, slug) VALUES (2, 'codex')", [])?;
+        conn.execute(
+            "INSERT INTO workspaces (id, path) VALUES (1, '/home/user/proj1')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO workspaces (id, path) VALUES (2, '/home/user/proj2')",
+            [],
+        )?;
+
         // Insert test data
         conn.execute(
-            "INSERT INTO conversations (id, agent, workspace, title, source_path, started_at, message_count) 
-             VALUES (1, 'claude', '/home/user/proj1', 'Test Conv 1', '/home/user/proj1/.claude/1.json', 1600000000000, 2)",
+            "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at, message_count)
+             VALUES (1, 1, 1, 'Test Conv 1', '/home/user/proj1/.claude/1.json', 1600000000000, 2)",
             [],
         )?;
         conn.execute(
@@ -54,8 +79,8 @@ mod tests {
         )?;
 
         conn.execute(
-            "INSERT INTO conversations (id, agent, workspace, title, source_path, started_at, message_count) 
-             VALUES (2, 'codex', '/home/user/proj2', 'Test Conv 2', '/home/user/proj2/.codex/session.json', 1700000000000, 1)",
+            "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at, message_count)
+             VALUES (2, 2, 2, 'Test Conv 2', '/home/user/proj2/.codex/session.json', 1700000000000, 1)",
             [],
         )?;
         conn.execute(

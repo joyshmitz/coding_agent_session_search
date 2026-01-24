@@ -3647,7 +3647,7 @@ fn robot_format_toon_is_valid_option() {
     // Should not fail with "invalid value" error
     // Use --limit 1 since limit 0 causes panic in tantivy
     cmd.args(["search", "test", "--robot-format", "toon", "--limit", "1"]);
-    // With tru not in PATH, it should fall back to JSON (warning on stderr)
+    // Ensure the flag is accepted and command succeeds.
     cmd.assert().success();
 }
 

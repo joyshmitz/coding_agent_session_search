@@ -852,7 +852,9 @@ impl StatsAggregator {
         }
     }
 
-    /// Record a conversation's contribution to stats.
+    /// Record a conversation's contribution to stats (session + messages + chars).
+    ///
+    /// This increments session_count by 1.
     ///
     /// # Arguments
     /// * `agent_slug` - The specific agent slug (not "all")
@@ -868,11 +870,28 @@ impl StatsAggregator {
         message_count: i64,
         total_chars: i64,
     ) {
+        self.record_delta(agent_slug, source_id, day_id, 1, message_count, total_chars);
+    }
+
+    /// Record an arbitrary delta. Use this for append-only updates where
+    /// `session_count_delta` may be 0 but message/char deltas are non-zero.
+    pub fn record_delta(
+        &mut self,
+        agent_slug: &str,
+        source_id: &str,
+        day_id: i64,
+        session_count_delta: i64,
+        message_count_delta: i64,
+        total_chars_delta: i64,
+    ) {
+        if session_count_delta == 0 && message_count_delta == 0 && total_chars_delta == 0 {
+            return;
+        }
         let key = (day_id, agent_slug.to_owned(), source_id.to_owned());
         let delta = self.deltas.entry(key).or_default();
-        delta.session_count_delta += 1;
-        delta.message_count_delta += message_count;
-        delta.total_chars_delta += total_chars;
+        delta.session_count_delta += session_count_delta;
+        delta.message_count_delta += message_count_delta;
+        delta.total_chars_delta += total_chars_delta;
     }
 
     /// Expand raw deltas into the 4 permutation keys:
@@ -1049,16 +1068,34 @@ impl SqliteStorage {
         let tx = self.conn.transaction()?;
         let mut outcomes = Vec::with_capacity(conversations.len());
         let mut fts_entries = Vec::new();
+        let mut stats = StatsAggregator::new();
 
         // Process all conversations, collecting FTS entries
         for &(agent_id, workspace_id, conv) in conversations {
-            let outcome = insert_conversation_in_tx_batched(
+            let (outcome, delta) = insert_conversation_in_tx_batched(
                 &tx,
                 agent_id,
                 workspace_id,
                 conv,
                 &mut fts_entries,
             )?;
+            if delta.session_count_delta != 0
+                || delta.message_count_delta != 0
+                || delta.total_chars_delta != 0
+            {
+                let day_id = conv
+                    .started_at
+                    .map(SqliteStorage::day_id_from_millis)
+                    .unwrap_or(0);
+                stats.record_delta(
+                    &conv.agent_slug,
+                    &conv.source_id,
+                    day_id,
+                    delta.session_count_delta,
+                    delta.message_count_delta,
+                    delta.total_chars_delta,
+                );
+            }
             outcomes.push(outcome);
         }
 
@@ -1072,6 +1109,19 @@ impl SqliteStorage {
                 inserted = inserted,
                 conversations = conversations.len(),
                 "batch_fts_insert_complete"
+            );
+        }
+
+        // Batched daily_stats update (avoid N*4 upserts).
+        if !stats.is_empty() {
+            let entries = stats.expand();
+            let affected = update_daily_stats_batched_in_tx(&tx, &entries)?;
+            tracing::debug!(
+                target: "cass::perf::daily_stats",
+                raw = stats.raw_entry_count(),
+                expanded = entries.len(),
+                affected = affected,
+                "batched_stats_update_complete"
             );
         }
 
@@ -2212,7 +2262,7 @@ fn insert_conversation_in_tx_batched(
     workspace_id: Option<i64>,
     conv: &Conversation,
     fts_entries: &mut Vec<FtsEntry>,
-) -> Result<InsertOutcome> {
+) -> Result<(InsertOutcome, StatsDelta)> {
     // Check for existing conversation with same (source_id, agent_id, external_id)
     if let Some(ext) = &conv.external_id {
         let existing: Option<i64> = tx
@@ -2233,6 +2283,7 @@ fn insert_conversation_in_tx_batched(
             let cutoff = max_idx.unwrap_or(-1);
 
             let mut inserted_indices = Vec::new();
+            let mut new_chars: i64 = 0;
             for msg in &conv.messages {
                 if msg.idx <= cutoff {
                     continue;
@@ -2242,6 +2293,7 @@ fn insert_conversation_in_tx_batched(
                 // Collect FTS entry instead of inserting immediately
                 fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
                 inserted_indices.push(msg.idx);
+                new_chars += msg.content.len() as i64;
             }
 
             // Update metadata fields and ended_at
@@ -2279,29 +2331,100 @@ fn insert_conversation_in_tx_batched(
                 // The caller (ingest_batch) handles stats aggregation efficiently.
             }
 
-            return Ok(InsertOutcome {
-                conversation_id,
-                inserted_indices,
-            });
+            let delta = StatsDelta {
+                session_count_delta: 0,
+                message_count_delta: inserted_indices.len() as i64,
+                total_chars_delta: new_chars,
+            };
+
+            return Ok((
+                InsertOutcome {
+                    conversation_id,
+                    inserted_indices,
+                },
+                delta,
+            ));
         }
     }
 
     // Insert new conversation
     let conv_id = insert_conversation(tx, agent_id, workspace_id, conv)?;
+    let mut total_chars: i64 = 0;
     for msg in &conv.messages {
         let msg_id = insert_message(tx, conv_id, msg)?;
         insert_snippets(tx, msg_id, &msg.snippets)?;
         // Collect FTS entry instead of inserting immediately
         fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
+        total_chars += msg.content.len() as i64;
     }
 
     // Note: Daily stats update skipped here to prevent double counting.
     // The caller (ingest_batch) handles stats aggregation efficiently.
 
-    Ok(InsertOutcome {
-        conversation_id: conv_id,
-        inserted_indices: conv.messages.iter().map(|m| m.idx).collect(),
-    })
+    let delta = StatsDelta {
+        session_count_delta: 1,
+        message_count_delta: conv.messages.len() as i64,
+        total_chars_delta: total_chars,
+    };
+
+    Ok((
+        InsertOutcome {
+            conversation_id: conv_id,
+            inserted_indices: conv.messages.iter().map(|m| m.idx).collect(),
+        },
+        delta,
+    ))
+}
+
+/// Upsert daily_stats deltas inside an existing transaction.
+///
+/// This mirrors `SqliteStorage::update_daily_stats_batched` but avoids starting a
+/// nested transaction so callers can keep all writes (conversations/messages/fts/stats)
+/// atomic.
+fn update_daily_stats_batched_in_tx(
+    tx: &Transaction<'_>,
+    entries: &[(i64, String, String, StatsDelta)],
+) -> Result<usize> {
+    if entries.is_empty() {
+        return Ok(0);
+    }
+
+    let now = SqliteStorage::now_millis();
+    const BATCH_SIZE: usize = 100;
+    let mut total_affected = 0;
+
+    for chunk in entries.chunks(BATCH_SIZE) {
+        let placeholders: String = (0..chunk.len())
+            .map(|_| "(?, ?, ?, ?, ?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+             VALUES {}
+             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
+                 session_count = session_count + excluded.session_count,
+                 message_count = message_count + excluded.message_count,
+                 total_chars = total_chars + excluded.total_chars,
+                 last_updated = excluded.last_updated",
+            placeholders
+        );
+
+        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 7);
+        for (day_id, agent, source, delta) in chunk {
+            params_vec.push((*day_id).into());
+            params_vec.push(agent.clone().into());
+            params_vec.push(source.clone().into());
+            params_vec.push(delta.session_count_delta.into());
+            params_vec.push(delta.message_count_delta.into());
+            params_vec.push(delta.total_chars_delta.into());
+            params_vec.push(now.into());
+        }
+
+        total_affected += tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
+    }
+
+    Ok(total_affected)
 }
 
 fn path_to_string<P: AsRef<Path>>(p: P) -> String {

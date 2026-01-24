@@ -11,9 +11,22 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 mod util;
 use util::EnvGuard;
+
+/// These tests mutate process-level env vars (XDG_*, HOME, CODEX_HOME) and spawn `cass`.
+/// Running them in parallel makes them flaky and can accidentally index the developer's real
+/// archives, causing multi-minute hangs.
+static TUI_SMOKE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn tui_smoke_guard() -> std::sync::MutexGuard<'static, ()> {
+    TUI_SMOKE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("tui smoke mutex poisoned")
+}
 
 // =============================================================================
 // Fixture Helpers
@@ -59,7 +72,9 @@ fn make_multi_agent_fixtures(_data_dir: &Path, codex_home: &Path, claude_home: &
 
 #[test]
 fn tui_headless_launches_with_valid_index() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -100,7 +115,9 @@ fn tui_headless_launches_with_valid_index() {
 
 #[test]
 fn tui_headless_exits_cleanly_on_empty_dataset() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -141,7 +158,9 @@ fn tui_headless_exits_cleanly_on_empty_dataset() {
 
 #[test]
 fn tui_headless_no_panic_without_index() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -177,7 +196,9 @@ fn tui_headless_no_panic_without_index() {
 
 #[test]
 fn tui_headless_search_executes_successfully() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -229,14 +250,17 @@ fn tui_headless_search_executes_successfully() {
 
 #[test]
 fn tui_headless_multi_agent_index_and_search() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
 
     let data_dir = tmp.path().join("data");
     let codex_home = tmp.path().join("codex_home");
-    let claude_home = tmp.path().join("claude_home");
+    // Claude connector scans ~/.claude/projects (relative to HOME), so put fixtures there.
+    let claude_home = tmp.path().join(".claude");
     fs::create_dir_all(&data_dir).unwrap();
     fs::create_dir_all(&codex_home).unwrap();
     fs::create_dir_all(&claude_home).unwrap();
@@ -298,7 +322,9 @@ fn tui_headless_multi_agent_index_and_search() {
 
 #[test]
 fn tui_headless_reset_state_clears_persisted_state() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -349,7 +375,9 @@ fn tui_headless_reset_state_clears_persisted_state() {
 
 #[test]
 fn tui_headless_exit_code_success_with_data() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -390,7 +418,9 @@ fn tui_headless_exit_code_success_with_data() {
 
 #[test]
 fn health_check_before_tui_launch() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -437,6 +467,7 @@ fn health_check_before_tui_launch() {
 
 #[test]
 fn tui_help_flag_shows_usage() {
+    let _guard_lock = tui_smoke_guard();
     // --help should show usage information and exit 0
     cargo_bin_cmd!("cass")
         .arg("tui")
@@ -448,7 +479,9 @@ fn tui_help_flag_shows_usage() {
 
 #[test]
 fn tui_accepts_data_dir_flag() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -490,7 +523,9 @@ fn tui_accepts_data_dir_flag() {
 
 #[test]
 fn diag_command_provides_useful_info() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -531,7 +566,9 @@ fn diag_command_provides_useful_info() {
 
 #[test]
 fn status_command_shows_health() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -569,7 +606,9 @@ fn status_command_shows_health() {
 
 #[test]
 fn tui_handles_unicode_content() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -622,7 +661,9 @@ fn tui_handles_unicode_content() {
 
 #[test]
 fn tui_handles_large_message_content() {
+    let _guard_lock = tui_smoke_guard();
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard_home = EnvGuard::set("HOME", tmp.path().to_string_lossy());
     let xdg = tmp.path().join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg.to_string_lossy());
@@ -675,6 +716,7 @@ fn tui_handles_large_message_content() {
 
 #[test]
 fn smoke_test_summary() {
+    let _guard_lock = tui_smoke_guard();
     // This test just logs that all smoke tests in this file should pass
     eprintln!("================================================================================");
     eprintln!("[TUI SMOKE TESTS] All tests in this module validate:");

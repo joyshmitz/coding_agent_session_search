@@ -21,8 +21,21 @@ use coding_agent_search::search::query::{FieldMask, SearchClient, SearchFilters}
 use coding_agent_search::search::tantivy::{TantivyIndex, index_dir};
 use coding_agent_search::storage::sqlite::SqliteStorage;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// These load tests do large allocations and use RSS-based assertions.
+/// Running them in parallel makes the measurements meaningless, so we serialize
+/// within this test binary.
+static LOAD_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn load_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    LOAD_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("load test mutex poisoned")
+}
 
 /// Generate a test conversation with specified parameters.
 fn generate_conversation(
@@ -192,6 +205,24 @@ fn get_memory_mb() -> f64 {
     0.0
 }
 
+/// Best-effort RSS trimming for Linux/glibc builds.
+///
+/// `malloc_trim(0)` asks glibc to return freed heap pages to the OS. Without it,
+/// RSS can remain high even after dropping large allocations, which makes the
+/// resource cleanup load test flaky on developer machines.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_allocator() {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+    unsafe {
+        let _ = malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_allocator() {}
+
 /// Run a search and measure latency.
 fn measure_search(client: &SearchClient, query: &str, limit: usize) -> (usize, Duration) {
     let filters = SearchFilters::default();
@@ -211,6 +242,7 @@ fn measure_search(client: &SearchClient, query: &str, limit: usize) -> (usize, D
 #[test]
 fn load_1k_conversations() {
     println!("\n=== Load Test: 1K Conversations (10MB baseline) ===");
+    let _guard = load_test_guard();
 
     let (tmp, client, index_time) = setup_load_index(1_000, 10, ContentSize::Mixed);
     println!("  Index creation: {:?}", index_time);
@@ -242,6 +274,7 @@ fn load_1k_conversations() {
 #[test]
 fn load_10k_conversations() {
     println!("\n=== Load Test: 10K Conversations (100MB target) ===");
+    let _guard = load_test_guard();
 
     let (tmp, client, index_time) = setup_load_index(10_000, 10, ContentSize::Mixed);
     println!("  Index creation: {:?}", index_time);
@@ -274,6 +307,7 @@ fn load_10k_conversations() {
 #[ignore = "expensive: run with --ignored for full load testing"]
 fn load_50k_conversations() {
     println!("\n=== Load Test: 50K Conversations (500MB target) ===");
+    let _guard = load_test_guard();
 
     let (tmp, client, index_time) = setup_load_index(50_000, 10, ContentSize::Mixed);
     println!("  Index creation: {:?}", index_time);
@@ -308,6 +342,7 @@ fn load_50k_conversations() {
 #[test]
 fn load_large_messages() {
     println!("\n=== Load Test: Large Messages ===");
+    let _guard = load_test_guard();
 
     // 100 conversations with 10 large messages each
     let (tmp, client, index_time) = setup_load_index(100, 10, ContentSize::Large);
@@ -334,6 +369,7 @@ fn load_large_messages() {
 #[test]
 fn load_many_small_messages() {
     println!("\n=== Load Test: Many Small Messages (100 per conv) ===");
+    let _guard = load_test_guard();
 
     // 500 conversations with 100 small messages each = 50K messages
     let (tmp, client, index_time) = setup_load_index(500, 100, ContentSize::Small);
@@ -364,6 +400,7 @@ fn load_many_small_messages() {
 #[test]
 fn load_memory_bounded_search() {
     println!("\n=== Load Test: Memory Bounded Search ===");
+    let _guard = load_test_guard();
 
     let (tmp, client, _) = setup_load_index(5_000, 10, ContentSize::Mixed);
 
@@ -409,6 +446,7 @@ fn load_memory_bounded_search() {
 #[test]
 fn load_resource_cleanup() {
     println!("\n=== Load Test: Resource Cleanup ===");
+    let _guard = load_test_guard();
 
     let initial_mem = get_memory_mb();
     if initial_mem == 0.0 {
@@ -433,6 +471,9 @@ fn load_resource_cleanup() {
 
     // Force GC-like behavior
     std::thread::sleep(Duration::from_millis(100));
+    trim_allocator();
+    std::thread::sleep(Duration::from_millis(50));
+    trim_allocator();
 
     let final_mem = get_memory_mb();
     let net_growth = final_mem - initial_mem;
@@ -460,6 +501,7 @@ fn load_resource_cleanup() {
 #[test]
 fn load_test_summary() {
     println!("\n");
+    let _guard = load_test_guard();
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║                    CASS Load Test Summary                     ║");
     println!("╠═══════════════════════════════════════════════════════════════╣");
