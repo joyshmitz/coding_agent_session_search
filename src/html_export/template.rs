@@ -10,8 +10,10 @@
 //! - **Semantic HTML**: Proper use of article, section, header elements
 
 use std::fmt;
+use std::time::Instant;
 
 use super::{encryption, filename, renderer, scripts, styles};
+use tracing::{debug, info, trace, warn};
 
 /// Errors that can occur during template generation.
 #[derive(Debug)]
@@ -265,6 +267,7 @@ pub struct TemplateMetadata {
 impl HtmlTemplate {
     /// Generate the complete HTML document.
     pub fn render(&self, options: &ExportOptions) -> String {
+        let started = Instant::now();
         let critical_css = format!(
             "{}\n{}\n{}",
             self.critical_css, SCREEN_ONLY_CSS, CDN_FALLBACK_CSS
@@ -374,6 +377,18 @@ impl HtmlTemplate {
 
         let toolbar = self.render_toolbar(options);
         let header = self.render_header();
+
+        trace!(
+            component = "template",
+            operation = "render_inputs",
+            include_cdn = options.include_cdn,
+            syntax_highlighting = options.syntax_highlighting,
+            include_search = options.include_search,
+            include_theme_toggle = options.include_theme_toggle,
+            encrypt = options.encrypt,
+            print_styles = options.print_styles,
+            "Preparing HTML render"
+        );
 
         format!(
             r#"<!DOCTYPE html>
@@ -578,6 +593,19 @@ impl HtmlExporter {
         metadata: TemplateMetadata,
         password: Option<&str>,
     ) -> Result<String, TemplateError> {
+        let started = Instant::now();
+        info!(
+            component = "template",
+            operation = "export_messages",
+            message_count = messages.len(),
+            encrypt = self.options.encrypt,
+            include_cdn = self.options.include_cdn,
+            include_search = self.options.include_search,
+            include_theme_toggle = self.options.include_theme_toggle,
+            print_styles = self.options.print_styles,
+            "Starting HTML export"
+        );
+
         let render_options = renderer::RenderOptions {
             show_timestamps: self.options.show_timestamps,
             show_tool_calls: self.options.show_tool_calls,
@@ -590,11 +618,35 @@ impl HtmlExporter {
             ..renderer::RenderOptions::default()
         };
 
+        let render_started = Instant::now();
         let rendered = renderer::render_conversation(messages, &render_options)
             .map_err(|e| TemplateError::RenderFailed(e.to_string()))?;
+        debug!(
+            component = "renderer",
+            operation = "render_conversation_complete",
+            duration_ms = render_started.elapsed().as_millis(),
+            bytes = rendered.len(),
+            "Conversation HTML rendered"
+        );
 
         let content = if self.options.encrypt {
-            let password = password.ok_or(TemplateError::EncryptionRequired)?;
+            let password = match password {
+                Some(pw) => pw,
+                None => {
+                    warn!(
+                        component = "encryption",
+                        operation = "encrypt_payload",
+                        "Encryption requested but no password provided"
+                    );
+                    return Err(TemplateError::EncryptionRequired);
+                }
+            };
+            debug!(
+                component = "encryption",
+                operation = "encrypt_payload",
+                plaintext_bytes = rendered.len(),
+                "Encrypting rendered HTML"
+            );
             let encrypted = encryption::encrypt_content(
                 &rendered,
                 password,
@@ -606,8 +658,26 @@ impl HtmlExporter {
             rendered
         };
 
+        let styles_started = Instant::now();
         let styles = styles::generate_styles(&self.options);
+        debug!(
+            component = "styles",
+            operation = "generate",
+            critical_bytes = styles.critical_css.len(),
+            print_bytes = styles.print_css.len(),
+            duration_ms = styles_started.elapsed().as_millis(),
+            "Generated styles"
+        );
+
+        let scripts_started = Instant::now();
         let scripts = scripts::generate_scripts(&self.options);
+        debug!(
+            component = "scripts",
+            operation = "generate",
+            inline_bytes = scripts.inline_js.len(),
+            duration_ms = scripts_started.elapsed().as_millis(),
+            "Generated scripts"
+        );
 
         let template = HtmlTemplate {
             title: title.to_string(),
@@ -619,7 +689,15 @@ impl HtmlExporter {
             metadata,
         };
 
-        Ok(template.render(&self.options))
+        let html = template.render(&self.options);
+        info!(
+            component = "template",
+            operation = "export_messages_complete",
+            duration_ms = started.elapsed().as_millis(),
+            bytes = html.len(),
+            "HTML export complete"
+        );
+        Ok(html)
     }
 }
 

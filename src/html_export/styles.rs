@@ -21,6 +21,7 @@
 
 use super::colors;
 use super::template::ExportOptions;
+use tracing::debug;
 
 /// Bundle of CSS styles for the template.
 pub struct StyleBundle {
@@ -33,9 +34,21 @@ pub struct StyleBundle {
 
 /// Generate all CSS styles for the template.
 pub fn generate_styles(options: &ExportOptions) -> StyleBundle {
+    let critical_css = generate_critical_css(options);
+    let print_css = generate_print_css();
+    debug!(
+        component = "styles",
+        operation = "generate",
+        include_search = options.include_search,
+        include_theme_toggle = options.include_theme_toggle,
+        encrypt = options.encrypt,
+        critical_bytes = critical_css.len(),
+        print_bytes = print_css.len(),
+        "Generated CSS styles"
+    );
     StyleBundle {
-        critical_css: generate_critical_css(options),
-        print_css: generate_print_css(),
+        critical_css,
+        print_css,
     }
 }
 

@@ -7,6 +7,7 @@
 //! - Encryption/decryption (Web Crypto API)
 
 use super::template::ExportOptions;
+use tracing::debug;
 
 /// Bundle of JavaScript for the template.
 pub struct ScriptBundle {
@@ -47,9 +48,19 @@ pub fn generate_scripts(options: &ExportOptions) -> ScriptBundle {
     // Initialize on load
     scripts.push(generate_init_js(options));
 
-    ScriptBundle {
-        inline_js: scripts.join("\n\n"),
-    }
+    let inline_js = scripts.join("\n\n");
+    debug!(
+        component = "scripts",
+        operation = "generate",
+        include_search = options.include_search,
+        include_theme_toggle = options.include_theme_toggle,
+        show_tool_calls = options.show_tool_calls,
+        encrypt = options.encrypt,
+        inline_bytes = inline_js.len(),
+        "Generated inline scripts"
+    );
+
+    ScriptBundle { inline_js }
 }
 
 fn generate_core_utils() -> String {

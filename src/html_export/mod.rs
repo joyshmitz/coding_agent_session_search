@@ -50,7 +50,7 @@ pub use renderer::{
 };
 pub use scripts::{ScriptBundle, generate_scripts};
 pub use styles::{StyleBundle, generate_styles};
-pub use template::{ExportOptions, HtmlExporter, HtmlTemplate, TemplateError};
+pub use template::{ExportOptions, HtmlExporter, HtmlTemplate, TemplateError, TemplateMetadata};
 
 /// Color palette matching TUI theme.rs for visual consistency.
 ///

@@ -14,9 +14,11 @@
 //! - **Accessible**: Semantic HTML with ARIA attributes
 
 use std::fmt;
+use std::time::Instant;
 
 use super::template::html_escape;
 use serde_json;
+use tracing::{debug, info, trace};
 
 /// Errors that can occur during rendering.
 #[derive(Debug)]
@@ -185,6 +187,7 @@ pub fn render_conversation(
     messages: &[Message],
     options: &RenderOptions,
 ) -> Result<String, RenderError> {
+    let started = Instant::now();
     let mut html = String::with_capacity(messages.len() * 2000);
 
     // Add agent-specific class to conversation wrapper if specified
@@ -193,6 +196,14 @@ pub fn render_conversation(
         .as_ref()
         .map(|s| agent_css_class(s))
         .unwrap_or("");
+
+    info!(
+        component = "renderer",
+        operation = "render_conversation",
+        message_count = messages.len(),
+        agent_slug = options.agent_slug.as_deref().unwrap_or(""),
+        "Rendering conversation"
+    );
 
     if !agent_class.is_empty() {
         html.push_str(&format!(
@@ -219,11 +230,29 @@ pub fn render_conversation(
         html.push_str("</div>\n");
     }
 
+    debug!(
+        component = "renderer",
+        operation = "render_conversation_complete",
+        duration_ms = started.elapsed().as_millis(),
+        bytes = html.len(),
+        "Conversation rendered"
+    );
+
     Ok(html)
 }
 
 /// Render a single message to HTML.
 pub fn render_message(message: &Message, options: &RenderOptions) -> Result<String, RenderError> {
+    let started = Instant::now();
+    trace!(
+        component = "renderer",
+        operation = "render_message",
+        message_index = message.index.unwrap_or(0),
+        has_index = message.index.is_some(),
+        role = message.role.as_str(),
+        content_len = message.content.len(),
+        "Rendering message"
+    );
     let role_class = match message.role.as_str() {
         "user" => "message-user",
         "assistant" | "agent" => "message-assistant",
@@ -264,6 +293,14 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     // Check if message should be collapsed
     let (content_wrapper_start, content_wrapper_end) =
         if options.collapse_threshold > 0 && message.content.len() > options.collapse_threshold {
+            debug!(
+                component = "renderer",
+                operation = "collapse_message",
+                message_index = message.index.unwrap_or(0),
+                content_len = message.content.len(),
+                collapse_threshold = options.collapse_threshold,
+                "Collapsing long message"
+            );
             let preview_len = options.collapse_threshold.min(500);
             // Safe truncation at char boundary to avoid panic on multi-byte UTF-8
             let safe_len = truncate_to_char_boundary(&message.content, preview_len);
@@ -304,7 +341,7 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
         _ => "",
     };
 
-    Ok(format!(
+    let rendered = format!(
         r#"            <article class="message {role_class}"{anchor} role="article" aria-label="{role} message">
                 <header class="message-header">
                     {role_icon}
@@ -326,7 +363,18 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
         content = content_html,
         wrapper_end = content_wrapper_end,
         tool_call = tool_call_html,
-    ))
+    );
+
+    debug!(
+        component = "renderer",
+        operation = "render_message_complete",
+        message_index = message.index.unwrap_or(0),
+        duration_ms = started.elapsed().as_millis(),
+        bytes = rendered.len(),
+        "Message rendered"
+    );
+
+    Ok(rendered)
 }
 
 /// Format role for display.
@@ -389,6 +437,14 @@ fn render_content(content: &str, options: &RenderOptions) -> String {
 
 /// Render a code block with optional syntax highlighting.
 fn render_code_block(content: &str, lang: &str, options: &RenderOptions) -> String {
+    trace!(
+        component = "renderer",
+        operation = "render_code_block",
+        language = lang,
+        lines = content.lines().count(),
+        content_len = content.len(),
+        "Rendering code block"
+    );
     let lang_class = if options.syntax_highlighting && !lang.is_empty() {
         format!(r#" class="language-{}""#, html_escape(lang))
     } else {
@@ -495,6 +551,15 @@ fn render_links(text: &str) -> String {
 
 /// Render a tool call section.
 fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
+    let started = Instant::now();
+    trace!(
+        component = "renderer",
+        operation = "render_tool_call",
+        tool = tool_call.name.as_str(),
+        input_len = tool_call.input.len(),
+        output_len = tool_call.output.as_ref().map(|s| s.len()).unwrap_or(0),
+        "Rendering tool call"
+    );
     // Status indicator
     let (status_class, status_icon) = tool_call
         .status
@@ -559,7 +624,7 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
         "tool-input"
     };
 
-    format!(
+    let rendered = format!(
         r#"
                 <details class="tool-call">
                     <summary class="tool-call-header">
@@ -588,7 +653,18 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
         input_class = input_class,
         input = html_escape(&formatted_input),
         output = output_html,
-    )
+    );
+
+    debug!(
+        component = "renderer",
+        operation = "render_tool_call_complete",
+        tool = tool_call.name.as_str(),
+        duration_ms = started.elapsed().as_millis(),
+        bytes = rendered.len(),
+        "Tool call rendered"
+    );
+
+    rendered
 }
 
 /// Try to format as pretty JSON, otherwise return raw.

@@ -5,6 +5,13 @@
 
 use std::fmt;
 
+#[cfg(feature = "encryption")]
+use std::time::Instant;
+
+use tracing::{debug, warn};
+
+#[cfg(feature = "encryption")]
+use tracing::info;
 /// Errors that can occur during encryption.
 #[derive(Debug)]
 pub enum EncryptionError {
@@ -122,6 +129,11 @@ pub fn encrypt_content(
     use sha2::Sha256;
 
     if password.is_empty() {
+        warn!(
+            component = "encryption",
+            operation = "validate_password",
+            "Rejected empty password"
+        );
         return Err(EncryptionError::InvalidPassword);
     }
     if params.iterations == 0 {
@@ -140,15 +152,33 @@ pub fn encrypt_content(
         ));
     }
 
+    let started = Instant::now();
+    info!(
+        component = "encryption",
+        operation = "encrypt_payload",
+        plaintext_bytes = plaintext.len(),
+        iterations = params.iterations,
+        salt_len = params.salt_len,
+        iv_len = params.iv_len,
+        "Starting encryption"
+    );
+
     // Generate random salt and IV
     let mut salt = vec![0u8; params.salt_len];
     let mut iv = vec![0u8; params.iv_len];
     OsRng.fill_bytes(&mut salt);
     OsRng.fill_bytes(&mut iv);
 
+    let derive_started = Instant::now();
     // Derive key using PBKDF2-SHA256
     let mut key = [0u8; 32]; // 256 bits for AES-256
     pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, params.iterations, &mut key);
+    debug!(
+        component = "encryption",
+        operation = "derive_key",
+        duration_ms = derive_started.elapsed().as_millis(),
+        "Derived key via PBKDF2"
+    );
 
     // Encrypt with AES-256-GCM
     let cipher = Aes256Gcm::new_from_slice(&key)
@@ -159,12 +189,22 @@ pub fn encrypt_content(
         .encrypt(nonce, plaintext.as_bytes())
         .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
 
-    Ok(EncryptedContent {
+    let encrypted = EncryptedContent {
         salt: base64_encode(&salt),
         iv: base64_encode(&iv),
         ciphertext: base64_encode(&ciphertext),
         iterations: params.iterations,
-    })
+    };
+
+    info!(
+        component = "encryption",
+        operation = "encrypt_complete",
+        ciphertext_bytes = encrypted.ciphertext.len(),
+        duration_ms = started.elapsed().as_millis(),
+        "Encryption complete"
+    );
+
+    Ok(encrypted)
 }
 
 /// Placeholder encrypt function when encryption feature is disabled.
@@ -174,6 +214,11 @@ pub fn encrypt_content(
     _password: &str,
     _params: &EncryptionParams,
 ) -> Result<EncryptedContent, EncryptionError> {
+    warn!(
+        component = "encryption",
+        operation = "encrypt_payload",
+        "Encryption feature not enabled"
+    );
     Err(EncryptionError::EncryptionFailed(
         "encryption feature not enabled - compile with --features encryption".to_string(),
     ))
@@ -216,6 +261,12 @@ fn base64_encode(data: &[u8]) -> String {
 /// The JSON is HTML-escaped to prevent XSS even if EncryptedContent
 /// contains unexpected data (defensive programming).
 pub fn render_encrypted_placeholder(encrypted: &EncryptedContent) -> String {
+    debug!(
+        component = "encryption",
+        operation = "render_placeholder",
+        ciphertext_bytes = encrypted.ciphertext.len(),
+        "Rendering encrypted placeholder"
+    );
     // HTML-escape the JSON to prevent XSS if someone passes malicious data
     let json = encrypted.to_json();
     let escaped_json = html_escape_for_content(&json);

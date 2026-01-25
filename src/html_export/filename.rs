@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use tracing::{debug, trace};
+
 /// Options for filename generation.
 #[derive(Debug, Clone, Default)]
 pub struct FilenameOptions {
@@ -136,7 +138,16 @@ pub fn generate_filename(metadata: &FilenameMetadata, options: &FilenameOptions)
         parts.join("_")
     };
 
-    finalize_filename(filename, options.max_length)
+    let final_name = finalize_filename(filename, options.max_length);
+    debug!(
+        component = "file",
+        operation = "generate_filename",
+        parts = parts.len(),
+        max_length = options.max_length.unwrap_or(0),
+        result_len = final_name.len(),
+        "Generated filename"
+    );
+    final_name
 }
 
 /// Generate a filename with path.
@@ -153,7 +164,14 @@ pub fn generate_filepath(
         None => base_max,
     });
     let filename = generate_filename(metadata, &adjusted);
-    base_dir.join(format!("{filename}{ext}"))
+    let path = base_dir.join(format!("{filename}{ext}"));
+    debug!(
+        component = "file",
+        operation = "generate_filepath",
+        path = %path.display(),
+        "Generated filepath"
+    );
+    path
 }
 
 /// Sanitize a string for use in filenames.
@@ -354,6 +372,13 @@ pub fn unique_filename(dir: &Path, base_filename: &str) -> PathBuf {
         let new_name = format!("{}_{}{}", stem, i, ext);
         let new_path = dir.join(&new_name);
         if !new_path.exists() {
+            trace!(
+                component = "file",
+                operation = "collision_check",
+                attempts = i,
+                path = %new_path.display(),
+                "Resolved filename collision"
+            );
             return new_path;
         }
     }
@@ -363,7 +388,14 @@ pub fn unique_filename(dir: &Path, base_filename: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    dir.join(format!("{}_{}{}", stem, ts, ext))
+    let fallback = dir.join(format!("{}_{}{}", stem, ts, ext));
+    trace!(
+        component = "file",
+        operation = "collision_fallback",
+        path = %fallback.display(),
+        "Resolved filename via timestamp"
+    );
+    fallback
 }
 
 // ============================================================================
@@ -524,7 +556,15 @@ pub fn generate_full_filename(
         agent_part, workspace_part, datetime_part, topic_part
     );
     let base = finalize_filename(base, Some(base_max));
-    format!("{base}{ext}")
+    let filename = format!("{base}{ext}");
+    debug!(
+        component = "file",
+        operation = "generate_full_filename",
+        agent = agent,
+        result_len = filename.len(),
+        "Generated full filename"
+    );
+    filename
 }
 
 #[cfg(test)]
