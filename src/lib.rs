@@ -3871,7 +3871,6 @@ fn run_cli_search(
         );
 
         // TODO(bd-2mbe): Wire model selection to embedder registry
-        // TODO(bd-2t2d): Implement reranking stage
         // TODO(bd-1lps): Implement daemon client integration
     }
 
@@ -3958,6 +3957,72 @@ fn run_cli_search(
                     }
                 }
             })?,
+    };
+
+    // Apply reranking if enabled (bd-2t2d)
+    let result = if semantic_opts.rerank && !result.hits.is_empty() {
+        use crate::search::fastembed_reranker::FastEmbedReranker;
+        use crate::search::reranker::Reranker;
+
+        let model_dir = FastEmbedReranker::default_model_dir(&data_dir);
+        match FastEmbedReranker::load_from_dir(&model_dir) {
+            Ok(reranker) => {
+                // Extract content from hits for reranking (use snippet if content is empty)
+                let docs: Vec<String> = result
+                    .hits
+                    .iter()
+                    .map(|hit| {
+                        if hit.content.is_empty() {
+                            hit.snippet.clone()
+                        } else {
+                            hit.content.clone()
+                        }
+                    })
+                    .collect();
+                let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+
+                match reranker.rerank(query, &doc_refs) {
+                    Ok(scores) => {
+                        // Update scores and re-sort hits
+                        let mut scored_hits: Vec<_> = result
+                            .hits
+                            .into_iter()
+                            .zip(scores.into_iter())
+                            .map(|(mut hit, score)| {
+                                hit.score = score;
+                                hit
+                            })
+                            .collect();
+                        scored_hits.sort_by(|a, b| {
+                            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+
+                        tracing::debug!(
+                            reranker_id = reranker.id(),
+                            hits_reranked = scored_hits.len(),
+                            "Reranking complete"
+                        );
+
+                        crate::search::query::SearchResult {
+                            hits: scored_hits,
+                            wildcard_fallback: result.wildcard_fallback,
+                            cache_stats: result.cache_stats,
+                            suggestions: result.suggestions,
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Reranking failed, returning original results");
+                        result
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "Reranker not available, skipping rerank");
+                result
+            }
+        }
+    } else {
+        result
     };
 
     // Check if search exceeded timeout - return partial results with timeout indicator
