@@ -11924,13 +11924,28 @@ fn run_models_install(
 
     let downloader = ModelDownloader::new(model_dir.clone());
     let pb_clone = pb.clone();
+    let manifest_clone = manifest.clone();
 
-    let result = downloader.download(
-        &manifest,
-        Some(Box::new(move |progress| {
-            pb_clone.set_position(progress.total_bytes);
-        })),
-    );
+    // Run download on a fresh OS thread to avoid nested Tokio runtime drops from reqwest::blocking.
+    let result = std::thread::spawn(move || {
+        downloader.download(
+            &manifest_clone,
+            Some(Box::new(move |progress| {
+                pb_clone.set_position(progress.total_bytes);
+            })),
+        )
+    })
+    .join()
+    .map_err(|_| {
+        pb.abandon_with_message("Download failed");
+        CliError {
+            code: 23,
+            kind: "download",
+            message: "Model download thread panicked".to_string(),
+            hint: Some("Retry the command; if it persists, report the panic output.".into()),
+            retryable: true,
+        }
+    })?;
 
     match result {
         Ok(()) => {
