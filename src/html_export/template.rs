@@ -224,7 +224,8 @@ impl HtmlTemplate {
         let mut meta_items = Vec::new();
 
         if let Some(ts) = &self.metadata.timestamp {
-            meta_items.push(format!(r#"<span class="meta-item"><time datetime="{}">{}</time></span>"#, ts, ts));
+            let escaped_ts = html_escape(ts);
+            meta_items.push(format!(r#"<span class="meta-item"><time datetime="{}">{}</time></span>"#, escaped_ts, escaped_ts));
         }
 
         if let Some(agent) = &self.metadata.agent {

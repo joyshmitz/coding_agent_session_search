@@ -150,17 +150,12 @@ const Search = {
             }
         });
 
-        // Keyboard shortcut: Ctrl/Cmd + F
+        // Keyboard shortcut: Ctrl/Cmd + F for search
         document.addEventListener('keydown', (e) => {
             if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
                 e.preventDefault();
                 this.input.focus();
                 this.input.select();
-            }
-            // Ctrl/Cmd + P: Print
-            if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
-                e.preventDefault();
-                printConversation();
             }
         });
     },
@@ -454,7 +449,15 @@ fn generate_init_js(options: &ExportOptions) -> String {
 
     // Print button handler
     const printBtn = $('#print-btn');
-    if (printBtn) printBtn.addEventListener('click', printConversation);"#);
+    if (printBtn) printBtn.addEventListener('click', printConversation);
+
+    // Global keyboard shortcut: Ctrl/Cmd + P for print
+    document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+            e.preventDefault();
+            printConversation();
+        }
+    });"#);
 
     format!(
         r#"// Initialize on DOM ready
