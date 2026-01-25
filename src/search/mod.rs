@@ -10,11 +10,13 @@
 //! - **[`fastembed_embedder`]**: FastEmbed-backed ML embedder (MiniLM).
 //! - **[`reranker`]**: Reranker trait for cross-encoder reranking of search results.
 //! - **[`fastembed_reranker`]**: FastEmbed-backed cross-encoder reranker (ms-marco-MiniLM-L-6-v2).
+//! - **[`daemon_client`]**: Daemon client wrappers for warm embedder/reranker (bd-1lps).
 //! - **[`model_manager`]**: Semantic model detection + context wiring (no downloads).
 //! - **[`model_download`]**: Model download system with consent, verification, and atomic install.
 //! - **[`canonicalize`]**: Text preprocessing for consistent embedding input.
 
 pub mod canonicalize;
+pub mod daemon_client;
 pub mod embedder;
 pub mod embedder_registry;
 pub mod fastembed_embedder;
