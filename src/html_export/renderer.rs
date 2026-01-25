@@ -181,7 +181,10 @@ pub fn agent_display_name(slug: &str) -> &'static str {
 }
 
 /// Render a list of messages to HTML.
-pub fn render_conversation(messages: &[Message], options: &RenderOptions) -> Result<String, RenderError> {
+pub fn render_conversation(
+    messages: &[Message],
+    options: &RenderOptions,
+) -> Result<String, RenderError> {
     let mut html = String::with_capacity(messages.len() * 2000);
 
     // Add agent-specific class to conversation wrapper if specified
@@ -262,7 +265,9 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     let (content_wrapper_start, content_wrapper_end) =
         if options.collapse_threshold > 0 && message.content.len() > options.collapse_threshold {
             let preview_len = options.collapse_threshold.min(500);
-            let preview = &message.content[..preview_len];
+            // Safe truncation at char boundary to avoid panic on multi-byte UTF-8
+            let safe_len = truncate_to_char_boundary(&message.content, preview_len);
+            let preview = &message.content[..safe_len];
             (
                 format!(
                     r#"<details class="message-collapsed">
@@ -439,6 +444,10 @@ fn render_inline_code(text: &str) -> String {
 }
 
 /// Render URLs as clickable links.
+///
+/// NOTE: This function expects already HTML-escaped text as input (from render_content).
+/// The URL is NOT re-escaped since it's already safe. The browser will decode HTML
+/// entities in href attributes after parsing, so `&amp;` becomes `&` in the actual URL.
 fn render_links(text: &str) -> String {
     // Simple URL detection - matches http:// and https://
     let mut result = String::new();
@@ -461,17 +470,19 @@ fn render_links(text: &str) -> String {
 
             let mut url = prefix.to_string();
             while let Some(&next) = chars.peek() {
-                if next.is_whitespace() || next == '<' || next == '>' || next == '"' {
+                // Stop at whitespace. Note: raw <, >, " would already be escaped
+                // to &lt;, &gt;, &quot; at this point, so we only check whitespace.
+                if next.is_whitespace() {
                     break;
                 }
                 url.push(chars.next().unwrap());
             }
 
-            // Escape URL for safe inclusion in href attribute
-            let escaped_url = html_escape(&url);
+            // URL is already HTML-escaped (from the earlier html_escape call in render_content).
+            // Do NOT re-escape, or &amp; becomes &amp;amp; (broken links).
             result.push_str(&format!(
                 r#"<a href="{url}" target="_blank" rel="noopener noreferrer">{url}</a>"#,
-                url = escaped_url
+                url = url
             ));
 
             buffer.clear();
@@ -498,7 +509,9 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
     let output_html = if let Some(output) = &tool_call.output {
         let formatted = format_json_or_raw(output);
         let (display_output, is_truncated) = if formatted.len() > 10000 {
-            let truncated = &formatted[..10000];
+            // Safe truncation at char boundary to avoid panic on multi-byte UTF-8
+            let safe_len = truncate_to_char_boundary(&formatted, 10000);
+            let truncated = &formatted[..safe_len];
             (truncated.to_string(), true)
         } else {
             (formatted, false)
@@ -538,7 +551,9 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
     };
 
     // Code preview lines option
-    let input_class = if options.code_preview_lines > 0 && formatted_input.lines().count() > options.code_preview_lines {
+    let input_class = if options.code_preview_lines > 0
+        && formatted_input.lines().count() > options.code_preview_lines
+    {
         "tool-input-long"
     } else {
         "tool-input"
@@ -592,10 +607,25 @@ fn format_timestamp(ts: &str) -> String {
     // Simple formatting - could be enhanced with chrono
     // For now, just return a shortened version
     if ts.len() > 19 {
-        ts[..19].replace('T', " ")
+        // Safe truncation at char boundary
+        let end = truncate_to_char_boundary(ts, 19);
+        ts[..end].replace('T', " ")
     } else {
         ts.to_string()
     }
+}
+
+/// Find the largest byte index <= `max_bytes` that is on a UTF-8 char boundary.
+fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> usize {
+    if max_bytes >= s.len() {
+        return s.len();
+    }
+    // Walk backwards from max_bytes to find a char boundary
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 #[cfg(test)]
@@ -648,6 +678,27 @@ mod tests {
         let result = render_links("Visit https://example.com for more");
         assert!(result.contains(r#"<a href="https://example.com""#));
         assert!(result.contains("target=\"_blank\""));
+    }
+
+    #[test]
+    fn test_url_with_query_params_not_double_escaped() {
+        // Test that URLs with & in query params are correctly escaped once, not twice.
+        // The render_content function HTML-escapes first, then render_links processes.
+        // If render_links re-escapes, &amp; becomes &amp;amp; (broken).
+        let msg = test_message("user", "Visit https://example.com?a=1&b=2 for info");
+        let html = render_message(&msg, &RenderOptions::default()).unwrap();
+
+        // Should contain &amp; (single escape), NOT &amp;amp; (double escape)
+        assert!(
+            html.contains("https://example.com?a=1&amp;b=2"),
+            "URL should have single-escaped ampersand. HTML: {}",
+            html
+        );
+        assert!(
+            !html.contains("&amp;amp;"),
+            "URL should NOT be double-escaped. HTML: {}",
+            html
+        );
     }
 
     #[test]
@@ -787,5 +838,73 @@ mod tests {
                 expected_icon
             );
         }
+    }
+
+    // ========================================================================
+    // UTF-8 boundary safety tests
+    // ========================================================================
+
+    #[test]
+    fn test_truncate_to_char_boundary() {
+        // ASCII string
+        assert_eq!(truncate_to_char_boundary("hello", 3), 3);
+        assert_eq!(truncate_to_char_boundary("hello", 10), 5);
+
+        // UTF-8 multi-byte characters
+        // "日本語" = 3 chars, 9 bytes (each char is 3 bytes)
+        let japanese = "日本語";
+        assert_eq!(japanese.len(), 9);
+        // Truncating at byte 4 should back up to byte 3 (end of first char)
+        assert_eq!(truncate_to_char_boundary(japanese, 4), 3);
+        // Truncating at byte 6 should stay at 6 (end of second char)
+        assert_eq!(truncate_to_char_boundary(japanese, 6), 6);
+    }
+
+    #[test]
+    fn test_long_message_collapse_utf8_safe() {
+        // Create a message with multi-byte UTF-8 content that would panic if sliced incorrectly
+        let content_with_emoji = "This is a message with emoji 🎉🎊🎈 ".repeat(50);
+        let msg = test_message("user", &content_with_emoji);
+        let mut opts = RenderOptions::default();
+        opts.collapse_threshold = 100; // Will trigger collapse
+
+        // Should not panic even though the emoji may be at the slice boundary
+        let html = render_message(&msg, &opts).unwrap();
+        assert!(html.contains("message-collapsed"));
+        // The preview should be valid UTF-8 (this would fail if we sliced incorrectly)
+        assert!(!html.is_empty());
+    }
+
+    #[test]
+    fn test_tool_output_truncation_utf8_safe() {
+        // Create a very long tool output with multi-byte chars
+        let long_output_with_unicode = "结果: ".repeat(5000); // Chinese characters
+
+        let msg = Message {
+            role: "tool".to_string(),
+            content: "Tool result".to_string(),
+            timestamp: None,
+            tool_call: Some(ToolCall {
+                name: "Test".to_string(),
+                input: "{}".to_string(),
+                output: Some(long_output_with_unicode),
+                status: Some(ToolStatus::Success),
+            }),
+            index: None,
+            author: None,
+        };
+
+        // Should not panic even though we're truncating at 10000 bytes
+        let html = render_message(&msg, &RenderOptions::default()).unwrap();
+        assert!(html.contains("Output truncated"));
+    }
+
+    #[test]
+    fn test_format_timestamp_utf8_safe() {
+        // Malformed timestamp with multi-byte chars (edge case)
+        let weird_ts = "2026-01-25T12:30:00日本語";
+        let formatted = format_timestamp(weird_ts);
+        // Should not panic and should produce valid output
+        assert!(!formatted.is_empty());
     }
 }
