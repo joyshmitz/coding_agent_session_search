@@ -267,7 +267,7 @@ pub struct TemplateMetadata {
 impl HtmlTemplate {
     /// Generate the complete HTML document.
     pub fn render(&self, options: &ExportOptions) -> String {
-        let started = Instant::now();
+        let _started = Instant::now();
         let critical_css = format!(
             "{}\n{}\n{}",
             self.critical_css, SCREEN_ONLY_CSS, CDN_FALLBACK_CSS
