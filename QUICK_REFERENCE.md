@@ -1,4 +1,33 @@
-# CASS Fast Search Patterns - Quick Reference
+# CASS Quick Reference (Agent Quickstart + Performance)
+
+## Agent Quickstart (Robot Mode)
+
+⚠️ NEVER run bare `cass` in an agent context — it launches the TUI. Always use `--robot` or `--json`.
+
+```bash
+# Health + index
+cass health --json || cass index --full
+
+# Search (minimal payload for LLMs)
+cass search "auth error" --robot --limit 5 --fields minimal
+
+# Inspect a hit (use source_path + line_number from search output)
+cass view /path/to/session.jsonl -n 42 --json
+cass expand /path/to/session.jsonl -n 42 -C 3 --json
+
+# Machine-readable help
+cass robot-docs guide
+cass robot-docs schemas
+```
+
+**Key flags**
+- `--robot` / `--json`: machine-readable output (stdout only)
+- `--fields minimal`: lowest-token payload
+- `--limit N`: cap results
+- `--agent NAME`: filter (claude, codex, cursor, gemini, aider, etc.)
+- `--days N`: recent window
+
+---
 
 ## TL;DR: What Makes CASS Fast
 
@@ -454,4 +483,3 @@ Key test patterns found in `tests/`:
 - **FastEmbed docs**: https://github.com/qdrant/fastembed
 - **RRF paper**: https://dl.acm.org/doi/10.1145/312624.312649
 - **BM25 algorithm**: https://en.wikipedia.org/wiki/Okapi_BM25
-
