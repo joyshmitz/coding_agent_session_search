@@ -34,7 +34,9 @@ fn load_test_guard() -> std::sync::MutexGuard<'static, ()> {
     LOAD_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("load test mutex poisoned")
+        // Recover from poisoned mutex - a previous test panicking shouldn't
+        // block subsequent tests from running
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Generate a test conversation with specified parameters.
