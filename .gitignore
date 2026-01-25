@@ -42,3 +42,9 @@ web/test-fixtures/
 
 # Performance test deps/artifacts
 tests/performance/node_modules/
+
+# Node.js test dependencies
+tests/node_modules/
+
+# Test output
+test-results/
