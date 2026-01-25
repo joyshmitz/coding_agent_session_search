@@ -1341,6 +1341,7 @@ pub fn build_scan_roots(storage: &SqliteStorage, data_dir: &Path) -> Vec<ScanRoo
                 let workspace_rewrites = source.path_mappings.clone();
 
                 for path in &source.paths {
+                    // Generate safe dirname from the path as configured
                     let expanded_path = if path.starts_with("~/") {
                         path.to_string()
                     } else if path.starts_with('~') {
@@ -1349,18 +1350,40 @@ pub fn build_scan_roots(storage: &SqliteStorage, data_dir: &Path) -> Vec<ScanRoo
                         path.to_string()
                     };
                     let safe_name = path_to_safe_dirname(&expanded_path);
-                    let mirror_path = data_dir
-                        .join("remotes")
-                        .join(&source.name)
-                        .join("mirror")
-                        .join(&safe_name);
-                    if !mirror_path.exists() {
+                    let mirror_base = data_dir.join("remotes").join(&source.name).join("mirror");
+                    let mirror_path = mirror_base.join(&safe_name);
+
+                    // Try the direct path first
+                    if mirror_path.exists() {
+                        let mut scan_root =
+                            ScanRoot::remote(mirror_path, origin.clone(), platform);
+                        scan_root.workspace_rewrites = workspace_rewrites.clone();
+                        roots.push(scan_root);
                         continue;
                     }
 
-                    let mut scan_root = ScanRoot::remote(mirror_path, origin.clone(), platform);
-                    scan_root.workspace_rewrites = workspace_rewrites.clone();
-                    roots.push(scan_root);
+                    // Fallback: sync may have expanded ~ differently (issue #45)
+                    // Look for any directory in mirror that ends with the path suffix
+                    // e.g., "~/.claude/projects" -> find "*_.claude_projects"
+                    if path.starts_with("~/") {
+                        let suffix = path.trim_start_matches("~/");
+                        let safe_suffix = path_to_safe_dirname(suffix);
+                        if let Ok(entries) = std::fs::read_dir(&mirror_base) {
+                            for entry in entries.flatten() {
+                                let name = entry.file_name();
+                                let name_str = name.to_string_lossy();
+                                // Match directories ending with the expected suffix
+                                // e.g., "home_user_.claude_projects" ends with ".claude_projects"
+                                if name_str.ends_with(&safe_suffix) && entry.path().is_dir() {
+                                    let mut scan_root =
+                                        ScanRoot::remote(entry.path(), origin.clone(), platform);
+                                    scan_root.workspace_rewrites = workspace_rewrites.clone();
+                                    roots.push(scan_root);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             return roots;
