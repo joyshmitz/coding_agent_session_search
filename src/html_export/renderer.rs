@@ -1,11 +1,22 @@
 //! Conversation to HTML rendering.
 //!
 //! Converts session messages into semantic HTML markup with proper
-//! role-based styling and syntax highlighting support.
+//! role-based styling, agent-specific theming, and syntax highlighting support.
+//!
+//! # Features
+//!
+//! - **Role-based styling**: User, assistant, tool, and system messages
+//! - **Agent-specific theming**: Visual differentiation for 11 supported agents
+//! - **Code blocks**: Syntax highlighting with Prism.js language classes
+//! - **Tool calls**: Collapsible details with formatted JSON
+//! - **Long message collapse**: Optional folding for lengthy content
+//! - **XSS prevention**: All user content is properly escaped
+//! - **Accessible**: Semantic HTML with ARIA attributes
 
 use std::fmt;
 
 use super::template::html_escape;
+use serde_json;
 
 /// Errors that can occur during rendering.
 #[derive(Debug)]
@@ -28,7 +39,7 @@ impl fmt::Display for RenderError {
 impl std::error::Error for RenderError {}
 
 /// Options for rendering conversations.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RenderOptions {
     /// Show message timestamps
     pub show_timestamps: bool,
@@ -41,6 +52,30 @@ pub struct RenderOptions {
 
     /// Wrap long lines in code blocks
     pub wrap_code: bool,
+
+    /// Collapse messages longer than this threshold (characters)
+    /// Set to 0 to disable collapsing
+    pub collapse_threshold: usize,
+
+    /// Maximum lines to show in collapsed code blocks preview
+    pub code_preview_lines: usize,
+
+    /// Agent slug for agent-specific styling
+    pub agent_slug: Option<String>,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            show_timestamps: true,
+            show_tool_calls: true,
+            syntax_highlighting: true,
+            wrap_code: false,
+            collapse_threshold: 0, // Disabled by default
+            code_preview_lines: 20,
+            agent_slug: None,
+        }
+    }
 }
 
 /// A message to render.
@@ -57,6 +92,12 @@ pub struct Message {
 
     /// Optional tool call information
     pub tool_call: Option<ToolCall>,
+
+    /// Optional message index for anchoring
+    pub index: Option<usize>,
+
+    /// Optional author name (for multi-participant sessions)
+    pub author: Option<String>,
 }
 
 /// Tool call information.
@@ -70,15 +111,109 @@ pub struct ToolCall {
 
     /// Tool output/result
     pub output: Option<String>,
+
+    /// Execution status (success, error, etc.)
+    pub status: Option<ToolStatus>,
+}
+
+/// Status of a tool execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolStatus {
+    Success,
+    Error,
+    Pending,
+}
+
+impl ToolStatus {
+    fn css_class(&self) -> &'static str {
+        match self {
+            ToolStatus::Success => "tool-status-success",
+            ToolStatus::Error => "tool-status-error",
+            ToolStatus::Pending => "tool-status-pending",
+        }
+    }
+
+    fn icon(&self) -> &'static str {
+        match self {
+            ToolStatus::Success => "✓",
+            ToolStatus::Error => "✗",
+            ToolStatus::Pending => "⋯",
+        }
+    }
+}
+
+/// Get the CSS class for an agent slug.
+///
+/// Maps agent identifiers to their visual styling class.
+pub fn agent_css_class(slug: &str) -> &'static str {
+    match slug {
+        "claude_code" | "claude" => "agent-claude",
+        "codex" | "codex_cli" => "agent-codex",
+        "cursor" | "cursor_ai" => "agent-cursor",
+        "chatgpt" | "openai" => "agent-chatgpt",
+        "gemini" | "google" => "agent-gemini",
+        "aider" => "agent-aider",
+        "copilot" | "github_copilot" => "agent-copilot",
+        "cody" | "sourcegraph" => "agent-cody",
+        "windsurf" => "agent-windsurf",
+        "amp" => "agent-amp",
+        "grok" => "agent-grok",
+        _ => "agent-default",
+    }
+}
+
+/// Get human-readable agent name.
+pub fn agent_display_name(slug: &str) -> &'static str {
+    match slug {
+        "claude_code" | "claude" => "Claude",
+        "codex" | "codex_cli" => "Codex",
+        "cursor" | "cursor_ai" => "Cursor",
+        "chatgpt" | "openai" => "ChatGPT",
+        "gemini" | "google" => "Gemini",
+        "aider" => "Aider",
+        "copilot" | "github_copilot" => "GitHub Copilot",
+        "cody" | "sourcegraph" => "Cody",
+        "windsurf" => "Windsurf",
+        "amp" => "Amp",
+        "grok" => "Grok",
+        _ => "AI Assistant",
+    }
 }
 
 /// Render a list of messages to HTML.
 pub fn render_conversation(messages: &[Message], options: &RenderOptions) -> Result<String, RenderError> {
-    let mut html = String::new();
+    let mut html = String::with_capacity(messages.len() * 2000);
 
-    for message in messages {
-        html.push_str(&render_message(message, options)?);
+    // Add agent-specific class to conversation wrapper if specified
+    let agent_class = options
+        .agent_slug
+        .as_ref()
+        .map(|s| agent_css_class(s))
+        .unwrap_or("");
+
+    if !agent_class.is_empty() {
+        html.push_str(&format!(
+            r#"<div class="conversation-messages {}">"#,
+            agent_class
+        ));
         html.push('\n');
+    }
+
+    for (idx, message) in messages.iter().enumerate() {
+        // Allow message to have its own index, or use enumeration
+        let msg_with_index = if message.index.is_some() {
+            message.clone()
+        } else {
+            let mut m = message.clone();
+            m.index = Some(idx);
+            m
+        };
+        html.push_str(&render_message(&msg_with_index, options)?);
+        html.push('\n');
+    }
+
+    if !agent_class.is_empty() {
+        html.push_str("</div>\n");
     }
 
     Ok(html)
@@ -93,6 +228,19 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
         "system" => "message-system",
         _ => "message-user",
     };
+
+    // Message anchor for deep linking
+    let anchor_id = message
+        .index
+        .map(|idx| format!(r#" id="msg-{}""#, idx))
+        .unwrap_or_default();
+
+    // Author display (falls back to role)
+    let author_display = message
+        .author
+        .as_ref()
+        .map(|a| html_escape(a))
+        .unwrap_or_else(|| format_role_display(&message.role));
 
     let timestamp_html = if options.show_timestamps {
         if let Some(ts) = &message.timestamp {
@@ -110,6 +258,28 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
 
     let content_html = render_content(&message.content, options);
 
+    // Check if message should be collapsed
+    let (content_wrapper_start, content_wrapper_end) =
+        if options.collapse_threshold > 0 && message.content.len() > options.collapse_threshold {
+            let preview_len = options.collapse_threshold.min(500);
+            let preview = &message.content[..preview_len];
+            (
+                format!(
+                    r#"<details class="message-collapsed">
+                    <summary class="message-preview">
+                        <span class="preview-text">{}</span>
+                        <span class="expand-hint">Click to expand ({} chars)</span>
+                    </summary>
+                    <div class="message-full">"#,
+                    html_escape(preview),
+                    message.content.len()
+                ),
+                "</div></details>".to_string(),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+
     let tool_call_html = if options.show_tool_calls {
         if let Some(tc) = &message.tool_call {
             render_tool_call(tc, options)
@@ -120,23 +290,49 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
         String::new()
     };
 
+    // Role icon for visual differentiation
+    let role_icon = match message.role.as_str() {
+        "user" => r#"<span class="role-icon" aria-hidden="true">👤</span>"#,
+        "assistant" | "agent" => r#"<span class="role-icon" aria-hidden="true">🤖</span>"#,
+        "tool" => r#"<span class="role-icon" aria-hidden="true">🔧</span>"#,
+        "system" => r#"<span class="role-icon" aria-hidden="true">⚙️</span>"#,
+        _ => "",
+    };
+
     Ok(format!(
-        r#"            <article class="message {role_class}" role="article">
+        r#"            <article class="message {role_class}"{anchor} role="article" aria-label="{role} message">
                 <header class="message-header">
-                    <span class="message-role">{role}</span>
+                    {role_icon}
+                    <span class="message-author">{author}</span>
                     {timestamp}
                 </header>
                 <div class="message-content">
-                    {content}
+                    {wrapper_start}{content}{wrapper_end}
                 </div>
                 {tool_call}
             </article>"#,
         role_class = role_class,
+        anchor = anchor_id,
         role = html_escape(&message.role),
+        role_icon = role_icon,
+        author = author_display,
         timestamp = timestamp_html,
+        wrapper_start = content_wrapper_start,
         content = content_html,
+        wrapper_end = content_wrapper_end,
         tool_call = tool_call_html,
     ))
+}
+
+/// Format role for display.
+fn format_role_display(role: &str) -> String {
+    match role {
+        "user" => "You".to_string(),
+        "assistant" | "agent" => "Assistant".to_string(),
+        "tool" => "Tool".to_string(),
+        "system" => "System".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Render message content, converting markdown to HTML.
@@ -287,36 +483,108 @@ fn render_links(text: &str) -> String {
 }
 
 /// Render a tool call section.
-fn render_tool_call(tool_call: &ToolCall, _options: &RenderOptions) -> String {
+fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
+    // Status indicator
+    let (status_class, status_icon) = tool_call
+        .status
+        .as_ref()
+        .map(|s| (s.css_class(), s.icon()))
+        .unwrap_or(("", ""));
+
+    // Format input as pretty JSON if possible
+    let formatted_input = format_json_or_raw(&tool_call.input);
+
+    // Format output with truncation for very long outputs
     let output_html = if let Some(output) = &tool_call.output {
+        let formatted = format_json_or_raw(output);
+        let (display_output, is_truncated) = if formatted.len() > 10000 {
+            let truncated = &formatted[..10000];
+            (truncated.to_string(), true)
+        } else {
+            (formatted, false)
+        };
+
+        let truncate_notice = if is_truncated {
+            r#"<p class="truncate-notice">Output truncated (10,000+ chars)</p>"#
+        } else {
+            ""
+        };
+
         format!(
             r#"
-                    <div class="tool-output">
-                        <pre><code>{}</code></pre>
-                    </div>"#,
-            html_escape(output)
+                        <div class="tool-output">
+                            <div class="tool-section-header">Output</div>
+                            <pre><code class="language-json">{}</code></pre>
+                            {}
+                        </div>"#,
+            html_escape(&display_output),
+            truncate_notice
         )
     } else {
         String::new()
+    };
+
+    // Tool icon based on name
+    let tool_icon = match tool_call.name.to_lowercase().as_str() {
+        "bash" | "shell" => "💻",
+        "read" | "read_file" => "📖",
+        "write" | "write_file" => "📝",
+        "edit" => "✏️",
+        "glob" | "find" => "🔍",
+        "grep" | "search" => "🔎",
+        "webfetch" | "fetch" | "http" => "🌐",
+        "websearch" => "🔍",
+        _ => "🔧",
+    };
+
+    // Code preview lines option
+    let input_class = if options.code_preview_lines > 0 && formatted_input.lines().count() > options.code_preview_lines {
+        "tool-input-long"
+    } else {
+        "tool-input"
     };
 
     format!(
         r#"
                 <details class="tool-call">
                     <summary class="tool-call-header">
+                        <span class="tool-icon" aria-hidden="true">{icon}</span>
                         <span class="tool-call-name">{name}</span>
-                        <span class="tool-call-toggle">▼</span>
+                        {status_badge}
+                        <span class="tool-call-toggle" aria-hidden="true">▼</span>
                     </summary>
                     <div class="tool-call-body">
-                        <div class="tool-input">
-                            <pre><code>{input}</code></pre>
+                        <div class="{input_class}">
+                            <div class="tool-section-header">Input</div>
+                            <pre><code class="language-json">{input}</code></pre>
                         </div>{output}
                     </div>
                 </details>"#,
+        icon = tool_icon,
         name = html_escape(&tool_call.name),
-        input = html_escape(&tool_call.input),
+        status_badge = if !status_class.is_empty() {
+            format!(
+                r#"<span class="tool-status {}">{}</span>"#,
+                status_class, status_icon
+            )
+        } else {
+            String::new()
+        },
+        input_class = input_class,
+        input = html_escape(&formatted_input),
         output = output_html,
     )
+}
+
+/// Try to format as pretty JSON, otherwise return raw.
+fn format_json_or_raw(s: &str) -> String {
+    // Try to parse as JSON and pretty print
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(s) {
+        if let Ok(pretty) = serde_json::to_string_pretty(&value) {
+            return pretty;
+        }
+    }
+    s.to_string()
 }
 
 /// Format a timestamp for display.
@@ -334,31 +602,31 @@ fn format_timestamp(ts: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_render_message_user() {
-        let msg = Message {
-            role: "user".to_string(),
-            content: "Hello, world!".to_string(),
+    fn test_message(role: &str, content: &str) -> Message {
+        Message {
+            role: role.to_string(),
+            content: content.to_string(),
             timestamp: None,
             tool_call: None,
-        };
+            index: None,
+            author: None,
+        }
+    }
 
+    #[test]
+    fn test_render_message_user() {
+        let msg = test_message("user", "Hello, world!");
         let opts = RenderOptions::default();
         let html = render_message(&msg, &opts).unwrap();
 
         assert!(html.contains("message-user"));
         assert!(html.contains("Hello, world!"));
+        assert!(html.contains("👤")); // User icon
     }
 
     #[test]
     fn test_render_message_with_code() {
-        let msg = Message {
-            role: "assistant".to_string(),
-            content: "Here's code:\n```rust\nfn main() {}\n```".to_string(),
-            timestamp: None,
-            tool_call: None,
-        };
-
+        let msg = test_message("assistant", "Here's code:\n```rust\nfn main() {}\n```");
         let mut opts = RenderOptions::default();
         opts.syntax_highlighting = true;
         let html = render_message(&msg, &opts).unwrap();
@@ -366,6 +634,7 @@ mod tests {
         assert!(html.contains("<pre>"));
         assert!(html.contains("language-rust"));
         assert!(html.contains("fn main()"));
+        assert!(html.contains("🤖")); // Assistant icon
     }
 
     #[test]
@@ -383,15 +652,140 @@ mod tests {
 
     #[test]
     fn test_html_escape_in_content() {
-        let msg = Message {
-            role: "user".to_string(),
-            content: "<script>alert('xss')</script>".to_string(),
-            timestamp: None,
-            tool_call: None,
-        };
-
+        let msg = test_message("user", "<script>alert('xss')</script>");
         let html = render_message(&msg, &RenderOptions::default()).unwrap();
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn test_agent_css_class() {
+        assert_eq!(agent_css_class("claude_code"), "agent-claude");
+        assert_eq!(agent_css_class("codex"), "agent-codex");
+        assert_eq!(agent_css_class("cursor"), "agent-cursor");
+        assert_eq!(agent_css_class("gemini"), "agent-gemini");
+        assert_eq!(agent_css_class("unknown"), "agent-default");
+    }
+
+    #[test]
+    fn test_agent_display_name() {
+        assert_eq!(agent_display_name("claude_code"), "Claude");
+        assert_eq!(agent_display_name("codex"), "Codex");
+        assert_eq!(agent_display_name("github_copilot"), "GitHub Copilot");
+        assert_eq!(agent_display_name("unknown"), "AI Assistant");
+    }
+
+    #[test]
+    fn test_tool_status_rendering() {
+        let msg = Message {
+            role: "tool".to_string(),
+            content: "Tool executed".to_string(),
+            timestamp: None,
+            tool_call: Some(ToolCall {
+                name: "Bash".to_string(),
+                input: r#"{"command": "ls -la"}"#.to_string(),
+                output: Some("file1.txt\nfile2.txt".to_string()),
+                status: Some(ToolStatus::Success),
+            }),
+            index: None,
+            author: None,
+        };
+
+        let html = render_message(&msg, &RenderOptions::default()).unwrap();
+        assert!(html.contains("tool-status-success"));
+        assert!(html.contains("✓")); // Success icon
+        assert!(html.contains("💻")); // Bash icon
+    }
+
+    #[test]
+    fn test_message_with_index() {
+        let msg = Message {
+            role: "user".to_string(),
+            content: "Test message".to_string(),
+            timestamp: None,
+            tool_call: None,
+            index: Some(42),
+            author: None,
+        };
+
+        let html = render_message(&msg, &RenderOptions::default()).unwrap();
+        assert!(html.contains(r#"id="msg-42""#));
+    }
+
+    #[test]
+    fn test_message_with_author() {
+        let msg = Message {
+            role: "user".to_string(),
+            content: "Test message".to_string(),
+            timestamp: None,
+            tool_call: None,
+            index: None,
+            author: Some("Alice".to_string()),
+        };
+
+        let html = render_message(&msg, &RenderOptions::default()).unwrap();
+        assert!(html.contains("Alice"));
+    }
+
+    #[test]
+    fn test_conversation_with_agent_class() {
+        let messages = vec![test_message("user", "Hello")];
+        let mut opts = RenderOptions::default();
+        opts.agent_slug = Some("claude_code".to_string());
+
+        let html = render_conversation(&messages, &opts).unwrap();
+        assert!(html.contains("agent-claude"));
+    }
+
+    #[test]
+    fn test_format_json_or_raw() {
+        // Valid JSON gets pretty printed
+        let json_input = r#"{"key":"value"}"#;
+        let formatted = format_json_or_raw(json_input);
+        assert!(formatted.contains('\n')); // Pretty printed has newlines
+
+        // Invalid JSON passes through unchanged
+        let raw_input = "not json at all";
+        let formatted = format_json_or_raw(raw_input);
+        assert_eq!(formatted, raw_input);
+    }
+
+    #[test]
+    fn test_long_message_collapse() {
+        let long_content = "x".repeat(2000);
+        let msg = test_message("user", &long_content);
+        let mut opts = RenderOptions::default();
+        opts.collapse_threshold = 1000;
+
+        let html = render_message(&msg, &opts).unwrap();
+        assert!(html.contains("message-collapsed"));
+        assert!(html.contains("Click to expand"));
+    }
+
+    #[test]
+    fn test_tool_icons_for_different_tools() {
+        let tools_and_icons = vec![
+            ("Read", "📖"),
+            ("Write", "📝"),
+            ("Bash", "💻"),
+            ("Grep", "🔎"),
+            ("WebFetch", "🌐"),
+        ];
+
+        for (tool_name, expected_icon) in tools_and_icons {
+            let tc = ToolCall {
+                name: tool_name.to_string(),
+                input: "{}".to_string(),
+                output: None,
+                status: None,
+            };
+            let html = render_tool_call(&tc, &RenderOptions::default());
+            assert!(
+                html.contains(expected_icon),
+                "Tool {} should have icon {}",
+                tool_name,
+                expected_icon
+            );
+        }
     }
 }

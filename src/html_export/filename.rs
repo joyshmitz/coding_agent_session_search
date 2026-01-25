@@ -17,6 +17,9 @@ pub struct FilenameOptions {
     /// Include project name in filename
     pub include_project: bool,
 
+    /// Include topic in filename (if provided)
+    pub include_topic: bool,
+
     /// Maximum filename length (excluding extension)
     pub max_length: Option<usize>,
 
@@ -41,6 +44,29 @@ pub struct FilenameMetadata {
 
     /// Project name
     pub project: Option<String>,
+
+    /// Topic provided by calling agent (robot mode).
+    /// Will be normalized to lowercase with underscores.
+    pub topic: Option<String>,
+}
+
+/// Normalize a topic string to lowercase with underscores.
+///
+/// This is the canonical way to convert a user-provided topic
+/// into the format expected by CASS filenames:
+/// - Converts to lowercase
+/// - Replaces spaces with underscores
+/// - Removes invalid characters
+/// - Collapses multiple underscores
+///
+/// # Examples
+/// ```
+/// use cass::html_export::filename::normalize_topic;
+/// assert_eq!(normalize_topic("My Cool Topic"), "my_cool_topic");
+/// assert_eq!(normalize_topic("HTML Export Feature"), "html_export_feature");
+/// ```
+pub fn normalize_topic(topic: &str) -> String {
+    sanitize(topic)
 }
 
 /// Generate a safe, descriptive filename.
@@ -72,6 +98,13 @@ pub fn generate_filename(metadata: &FilenameMetadata, options: &FilenameOptions)
     if options.include_project {
         if let Some(project) = &metadata.project {
             parts.push(sanitize(project));
+        }
+    }
+
+    // Add topic (robot mode can supply this for intelligent naming)
+    if options.include_topic {
+        if let Some(topic) = &metadata.topic {
+            parts.push(normalize_topic(topic));
         }
     }
 
@@ -282,5 +315,98 @@ mod tests {
         let path = generate_filepath(std::path::Path::new("/tmp"), &meta, &opts);
 
         assert_eq!(path, PathBuf::from("/tmp/test.html"));
+    }
+
+    #[test]
+    fn test_normalize_topic_basic() {
+        assert_eq!(normalize_topic("My Cool Topic"), "my_cool_topic");
+        assert_eq!(normalize_topic("HTML Export Feature"), "html_export_feature");
+        assert_eq!(normalize_topic("debugging auth flow"), "debugging_auth_flow");
+    }
+
+    #[test]
+    fn test_normalize_topic_special_chars() {
+        // Special characters should be removed
+        assert_eq!(normalize_topic("API Design (v2)"), "api_design_v2");
+        assert_eq!(normalize_topic("fix: login bug"), "fix_login_bug");
+        assert_eq!(normalize_topic("add feature #123"), "add_feature_123");
+    }
+
+    #[test]
+    fn test_normalize_topic_already_normalized() {
+        // Already normalized topics should pass through
+        assert_eq!(normalize_topic("already_normalized"), "already_normalized");
+        assert_eq!(normalize_topic("lowercase_topic"), "lowercase_topic");
+    }
+
+    #[test]
+    fn test_normalize_topic_multiple_spaces() {
+        // Multiple spaces should collapse to single underscore
+        assert_eq!(normalize_topic("too   many    spaces"), "too_many_spaces");
+    }
+
+    #[test]
+    fn test_generate_filename_with_topic() {
+        let meta = FilenameMetadata {
+            date: Some("2026-01-25".to_string()),
+            agent: Some("claude".to_string()),
+            topic: Some("Debugging Auth Flow".to_string()),
+            ..Default::default()
+        };
+        let opts = FilenameOptions {
+            include_date: true,
+            include_agent: true,
+            include_topic: true,
+            ..Default::default()
+        };
+
+        let result = generate_filename(&meta, &opts);
+        assert!(result.contains("2026-01-25"));
+        assert!(result.contains("claude"));
+        assert!(result.contains("debugging_auth_flow"));
+    }
+
+    #[test]
+    fn test_generate_filename_topic_without_flag() {
+        // Topic should not appear if include_topic is false
+        let meta = FilenameMetadata {
+            topic: Some("My Topic".to_string()),
+            title: Some("Session".to_string()),
+            ..Default::default()
+        };
+        let opts = FilenameOptions {
+            include_topic: false,
+            ..Default::default()
+        };
+
+        let result = generate_filename(&meta, &opts);
+        assert!(!result.contains("my_topic"));
+        assert_eq!(result, "session");
+    }
+
+    #[test]
+    fn test_generate_filename_full_robot_mode() {
+        // Typical robot mode export with all metadata
+        let meta = FilenameMetadata {
+            date: Some("2026-01-25".to_string()),
+            agent: Some("claude_code".to_string()),
+            project: Some("my-project".to_string()),
+            topic: Some("Fix Authentication Bug".to_string()),
+            title: None, // Robot mode might not use title
+        };
+        let opts = FilenameOptions {
+            include_date: true,
+            include_agent: true,
+            include_project: true,
+            include_topic: true,
+            ..Default::default()
+        };
+
+        let result = generate_filename(&meta, &opts);
+        // Should produce something like: 2026-01-25_claude_code_my-project_fix_authentication_bug
+        assert!(result.starts_with("2026-01-25"));
+        assert!(result.contains("claude_code"));
+        assert!(result.contains("my-project"));
+        assert!(result.contains("fix_authentication_bug"));
     }
 }

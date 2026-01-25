@@ -39,8 +39,11 @@ mod template;
 
 // Re-export public API
 pub use encryption::{EncryptedContent, EncryptionError, EncryptionParams, encrypt_content};
-pub use filename::{FilenameOptions, generate_filename};
-pub use renderer::{RenderError, RenderOptions, render_conversation};
+pub use filename::{FilenameMetadata, FilenameOptions, generate_filename, normalize_topic};
+pub use renderer::{
+    Message, RenderError, RenderOptions, ToolCall, ToolStatus,
+    agent_css_class, agent_display_name, render_conversation, render_message,
+};
 pub use scripts::{ScriptBundle, generate_scripts};
 pub use styles::{StyleBundle, generate_styles};
 pub use template::{ExportOptions, HtmlExporter, HtmlTemplate, TemplateError};
