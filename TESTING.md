@@ -81,12 +81,15 @@ Playwright-based tests validate web viewer and HTML export flows.
 
 Install dependencies (one-time):
 ```bash
+cd tests
+npm install
 npx playwright install --with-deps
 ```
 
 Run HTML export WebCrypto decryption tests:
 ```bash
-npx playwright test tests/html_export/html_export_encryption.test.js
+cd tests
+npx playwright test html_export/html_export_encryption.test.js
 ```
 
 ### CLI/Robot Tests

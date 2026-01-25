@@ -2,7 +2,8 @@
  * HTML Export Encryption E2E (WebCrypto)
  *
  * Run:
- *   npx playwright test tests/html_export/html_export_encryption.test.js
+ *   cd tests
+ *   npx playwright test html_export/html_export_encryption.test.js
  *
  * This test spins up a tiny HTTP server to serve an encrypted HTML export
  * and validates client-side WebCrypto decryption behavior with rich logging.
@@ -95,6 +96,7 @@ function buildHtml(payload) {
   <style>
     body { font-family: sans-serif; padding: 2rem; }
     .modal { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,0.4); }
+    .modal[hidden] { display: none; }
     .modal-content { background: #111827; color: #fff; padding: 1.5rem; border-radius: 12px; width: 360px; }
     .modal-input { width: 100%; padding: 0.5rem; margin-top: 0.5rem; }
     .modal-btn { margin-top: 0.75rem; width: 100%; padding: 0.5rem; }

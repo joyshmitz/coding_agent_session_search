@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 // -------------------------------------------------------------------------
@@ -1928,12 +1928,14 @@ fn apply_pragmas(conn: &mut Connection) -> Result<()> {
         r"
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
+        PRAGMA wal_autocheckpoint = 1000;
         ",
     )?;
     apply_common_pragmas(conn)
 }
 
 fn apply_common_pragmas(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(
         r"
         PRAGMA temp_store = MEMORY;
