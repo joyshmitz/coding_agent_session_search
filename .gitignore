@@ -48,3 +48,4 @@ tests/node_modules/
 
 # Test output
 test-results/
+claude-upgrade-progress.json
