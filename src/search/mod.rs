@@ -5,6 +5,7 @@
 //! - **[`query`]**: Query parsing, execution, and caching for Tantivy-based full-text search.
 //! - **[`tantivy`]**: Tantivy index creation, schema management, and document indexing.
 //! - **[`embedder`]**: Embedder trait for semantic search (hash and ML implementations).
+//! - **[`embedder_registry`]**: Embedder registry for model selection (bd-2mbe).
 //! - **[`hash_embedder`]**: FNV-1a feature hashing embedder (deterministic fallback).
 //! - **[`fastembed_embedder`]**: FastEmbed-backed ML embedder (MiniLM).
 //! - **[`reranker`]**: Reranker trait for cross-encoder reranking of search results.
@@ -15,6 +16,7 @@
 
 pub mod canonicalize;
 pub mod embedder;
+pub mod embedder_registry;
 pub mod fastembed_embedder;
 pub mod fastembed_reranker;
 pub mod hash_embedder;

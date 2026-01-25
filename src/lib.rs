@@ -177,7 +177,8 @@ pub enum Commands {
         /// Output as JSON (--robot also works). Equivalent to --robot-format json
         #[arg(long, visible_alias = "robot")]
         json: bool,
-        /// Robot output format: json (pretty), jsonl (streaming), compact (single-line), sessions (paths), toon (token-optimized)
+        /// Robot output format: json (pretty), jsonl (streaming), compact (single-line), sessions (paths), toon (token-optimized).
+        /// Env: CASS_OUTPUT_FORMAT, TOON_DEFAULT_FORMAT.
         #[arg(long, value_enum)]
         robot_format: Option<RobotFormat>,
         /// Include extended metadata in robot output (`elapsed_ms`, `wildcard_fallback`, `cache_stats`)
@@ -3673,10 +3674,31 @@ fn run_cli_search(
     let effective_mode = mode.unwrap_or(SearchMode::Lexical);
 
     if matches!(effective_mode, SearchMode::Semantic | SearchMode::Hybrid) {
-        let prefer_hash = semantic_opts.model.as_deref().is_some_and(|model| {
-            let model = model.to_ascii_lowercase();
-            model == "hash" || model == "fnv1a" || model.starts_with("fnv1a-")
-        });
+        use crate::search::embedder_registry::{EmbedderRegistry, HASH_EMBEDDER};
+
+        // Use embedder registry for model selection (bd-2mbe)
+        let registry = EmbedderRegistry::new(&data_dir);
+        let requested_model = semantic_opts.model.as_deref();
+
+        // Validate requested model if specified
+        if let Some(model_name) = requested_model {
+            if let Err(e) = registry.validate(model_name) {
+                return Err(CliError {
+                    code: 15,
+                    kind: "embedder-unavailable",
+                    message: format!("Embedder validation failed: {e}"),
+                    hint: Some("Run 'cass models list' to see available embedders".to_string()),
+                    retryable: false,
+                });
+            }
+        }
+
+        // Determine which embedder to use
+        let embedder_info = match requested_model {
+            Some(name) => registry.get(name),
+            None => Some(registry.best_available()),
+        };
+        let prefer_hash = embedder_info.is_some_and(|e| e.name == HASH_EMBEDDER);
 
         let setup = if prefer_hash {
             load_hash_semantic_context(&data_dir, &db_path)
