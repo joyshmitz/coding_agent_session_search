@@ -188,15 +188,35 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Generate HTML for encrypted content display.
+///
+/// The JSON is HTML-escaped to prevent XSS even if EncryptedContent
+/// contains unexpected data (defensive programming).
 pub fn render_encrypted_placeholder(encrypted: &EncryptedContent) -> String {
+    // HTML-escape the JSON to prevent XSS if someone passes malicious data
+    let json = encrypted.to_json();
+    let escaped_json = html_escape_for_content(&json);
     format!(
         r#"            <!-- Encrypted content - requires password to decrypt -->
             <div id="encrypted-content" hidden>{}</div>
             <div class="encrypted-notice">
                 <p>This conversation is encrypted. Enter the password above to view.</p>
             </div>"#,
-        encrypted.to_json()
+        escaped_json
     )
+}
+
+/// Escape HTML special characters for safe embedding in HTML content.
+fn html_escape_for_content(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 #[cfg(test)]

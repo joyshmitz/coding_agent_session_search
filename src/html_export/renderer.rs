@@ -99,7 +99,7 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
             format!(
                 r#"<time class="message-time" datetime="{}">{}</time>"#,
                 html_escape(ts),
-                format_timestamp(ts)
+                html_escape(&format_timestamp(ts))
             )
         } else {
             String::new()

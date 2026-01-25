@@ -52,7 +52,73 @@ pub fn generate_scripts(options: &ExportOptions) -> ScriptBundle {
 fn generate_core_utils() -> String {
     r#"// Core utilities
 const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);"#
+const $$ = (sel) => document.querySelectorAll(sel);
+
+// Toast notifications
+const Toast = {
+    container: null,
+
+    init() {
+        this.container = document.createElement('div');
+        this.container.id = 'toast-container';
+        this.container.style.cssText = 'position:fixed;bottom:1rem;right:1rem;z-index:9999;display:flex;flex-direction:column;gap:0.5rem;';
+        document.body.appendChild(this.container);
+    },
+
+    show(message, type = 'info') {
+        if (!this.container) this.init();
+        const toast = document.createElement('div');
+        toast.className = 'toast toast-' + type;
+        toast.style.cssText = 'padding:0.75rem 1rem;background:var(--bg-surface);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);box-shadow:0 4px 12px rgba(0,0,0,0.3);transform:translateX(100%);transition:transform 0.3s ease;';
+        toast.textContent = message;
+        this.container.appendChild(toast);
+        requestAnimationFrame(() => toast.style.transform = 'translateX(0)');
+        setTimeout(() => {
+            toast.style.transform = 'translateX(100%)';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+};
+
+// Copy to clipboard
+async function copyToClipboard(text) {
+    try {
+        await navigator.clipboard.writeText(text);
+        Toast.show('Copied to clipboard', 'success');
+    } catch (e) {
+        // Fallback for older browsers
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            document.execCommand('copy');
+            Toast.show('Copied to clipboard', 'success');
+        } catch (e2) {
+            Toast.show('Copy failed', 'error');
+        }
+        textarea.remove();
+    }
+}
+
+// Copy code block
+function copyCodeBlock(btn) {
+    const pre = btn.closest('pre');
+    const code = pre.querySelector('code');
+    copyToClipboard(code ? code.textContent : pre.textContent);
+}
+
+// Print handler
+function printConversation() {
+    // Expand all collapsed sections before print
+    $$('details, .tool-call').forEach(el => {
+        if (el.tagName === 'DETAILS') el.open = true;
+        else el.classList.add('expanded');
+    });
+    window.print();
+}"#
         .to_string()
 }
 
@@ -90,6 +156,11 @@ const Search = {
                 e.preventDefault();
                 this.input.focus();
                 this.input.select();
+            }
+            // Ctrl/Cmd + P: Print
+            if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+                e.preventDefault();
+                printConversation();
             }
         });
     },
@@ -365,6 +436,26 @@ fn generate_init_js(options: &ExportOptions) -> String {
         inits.push("Crypto.init();");
     }
 
+    // Always add code block copy buttons and print button handler
+    inits.push(r#"// Add copy buttons to code blocks
+    $$('pre code').forEach((code) => {
+        const pre = code.parentNode;
+        const btn = document.createElement('button');
+        btn.className = 'copy-code-btn';
+        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+        btn.title = 'Copy code';
+        btn.onclick = () => copyCodeBlock(btn);
+        btn.style.cssText = 'position:absolute;top:0.5rem;right:0.5rem;padding:0.25rem;background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;color:var(--text-muted);cursor:pointer;opacity:0;transition:opacity 0.2s;';
+        pre.style.position = 'relative';
+        pre.appendChild(btn);
+        pre.addEventListener('mouseenter', () => btn.style.opacity = '1');
+        pre.addEventListener('mouseleave', () => btn.style.opacity = '0');
+    });
+
+    // Print button handler
+    const printBtn = $('#print-btn');
+    if (printBtn) printBtn.addEventListener('click', printConversation);"#);
+
     format!(
         r#"// Initialize on DOM ready
 document.addEventListener('DOMContentLoaded', () => {{
@@ -415,5 +506,54 @@ mod tests {
 
         assert!(bundle.inline_js.contains("const Crypto"));
         assert!(bundle.inline_js.contains("crypto.subtle"));
+    }
+
+    #[test]
+    fn test_generate_scripts_includes_toast_and_copy() {
+        let opts = ExportOptions::default();
+        let bundle = generate_scripts(&opts);
+
+        // Toast notifications
+        assert!(bundle.inline_js.contains("const Toast"));
+        assert!(bundle.inline_js.contains("Toast.show"));
+
+        // Copy to clipboard
+        assert!(bundle.inline_js.contains("copyToClipboard"));
+        assert!(bundle.inline_js.contains("navigator.clipboard"));
+
+        // Fallback for older browsers
+        assert!(bundle.inline_js.contains("execCommand"));
+    }
+
+    #[test]
+    fn test_generate_scripts_includes_print_handler() {
+        let opts = ExportOptions::default();
+        let bundle = generate_scripts(&opts);
+
+        assert!(bundle.inline_js.contains("printConversation"));
+        assert!(bundle.inline_js.contains("window.print"));
+    }
+
+    #[test]
+    fn test_generate_scripts_includes_keyboard_shortcuts() {
+        let mut opts = ExportOptions::default();
+        opts.include_search = true;
+        let bundle = generate_scripts(&opts);
+
+        // Ctrl+F for search
+        assert!(bundle.inline_js.contains("e.key === 'f'"));
+        // Ctrl+P for print
+        assert!(bundle.inline_js.contains("e.key === 'p'"));
+        // Escape to clear
+        assert!(bundle.inline_js.contains("'Escape'"));
+    }
+
+    #[test]
+    fn test_generate_scripts_includes_copy_code_buttons() {
+        let opts = ExportOptions::default();
+        let bundle = generate_scripts(&opts);
+
+        assert!(bundle.inline_js.contains("copy-code-btn"));
+        assert!(bundle.inline_js.contains("copyCodeBlock"));
     }
 }
