@@ -3979,40 +3979,55 @@ fn run_cli_search(
                         }
                     })
                     .collect();
-                let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
 
-                match reranker.rerank(query, &doc_refs) {
-                    Ok(scores) => {
-                        // Update scores and re-sort hits
-                        let mut scored_hits: Vec<_> = result
-                            .hits
-                            .into_iter()
-                            .zip(scores.into_iter())
-                            .map(|(mut hit, score)| {
-                                hit.score = score;
-                                hit
-                            })
-                            .collect();
-                        scored_hits.sort_by(|a, b| {
-                            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                // Skip reranking if any document is empty (reranker rejects empty docs)
+                let has_empty_doc = docs.iter().any(|d| d.is_empty());
+                if has_empty_doc {
+                    tracing::debug!(
+                        "Skipping rerank: one or more hits have empty content and snippet"
+                    );
+                    result
+                } else {
+                    let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
 
-                        tracing::debug!(
-                            reranker_id = reranker.id(),
-                            hits_reranked = scored_hits.len(),
-                            "Reranking complete"
-                        );
+                    match reranker.rerank(query, &doc_refs) {
+                        Ok(scores) => {
+                            // Update scores and re-sort hits
+                            let mut scored_hits: Vec<_> = result
+                                .hits
+                                .into_iter()
+                                .zip(scores.into_iter())
+                                .map(|(mut hit, score)| {
+                                    hit.score = score;
+                                    hit
+                                })
+                                .collect();
+                            scored_hits.sort_by(|a, b| {
+                                b.score
+                                    .partial_cmp(&a.score)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
 
-                        crate::search::query::SearchResult {
-                            hits: scored_hits,
-                            wildcard_fallback: result.wildcard_fallback,
-                            cache_stats: result.cache_stats,
-                            suggestions: result.suggestions,
+                            tracing::debug!(
+                                reranker_id = reranker.id(),
+                                hits_reranked = scored_hits.len(),
+                                "Reranking complete"
+                            );
+
+                            crate::search::query::SearchResult {
+                                hits: scored_hits,
+                                wildcard_fallback: result.wildcard_fallback,
+                                cache_stats: result.cache_stats,
+                                suggestions: result.suggestions,
+                            }
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Reranking failed, returning original results");
-                        result
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Reranking failed, returning original results"
+                            );
+                            result
+                        }
                     }
                 }
             }
