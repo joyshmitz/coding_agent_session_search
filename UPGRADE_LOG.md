@@ -140,3 +140,13 @@ cargo audit
 - RUSTSEC-2024-0436: `paste 1.0.15` (unmaintained) via `tokenizers`/`macro_rules_attribute`
 - RUSTSEC-2024-0320: `yaml-rust 0.4.5` (unmaintained) via `syntect`
 - RUSTSEC-2026-0002: `lru 0.12.5` (unsound) via `tantivy`
+
+---
+
+## Revalidation (2026-01-26)
+
+- Re-ran `cargo outdated -w`: same outdated list as above (all blocked or removed).
+- No dependency updates applied (constraints unchanged).
+- `cargo fmt --check` ✅
+- `CARGO_TARGET_DIR=target_bd1lps_check3 cargo check --all-targets` ✅
+- `CARGO_TARGET_DIR=target_bd1lps_clippy2 cargo clippy --all-targets -- -D warnings` ✅

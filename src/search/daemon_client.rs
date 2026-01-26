@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::search::embedder::{Embedder, EmbedderResult};
 use crate::search::reranker::{Reranker, RerankerError, RerankerResult};
@@ -287,6 +287,13 @@ impl DaemonFallbackEmbedder {
         let mut last_err: Option<DaemonError> = None;
         while attempts < self.config.max_attempts {
             attempts += 1;
+            debug!(
+                daemon_id = self.daemon.id(),
+                request_id = request_id,
+                attempt = attempts,
+                max_attempts = self.config.max_attempts,
+                "Attempting daemon embed"
+            );
             match self.daemon.embed(text, request_id) {
                 Ok(vector) => {
                     self.state.lock().record_success();
@@ -294,12 +301,30 @@ impl DaemonFallbackEmbedder {
                 }
                 Err(err) => {
                     let should_retry = Self::should_retry(&err);
-                    let backoff = self.state.lock().record_failure(&self.config, &err);
+                    let should_backoff = !matches!(err, DaemonError::InvalidInput(_));
+                    let backoff = if should_backoff {
+                        Some(self.state.lock().record_failure(&self.config, &err))
+                    } else {
+                        None
+                    };
+                    let backoff_ms = backoff.map(|delay| delay.as_millis() as u64).unwrap_or(0);
+                    debug!(
+                        daemon_id = self.daemon.id(),
+                        request_id = request_id,
+                        attempt = attempts,
+                        max_attempts = self.config.max_attempts,
+                        backoff_ms = backoff_ms,
+                        will_retry = should_retry && attempts < self.config.max_attempts,
+                        error = %&err,
+                        "Daemon embed failed"
+                    );
                     last_err = Some(err);
                     if !should_retry || attempts >= self.config.max_attempts {
                         break;
                     }
-                    std::thread::sleep(backoff);
+                    if let Some(backoff) = backoff {
+                        std::thread::sleep(backoff);
+                    }
                 }
             }
         }
@@ -338,6 +363,13 @@ impl DaemonFallbackEmbedder {
         let mut last_err: Option<DaemonError> = None;
         while attempts < self.config.max_attempts {
             attempts += 1;
+            debug!(
+                daemon_id = self.daemon.id(),
+                request_id = request_id,
+                attempt = attempts,
+                max_attempts = self.config.max_attempts,
+                "Attempting daemon embed batch"
+            );
             match self.daemon.embed_batch(texts, request_id) {
                 Ok(vectors) => {
                     self.state.lock().record_success();
@@ -345,12 +377,30 @@ impl DaemonFallbackEmbedder {
                 }
                 Err(err) => {
                     let should_retry = Self::should_retry(&err);
-                    let backoff = self.state.lock().record_failure(&self.config, &err);
+                    let should_backoff = !matches!(err, DaemonError::InvalidInput(_));
+                    let backoff = if should_backoff {
+                        Some(self.state.lock().record_failure(&self.config, &err))
+                    } else {
+                        None
+                    };
+                    let backoff_ms = backoff.map(|delay| delay.as_millis() as u64).unwrap_or(0);
+                    debug!(
+                        daemon_id = self.daemon.id(),
+                        request_id = request_id,
+                        attempt = attempts,
+                        max_attempts = self.config.max_attempts,
+                        backoff_ms = backoff_ms,
+                        will_retry = should_retry && attempts < self.config.max_attempts,
+                        error = %&err,
+                        "Daemon embed batch failed"
+                    );
                     last_err = Some(err);
                     if !should_retry || attempts >= self.config.max_attempts {
                         break;
                     }
-                    std::thread::sleep(backoff);
+                    if let Some(backoff) = backoff {
+                        std::thread::sleep(backoff);
+                    }
                 }
             }
         }
@@ -463,6 +513,13 @@ impl DaemonFallbackReranker {
         let mut last_err: Option<DaemonError> = None;
         while attempts < self.config.max_attempts {
             attempts += 1;
+            debug!(
+                daemon_id = self.daemon.id(),
+                request_id = request_id,
+                attempt = attempts,
+                max_attempts = self.config.max_attempts,
+                "Attempting daemon rerank"
+            );
             match self.daemon.rerank(query, documents, request_id) {
                 Ok(scores) => {
                     self.state.lock().record_success();
@@ -470,12 +527,30 @@ impl DaemonFallbackReranker {
                 }
                 Err(err) => {
                     let should_retry = DaemonFallbackEmbedder::should_retry(&err);
-                    let backoff = self.state.lock().record_failure(&self.config, &err);
+                    let should_backoff = !matches!(err, DaemonError::InvalidInput(_));
+                    let backoff = if should_backoff {
+                        Some(self.state.lock().record_failure(&self.config, &err))
+                    } else {
+                        None
+                    };
+                    let backoff_ms = backoff.map(|delay| delay.as_millis() as u64).unwrap_or(0);
+                    debug!(
+                        daemon_id = self.daemon.id(),
+                        request_id = request_id,
+                        attempt = attempts,
+                        max_attempts = self.config.max_attempts,
+                        backoff_ms = backoff_ms,
+                        will_retry = should_retry && attempts < self.config.max_attempts,
+                        error = %&err,
+                        "Daemon rerank failed"
+                    );
                     last_err = Some(err);
                     if !should_retry || attempts >= self.config.max_attempts {
                         break;
                     }
-                    std::thread::sleep(backoff);
+                    if let Some(backoff) = backoff {
+                        std::thread::sleep(backoff);
+                    }
                 }
             }
         }
@@ -738,6 +813,8 @@ mod tests {
         let fallback = Arc::new(MockEmbedder { dim: 4 });
         let cfg = DaemonRetryConfig {
             max_attempts: 2,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
             ..DaemonRetryConfig::default()
         };
 
@@ -753,6 +830,8 @@ mod tests {
         let fallback = Arc::new(MockEmbedder { dim: 4 });
         let cfg = DaemonRetryConfig {
             max_attempts: 2,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
             ..DaemonRetryConfig::default()
         };
 
@@ -777,11 +856,33 @@ mod tests {
     }
 
     #[test]
+    fn daemon_invalid_input_does_not_backoff() {
+        let daemon = Arc::new(MockDaemon::new_with_mode(1, FailureMode::InvalidInput));
+        let fallback = Arc::new(MockEmbedder { dim: 4 });
+        let cfg = DaemonRetryConfig {
+            max_attempts: 1,
+            base_delay: Duration::from_millis(50),
+            max_delay: Duration::from_millis(50),
+            ..DaemonRetryConfig::default()
+        };
+
+        let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
+        let first = embedder.embed("hello").unwrap();
+        assert_eq!(first[0], 1.0);
+
+        let second = embedder.embed("hello-again").unwrap();
+        assert_eq!(second[0], 2.0);
+        assert_eq!(daemon.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
     fn daemon_failed_retries_then_falls_back() {
         let daemon = Arc::new(MockDaemon::new_with_mode(2, FailureMode::Failed));
         let fallback = Arc::new(MockEmbedder { dim: 4 });
         let cfg = DaemonRetryConfig {
             max_attempts: 2,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
             ..DaemonRetryConfig::default()
         };
 

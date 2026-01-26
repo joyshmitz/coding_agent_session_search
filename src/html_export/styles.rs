@@ -3324,7 +3324,8 @@ fn generate_print_css() -> String {
         font-size: 11pt;
     }
 
-    body {
+    body,
+    #app {
         background: white !important;
         color: #1a1b26 !important;
         line-height: 1.4;
@@ -3338,10 +3339,16 @@ fn generate_print_css() -> String {
     /* Hide interactive elements */
     .toolbar,
     .theme-toggle,
+    #theme-toggle,
+    [data-action="toggle-theme"],
     .copy-code-btn,
+    .copy-btn,
+    [data-action="copy"],
     .message-actions,
     .skip-link,
+    .search-controls,
     #search-input,
+    [data-testid="search"],
     .search-nav,
     .kbd-hint {
         display: none !important;
@@ -3382,6 +3389,13 @@ fn generate_print_css() -> String {
 
     .message::before {
         display: none;
+    }
+
+    pre,
+    pre code,
+    code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
+        white-space: pre-wrap;
     }
 
     .message-user {

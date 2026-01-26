@@ -14,7 +14,7 @@ pub struct ValidationReport {
 }
 
 /// Compute NDCG@k for a list of relevances in rank order.
-/// Relevances <= 0 are treated as non-relevant.
+/// Non-finite or <= 0 relevances are treated as non-relevant.
 pub fn ndcg_at_k(relevances: &[f64], k: usize) -> f64 {
     if k == 0 || relevances.is_empty() {
         return 0.0;
@@ -23,14 +23,13 @@ pub fn ndcg_at_k(relevances: &[f64], k: usize) -> f64 {
     if dcg == 0.0 {
         return 0.0;
     }
-    let mut ideal: Vec<f64> = relevances.iter().copied().collect();
+    let mut ideal: Vec<f64> = relevances
+        .iter()
+        .map(|rel| if rel.is_finite() { rel.max(0.0) } else { 0.0 })
+        .collect();
     ideal.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
     let idcg = dcg_at_k(&ideal, k);
-    if idcg == 0.0 {
-        0.0
-    } else {
-        dcg / idcg
-    }
+    if idcg == 0.0 { 0.0 } else { dcg / idcg }
 }
 
 fn dcg_at_k(relevances: &[f64], k: usize) -> f64 {
@@ -39,9 +38,10 @@ fn dcg_at_k(relevances: &[f64], k: usize) -> f64 {
         .take(k)
         .enumerate()
         .map(|(idx, rel)| {
-            let rel = rel.max(&0.0);
+            let rel = if rel.is_finite() { *rel } else { 0.0 };
+            let rel = rel.max(0.0);
             let denom = (idx as f64 + 2.0).log2();
-            (2.0_f64.powf(*rel) - 1.0) / denom
+            (2.0_f64.powf(rel) - 1.0) / denom
         })
         .sum()
 }

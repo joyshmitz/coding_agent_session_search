@@ -2506,6 +2506,13 @@ cargo test --test e2e_index_tui
 cargo test --test install_scripts
 ```
 
+### HTML Export E2E Logging
+
+Playwright E2E runs emit a setup metadata file at `tests/e2e/exports/setup-metadata.json` and
+export its path as `TEST_EXPORT_SETUP_LOG` in `tests/e2e/.env.test`. On failures, tests attach
+per-test browser logs (console/pageerror/requestfailed). Set `E2E_LOG_ALWAYS=1` to attach logs
+for every test.
+
 ### Release Build Optimizations
 
 The release profile is aggressively optimized for binary size and performance:
