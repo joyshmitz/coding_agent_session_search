@@ -4677,7 +4677,7 @@ fn clamp_hits_to_budget(
 }
 
 fn robot_format_from_env() -> Option<RobotFormat> {
-    std::env::var("CASS_OUTPUT_FORMAT")
+    dotenvy::var("CASS_OUTPUT_FORMAT")
         .ok()
         .and_then(|val| match val.trim().to_ascii_lowercase().as_str() {
             "json" => Some(RobotFormat::Json),
@@ -4688,7 +4688,7 @@ fn robot_format_from_env() -> Option<RobotFormat> {
             _ => None,
         })
         .or_else(|| {
-            std::env::var("TOON_DEFAULT_FORMAT").ok().and_then(|val| {
+            dotenvy::var("TOON_DEFAULT_FORMAT").ok().and_then(|val| {
                 match val.trim().to_ascii_lowercase().as_str() {
                     "toon" => Some(RobotFormat::Toon),
                     "json" => Some(RobotFormat::Json),
@@ -4699,7 +4699,7 @@ fn robot_format_from_env() -> Option<RobotFormat> {
 }
 
 fn toon_encode_options_from_env() -> toon_rust::EncodeOptions {
-    let indent = match std::env::var("TOON_INDENT") {
+    let indent = match dotenvy::var("TOON_INDENT") {
         Ok(v) if !v.trim().is_empty() => match v.parse::<usize>() {
             Ok(n) => Some(n),
             Err(e) => {
@@ -4710,7 +4710,7 @@ fn toon_encode_options_from_env() -> toon_rust::EncodeOptions {
         _ => None,
     };
 
-    let key_folding = match std::env::var("TOON_KEY_FOLDING") {
+    let key_folding = match dotenvy::var("TOON_KEY_FOLDING") {
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
             "" | "off" | "0" | "false" => Some(toon_rust::options::KeyFoldingMode::Off),
             "safe" => Some(toon_rust::options::KeyFoldingMode::Safe),
@@ -10168,7 +10168,64 @@ fn run_export_html(
 }
 
 /// Extract tool call information from a message for HTML export.
+///
+/// Supports multiple formats:
+/// 1. Claude/Anthropic format: `content` array with `type: "tool_use"` or `type: "tool_result"` blocks
+/// 2. Cursor/generic format: `type: "tool"` at top level with `message.tool_name`, `message.tool_input`, `message.tool_output`
 fn extract_tool_call(msg: &serde_json::Value) -> Option<html_export::ToolCall> {
+    // Format 2: Cursor/generic format - check for top-level type: "tool"
+    if let Some(msg_type) = msg.get("type").and_then(|t| t.as_str())
+        && msg_type == "tool"
+    {
+        // Look for tool info in the message object
+        let inner = msg.get("message").unwrap_or(msg);
+
+        let tool_name = inner
+            .get("tool_name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("tool");
+
+        let tool_input = inner.get("tool_input").map(|i| {
+            if i.is_object() || i.is_array() {
+                serde_json::to_string_pretty(i).unwrap_or_default()
+            } else if let Some(s) = i.as_str() {
+                s.to_string()
+            } else {
+                i.to_string()
+            }
+        });
+
+        let tool_output = inner.get("tool_output").map(|o| {
+            if let Some(s) = o.as_str() {
+                s.to_string()
+            } else {
+                o.to_string()
+            }
+        });
+
+        // Determine status from explicit status field or presence of output
+        let status_str = inner
+            .get("status")
+            .and_then(|s| s.as_str())
+            .or_else(|| msg.get("status").and_then(|s| s.as_str()));
+
+        let status = match status_str {
+            Some("success") => Some(html_export::ToolStatus::Success),
+            Some("error") => Some(html_export::ToolStatus::Error),
+            Some("pending") => Some(html_export::ToolStatus::Pending),
+            _ if tool_output.is_some() => Some(html_export::ToolStatus::Success),
+            _ => Some(html_export::ToolStatus::Pending),
+        };
+
+        return Some(html_export::ToolCall {
+            name: tool_name.to_string(),
+            input: tool_input.unwrap_or_default(),
+            output: tool_output,
+            status,
+        });
+    }
+
+    // Format 1: Claude/Anthropic format - content array with tool_use/tool_result blocks
     let content = msg
         .get("message")
         .and_then(|m| m.get("content"))
