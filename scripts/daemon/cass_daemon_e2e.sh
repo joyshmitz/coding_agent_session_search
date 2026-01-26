@@ -25,6 +25,11 @@ NO_BUILD=0
 EMBEDDER="hash"
 QUERY="binary search"
 
+DAEMON_RETRY_MAX="${CASS_DAEMON_RETRY_MAX:-2}"
+DAEMON_BACKOFF_BASE_MS="${CASS_DAEMON_BACKOFF_BASE_MS:-200}"
+DAEMON_BACKOFF_MAX_MS="${CASS_DAEMON_BACKOFF_MAX_MS:-5000}"
+DAEMON_JITTER_PCT="${CASS_DAEMON_JITTER_PCT:-0.2}"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-build)
@@ -195,10 +200,37 @@ ATTEMPT_RERANK=$(grep -c "Attempting daemon rerank$" "${SEARCH_STDERR}" || true)
 FALLBACK_EMBED=$(grep -c "Daemon embed failed; using local embedder" "${SEARCH_STDERR}" || true)
 FALLBACK_RERANK=$(grep -c "Daemon rerank failed; using local reranker" "${SEARCH_STDERR}" || true)
 
+count_fallback_reason() {
+    local reason=$1
+    grep -o "fallback_reason=${reason}" "${SEARCH_STDERR}" | wc -l | tr -d ' '
+}
+
+FALLBACK_UNAVAILABLE=$(count_fallback_reason "unavailable")
+FALLBACK_TIMEOUT=$(count_fallback_reason "timeout")
+FALLBACK_OVERLOADED=$(count_fallback_reason "overloaded")
+FALLBACK_ERROR=$(count_fallback_reason "error")
+FALLBACK_INVALID=$(count_fallback_reason "invalid")
+FALLBACK_BACKOFF=$(count_fallback_reason "backoff")
+
+BACKOFF_VALUES=$(grep -o "backoff_ms=[0-9]*" "${SEARCH_STDERR}" | awk -F= '{print $2}' || true)
+if [[ -n "${BACKOFF_VALUES}" ]]; then
+    BACKOFF_COUNT=$(echo "${BACKOFF_VALUES}" | wc -l | tr -d ' ')
+    BACKOFF_MIN=$(echo "${BACKOFF_VALUES}" | sort -n | head -n 1)
+    BACKOFF_MAX=$(echo "${BACKOFF_VALUES}" | sort -n | tail -n 1)
+    BACKOFF_AVG=$(echo "${BACKOFF_VALUES}" | awk '{sum+=$1} END { if (NR>0) printf "%.2f", sum/NR; else print "0" }')
+else
+    BACKOFF_COUNT=0
+    BACKOFF_MIN=0
+    BACKOFF_MAX=0
+    BACKOFF_AVG=0
+fi
+
 log "INFO" "Daemon embed attempts: ${ATTEMPT_EMBED}"
 log "INFO" "Daemon rerank attempts: ${ATTEMPT_RERANK}"
 log "INFO" "Embed fallbacks: ${FALLBACK_EMBED}"
 log "INFO" "Rerank fallbacks: ${FALLBACK_RERANK}"
+log "INFO" "Fallback reasons - unavailable=${FALLBACK_UNAVAILABLE} timeout=${FALLBACK_TIMEOUT} overloaded=${FALLBACK_OVERLOADED} error=${FALLBACK_ERROR} invalid=${FALLBACK_INVALID} backoff=${FALLBACK_BACKOFF}"
+log "INFO" "Backoff samples: ${BACKOFF_COUNT} (min=${BACKOFF_MIN}ms max=${BACKOFF_MAX}ms avg=${BACKOFF_AVG}ms)"
 log "INFO" "Search latency: ${SEARCH_LATENCY_MS}ms"
 
 cat > "${REPORT_JSON}" <<EOF
@@ -208,6 +240,12 @@ cat > "${REPORT_JSON}" <<EOF
   "query": "$(json_escape "$QUERY")",
   "embedder": "$(json_escape "$EMBEDDER")",
   "daemon_enabled": true,
+  "retry_config": {
+    "max_attempts": ${DAEMON_RETRY_MAX},
+    "base_delay_ms": ${DAEMON_BACKOFF_BASE_MS},
+    "max_delay_ms": ${DAEMON_BACKOFF_MAX_MS},
+    "jitter_pct": ${DAEMON_JITTER_PCT}
+  },
   "search_exit_code": ${SEARCH_EXIT},
   "latency_ms": ${SEARCH_LATENCY_MS},
   "attempts": {
@@ -217,6 +255,20 @@ cat > "${REPORT_JSON}" <<EOF
   "fallbacks": {
     "embed": ${FALLBACK_EMBED},
     "rerank": ${FALLBACK_RERANK}
+  },
+  "fallback_reasons": {
+    "unavailable": ${FALLBACK_UNAVAILABLE},
+    "timeout": ${FALLBACK_TIMEOUT},
+    "overloaded": ${FALLBACK_OVERLOADED},
+    "error": ${FALLBACK_ERROR},
+    "invalid": ${FALLBACK_INVALID},
+    "backoff": ${FALLBACK_BACKOFF}
+  },
+  "backoff_ms": {
+    "samples": ${BACKOFF_COUNT},
+    "min": ${BACKOFF_MIN},
+    "max": ${BACKOFF_MAX},
+    "avg": ${BACKOFF_AVG}
   },
   "artifacts": {
     "stdout": "$(json_escape "$SEARCH_STDOUT")",

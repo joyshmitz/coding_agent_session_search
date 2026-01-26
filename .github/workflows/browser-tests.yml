@@ -4,13 +4,15 @@ on:
   push:
     branches: [main]
     paths:
-      - 'web/**'
+      - 'tests/**'
+      - 'src/pages/**'
       - 'src/pages_assets/**'
       - '.github/workflows/browser-tests.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'web/**'
+      - 'tests/**'
+      - 'src/pages/**'
       - 'src/pages_assets/**'
       - '.github/workflows/browser-tests.yml'
   workflow_dispatch:
@@ -34,16 +36,16 @@ jobs:
         uses: actions/cache@v4
         id: cache-npm
         with:
-          path: web/node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('web/package.json') }}
+          path: tests/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('tests/package-lock.json') }}
 
       - name: Install dependencies
         if: steps.cache-npm.outputs.cache-hit != 'true'
-        working-directory: web
-        run: npm install
+        working-directory: tests
+        run: npm ci
 
       - name: Install Playwright browsers
-        working-directory: web
+        working-directory: tests
         run: npx playwright install --with-deps
 
   # Run tests on Chromium
@@ -61,20 +63,20 @@ jobs:
       - name: Restore node modules
         uses: actions/cache@v4
         with:
-          path: web/node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('web/package.json') }}
+          path: tests/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('tests/package-lock.json') }}
 
       - name: Install dependencies
-        working-directory: web
-        run: npm install
+        working-directory: tests
+        run: npm ci
 
       - name: Install Playwright browsers
-        working-directory: web
+        working-directory: tests
         run: npx playwright install chromium --with-deps
 
       - name: Run Chromium tests
-        working-directory: web
-        run: npm run test:chromium
+        working-directory: tests
+        run: npm run test:e2e:chromium
         env:
           CI: true
 
@@ -83,15 +85,17 @@ jobs:
         if: always()
         with:
           name: chromium-test-results
-          path: web/test-results/
+          path: tests/test-results/
           retention-days: 7
 
-      - name: Upload Playwright report
+      - name: Upload E2E report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: chromium-playwright-report
-          path: web/playwright-report/
+          name: chromium-e2e-report
+          path: |
+            tests/e2e-report/
+            tests/e2e-results.json
           retention-days: 7
 
   # Run tests on Firefox
@@ -109,20 +113,20 @@ jobs:
       - name: Restore node modules
         uses: actions/cache@v4
         with:
-          path: web/node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('web/package.json') }}
+          path: tests/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('tests/package-lock.json') }}
 
       - name: Install dependencies
-        working-directory: web
-        run: npm install
+        working-directory: tests
+        run: npm ci
 
       - name: Install Playwright browsers
-        working-directory: web
+        working-directory: tests
         run: npx playwright install firefox --with-deps
 
       - name: Run Firefox tests
-        working-directory: web
-        run: npm run test:firefox
+        working-directory: tests
+        run: npm run test:e2e:firefox
         env:
           CI: true
 
@@ -131,7 +135,17 @@ jobs:
         if: always()
         with:
           name: firefox-test-results
-          path: web/test-results/
+          path: tests/test-results/
+          retention-days: 7
+
+      - name: Upload E2E report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: firefox-e2e-report
+          path: |
+            tests/e2e-report/
+            tests/e2e-results.json
           retention-days: 7
 
   # Run tests on WebKit (Safari)
@@ -149,20 +163,20 @@ jobs:
       - name: Restore node modules
         uses: actions/cache@v4
         with:
-          path: web/node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('web/package.json') }}
+          path: tests/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('tests/package-lock.json') }}
 
       - name: Install dependencies
-        working-directory: web
-        run: npm install
+        working-directory: tests
+        run: npm ci
 
       - name: Install Playwright browsers
-        working-directory: web
+        working-directory: tests
         run: npx playwright install webkit --with-deps
 
       - name: Run WebKit tests
-        working-directory: web
-        run: npm run test:webkit
+        working-directory: tests
+        run: npm run test:e2e:webkit
         env:
           CI: true
 
@@ -171,7 +185,17 @@ jobs:
         if: always()
         with:
           name: webkit-test-results
-          path: web/test-results/
+          path: tests/test-results/
+          retention-days: 7
+
+      - name: Upload E2E report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: webkit-e2e-report
+          path: |
+            tests/e2e-report/
+            tests/e2e-results.json
           retention-days: 7
 
   # Run mobile emulation tests
@@ -189,20 +213,20 @@ jobs:
       - name: Restore node modules
         uses: actions/cache@v4
         with:
-          path: web/node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('web/package.json') }}
+          path: tests/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('tests/package-lock.json') }}
 
       - name: Install dependencies
-        working-directory: web
-        run: npm install
+        working-directory: tests
+        run: npm ci
 
       - name: Install Playwright browsers
-        working-directory: web
+        working-directory: tests
         run: npx playwright install chromium webkit --with-deps
 
       - name: Run mobile tests
-        working-directory: web
-        run: npm run test:mobile
+        working-directory: tests
+        run: npm run test:e2e -- --project=mobile-chrome --project=mobile-safari
         env:
           CI: true
 
@@ -211,7 +235,17 @@ jobs:
         if: always()
         with:
           name: mobile-test-results
-          path: web/test-results/
+          path: tests/test-results/
+          retention-days: 7
+
+      - name: Upload E2E report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mobile-e2e-report
+          path: |
+            tests/e2e-report/
+            tests/e2e-results.json
           retention-days: 7
 
   # Summary job

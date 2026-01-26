@@ -1,5 +1,5 @@
 # .github/workflows/bench.yml
-# Performance benchmarks using Criterion
+# Performance benchmarks using Criterion with regression detection
 name: Benchmarks
 
 on:
@@ -26,11 +26,45 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Run benchmarks
-        run: cargo bench --bench index_perf --bench runtime_perf --bench search_perf
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache benchmark baselines
+        uses: actions/cache@v4
+        with:
+          path: target/criterion
+          key: criterion-${{ runner.os }}-${{ hashFiles('benches/**') }}
+          restore-keys: |
+            criterion-${{ runner.os }}-
+
+      - name: Run benchmarks (save baseline for main)
+        if: github.ref == 'refs/heads/main'
+        run: cargo bench --bench index_perf --bench runtime_perf --bench search_perf -- --save-baseline main
+
+      - name: Run benchmarks (compare with baseline for PRs)
+        if: github.event_name == 'pull_request'
+        run: cargo bench --bench index_perf --bench runtime_perf --bench search_perf -- --save-baseline pr
+
+      - name: Check for regressions
+        if: github.event_name == 'pull_request'
+        run: python scripts/check_bench_regression.py --threshold 10
 
       - name: Generate benchmark summary
         run: |
           echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Benchmarks completed successfully. See workflow logs for detailed timing." >> $GITHUB_STEP_SUMMARY
+          if [ -f target/criterion/report/index.html ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "📊 Detailed reports available in workflow artifacts." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload benchmark reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-reports
+          path: target/criterion/
+          retention-days: 30
