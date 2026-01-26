@@ -771,7 +771,10 @@ mod tests {
         let result = embedder.embed("hello").unwrap();
         // Should use fallback (HashEmbedder), not daemon
         assert_eq!(result.len(), TEST_DAEMON_DIM);
-        assert!(!is_daemon_result(&result), "expected fallback, got daemon result");
+        assert!(
+            !is_daemon_result(&result),
+            "expected fallback, got daemon result"
+        );
     }
 
     #[test]
@@ -785,12 +788,17 @@ mod tests {
         // Without fallback, reranker should return error when daemon fails
         let reranker_no_fallback = DaemonFallbackReranker::new(daemon.clone(), None, cfg.clone());
         let result = reranker_no_fallback.rerank("query", &["doc a", "doc b"]);
-        assert!(result.is_err(), "expected error when no fallback and daemon fails");
+        assert!(
+            result.is_err(),
+            "expected error when no fallback and daemon fails"
+        );
 
         // With a daemon that eventually succeeds after retries, it should work
         let working_daemon = Arc::new(TestDaemon::new(0)); // succeeds immediately
         let reranker_working = DaemonFallbackReranker::new(working_daemon, None, cfg);
-        let result = reranker_working.rerank("query", &["doc a", "doc b"]).unwrap();
+        let result = reranker_working
+            .rerank("query", &["doc a", "doc b"])
+            .unwrap();
         assert_eq!(result.len(), 2);
         // TestDaemon returns 1.0 for each document
         assert!((result[0] - 1.0).abs() < f32::EPSILON);
@@ -810,7 +818,10 @@ mod tests {
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
         let result = embedder.embed("hello").unwrap();
         // Should succeed on second try with daemon result
-        assert!(is_daemon_result(&result), "expected daemon result after retry");
+        assert!(
+            is_daemon_result(&result),
+            "expected daemon result after retry"
+        );
         assert_eq!(daemon.calls.load(Ordering::Relaxed), 2);
     }
 
@@ -828,7 +839,10 @@ mod tests {
         let embedder = DaemonFallbackEmbedder::new(daemon, fallback, cfg);
         let result = embedder.embed("hello").unwrap();
         // Should fall back to HashEmbedder after exhausting retries
-        assert!(!is_daemon_result(&result), "expected fallback after timeout");
+        assert!(
+            !is_daemon_result(&result),
+            "expected fallback after timeout"
+        );
     }
 
     #[test]
@@ -843,7 +857,10 @@ mod tests {
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
         let result = embedder.embed("hello").unwrap();
         // InvalidInput should not retry, just fallback immediately
-        assert!(!is_daemon_result(&result), "expected fallback on invalid input");
+        assert!(
+            !is_daemon_result(&result),
+            "expected fallback on invalid input"
+        );
         assert_eq!(daemon.calls.load(Ordering::Relaxed), 1);
     }
 
@@ -865,7 +882,10 @@ mod tests {
 
         // Second call should try daemon again (no backoff for InvalidInput)
         let second = embedder.embed("hello-again").unwrap();
-        assert!(is_daemon_result(&second), "expected daemon result on second call");
+        assert!(
+            is_daemon_result(&second),
+            "expected daemon result on second call"
+        );
         assert_eq!(daemon.calls.load(Ordering::Relaxed), 2);
     }
 
@@ -882,7 +902,10 @@ mod tests {
 
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
         let result = embedder.embed("hello").unwrap();
-        assert!(!is_daemon_result(&result), "expected fallback after failures");
+        assert!(
+            !is_daemon_result(&result),
+            "expected fallback after failures"
+        );
         assert_eq!(daemon.calls.load(Ordering::Relaxed), 2);
     }
 
