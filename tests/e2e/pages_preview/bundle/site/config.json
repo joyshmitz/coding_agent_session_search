@@ -1,0 +1,35 @@
+{
+  "version": 2,
+  "export_id": "qBVrGXKbLLHR99AiC05ghw==",
+  "base_nonce": "MDXqsQR4sWi/hegX",
+  "compression": "deflate",
+  "kdf_defaults": {
+    "memory_kb": 65536,
+    "iterations": 3,
+    "parallelism": 4
+  },
+  "payload": {
+    "chunk_size": 1048576,
+    "chunk_count": 1,
+    "total_compressed_size": 31098,
+    "total_plaintext_size": 561152,
+    "files": [
+      "payload/chunk-00000.bin"
+    ]
+  },
+  "key_slots": [
+    {
+      "id": 0,
+      "slot_type": "password",
+      "kdf": "argon2id",
+      "salt": "aXJIdEJhVTRQcnp0ckZFTkw1Nll0dw==",
+      "wrapped_dek": "picHtmHMnTlRHgdaiTS6YU8XUHaHJ4/fB62C00UuwTvWnpOzQDUviLUN43qpifHX",
+      "nonce": "rDgfSA5FXwMs5Q7A",
+      "argon2_params": {
+        "memory_kb": 65536,
+        "iterations": 3,
+        "parallelism": 4
+      }
+    }
+  ]
+}

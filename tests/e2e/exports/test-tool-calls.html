@@ -3378,6 +3378,177 @@ canvas {
                     
                 </div>
                 
+                <details class="tool-call">
+                    <summary class="tool-call-header">
+                        <span class="tool-icon" aria-hidden="true">📖</span>
+                        <span class="tool-call-name">read_file</span>
+                        <span class="tool-status tool-status-success">✓</span>
+                        <span class="tool-call-toggle" aria-hidden="true">▼</span>
+                    </summary>
+                    <div class="tool-call-body">
+                        <div class="tool-input">
+                            <div class="tool-section-header">Input</div>
+                            <pre><code class="language-json">{
+  &quot;path&quot;: &quot;/home/dev/webapp/src/services/user_service.ts&quot;
+}</code></pre>
+                        </div>
+                        <div class="tool-output">
+                            <div class="tool-section-header">Output</div>
+                            <pre><code class="language-json">import { Database } from &#39;../db&#39;;
+import { EmailService } from &#39;./email_service&#39;;
+import { CacheService } from &#39;./cache_service&#39;;
+import { Logger } from &#39;../utils/logger&#39;;
+import { hash, verify } from &#39;bcrypt&#39;;
+import { sign, verify as jwtVerify } from &#39;jsonwebtoken&#39;;
+
+export interface User {
+  id: string;
+  email: string;
+  passwordHash: string;
+  name: string;
+  role: &#39;admin&#39; | &#39;user&#39; | &#39;moderator&#39;;
+  createdAt: Date;
+  updatedAt: Date;
+  lastLoginAt?: Date;
+  preferences: UserPreferences;
+}
+
+export interface UserPreferences {
+  theme: &#39;light&#39; | &#39;dark&#39;;
+  notifications: boolean;
+  language: string;
+}
+
+export class UserService {
+  private db: Database;
+  private emailService: EmailService;
+  private cache: CacheService;
+  private logger: Logger;
+
+  constructor(
+    db: Database,
+    emailService: EmailService,
+    cache: CacheService,
+    logger: Logger
+  ) {
+    this.db = db;
+    this.emailService = emailService;
+    this.cache = cache;
+    this.logger = logger;
+  }
+
+  // User CRUD operations
+  async createUser(email: string, password: string, name: string): Promise&lt;User&gt; {
+    const passwordHash = await hash(password, 12);
+    const user = await this.db.users.create({
+      email,
+      passwordHash,
+      name,
+      role: &#39;user&#39;,
+      preferences: { theme: &#39;light&#39;, notifications: true, language: &#39;en&#39; }
+    });
+    await this.emailService.sendWelcomeEmail(user.email, user.name);
+    this.logger.info(`User created: ${user.id}`);
+    return user;
+  }
+
+  async getUserById(id: string): Promise&lt;User | null&gt; {
+    const cached = await this.cache.get(`user:${id}`);
+    if (cached) return JSON.parse(cached);
+    
+    const user = await this.db.users.findById(id);
+    if (user) {
+      await this.cache.set(`user:${id}`, JSON.stringify(user), 3600);
+    }
+    return user;
+  }
+
+  async updateUser(id: string, updates: Partial&lt;User&gt;): Promise&lt;User&gt; {
+    const user = await this.db.users.update(id, updates);
+    await this.cache.delete(`user:${id}`);
+    this.logger.info(`User updated: ${id}`);
+    return user;
+  }
+
+  async deleteUser(id: string): Promise&lt;void&gt; {
+    await this.db.users.delete(id);
+    await this.cache.delete(`user:${id}`);
+    this.logger.info(`User deleted: ${id}`);
+  }
+
+  // Authentication
+  async login(email: string, password: string): Promise&lt;{ user: User; token: string }&gt; {
+    const user = await this.db.users.findByEmail(email);
+    if (!user) throw new Error(&#39;Invalid credentials&#39;);
+    
+    const valid = await verify(password, user.passwordHash);
+    if (!valid) throw new Error(&#39;Invalid credentials&#39;);
+    
+    const token = sign({ userId: user.id, role: user.role }, process.env.JWT_SECRET!, { expiresIn: &#39;24h&#39; });
+    
+    await this.db.users.update(user.id, { lastLoginAt: new Date() });
+    this.logger.info(`User logged in: ${user.id}`);
+    
+    return { user, token };
+  }
+
+  async verifyToken(token: string): Promise&lt;{ userId: string; role: string }&gt; {
+    return jwtVerify(token, process.env.JWT_SECRET!) as { userId: string; role: string };
+  }
+
+  async changePassword(userId: string, oldPassword: string, newPassword: string): Promise&lt;void&gt; {
+    const user = await this.getUserById(userId);
+    if (!user) throw new Error(&#39;User not found&#39;);
+    
+    const valid = await verify(oldPassword, user.passwordHash);
+    if (!valid) throw new Error(&#39;Invalid password&#39;);
+    
+    const passwordHash = await hash(newPassword, 12);
+    await this.updateUser(userId, { passwordHash });
+    await this.emailService.sendPasswordChangedEmail(user.email);
+  }
+
+  async requestPasswordReset(email: string): Promise&lt;void&gt; {
+    const user = await this.db.users.findByEmail(email);
+    if (!user) return; // Don&#39;t reveal if email exists
+    
+    const token = sign({ userId: user.id, type: &#39;reset&#39; }, process.env.JWT_SECRET!, { expiresIn: &#39;1h&#39; });
+    await this.emailService.sendPasswordResetEmail(user.email, token);
+  }
+
+  // Role management
+  async assignRole(userId: string, role: User[&#39;role&#39;]): Promise&lt;User&gt; {
+    return this.updateUser(userId, { role });
+  }
+
+  async isAdmin(userId: string): Promise&lt;boolean&gt; {
+    const user = await this.getUserById(userId);
+    return user?.role === &#39;admin&#39;;
+  }
+
+  // Preferences
+  async updatePreferences(userId: string, preferences: Partial&lt;UserPreferences&gt;): Promise&lt;User&gt; {
+    const user = await this.getUserById(userId);
+    if (!user) throw new Error(&#39;User not found&#39;);
+    
+    return this.updateUser(userId, {
+      preferences: { ...user.preferences, ...preferences }
+    });
+  }
+
+  // Analytics
+  async getActiveUsers(since: Date): Promise&lt;number&gt; {
+    return this.db.users.count({ lastLoginAt: { $gte: since } });
+  }
+
+  async getUsersByRole(role: User[&#39;role&#39;]): Promise&lt;User[]&gt; {
+    return this.db.users.findMany({ role });
+  }
+}</code></pre>
+                            
+                        </div>
+                    </div>
+                </details>
             </article>
             <article class="message message-assistant" id="msg-3" role="article" aria-label="assistant message">
                 <header class="message-header">
@@ -3414,6 +3585,27 @@ canvas {
                     
                 </div>
                 
+                <details class="tool-call">
+                    <summary class="tool-call-header">
+                        <span class="tool-icon" aria-hidden="true">📝</span>
+                        <span class="tool-call-name">write_file</span>
+                        <span class="tool-status tool-status-success">✓</span>
+                        <span class="tool-call-toggle" aria-hidden="true">▼</span>
+                    </summary>
+                    <div class="tool-call-body">
+                        <div class="tool-input">
+                            <div class="tool-section-header">Input</div>
+                            <pre><code class="language-json">{
+  &quot;path&quot;: &quot;/home/dev/webapp/src/services/user/UserRepository.ts&quot;
+}</code></pre>
+                        </div>
+                        <div class="tool-output">
+                            <div class="tool-section-header">Output</div>
+                            <pre><code class="language-json">File written successfully</code></pre>
+                            
+                        </div>
+                    </div>
+                </details>
             </article>
             <article class="message message-assistant" id="msg-5" role="article" aria-label="assistant message">
                 <header class="message-header">
@@ -3922,6 +4114,52 @@ export function createAuthRoutes(container: Container): Router {
                     
                 </div>
                 
+                <details class="tool-call">
+                    <summary class="tool-call-header">
+                        <span class="tool-icon" aria-hidden="true">💻</span>
+                        <span class="tool-call-name">bash</span>
+                        <span class="tool-status tool-status-success">✓</span>
+                        <span class="tool-call-toggle" aria-hidden="true">▼</span>
+                    </summary>
+                    <div class="tool-call-body">
+                        <div class="tool-input">
+                            <div class="tool-section-header">Input</div>
+                            <pre><code class="language-json">{
+  &quot;command&quot;: &quot;cd /home/dev/webapp &amp;&amp; npm test -- --coverage&quot;
+}</code></pre>
+                        </div>
+                        <div class="tool-output">
+                            <div class="tool-section-header">Output</div>
+                            <pre><code class="language-json">PASS src/services/user/UserRepository.test.ts
+PASS src/services/user/AuthService.test.ts
+PASS src/services/user/AuthorizationService.test.ts
+PASS src/services/user/PreferencesService.test.ts
+PASS src/services/user/UserQueryService.test.ts
+PASS src/routes/auth.test.ts
+PASS src/routes/users.test.ts
+PASS src/container.test.ts
+
+-------------------------|---------|----------|---------|---------|-------------------
+File                     | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s
+-------------------------|---------|----------|---------|---------|-------------------
+All files                |   94.5  |    91.2  |   96.8  |   94.1  |
+ services/user/          |   97.2  |    94.6  |   98.1  |   96.8  |
+  AuthService.ts         |   98.4  |    96.2  |  100    |   98.1  | 142
+  AuthorizationService.ts|   96.7  |    93.3  |   97.5  |   96.2  | 89,91
+  UserRepository.ts      |   95.8  |    92.1  |   96.4  |   95.3  | 45,67
+  PreferencesService.ts  |  100    |   100    |  100    |  100    |
+  UserQueryService.ts    |   96.3  |    91.7  |   95.2  |   96.0  | 33
+ routes/                 |   91.2  |    87.5  |   94.3  |   90.8  |
+-------------------------|---------|----------|---------|---------|-------------------
+
+Test Suites: 8 passed, 8 total
+Tests:       47 passed, 47 total
+Snapshots:   0 total
+Time:        12.453s</code></pre>
+                            
+                        </div>
+                    </div>
+                </details>
             </article>
             <article class="message message-assistant" id="msg-12" role="article" aria-label="assistant message">
                 <header class="message-header">
@@ -3976,6 +4214,36 @@ export function createAuthRoutes(container: Container): Router {
                     
                 </div>
                 
+                <details class="tool-call">
+                    <summary class="tool-call-header">
+                        <span class="tool-icon" aria-hidden="true">💻</span>
+                        <span class="tool-call-name">bash</span>
+                        <span class="tool-status tool-status-success">✓</span>
+                        <span class="tool-call-toggle" aria-hidden="true">▼</span>
+                    </summary>
+                    <div class="tool-call-body">
+                        <div class="tool-input">
+                            <div class="tool-section-header">Input</div>
+                            <pre><code class="language-json">{
+  &quot;command&quot;: &quot;cd /home/dev/webapp &amp;&amp; git add -A &amp;&amp; git commit -m &#39;refactor(user): split UserService into focused domain services\n\n- Extract UserRepository for data access with caching\n- Extract AuthService for authentication and token management\n- Extract AuthorizationService for RBAC and permissions\n- Extract PreferencesService for user settings\n- Extract UserQueryService for analytics queries\n- Add DI container for wiring dependencies\n- Update all routes to use new services\n- Maintain 94.5% test coverage\n\nBREAKING CHANGE: UserService is removed. Use individual services instead.\n\nCloses #287&#39;&quot;
+}</code></pre>
+                        </div>
+                        <div class="tool-output">
+                            <div class="tool-section-header">Output</div>
+                            <pre><code class="language-json">[feature/user-refactor 8f4a2c1] refactor(user): split UserService into focused domain services
+ 12 files changed, 847 insertions(+), 234 deletions(-)
+ create mode 100644 src/services/user/AuthService.ts
+ create mode 100644 src/services/user/AuthorizationService.ts
+ create mode 100644 src/services/user/PreferencesService.ts
+ create mode 100644 src/services/user/UserQueryService.ts
+ create mode 100644 src/services/user/UserRepository.ts
+ create mode 100644 src/services/user/types.ts
+ delete mode 100644 src/services/user_service.ts
+ create mode 100644 src/container.ts</code></pre>
+                            
+                        </div>
+                    </div>
+                </details>
             </article>
             <article class="message message-assistant" id="msg-15" role="article" aria-label="assistant message">
                 <header class="message-header">
@@ -4477,6 +4745,16 @@ const WorldClass = {
 
     initIntersectionObserver() {
         if (!('IntersectionObserver' in window)) return;
+
+        const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (reduceMotion) {
+            this.messages.forEach((msg) => {
+                msg.style.opacity = '1';
+                msg.style.transform = 'none';
+                msg.classList.add('in-view');
+            });
+            return;
+        }
 
         const observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {

@@ -74,6 +74,7 @@ export interface TestFixtures {
   largeExportPath: string;
   unicodeExportPath: string;
   noCdnExportPath: string;
+  previewUrl: string;
   password: string;
 }
 
@@ -207,6 +208,11 @@ export const test = base.extend<TestFixtures>({
   noCdnExportPath: async ({}, use) => {
     const exportPath = process.env.TEST_EXPORT_TEST_NO_CDN || '';
     await use(exportPath);
+  },
+
+  previewUrl: async ({}, use) => {
+    const previewUrl = process.env.TEST_PAGES_PREVIEW_URL || '';
+    await use(previewUrl);
   },
 
   password: async ({}, use) => {

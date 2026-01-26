@@ -18731,6 +18731,16 @@ const WorldClass = {
     initIntersectionObserver() {
         if (!('IntersectionObserver' in window)) return;
 
+        const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (reduceMotion) {
+            this.messages.forEach((msg) => {
+                msg.style.opacity = '1';
+                msg.style.transform = 'none';
+                msg.classList.add('in-view');
+            });
+            return;
+        }
+
         const observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
                 if (entry.isIntersecting) {
