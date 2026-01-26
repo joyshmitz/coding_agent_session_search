@@ -4922,7 +4922,7 @@ pub fn run_tui(
                                                 info.current_version, info.latest_version
                                             );
                                             // This does not return - it execs the installer
-                                            run_self_update();
+                                            run_self_update(&info.tag_name);
                                         } else {
                                             status = "You're on the latest version".to_string();
                                         }

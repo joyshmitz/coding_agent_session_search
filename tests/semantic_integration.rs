@@ -983,7 +983,8 @@ fn test_models_install_from_file_error() {
     fs::create_dir_all(&data_dir).unwrap();
 
     // Use fixture model file instead of fake content
-    let fixture_dir = PathBuf::from("tests/fixtures/models");
+    // Note: Use CARGO_MANIFEST_DIR for robust path resolution regardless of cwd
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models");
     let model_file = tmp.path().join("model.onnx");
     fs::copy(fixture_dir.join("model.onnx.placeholder"), &model_file).unwrap();
 

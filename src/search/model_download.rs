@@ -744,7 +744,7 @@ mod tests {
     use super::*;
 
     /// Copy model fixtures from tests/fixtures/models/ to the target directory.
-    /// Returns the list of files copied.
+    /// Copies model.onnx.placeholder as model.onnx plus config files.
     fn copy_model_fixtures(target_dir: &Path) -> std::io::Result<()> {
         let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models");
         fs::create_dir_all(target_dir)?;

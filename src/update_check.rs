@@ -110,6 +110,8 @@ impl UpdateState {
 pub struct UpdateInfo {
     /// Latest version available
     pub latest_version: String,
+    /// Git tag name for the release
+    pub tag_name: String,
     /// Current running version
     pub current_version: String,
     /// URL to release notes
@@ -188,6 +190,7 @@ pub async fn check_for_updates(current_version: &str) -> Option<UpdateInfo> {
 
     Some(UpdateInfo {
         latest_version: latest_str.to_string(),
+        tag_name: release.tag_name,
         current_version: current_version.to_string(),
         release_url: release.html_url,
         is_newer,
@@ -241,17 +244,17 @@ pub fn open_in_browser(url: &str) -> std::io::Result<()> {
 /// Run the self-update installer script interactively.
 /// This function does NOT return - it replaces the current process with the installer.
 /// The caller should ensure the terminal is in a clean state before calling.
-pub fn run_self_update() -> ! {
+pub fn run_self_update(version: &str) -> ! {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         use std::os::unix::process::CommandExt;
         let install_url =
-            format!("https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh");
+            format!("https://raw.githubusercontent.com/{GITHUB_REPO}/{version}/install.sh");
         // exec replaces the current process, so we don't return
         let err = std::process::Command::new("bash")
             .args([
                 "-c",
-                &format!("curl -fsSL '{}' | bash -s -- --easy-mode", install_url),
+                &format!("curl -fsSL '{}' | bash -s -- --easy-mode --version {}", install_url, version),
             ])
             .exec();
         // If we get here, exec failed
@@ -262,7 +265,7 @@ pub fn run_self_update() -> ! {
     #[cfg(target_os = "windows")]
     {
         let install_url =
-            format!("https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.ps1");
+            format!("https://raw.githubusercontent.com/{GITHUB_REPO}/{version}/install.ps1");
         // Windows doesn't have exec(), so we spawn and wait
         let status = std::process::Command::new("powershell")
             .args([
@@ -270,8 +273,8 @@ pub fn run_self_update() -> ! {
                 "Bypass",
                 "-Command",
                 &format!(
-                    "Invoke-WebRequest -Uri '{}' -UseBasicParsing | Invoke-Expression",
-                    install_url
+                    "Invoke-WebRequest -Uri '{}' -UseBasicParsing | Invoke-Expression; install.ps1 -EasyMode -Version {}",
+                    install_url, version
                 ),
             ])
             .status();
@@ -381,6 +384,7 @@ pub fn check_for_updates_sync(current_version: &str) -> Option<UpdateInfo> {
 
     Some(UpdateInfo {
         latest_version: latest_str.to_string(),
+        tag_name: release.tag_name,
         current_version: current_version.to_string(),
         release_url: release.html_url,
         is_newer,
@@ -460,6 +464,7 @@ mod tests {
     fn test_update_info_should_show() {
         let info = UpdateInfo {
             latest_version: "1.0.0".into(),
+            tag_name: "v1.0.0".into(),
             current_version: "0.9.0".into(),
             release_url: "https://example.com".into(),
             is_newer: true,
@@ -557,6 +562,7 @@ mod tests {
         // Case 1: New version available, not skipped -> should show
         let info = UpdateInfo {
             latest_version: "0.2.0".into(),
+            tag_name: "v0.2.0".into(),
             current_version: "0.1.52".into(),
             release_url: "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.0".into(),
             is_newer: true,
@@ -584,6 +590,7 @@ mod tests {
         state.clear_skip();
         let newer_info = UpdateInfo {
             latest_version: "0.3.0".into(),
+            tag_name: "v0.3.0".into(),
             current_version: "0.1.52".into(),
             release_url: "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.3.0".into(),
             is_newer: true,
