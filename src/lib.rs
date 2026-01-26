@@ -1816,8 +1816,14 @@ fn heuristic_parse_recovery(
     }
 }
 
-pub async fn run() -> CliResult<()> {
-    let raw_args: Vec<String> = std::env::args().collect();
+pub struct ParsedCli {
+    pub cli: Cli,
+    raw_args: Vec<String>,
+    parse_note: Option<String>,
+    heuristic_note: Option<String>,
+}
+
+pub fn parse_cli(raw_args: Vec<String>) -> CliResult<ParsedCli> {
     // First normalization pass (global flags lift)
     let (normalized_args, parse_note) = normalize_args(raw_args.clone());
 
@@ -1858,6 +1864,27 @@ pub async fn run() -> CliResult<()> {
             }
         }
     };
+
+    Ok(ParsedCli {
+        cli,
+        raw_args,
+        parse_note,
+        heuristic_note,
+    })
+}
+
+pub async fn run() -> CliResult<()> {
+    let parsed = parse_cli(std::env::args().collect())?;
+    run_with_parsed(parsed).await
+}
+
+pub async fn run_with_parsed(parsed: ParsedCli) -> CliResult<()> {
+    let ParsedCli {
+        cli,
+        raw_args,
+        parse_note,
+        heuristic_note,
+    } = parsed;
 
     let stdout_is_tty = io::stdout().is_terminal();
     let stderr_is_tty = io::stderr().is_terminal();
@@ -3734,6 +3761,7 @@ fn run_cli_search(
     use crate::search::tantivy::index_dir;
     use crate::sources::provenance::SourceFilter;
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     // Start timing for robot_meta elapsed_ms
     let start_time = Instant::now();
@@ -3804,12 +3832,24 @@ fn run_cli_search(
         };
 
         if let Some(context) = setup.context {
-            if let Err(err) = client.set_semantic_context(
-                context.embedder,
-                context.index,
-                context.filter_maps,
-                context.roles,
-            ) {
+            let embedder = context.embedder;
+            let index = context.index;
+            let filter_maps = context.filter_maps;
+            let roles = context.roles;
+
+            let embedder: Arc<dyn crate::search::embedder::Embedder> = if semantic_opts.use_daemon {
+                use crate::search::daemon_client::{
+                    DaemonFallbackEmbedder, DaemonRetryConfig, NoopDaemonClient,
+                };
+
+                let daemon = Arc::new(NoopDaemonClient::new("daemon-unconfigured"));
+                let config = DaemonRetryConfig::from_env();
+                Arc::new(DaemonFallbackEmbedder::new(daemon, embedder, config))
+            } else {
+                embedder
+            };
+
+            if let Err(err) = client.set_semantic_context(embedder, index, filter_maps, roles) {
                 let hint = if prefer_hash {
                     "Run 'cass index --semantic --embedder hash' to rebuild the hash vector index, or use --mode lexical"
                         .to_string()
@@ -4080,80 +4120,100 @@ fn run_cli_search(
 
     // Apply reranking if enabled (bd-2t2d)
     let result = if semantic_opts.rerank && !result.hits.is_empty() {
+        use crate::search::daemon_client::{
+            DaemonFallbackReranker, DaemonRetryConfig, NoopDaemonClient,
+        };
         use crate::search::fastembed_reranker::FastEmbedReranker;
         use crate::search::reranker::Reranker;
 
         let model_dir = FastEmbedReranker::default_model_dir(&data_dir);
-        match FastEmbedReranker::load_from_dir(&model_dir) {
-            Ok(reranker) => {
-                // Extract content from hits for reranking (use snippet if content is empty)
-                let docs: Vec<String> = result
-                    .hits
-                    .iter()
-                    .map(|hit| {
-                        if hit.content.is_empty() {
-                            hit.snippet.clone()
-                        } else {
-                            hit.content.clone()
+        let local_reranker: Option<Arc<dyn Reranker>> =
+            match FastEmbedReranker::load_from_dir(&model_dir) {
+                Ok(reranker) => Some(Arc::new(reranker)),
+                Err(e) => {
+                    if !semantic_opts.use_daemon {
+                        tracing::debug!(error = %e, "Reranker not available, skipping rerank");
+                    }
+                    None
+                }
+            };
+
+        let reranker: Option<Arc<dyn Reranker>> = if semantic_opts.use_daemon {
+            let daemon = Arc::new(NoopDaemonClient::new("daemon-unconfigured"));
+            let config = DaemonRetryConfig::from_env();
+            Some(Arc::new(DaemonFallbackReranker::new(
+                daemon,
+                local_reranker,
+                config,
+            )))
+        } else {
+            local_reranker
+        };
+
+        if let Some(reranker) = reranker {
+            // Extract content from hits for reranking (use snippet if content is empty)
+            let docs: Vec<String> = result
+                .hits
+                .iter()
+                .map(|hit| {
+                    if hit.content.is_empty() {
+                        hit.snippet.clone()
+                    } else {
+                        hit.content.clone()
+                    }
+                })
+                .collect();
+
+            // Skip reranking if any document is empty (reranker rejects empty docs)
+            let has_empty_doc = docs.iter().any(|d| d.is_empty());
+            if has_empty_doc {
+                tracing::debug!("Skipping rerank: one or more hits have empty content and snippet");
+                result
+            } else {
+                let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+
+                match reranker.rerank(query, &doc_refs) {
+                    Ok(scores) => {
+                        // Update scores and re-sort hits
+                        let mut scored_hits: Vec<_> = result
+                            .hits
+                            .into_iter()
+                            .zip(scores)
+                            .map(|(mut hit, score)| {
+                                hit.score = score;
+                                hit
+                            })
+                            .collect();
+                        scored_hits.sort_by(|a, b| {
+                            b.score
+                                .partial_cmp(&a.score)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+
+                        tracing::debug!(
+                            reranker_id = reranker.id(),
+                            hits_reranked = scored_hits.len(),
+                            "Reranking complete"
+                        );
+
+                        crate::search::query::SearchResult {
+                            hits: scored_hits,
+                            wildcard_fallback: result.wildcard_fallback,
+                            cache_stats: result.cache_stats,
+                            suggestions: result.suggestions,
                         }
-                    })
-                    .collect();
-
-                // Skip reranking if any document is empty (reranker rejects empty docs)
-                let has_empty_doc = docs.iter().any(|d| d.is_empty());
-                if has_empty_doc {
-                    tracing::debug!(
-                        "Skipping rerank: one or more hits have empty content and snippet"
-                    );
-                    result
-                } else {
-                    let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
-
-                    match reranker.rerank(query, &doc_refs) {
-                        Ok(scores) => {
-                            // Update scores and re-sort hits
-                            let mut scored_hits: Vec<_> = result
-                                .hits
-                                .into_iter()
-                                .zip(scores)
-                                .map(|(mut hit, score)| {
-                                    hit.score = score;
-                                    hit
-                                })
-                                .collect();
-                            scored_hits.sort_by(|a, b| {
-                                b.score
-                                    .partial_cmp(&a.score)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                            });
-
-                            tracing::debug!(
-                                reranker_id = reranker.id(),
-                                hits_reranked = scored_hits.len(),
-                                "Reranking complete"
-                            );
-
-                            crate::search::query::SearchResult {
-                                hits: scored_hits,
-                                wildcard_fallback: result.wildcard_fallback,
-                                cache_stats: result.cache_stats,
-                                suggestions: result.suggestions,
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "Reranking failed, returning original results"
-                            );
-                            result
-                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Reranking failed, returning original results"
+                        );
+                        result
                     }
                 }
             }
-            Err(e) => {
-                tracing::debug!(error = %e, "Reranker not available, skipping rerank");
-                result
-            }
+        } else {
+            result
         }
     } else {
         result
