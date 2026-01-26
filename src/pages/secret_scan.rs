@@ -743,11 +743,11 @@ fn redact_token(token: &str) -> String {
     if len <= 8 {
         return "[redacted]".to_string();
     }
-    let prefix: String = chars.iter().take(4).collect();
+    let prefix: String = chars.iter().take(2).collect();
     let suffix: String = chars
         .iter()
         .rev()
-        .take(4)
+        .take(2)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
