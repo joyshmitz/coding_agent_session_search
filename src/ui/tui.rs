@@ -38,6 +38,7 @@ use crate::search::query::{
     CacheStats, QuerySuggestion, SearchClient, SearchFilters, SearchHit, SearchMode,
 };
 use crate::search::tantivy::index_dir;
+use crate::ui::components::export_modal::{ExportField, ExportModalState, ExportProgress, render_export_modal};
 use crate::ui::components::help_strip;
 use crate::ui::components::palette::{self, PaletteAction, PaletteState};
 use crate::ui::components::pills::{self, Pill};
@@ -2729,6 +2730,9 @@ pub fn run_tui(
     // Bulk action modal state
     let mut show_bulk_modal = false;
     let mut bulk_action_idx: usize = 0;
+    // HTML export modal state
+    let mut show_export_modal = false;
+    let mut export_modal_state: Option<ExportModalState> = None;
     // Model download consent dialog state
     let mut show_consent_dialog = false;
     // Model download state
@@ -4418,6 +4422,11 @@ pub fn run_tui(
                     f.render_widget(list, area);
                 }
 
+                // HTML export modal
+                if show_export_modal && let Some(ref state) = export_modal_state {
+                    render_export_modal(f, state, palette);
+                }
+
                 // Model download consent dialog
                 if show_consent_dialog {
                     // Fixed width of 62 chars to fit content comfortably:
@@ -5653,7 +5662,71 @@ pub fn run_tui(
                             };
                         }
                     }
+                    KeyCode::Char('e') => {
+                        // Open export modal
+                        if let Some((_, ref detail)) = cached_detail
+                            && let Some(pane) = panes.get(active_pane)
+                            && let Some(hit) = pane.hits.get(pane.selected)
+                        {
+                            export_modal_state = Some(ExportModalState::from_hit(hit, detail));
+                            show_export_modal = true;
+                            show_detail_modal = false;
+                            modal_scroll = 0;
+                            status = "Export modal opened".to_string();
+                        }
+                    }
                     _ => {}
+                }
+                continue;
+            }
+
+            // Handle export modal keyboard input
+            if show_export_modal {
+                if let Some(ref mut state) = export_modal_state {
+                    match key.code {
+                        KeyCode::Esc => {
+                            show_export_modal = false;
+                            export_modal_state = None;
+                            status = "Export cancelled".to_string();
+                        }
+                        KeyCode::Tab => {
+                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                state.prev_field();
+                            } else {
+                                state.next_field();
+                            }
+                        }
+                        KeyCode::BackTab => {
+                            state.prev_field();
+                        }
+                        KeyCode::Char(' ') => {
+                            state.toggle_current();
+                        }
+                        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            state.toggle_password_visibility();
+                        }
+                        KeyCode::Enter => {
+                            if state.focused == ExportField::ExportButton && state.can_export() {
+                                // Perform the export
+                                state.progress = ExportProgress::Preparing;
+                                // TODO: Actually perform the export here
+                                // For now, show success message
+                                let path = state.output_path();
+                                status = format!("Export to {} (not yet implemented)", path.display());
+                                show_export_modal = false;
+                                export_modal_state = None;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            state.password_pop();
+                        }
+                        KeyCode::Char(c) => {
+                            if state.focused == ExportField::Password {
+                                state.password_push(c);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 continue;
             }
