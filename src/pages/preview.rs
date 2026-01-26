@@ -394,6 +394,7 @@ fn open_browser(url: &str) -> Result<(), PreviewError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_guess_mime_type() {
@@ -460,5 +461,36 @@ mod tests {
         let response = handle_request(site_dir, "GET /../etc/passwd HTTP/1.1\r\n").await;
         let response_str = String::from_utf8_lossy(&response);
         assert!(response_str.contains("400") || response_str.contains("Invalid"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_serves_index_with_coi_headers() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let site_dir = temp_dir.path();
+
+        std::fs::write(
+            site_dir.join("index.html"),
+            "<!doctype html><html>ok</html>",
+        )
+        .expect("write index.html");
+        std::fs::write(
+            site_dir.join("sw.js"),
+            "self.addEventListener('install', () => {});",
+        )
+        .expect("write sw.js");
+
+        let index_response = handle_request(site_dir, "GET / HTTP/1.1\r\n").await;
+        let index_str = String::from_utf8_lossy(&index_response);
+
+        assert!(index_str.contains("HTTP/1.1 200 OK"));
+        assert!(index_str.contains("Content-Type: text/html; charset=utf-8"));
+        assert!(index_str.contains("Cross-Origin-Opener-Policy: same-origin"));
+        assert!(index_str.contains("Cross-Origin-Embedder-Policy: require-corp"));
+        assert!(index_str.contains("Cross-Origin-Resource-Policy: same-origin"));
+
+        let sw_response = handle_request(site_dir, "GET /sw.js HTTP/1.1\r\n").await;
+        let sw_str = String::from_utf8_lossy(&sw_response);
+        assert!(sw_str.contains("HTTP/1.1 200 OK"));
+        assert!(sw_str.contains("Content-Type: application/javascript; charset=utf-8"));
     }
 }

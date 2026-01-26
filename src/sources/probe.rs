@@ -391,11 +391,13 @@ fn parse_probe_output(host_name: &str, output: &str, connection_time_ms: u64) ->
         if line.starts_with("AGENT_DATA=") {
             // Special handling for agent data: AGENT_DATA=path|size|count
             if let Some(data) = line.strip_prefix("AGENT_DATA=") {
-                let parts: Vec<&str> = data.split('|').collect();
-                if parts.len() >= 3 {
-                    let path = parts[0].to_string();
+                // Use rsplitn to handle paths containing pipes (parse from right)
+                // Yields: count, size, path
+                let parts: Vec<&str> = data.rsplitn(3, '|').collect();
+                if parts.len() == 3 {
+                    let count = parts[0].parse().unwrap_or(0);
                     let size = parts[1].parse().unwrap_or(0);
-                    let count = parts[2].parse().unwrap_or(0);
+                    let path = parts[2].to_string();
                     agent_data.push((path, size, count));
                 }
             }

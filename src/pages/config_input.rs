@@ -338,14 +338,14 @@ impl PagesConfig {
             && let Some(env_var) = password.strip_prefix("env:")
         {
             self.encryption.password = Some(
-                std::env::var(env_var)
+                dotenvy::var(env_var)
                     .map_err(|_| ConfigError::EnvVarNotFound(env_var.to_string()))?,
             );
         }
 
         // Resolve env vars in output_dir if prefixed
         if let Some(env_var) = self.deployment.output_dir.strip_prefix("env:") {
-            self.deployment.output_dir = std::env::var(env_var)
+            self.deployment.output_dir = dotenvy::var(env_var)
                 .map_err(|_| ConfigError::EnvVarNotFound(env_var.to_string()))?;
         }
 

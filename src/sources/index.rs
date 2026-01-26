@@ -603,90 +603,48 @@ fn parse_count(token: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sources::probe::{CassStatus, HostProbeResult};
+    use crate::sources::probe::HostProbeResult;
+    use std::path::PathBuf;
 
-    fn mock_probe_indexed(sessions: u64) -> HostProbeResult {
-        HostProbeResult {
-            host_name: "test".into(),
-            reachable: true,
-            connection_time_ms: 100,
-            cass_status: CassStatus::Indexed {
-                version: "0.1.50".into(),
-                session_count: sessions,
-                last_indexed: None,
-            },
-            detected_agents: vec![],
-            system_info: None,
-            resources: None,
-            error: None,
-        }
-    }
-
-    fn mock_probe_not_indexed() -> HostProbeResult {
-        HostProbeResult {
-            host_name: "test".into(),
-            reachable: true,
-            connection_time_ms: 100,
-            cass_status: CassStatus::InstalledNotIndexed {
-                version: "0.1.50".into(),
-            },
-            detected_agents: vec![],
-            system_info: None,
-            resources: None,
-            error: None,
-        }
-    }
-
-    fn mock_probe_not_found() -> HostProbeResult {
-        HostProbeResult {
-            host_name: "test".into(),
-            reachable: true,
-            connection_time_ms: 100,
-            cass_status: CassStatus::NotFound,
-            detected_agents: vec![],
-            system_info: None,
-            resources: None,
-            error: None,
-        }
+    /// Load a probe fixture from the tests/fixtures/sources/probe directory.
+    fn load_probe_fixture(name: &str) -> HostProbeResult {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sources/probe")
+            .join(format!("{}.json", name));
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Failed to read fixture {}: {}", path.display(), e));
+        serde_json::from_str(&content)
+            .unwrap_or_else(|e| panic!("Failed to parse fixture {}: {}", path.display(), e))
     }
 
     #[test]
     fn test_no_indexing_when_not_found() {
         // Can't index if cass isn't installed
-        let probe = mock_probe_not_found();
+        let probe = load_probe_fixture("no_cass_host");
         assert!(!RemoteIndexer::needs_indexing(&probe));
     }
 
     #[test]
     fn test_needs_indexing_when_not_indexed() {
-        let probe = mock_probe_not_indexed();
+        let probe = load_probe_fixture("not_indexed_host");
         assert!(RemoteIndexer::needs_indexing(&probe));
     }
 
     #[test]
     fn test_needs_indexing_when_empty_index() {
-        let probe = mock_probe_indexed(0);
+        let probe = load_probe_fixture("empty_index_host");
         assert!(RemoteIndexer::needs_indexing(&probe));
     }
 
     #[test]
     fn test_no_indexing_needed_when_has_sessions() {
-        let probe = mock_probe_indexed(100);
+        let probe = load_probe_fixture("indexed_host");
         assert!(!RemoteIndexer::needs_indexing(&probe));
     }
 
     #[test]
     fn test_needs_indexing_when_unknown() {
-        let probe = HostProbeResult {
-            host_name: "test".into(),
-            reachable: true,
-            connection_time_ms: 100,
-            cass_status: CassStatus::Unknown,
-            detected_agents: vec![],
-            system_info: None,
-            resources: None,
-            error: None,
-        };
+        let probe = load_probe_fixture("unknown_status_host");
         assert!(RemoteIndexer::needs_indexing(&probe));
     }
 
