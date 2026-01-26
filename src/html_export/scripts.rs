@@ -473,13 +473,12 @@ const WorldClass = {
                     this.navigateMessage(-1);
                     break;
                 case 'g':
-                    if (e.shiftKey) {
-                        e.preventDefault();
-                        this.navigateToMessage(this.messages.length - 1);
-                    } else {
-                        e.preventDefault();
-                        this.navigateToMessage(0);
-                    }
+                    e.preventDefault();
+                    this.navigateToMessage(0);
+                    break;
+                case 'G':
+                    e.preventDefault();
+                    this.navigateToMessage(this.messages.length - 1);
                     break;
                 case '/':
                     if (!e.ctrlKey && !e.metaKey) {

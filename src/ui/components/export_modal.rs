@@ -663,26 +663,31 @@ mod tests {
 
     #[test]
     fn test_can_export() {
-        let mut state = ExportModalState::default();
-
-        // Can export when not encrypting
+        let state = ExportModalState::default();
         assert!(state.can_export());
 
-        // Cannot export when encrypting without password
-        state.encrypt = true;
+        let state = ExportModalState {
+            encrypt: true,
+            ..Default::default()
+        };
         assert!(!state.can_export());
 
-        // Can export when encrypting with password
-        state.password = "secret".to_string();
+        let state = ExportModalState {
+            encrypt: true,
+            password: "secret".to_string(),
+            ..Default::default()
+        };
         assert!(state.can_export());
     }
 
     #[test]
     fn test_toggle_encryption_clears_password() {
-        let mut state = ExportModalState::default();
-        state.encrypt = true;
-        state.password = "secret".to_string();
-        state.focused = ExportField::Encrypt;
+        let mut state = ExportModalState {
+            encrypt: true,
+            password: "secret".to_string(),
+            focused: ExportField::Encrypt,
+            ..Default::default()
+        };
 
         // Toggling encryption off should clear password
         state.toggle_current();

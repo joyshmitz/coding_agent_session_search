@@ -38,7 +38,9 @@ use crate::search::query::{
     CacheStats, QuerySuggestion, SearchClient, SearchFilters, SearchHit, SearchMode,
 };
 use crate::search::tantivy::index_dir;
-use crate::ui::components::export_modal::{ExportField, ExportModalState, ExportProgress, render_export_modal};
+use crate::ui::components::export_modal::{
+    ExportField, ExportModalState, ExportProgress, render_export_modal,
+};
 use crate::ui::components::help_strip;
 use crate::ui::components::palette::{self, PaletteAction, PaletteState};
 use crate::ui::components::pills::{self, Pill};
@@ -5712,7 +5714,8 @@ pub fn run_tui(
                                 // TODO: Actually perform the export here
                                 // For now, show success message
                                 let path = state.output_path();
-                                status = format!("Export to {} (not yet implemented)", path.display());
+                                status =
+                                    format!("Export to {} (not yet implemented)", path.display());
                                 show_export_modal = false;
                                 export_modal_state = None;
                             }

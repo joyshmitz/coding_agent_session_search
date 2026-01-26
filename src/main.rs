@@ -26,8 +26,10 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    let use_current_thread =
-        matches!(parsed.cli.command, Some(coding_agent_search::Commands::Search { .. }));
+    let use_current_thread = matches!(
+        parsed.cli.command,
+        Some(coding_agent_search::Commands::Search { .. })
+    );
     let runtime = if use_current_thread {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
