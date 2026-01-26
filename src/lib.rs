@@ -9995,7 +9995,7 @@ fn run_export_html(
     // --- Generate output path ---
     let output_directory = output_dir
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| get_downloads_dir());
+        .unwrap_or_else(get_downloads_dir);
 
     let workspace_path = workspace.as_deref().map(Path::new);
 
