@@ -355,10 +355,51 @@ cass view /path/to/session.jsonl -n 42 --json
 # Expand context around a line
 cass expand /path/to/session.jsonl -n 42 -C 3 --json
 
+# Export session as self-contained HTML
+cass export-html /path/to/session.jsonl --json
+cass export-html session.jsonl --encrypt --password "secret" --json
+
 # Learn the full API
 cass capabilities --json      # Feature discovery
 cass robot-docs guide         # LLM-optimized docs
 ```
+
+### HTML Export (Robot Mode)
+
+Export conversations as self-contained HTML files with optional encryption:
+
+```bash
+# Basic export (outputs to Downloads folder)
+cass export-html /path/to/session.jsonl --json
+
+# With encryption
+cass export-html session.jsonl --encrypt --password "secret" --json
+
+# Password from stdin (secure)
+echo "secret" | cass export-html session.jsonl --encrypt --password-stdin --json
+
+# Custom output
+cass export-html session.jsonl --output-dir /tmp --filename "export" --json
+```
+
+**Robot mode JSON output:**
+```json
+{
+  "success": true,
+  "output_path": "/home/user/Downloads/claude_2026-01-25_session.html",
+  "file_size": 145623,
+  "encrypted": false,
+  "message_count": 42
+}
+```
+
+**Error codes:**
+| Code | Kind | Description |
+|------|------|-------------|
+| 3 | session_not_found | Session file doesn't exist |
+| 4 | output_not_writable | Cannot write to output directory |
+| 5 | encryption_error | Encryption failed |
+| 6 | password_required | --encrypt used without password |
 
 ### Key Flags
 

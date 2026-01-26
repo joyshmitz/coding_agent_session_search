@@ -451,9 +451,10 @@ const WorldClass = {
         });
 
         // Initially hide messages for animation
+        // Must match CSS @keyframes messageReveal 'from' state exactly
         this.messages.forEach((msg, i) => {
             msg.style.opacity = '0';
-            msg.style.transform = 'translateY(24px)';
+            msg.style.transform = 'translateY(24px) scale(0.97)';
             setTimeout(() => observer.observe(msg), i * 30);
         });
     },

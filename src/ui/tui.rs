@@ -5695,6 +5695,22 @@ pub fn run_tui(
                             };
                         }
                     }
+                    KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Quick export with defaults (Ctrl+E)
+                        if let Some((_, ref detail)) = cached_detail
+                            && let Some(pane) = panes.get(active_pane)
+                            && let Some(hit) = pane.hits.get(pane.selected)
+                        {
+                            let mut state = ExportModalState::from_hit(hit, detail);
+                            // Auto-focus on export button for quick confirmation
+                            state.focused = ExportField::ExportButton;
+                            export_modal_state = Some(state);
+                            show_export_modal = true;
+                            show_detail_modal = false;
+                            modal_scroll = 0;
+                            status = "Quick export: Press Enter to confirm".to_string();
+                        }
+                    }
                     KeyCode::Char('e') => {
                         // Open export modal
                         if let Some((_, ref detail)) = cached_detail
@@ -5771,12 +5787,12 @@ pub fn run_tui(
                                     let include_tools = state_snapshot.include_tools;
                                     let output_path = state_snapshot.output_path();
                                     let encrypted = export_options.encrypt;
-                                    let password = if encrypted && !state_snapshot.password.is_empty()
-                                    {
-                                        Some(state_snapshot.password.clone())
-                                    } else {
-                                        None
-                                    };
+                                    let password =
+                                        if encrypted && !state_snapshot.password.is_empty() {
+                                            Some(state_snapshot.password.clone())
+                                        } else {
+                                            None
+                                        };
 
                                     let title = detail
                                         .convo
@@ -5843,11 +5859,7 @@ pub fn run_tui(
                                             (Some(start), Some(end)) if end > start => {
                                                 let mins = (end - start) / 60_000;
                                                 if mins >= 60 {
-                                                    Some(format!(
-                                                        "{}h {}m",
-                                                        mins / 60,
-                                                        mins % 60
-                                                    ))
+                                                    Some(format!("{}h {}m", mins / 60, mins % 60))
                                                 } else if mins > 0 {
                                                     Some(format!("{}m", mins))
                                                 } else {
@@ -5879,11 +5891,9 @@ pub fn run_tui(
 
                                     let metadata = TemplateMetadata {
                                         timestamp: detail.convo.started_at.and_then(|ts| {
-                                            Utc.timestamp_millis_opt(ts)
-                                                .single()
-                                                .map(|dt| {
-                                                    dt.format("%Y-%m-%d %H:%M UTC").to_string()
-                                                })
+                                            Utc.timestamp_millis_opt(ts).single().map(|dt| {
+                                                dt.format("%Y-%m-%d %H:%M UTC").to_string()
+                                            })
                                         }),
                                         agent: Some(state_snapshot.agent_name.clone()),
                                         message_count: messages.len(),
@@ -5892,9 +5902,7 @@ pub fn run_tui(
                                     };
 
                                     if encrypted {
-                                        send(ExportTaskEvent::Progress(
-                                            ExportProgress::Encrypting,
-                                        ));
+                                        send(ExportTaskEvent::Progress(ExportProgress::Encrypting));
                                     }
 
                                     let exporter = HtmlExporter::with_options(export_options);
@@ -5915,17 +5923,16 @@ pub fn run_tui(
 
                                     send(ExportTaskEvent::Progress(ExportProgress::Writing));
 
-                                    if let Some(parent) = output_path.parent() {
-                                        if let Err(err) = std::fs::create_dir_all(parent) {
-                                            send(ExportTaskEvent::Failed(format!(
-                                                "Failed to create output dir: {err}"
-                                            )));
-                                            return;
-                                        }
+                                    if let Some(parent) = output_path.parent()
+                                        && let Err(err) = std::fs::create_dir_all(parent)
+                                    {
+                                        send(ExportTaskEvent::Failed(format!(
+                                            "Failed to create output dir: {err}"
+                                        )));
+                                        return;
                                     }
 
-                                    if let Err(err) =
-                                        std::fs::write(&output_path, html.as_bytes())
+                                    if let Err(err) = std::fs::write(&output_path, html.as_bytes())
                                     {
                                         send(ExportTaskEvent::Failed(format!(
                                             "Failed to write export: {err}"
@@ -7925,12 +7932,15 @@ pub fn run_tui(
                         if let Some(ref mut state) = export_modal_state {
                             state.progress = progress.clone();
                         }
-                        status = match progress {
-                            ExportProgress::Preparing => "Preparing export...".to_string(),
-                            ExportProgress::Encrypting => "Encrypting export...".to_string(),
-                            ExportProgress::Writing => "Writing export...".to_string(),
-                            _ => status,
+                        let progress_status = match progress {
+                            ExportProgress::Preparing => Some("Preparing export...".to_string()),
+                            ExportProgress::Encrypting => Some("Encrypting export...".to_string()),
+                            ExportProgress::Writing => Some("Writing export...".to_string()),
+                            _ => None,
                         };
+                        if let Some(next_status) = progress_status {
+                            status = next_status;
+                        }
                     }
                     ExportTaskEvent::Completed {
                         output_path,
