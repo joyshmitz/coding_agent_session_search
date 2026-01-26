@@ -1855,12 +1855,30 @@ pub fn parse_cli(raw_args: Vec<String>) -> CliResult<ParsedCli> {
                         // Recovery failed to produce valid args, fail with original error + friendly help
                         let friendly =
                             format_friendly_parse_error(err, &raw_args, &normalized_args);
+                        if friendly.trim().starts_with('{') {
+                            return Err(CliError {
+                                code: 2,
+                                kind: "usage",
+                                message: friendly,
+                                hint: None,
+                                retryable: false,
+                            });
+                        }
                         return Err(CliError::usage("Could not parse arguments", Some(friendly)));
                     }
                 }
             } else {
                 // No recovery possible
                 let friendly = format_friendly_parse_error(err, &raw_args, &normalized_args);
+                if friendly.trim().starts_with('{') {
+                    return Err(CliError {
+                        code: 2,
+                        kind: "usage",
+                        message: friendly,
+                        hint: None,
+                        retryable: false,
+                    });
+                }
                 return Err(CliError::usage("Could not parse arguments", Some(friendly)));
             }
         }
