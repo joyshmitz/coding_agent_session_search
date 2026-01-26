@@ -11,6 +11,9 @@ const __dirname = path.dirname(__filename);
  */
 export default defineConfig({
   testDir: './e2e',
+  // Explicitly ignore test files outside e2e/ that use Playwright imports
+  // but are meant to be run separately or are legacy tests
+  testIgnore: ['**/html_export/**', '**/performance/**', '**/accessibility/**'],
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

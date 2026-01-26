@@ -32,9 +32,9 @@ test.describe('Collapsible Sections', () => {
     await summary.click();
     await page.waitForTimeout(200);
 
-    // Should now be open
+    // Should now be open (state should have changed)
     const afterClickOpen = await firstDetails.getAttribute('open');
-    expect(afterClickOpen !== null || afterClickOpen !== initiallyOpen).toBe(true);
+    expect(afterClickOpen).not.toEqual(initiallyOpen);
   });
 
   test('tool call content shows when expanded', async ({ page, toolCallsExportPath }) => {
@@ -88,7 +88,6 @@ test.describe('Collapsible Sections', () => {
     }
 
     const details = page.locator('details');
-    const detailsCount = await details.count();
 
     if (hasExpandAll) {
       await expandAllBtn.first().click();
