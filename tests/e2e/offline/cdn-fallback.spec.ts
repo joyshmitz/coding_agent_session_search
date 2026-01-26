@@ -146,7 +146,9 @@ test.describe('CDN Fallback - Network Blocking', () => {
 });
 
 test.describe('Offline Mode Simulation', () => {
-  test('page works in offline mode', async ({ page, noCdnExportPath }) => {
+  test('page works in offline mode', async ({ page, noCdnExportPath, browserName }) => {
+    // WebKit skip must be FIRST - setOffline fails immediately on WebKit with file:// URLs
+    test.skip(browserName === 'webkit', 'WebKit offline mode not reliable with file:// URLs');
     test.skip(!noCdnExportPath, 'No-CDN export path not available');
 
     // Go offline

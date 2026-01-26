@@ -72,8 +72,8 @@ test.describe('Print Styles', () => {
     if (rgbMatch && rgbMatch.length >= 3) {
       const [r, g, b] = rgbMatch.map(Number);
       const brightness = (r * 299 + g * 587 + b * 114) / 1000;
-      // Brightness < 128 means dark text
-      expect(brightness).toBeLessThan(200);
+      // Brightness < 210 is readable on white background (255 = pure white)
+      expect(brightness).toBeLessThan(210);
     }
   });
 

@@ -146,6 +146,11 @@ test.describe('Collapsible Sections', () => {
 });
 
 test.describe('Copy to Clipboard', () => {
+  // Firefox and WebKit have stricter clipboard API permissions for file:// URLs
+  test.beforeEach(async ({ browserName }) => {
+    test.skip(browserName === 'firefox' || browserName === 'webkit', 'Clipboard API not fully supported in file:// URLs');
+  });
+
   test('code blocks have copy buttons', async ({ page, exportPath }) => {
     test.skip(!exportPath, 'Export path not available');
 
@@ -171,8 +176,9 @@ test.describe('Copy to Clipboard', () => {
     await expect(copyBtn).toBeVisible({ timeout: 2000 });
   });
 
-  test('copy button shows feedback', async ({ page, context, exportPath }) => {
+  test('copy button shows feedback', async ({ page, context, exportPath, browserName }) => {
     test.skip(!exportPath, 'Export path not available');
+    test.skip(browserName === 'firefox' || browserName === 'webkit', 'Clipboard API not fully supported');
 
     // Grant clipboard permissions
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -213,8 +219,9 @@ test.describe('Copy to Clipboard', () => {
     expect(hasToast || btnHasCopiedClass).toBe(true);
   });
 
-  test('clipboard contains code content', async ({ page, context, exportPath }) => {
+  test('clipboard contains code content', async ({ page, context, exportPath, browserName }) => {
     test.skip(!exportPath, 'Export path not available');
+    test.skip(browserName === 'firefox' || browserName === 'webkit', 'Clipboard API not fully supported');
 
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
 

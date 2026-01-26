@@ -1,6 +1,11 @@
 import { test, expect, gotoFile, waitForPageReady } from '../setup/test-utils';
 
 test.describe('Copy to Clipboard', () => {
+  // Firefox and WebKit have stricter clipboard API permissions for file:// URLs
+  test.beforeEach(async ({ browserName }) => {
+    test.skip(browserName === 'firefox' || browserName === 'webkit', 'Clipboard API not fully supported in file:// URLs');
+  });
+
   test('copy button appears on code blocks', async ({ page, exportPath }) => {
     test.skip(!exportPath, 'Export path not available');
 
@@ -25,8 +30,9 @@ test.describe('Copy to Clipboard', () => {
     }
   });
 
-  test('clicking copy button shows toast notification', async ({ page, context, exportPath }) => {
+  test('clicking copy button shows toast notification', async ({ page, context, exportPath, browserName }) => {
     test.skip(!exportPath, 'Export path not available');
+    test.skip(browserName === 'firefox' || browserName === 'webkit', 'Clipboard API not fully supported');
 
     // Grant clipboard permissions
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -53,8 +59,9 @@ test.describe('Copy to Clipboard', () => {
     }
   });
 
-  test('copies code content to clipboard', async ({ page, context, exportPath }) => {
+  test('copies code content to clipboard', async ({ page, context, exportPath, browserName }) => {
     test.skip(!exportPath, 'Export path not available');
+    test.skip(browserName === 'firefox' || browserName === 'webkit', 'Clipboard API not fully supported');
 
     // Grant clipboard permissions
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -91,8 +98,9 @@ test.describe('Copy to Clipboard', () => {
     }
   });
 
-  test('toast notification disappears after timeout', async ({ page, context, exportPath }) => {
+  test('toast notification disappears after timeout', async ({ page, context, exportPath, browserName }) => {
     test.skip(!exportPath, 'Export path not available');
+    test.skip(browserName === 'firefox' || browserName === 'webkit', 'Clipboard API not fully supported');
 
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
 
