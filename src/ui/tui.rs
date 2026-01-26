@@ -1,7 +1,7 @@
 //! Ratatui-based interface wired to Tantivy search.
 
 use anyhow::Result;
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
     MouseEventKind,
@@ -29,6 +29,7 @@ use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
 use crate::default_data_dir;
+use crate::html_export::{HtmlExporter, Message as HtmlMessage, TemplateMetadata};
 use crate::model::types::MessageRole;
 use crate::search::model_download::{DownloadProgress, ModelDownloader, ModelManifest};
 use crate::search::model_manager::{
@@ -69,6 +70,23 @@ enum ExportTaskEvent {
         encrypted: bool,
     },
     Failed(String),
+}
+
+fn html_role_slug(role: &MessageRole) -> String {
+    match role {
+        MessageRole::User => "user".to_string(),
+        MessageRole::Agent => "assistant".to_string(),
+        MessageRole::Tool => "tool".to_string(),
+        MessageRole::System => "system".to_string(),
+        MessageRole::Other(value) => {
+            let lowered = value.trim().to_ascii_lowercase();
+            if lowered.is_empty() {
+                "user".to_string()
+            } else {
+                lowered
+            }
+        }
+    }
 }
 
 /// Format a timestamp as a short human-readable date for filter chips.
@@ -2751,6 +2769,8 @@ pub fn run_tui(
     // Model download state
     let mut download_rx: Option<mpsc::Receiver<DownloadProgress>> = None;
     let mut download_cancel: Option<Arc<AtomicBool>> = None;
+    // HTML export background task state
+    let mut export_rx: Option<mpsc::Receiver<ExportTaskEvent>> = None;
     // Toast notification manager for semantic state changes
     let mut toast_manager = ToastManager::new()
         .with_max_visible(2)
@@ -5720,15 +5740,209 @@ pub fn run_tui(
                         }
                         KeyCode::Enter => {
                             if state.focused == ExportField::ExportButton && state.can_export() {
-                                // Perform the export
+                                if export_rx.is_some() {
+                                    status = "Export already running".to_string();
+                                    toast_manager.push(Toast::warning(
+                                        "Export already running in background",
+                                    ));
+                                    continue;
+                                }
+                                let detail = match cached_detail.as_ref() {
+                                    Some((_, detail)) => detail.clone(),
+                                    None => {
+                                        status = "No session loaded for export".to_string();
+                                        toast_manager
+                                            .push(Toast::error("No session loaded for export"));
+                                        continue;
+                                    }
+                                };
+                                let state_snapshot = state.clone();
+                                let (tx, rx) = mpsc::channel();
+                                export_rx = Some(rx);
                                 state.progress = ExportProgress::Preparing;
-                                // TODO: Actually perform the export here
-                                // For now, show success message
-                                let path = state.output_path();
-                                status =
-                                    format!("Export to {} (not yet implemented)", path.display());
-                                show_export_modal = false;
-                                export_modal_state = None;
+                                status = "Preparing export...".to_string();
+
+                                std::thread::spawn(move || {
+                                    let send = |event: ExportTaskEvent| {
+                                        let _ = tx.send(event);
+                                    };
+
+                                    let export_options = state_snapshot.to_export_options();
+                                    let include_tools = state_snapshot.include_tools;
+                                    let output_path = state_snapshot.output_path();
+                                    let encrypted = export_options.encrypt;
+                                    let password = if encrypted && !state_snapshot.password.is_empty()
+                                    {
+                                        Some(state_snapshot.password.clone())
+                                    } else {
+                                        None
+                                    };
+
+                                    let title = detail
+                                        .convo
+                                        .title
+                                        .clone()
+                                        .or_else(|| {
+                                            detail
+                                                .messages
+                                                .iter()
+                                                .find(|m| matches!(&m.role, MessageRole::User))
+                                                .and_then(|m| {
+                                                    let content = m.content.trim();
+                                                    if content.is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(
+                                                            content
+                                                                .lines()
+                                                                .next()
+                                                                .unwrap_or("Untitled Session")
+                                                                .chars()
+                                                                .take(80)
+                                                                .collect(),
+                                                        )
+                                                    }
+                                                })
+                                        })
+                                        .unwrap_or_else(|| state_snapshot.title_preview.clone());
+
+                                    let messages: Vec<HtmlMessage> = detail
+                                        .messages
+                                        .iter()
+                                        .filter(|m| {
+                                            include_tools || !matches!(&m.role, MessageRole::Tool)
+                                        })
+                                        .map(|m| {
+                                            let timestamp = m
+                                                .created_at
+                                                .and_then(|ts| {
+                                                    Utc.timestamp_millis_opt(ts).single()
+                                                })
+                                                .map(|dt| dt.to_rfc3339());
+                                            let index = usize::try_from(m.idx).ok();
+                                            HtmlMessage {
+                                                role: html_role_slug(&m.role),
+                                                content: m.content.clone(),
+                                                timestamp,
+                                                tool_call: None,
+                                                index,
+                                                author: m.author.clone(),
+                                            }
+                                        })
+                                        .collect();
+
+                                    if messages.is_empty() {
+                                        send(ExportTaskEvent::Failed(
+                                            "No messages available for export".to_string(),
+                                        ));
+                                        return;
+                                    }
+
+                                    let duration =
+                                        match (detail.convo.started_at, detail.convo.ended_at) {
+                                            (Some(start), Some(end)) if end > start => {
+                                                let mins = (end - start) / 60_000;
+                                                if mins >= 60 {
+                                                    Some(format!(
+                                                        "{}h {}m",
+                                                        mins / 60,
+                                                        mins % 60
+                                                    ))
+                                                } else if mins > 0 {
+                                                    Some(format!("{}m", mins))
+                                                } else {
+                                                    Some("< 1m".to_string())
+                                                }
+                                            }
+                                            _ => None,
+                                        };
+
+                                    let project = if !state_snapshot.workspace.trim().is_empty() {
+                                        Some(state_snapshot.workspace.clone())
+                                    } else {
+                                        detail
+                                            .workspace
+                                            .as_ref()
+                                            .map(|ws| {
+                                                ws.display_name.clone().unwrap_or_else(|| {
+                                                    ws.path.display().to_string()
+                                                })
+                                            })
+                                            .or_else(|| {
+                                                detail
+                                                    .convo
+                                                    .workspace
+                                                    .as_ref()
+                                                    .map(|p| p.display().to_string())
+                                            })
+                                    };
+
+                                    let metadata = TemplateMetadata {
+                                        timestamp: detail.convo.started_at.and_then(|ts| {
+                                            Utc.timestamp_millis_opt(ts)
+                                                .single()
+                                                .map(|dt| {
+                                                    dt.format("%Y-%m-%d %H:%M UTC").to_string()
+                                                })
+                                        }),
+                                        agent: Some(state_snapshot.agent_name.clone()),
+                                        message_count: messages.len(),
+                                        duration,
+                                        project,
+                                    };
+
+                                    if encrypted {
+                                        send(ExportTaskEvent::Progress(
+                                            ExportProgress::Encrypting,
+                                        ));
+                                    }
+
+                                    let exporter = HtmlExporter::with_options(export_options);
+                                    let html = match exporter.export_messages(
+                                        &title,
+                                        &messages,
+                                        metadata,
+                                        password.as_deref(),
+                                    ) {
+                                        Ok(content) => content,
+                                        Err(err) => {
+                                            send(ExportTaskEvent::Failed(format!(
+                                                "Template error: {err}"
+                                            )));
+                                            return;
+                                        }
+                                    };
+
+                                    send(ExportTaskEvent::Progress(ExportProgress::Writing));
+
+                                    if let Some(parent) = output_path.parent() {
+                                        if let Err(err) = std::fs::create_dir_all(parent) {
+                                            send(ExportTaskEvent::Failed(format!(
+                                                "Failed to create output dir: {err}"
+                                            )));
+                                            return;
+                                        }
+                                    }
+
+                                    if let Err(err) =
+                                        std::fs::write(&output_path, html.as_bytes())
+                                    {
+                                        send(ExportTaskEvent::Failed(format!(
+                                            "Failed to write export: {err}"
+                                        )));
+                                        return;
+                                    }
+
+                                    let file_size = std::fs::metadata(&output_path)
+                                        .map(|m| m.len() as usize)
+                                        .unwrap_or_else(|_| html.len());
+
+                                    send(ExportTaskEvent::Completed {
+                                        output_path,
+                                        file_size,
+                                        encrypted,
+                                    });
+                                });
                             }
                         }
                         KeyCode::Backspace => {
@@ -7697,6 +7911,61 @@ pub fn run_tui(
                     }
                     needs_draw = true;
                 }
+            }
+            // Poll for HTML export progress/events
+            let mut export_event: Option<ExportTaskEvent> = None;
+            if let Some(rx) = export_rx.as_ref() {
+                while let Ok(event) = rx.try_recv() {
+                    export_event = Some(event);
+                }
+            }
+            if let Some(event) = export_event {
+                match event {
+                    ExportTaskEvent::Progress(progress) => {
+                        if let Some(ref mut state) = export_modal_state {
+                            state.progress = progress.clone();
+                        }
+                        status = match progress {
+                            ExportProgress::Preparing => "Preparing export...".to_string(),
+                            ExportProgress::Encrypting => "Encrypting export...".to_string(),
+                            ExportProgress::Writing => "Writing export...".to_string(),
+                            _ => status,
+                        };
+                    }
+                    ExportTaskEvent::Completed {
+                        output_path,
+                        file_size,
+                        encrypted,
+                    } => {
+                        if let Some(ref mut state) = export_modal_state {
+                            state.progress = ExportProgress::Complete(output_path.clone());
+                        }
+                        let size_kb = file_size as f64 / 1024.0;
+                        let size_label = if size_kb >= 1024.0 {
+                            format!("{:.1} MB", size_kb / 1024.0)
+                        } else {
+                            format!("{:.0} KB", size_kb.max(1.0))
+                        };
+                        let encryption_label = if encrypted { " (encrypted)" } else { "" };
+                        status = format!("Exported {}{}", output_path.display(), encryption_label);
+                        toast_manager.push(Toast::success(format!(
+                            "Exported to {} ({}){}",
+                            output_path.display(),
+                            size_label,
+                            encryption_label
+                        )));
+                        export_rx = None;
+                    }
+                    ExportTaskEvent::Failed(err) => {
+                        if let Some(ref mut state) = export_modal_state {
+                            state.progress = ExportProgress::Error(err.clone());
+                        }
+                        status = format!("Export failed: {err}");
+                        toast_manager.push(Toast::error(format!("Export failed: {err}")));
+                        export_rx = None;
+                    }
+                }
+                needs_draw = true;
             }
             // Check if indexing progress changed and trigger redraw (bead 019)
             // Includes discovered_agents to trigger redraw when new agents are found
