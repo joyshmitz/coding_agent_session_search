@@ -51,3 +51,9 @@ test-results/*
 !test-results/no_mock_allowlist.json
 !test-results/no_mock_audit.md
 claude-upgrade-progress.json
+
+# Ephemeral E2E test artifacts
+tmp/
+tests/e2e-report/
+tests/e2e-results.json
+tests/e2e/.env.test
