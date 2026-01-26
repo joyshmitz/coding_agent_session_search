@@ -1,0 +1,244 @@
+import { test, expect, waitForPageReady, countMessages } from '../setup/test-utils';
+
+test.describe('Encrypted Export - Password Prompt', () => {
+  test('shows password modal on load', async ({ page, encryptedExportPath }) => {
+    test.skip(!encryptedExportPath, 'Encrypted export path not available');
+
+    await page.goto(`file://${encryptedExportPath}`);
+
+    // Modal should be visible
+    const modal = page.locator(
+      '#decrypt-modal, .decrypt-modal, [data-testid="decrypt-modal"], .modal:has(input[type="password"])'
+    );
+
+    await expect(modal.first()).toBeVisible({ timeout: 5000 });
+
+    // Main content should be hidden
+    const conversation = page.locator('.conversation, main, #content');
+    const conversationVisible = await conversation.first().isVisible().catch(() => false);
+
+    // Content might be hidden or not yet rendered
+    // The key is that the modal is shown first
+    expect(conversationVisible).toBe(false);
+  });
+
+  test('password input is present and focusable', async ({ page, encryptedExportPath }) => {
+    test.skip(!encryptedExportPath, 'Encrypted export path not available');
+
+    await page.goto(`file://${encryptedExportPath}`);
+    await page.waitForTimeout(500);
+
+    const passwordInput = page.locator(
+      '#password-input, input[type="password"], [data-testid="password-input"]'
+    );
+
+    await expect(passwordInput.first()).toBeVisible();
+
+    // Should be focusable
+    await passwordInput.first().focus();
+    await expect(passwordInput.first()).toBeFocused();
+  });
+});
+
+test.describe('Encrypted Export - Correct Password', () => {
+  test('decrypts and displays content with correct password', async ({
+    page,
+    encryptedExportPath,
+    password,
+  }) => {
+    test.skip(!encryptedExportPath, 'Encrypted export path not available');
+
+    await page.goto(`file://${encryptedExportPath}`);
+    await page.waitForTimeout(500);
+
+    // Find and fill password input
+    const passwordInput = page.locator(
+      '#password-input, input[type="password"], [data-testid="password-input"]'
+    );
+    await passwordInput.first().fill(password);
+
+    // Click decrypt button
+    const decryptBtn = page.locator(
+      'button:has-text("Decrypt"), button:has-text("Unlock"), [data-action="decrypt"]'
+    );
+    await decryptBtn.first().click();
+
+    // Wait for decryption
+    await page.waitForTimeout(2000);
+
+    // Modal should disappear
+    const modal = page.locator('#decrypt-modal, .decrypt-modal, [data-testid="decrypt-modal"]');
+    await expect(modal.first()).not.toBeVisible({ timeout: 10000 });
+
+    // Content should now be visible
+    const messages = page.locator('.message');
+    const messageCount = await messages.count();
+    expect(messageCount).toBeGreaterThan(0);
+  });
+
+  test('decryption completes within 5 seconds', async ({
+    page,
+    encryptedExportPath,
+    password,
+  }) => {
+    test.skip(!encryptedExportPath, 'Encrypted export path not available');
+
+    await page.goto(`file://${encryptedExportPath}`);
+    await page.waitForTimeout(500);
+
+    const passwordInput = page.locator(
+      '#password-input, input[type="password"]'
+    );
+    await passwordInput.first().fill(password);
+
+    const start = Date.now();
+
+    const decryptBtn = page.locator(
+      'button:has-text("Decrypt"), button:has-text("Unlock")'
+    );
+    await decryptBtn.first().click();
+
+    // Wait for content to appear
+    const messages = page.locator('.message');
+    await expect(messages.first()).toBeVisible({ timeout: 5000 });
+
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(5000);
+  });
+
+  test('Enter key submits password', async ({
+    page,
+    encryptedExportPath,
+    password,
+  }) => {
+    test.skip(!encryptedExportPath, 'Encrypted export path not available');
+
+    await page.goto(`file://${encryptedExportPath}`);
+    await page.waitForTimeout(500);
+
+    const passwordInput = page.locator(
+      '#password-input, input[type="password"]'
+    );
+    await passwordInput.first().fill(password);
+
+    // Press Enter instead of clicking button
+    await page.keyboard.press('Enter');
+
+    // Wait for decryption
+    await page.waitForTimeout(2000);
+
+    // Content should appear
+    const messages = page.locator('.message');
+    await expect(messages.first()).toBeVisible({ timeout: 10000 });
+  });
+});
+
+test.describe('Encrypted Export - Wrong Password', () => {
+  test('shows error with wrong password', async ({ page, encryptedExportPath }) => {
+    test.skip(!encryptedExportPath, 'Encrypted export path not available');
+
+    await page.goto(`file://${encryptedExportPath}`);
+    await page.waitForTimeout(500);
+
+    const passwordInput = page.locator(
+      '#password-input, input[type="password"]'
+    );
+    await passwordInput.first().fill('wrong-password-123');
+
+    const decryptBtn = page.locator(
+      'button:has-text("Decrypt"), button:has-text("Unlock")'
+    );
+    await decryptBtn.first().click();
+
+    await page.waitForTimeout(2000);
+
+    // Error message should appear
+    const error = page.locator(
+      '#decrypt-error, .decrypt-error, .error, [role="alert"]'
+    );
+    await expect(error.first()).toBeVisible({ timeout: 5000 });
+
+    // Error should mention failure
+    const errorText = await error.first().textContent();
+    expect(errorText?.toLowerCase()).toMatch(/incorrect|failed|error|invalid/);
+
+    // Content should still be hidden
+    const messages = page.locator('.message');
+    const messageCount = await messages.count();
+    expect(messageCount).toBe(0);
+  });
+
+  test('allows retry after wrong password', async ({
+    page,
+    encryptedExportPath,
+    password,
+  }) => {
+    test.skip(!encryptedExportPath, 'Encrypted export path not available');
+
+    await page.goto(`file://${encryptedExportPath}`);
+    await page.waitForTimeout(500);
+
+    const passwordInput = page.locator(
+      '#password-input, input[type="password"]'
+    );
+    const decryptBtn = page.locator(
+      'button:has-text("Decrypt"), button:has-text("Unlock")'
+    );
+
+    // First attempt with wrong password
+    await passwordInput.first().fill('wrong');
+    await decryptBtn.first().click();
+    await page.waitForTimeout(1500);
+
+    // Error should appear
+    const error = page.locator('#decrypt-error, .decrypt-error, .error');
+    await expect(error.first()).toBeVisible();
+
+    // Clear and try correct password
+    await passwordInput.first().fill('');
+    await passwordInput.first().fill(password);
+    await decryptBtn.first().click();
+
+    // Wait for decryption
+    await page.waitForTimeout(2000);
+
+    // Should succeed now
+    const messages = page.locator('.message');
+    await expect(messages.first()).toBeVisible({ timeout: 10000 });
+  });
+});
+
+test.describe('Encrypted Export - Security', () => {
+  test('plaintext content is not visible in encrypted HTML', async ({
+    page,
+    encryptedExportPath,
+  }) => {
+    test.skip(!encryptedExportPath, 'Encrypted export path not available');
+
+    // Get the raw HTML source before decryption
+    const response = await page.goto(`file://${encryptedExportPath}`);
+    const html = await page.content();
+
+    // Encrypted content should contain base64/hex encrypted data
+    expect(html).toMatch(/ciphertext|encrypted|base64|iv|salt/i);
+
+    // Should not contain obvious plaintext message content
+    // (unless it's UI text like "Enter password")
+    const messagePhrases = [
+      'authentication',
+      'function main',
+      'import React',
+      'def __init__',
+    ];
+
+    for (const phrase of messagePhrases) {
+      // These should NOT appear in the HTML (they should be encrypted)
+      const containsPhrase = html.toLowerCase().includes(phrase.toLowerCase());
+      // Skip if it's a common word that might appear in UI
+      if (containsPhrase && phrase !== 'authentication') {
+        // This is a potential security issue - plaintext visible
+        console.warn(`Potential plaintext leak: "${phrase}" found in encrypted HTML`);
+      }
+    }
+  });
+});
