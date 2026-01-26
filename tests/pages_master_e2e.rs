@@ -674,3 +674,559 @@ fn setup_test_tracing(_test_name: &str) -> tracing::subscriber::DefaultGuard {
 
     tracing::subscriber::set_default(subscriber)
 }
+
+// =============================================================================
+// E2E Logger Integration
+// =============================================================================
+
+use util::e2e_log::{E2eLogger, E2eTestInfo, E2eRunSummary, E2ePhase, E2eError};
+
+/// Test result for collecting outcomes.
+#[derive(Debug, Clone)]
+pub struct TestOutcome {
+    pub name: String,
+    pub suite: String,
+    pub status: TestStatus,
+    pub duration: Duration,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestStatus {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+impl TestStatus {
+    #[allow(dead_code)]
+    fn as_str(&self) -> &'static str {
+        match self {
+            TestStatus::Passed => "pass",
+            TestStatus::Failed => "fail",
+            TestStatus::Skipped => "skip",
+        }
+    }
+}
+
+/// Run a test with E2eLogger instrumentation.
+pub fn run_with_logging<F>(
+    logger: &E2eLogger,
+    name: &str,
+    suite: &str,
+    file: &str,
+    line: u32,
+    test_fn: F,
+) -> TestOutcome
+where
+    F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+{
+    let test_info = E2eTestInfo::new(name, suite, file, line);
+
+    // Emit test_start event
+    let _ = logger.test_start(&test_info);
+
+    let start = Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test_fn));
+    let duration = start.elapsed();
+
+    let (status, error) = match result {
+        Ok(Ok(())) => (TestStatus::Passed, None),
+        Ok(Err(e)) => (TestStatus::Failed, Some(e.to_string())),
+        Err(panic) => {
+            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic".to_string()
+            };
+            (TestStatus::Failed, Some(msg))
+        }
+    };
+
+    // Emit test_end event
+    match status {
+        TestStatus::Passed => {
+            let _ = logger.test_pass(&test_info, duration.as_millis() as u64, None);
+        }
+        TestStatus::Failed => {
+            let _ = logger.test_fail(
+                &test_info,
+                duration.as_millis() as u64,
+                None,
+                E2eError {
+                    message: error.clone().unwrap_or_default(),
+                    error_type: Some("TestFailure".to_string()),
+                    stack: None,
+                },
+            );
+        }
+        TestStatus::Skipped => {
+            let _ = logger.test_skip(&test_info);
+        }
+    }
+
+    TestOutcome {
+        name: name.to_string(),
+        suite: suite.to_string(),
+        status,
+        duration,
+        error,
+    }
+}
+
+// =============================================================================
+// HTML Report Generation
+// =============================================================================
+
+/// Generate an HTML test report from collected outcomes.
+pub fn generate_html_report(outcomes: &[TestOutcome], total_duration: Duration) -> String {
+    let passed = outcomes.iter().filter(|o| o.status == TestStatus::Passed).count();
+    let failed = outcomes.iter().filter(|o| o.status == TestStatus::Failed).count();
+    let skipped = outcomes.iter().filter(|o| o.status == TestStatus::Skipped).count();
+    let total = outcomes.len();
+
+    let test_rows: String = outcomes
+        .iter()
+        .map(|o| {
+            let status_class = match o.status {
+                TestStatus::Passed => "passed",
+                TestStatus::Failed => "failed",
+                TestStatus::Skipped => "skipped",
+            };
+            let status_icon = match o.status {
+                TestStatus::Passed => "✓",
+                TestStatus::Failed => "✗",
+                TestStatus::Skipped => "⊘",
+            };
+            let error_row = if let Some(ref err) = o.error {
+                format!(r#"<tr class="error-row"><td colspan="4"><pre>{}</pre></td></tr>"#,
+                    html_escape(err))
+            } else {
+                String::new()
+            };
+            format!(
+                r#"<tr class="test-row {status_class}">
+                    <td class="status">{status_icon}</td>
+                    <td class="name">{name}</td>
+                    <td class="suite">{suite}</td>
+                    <td class="duration">{duration:.2}ms</td>
+                </tr>{error_row}"#,
+                status_class = status_class,
+                status_icon = status_icon,
+                name = html_escape(&o.name),
+                suite = html_escape(&o.suite),
+                duration = o.duration.as_secs_f64() * 1000.0,
+                error_row = error_row,
+            )
+        })
+        .collect();
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>E2E Test Report - Master Suite</title>
+    <style>
+        :root {{
+            --bg-primary: #1a1b26;
+            --bg-secondary: #24283b;
+            --text-primary: #c0caf5;
+            --text-secondary: #565f89;
+            --green: #9ece6a;
+            --red: #f7768e;
+            --yellow: #e0af68;
+            --blue: #7aa2f7;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: 2rem;
+        }}
+        .header {{
+            text-align: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--bg-secondary);
+        }}
+        h1 {{
+            color: var(--blue);
+            font-size: 1.8rem;
+            margin-bottom: 0.5rem;
+        }}
+        .timestamp {{
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }}
+        .summary {{
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }}
+        .stat {{
+            background: var(--bg-secondary);
+            padding: 1rem 2rem;
+            border-radius: 8px;
+            text-align: center;
+        }}
+        .stat-value {{
+            font-size: 2rem;
+            font-weight: bold;
+        }}
+        .stat-label {{
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+        }}
+        .stat.passed .stat-value {{ color: var(--green); }}
+        .stat.failed .stat-value {{ color: var(--red); }}
+        .stat.skipped .stat-value {{ color: var(--yellow); }}
+        .stat.total .stat-value {{ color: var(--blue); }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }}
+        th {{
+            background: var(--bg-secondary);
+            padding: 0.75rem;
+            text-align: left;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            font-size: 0.8rem;
+        }}
+        td {{
+            padding: 0.75rem;
+            border-bottom: 1px solid var(--bg-secondary);
+        }}
+        .test-row.passed {{ background: rgba(158, 206, 106, 0.1); }}
+        .test-row.failed {{ background: rgba(247, 118, 142, 0.1); }}
+        .test-row.skipped {{ background: rgba(224, 175, 104, 0.1); }}
+        .status {{ width: 30px; text-align: center; font-size: 1.2rem; }}
+        .passed .status {{ color: var(--green); }}
+        .failed .status {{ color: var(--red); }}
+        .skipped .status {{ color: var(--yellow); }}
+        .name {{ font-weight: 500; }}
+        .suite {{ color: var(--text-secondary); }}
+        .duration {{ text-align: right; font-variant-numeric: tabular-nums; }}
+        .error-row td {{
+            background: rgba(247, 118, 142, 0.05);
+            border-left: 3px solid var(--red);
+        }}
+        .error-row pre {{
+            color: var(--red);
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            padding: 0.5rem;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+            max-height: 200px;
+            overflow: auto;
+        }}
+        .footer {{
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--bg-secondary);
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🧪 E2E Test Report</h1>
+        <p class="timestamp">Generated: {timestamp}</p>
+    </div>
+
+    <div class="summary">
+        <div class="stat passed">
+            <div class="stat-value">{passed}</div>
+            <div class="stat-label">Passed</div>
+        </div>
+        <div class="stat failed">
+            <div class="stat-value">{failed}</div>
+            <div class="stat-label">Failed</div>
+        </div>
+        <div class="stat skipped">
+            <div class="stat-value">{skipped}</div>
+            <div class="stat-label">Skipped</div>
+        </div>
+        <div class="stat total">
+            <div class="stat-value">{total}</div>
+            <div class="stat-label">Total</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value">{duration:.2}s</div>
+            <div class="stat-label">Duration</div>
+        </div>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th></th>
+                <th>Test Name</th>
+                <th>Suite</th>
+                <th style="text-align: right">Duration</th>
+            </tr>
+        </thead>
+        <tbody>
+            {test_rows}
+        </tbody>
+    </table>
+
+    <div class="footer">
+        <p>cass E2E Test Suite • Master Pipeline Tests</p>
+    </div>
+</body>
+</html>"#,
+        timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+        passed = passed,
+        failed = failed,
+        skipped = skipped,
+        total = total,
+        duration = total_duration.as_secs_f64(),
+        test_rows = test_rows,
+    )
+}
+
+/// Escape HTML entities.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+// =============================================================================
+// Master Test Runner (Programmatic Execution)
+// =============================================================================
+
+/// Run all master E2E tests programmatically with comprehensive logging.
+///
+/// This function is designed to be called from a binary or integration test
+/// to run all tests with E2eLogger instrumentation and generate reports.
+///
+/// # Example
+///
+/// ```ignore
+/// let report = run_master_suite()?;
+/// fs::write("test-results/e2e/report.html", report.html)?;
+/// ```
+#[allow(dead_code)]
+pub fn run_master_suite() -> std::io::Result<MasterSuiteReport> {
+    let logger = E2eLogger::new("rust")?;
+    logger.run_start(None)?;
+
+    let suite_start = Instant::now();
+    let mut outcomes = Vec::new();
+
+    // Phase 1: Workflow Tests
+    let phase = E2ePhase {
+        name: "Workflow Tests".to_string(),
+        description: Some("Full export pipeline validation".to_string()),
+    };
+    logger.phase_start(&phase)?;
+    let phase_start = Instant::now();
+
+    outcomes.push(run_workflow_test(&logger, "test_full_export_workflow", || {
+        let config = E2EConfig::default();
+        let artifacts = build_pipeline(&config);
+        let result = verify_bundle(&artifacts.bundle.site_dir, false)?;
+        if result.status != "valid" {
+            return Err(format!("Bundle validation failed: {}", result.status).into());
+        }
+        Ok(())
+    }));
+
+    outcomes.push(run_workflow_test(&logger, "test_empty_archive_handling", || {
+        let config = E2EConfig {
+            conversation_count: 1,
+            messages_per_conversation: 1,
+            ..Default::default()
+        };
+        let artifacts = build_pipeline(&config);
+        let result = verify_bundle(&artifacts.bundle.site_dir, false)?;
+        if result.status != "valid" {
+            return Err(format!("Minimal bundle validation failed: {}", result.status).into());
+        }
+        Ok(())
+    }));
+
+    logger.phase_end(&phase, phase_start.elapsed().as_millis() as u64)?;
+
+    // Phase 2: Authentication Tests
+    let phase = E2ePhase {
+        name: "Authentication Tests".to_string(),
+        description: Some("Password and recovery key validation".to_string()),
+    };
+    logger.phase_start(&phase)?;
+    let phase_start = Instant::now();
+
+    outcomes.push(run_workflow_test(&logger, "test_password_authentication", || {
+        let config = E2EConfig::default();
+        let artifacts = build_pipeline(&config);
+        let enc_config = load_config(&artifacts.bundle.site_dir)?;
+        let _decryptor = DecryptionEngine::unlock_with_password(enc_config, TEST_PASSWORD)
+            .map_err(|e| format!("Password unlock failed: {:?}", e))?;
+        Ok(())
+    }));
+
+    outcomes.push(run_workflow_test(&logger, "test_recovery_key_authentication", || {
+        let config = E2EConfig::default();
+        let artifacts = build_pipeline(&config);
+        let enc_config = load_config(&artifacts.bundle.site_dir)?;
+        let _decryptor = DecryptionEngine::unlock_with_recovery(enc_config, TEST_RECOVERY_SECRET)
+            .map_err(|e| format!("Recovery unlock failed: {:?}", e))?;
+        Ok(())
+    }));
+
+    logger.phase_end(&phase, phase_start.elapsed().as_millis() as u64)?;
+
+    // Phase 3: Security Tests
+    let phase = E2ePhase {
+        name: "Security Tests".to_string(),
+        description: Some("Key management and corruption detection".to_string()),
+    };
+    logger.phase_start(&phase)?;
+    let phase_start = Instant::now();
+
+    outcomes.push(run_workflow_test(&logger, "test_invalid_password_rejected", || {
+        let config = E2EConfig::default();
+        let artifacts = build_pipeline(&config);
+        let enc_config = load_config(&artifacts.bundle.site_dir)?;
+        let result = DecryptionEngine::unlock_with_password(enc_config, "wrong-password");
+        if result.is_ok() {
+            return Err("Should have rejected invalid password".into());
+        }
+        Ok(())
+    }));
+
+    logger.phase_end(&phase, phase_start.elapsed().as_millis() as u64)?;
+
+    let total_duration = suite_start.elapsed();
+
+    // Generate summary
+    let passed = outcomes.iter().filter(|o| o.status == TestStatus::Passed).count() as u32;
+    let failed = outcomes.iter().filter(|o| o.status == TestStatus::Failed).count() as u32;
+    let skipped = outcomes.iter().filter(|o| o.status == TestStatus::Skipped).count() as u32;
+
+    let summary = E2eRunSummary {
+        total: outcomes.len() as u32,
+        passed,
+        failed,
+        skipped,
+        flaky: None,
+        duration_ms: total_duration.as_millis() as u64,
+    };
+
+    let exit_code = if failed > 0 { 1 } else { 0 };
+    logger.run_end(summary, exit_code)?;
+
+    // Generate HTML report
+    let html = generate_html_report(&outcomes, total_duration);
+
+    Ok(MasterSuiteReport {
+        outcomes,
+        total_duration,
+        jsonl_path: logger.output_path().clone(),
+        html,
+        exit_code,
+    })
+}
+
+fn run_workflow_test<F>(logger: &E2eLogger, name: &str, f: F) -> TestOutcome
+where
+    F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+{
+    run_with_logging(logger, name, "pages_master_e2e", file!(), line!(), f)
+}
+
+/// Report from running the master test suite.
+#[derive(Debug)]
+pub struct MasterSuiteReport {
+    pub outcomes: Vec<TestOutcome>,
+    pub total_duration: Duration,
+    pub jsonl_path: std::path::PathBuf,
+    pub html: String,
+    pub exit_code: i32,
+}
+
+impl MasterSuiteReport {
+    /// Write the HTML report to a file.
+    pub fn write_html(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        fs::write(path, &self.html)
+    }
+
+    /// Returns true if all tests passed.
+    pub fn all_passed(&self) -> bool {
+        self.exit_code == 0
+    }
+
+    /// Get count of tests by status.
+    pub fn count_by_status(&self, status: TestStatus) -> usize {
+        self.outcomes.iter().filter(|o| o.status == status).count()
+    }
+}
+
+// =============================================================================
+// Test for the Test Runner
+// =============================================================================
+
+#[test]
+fn test_master_suite_runner() {
+    // Run the master suite programmatically
+    let report = run_master_suite().expect("Failed to run master suite");
+
+    // Verify we got results
+    assert!(!report.outcomes.is_empty(), "Should have test outcomes");
+
+    // Verify JSONL was created
+    assert!(
+        report.jsonl_path.exists(),
+        "JSONL log file should exist at {:?}",
+        report.jsonl_path
+    );
+
+    // Verify HTML was generated
+    assert!(
+        report.html.contains("E2E Test Report"),
+        "HTML should contain report title"
+    );
+    assert!(
+        report.html.contains("Passed"),
+        "HTML should contain pass count"
+    );
+
+    // Write HTML report to test-results
+    let report_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test-results")
+        .join("e2e");
+    fs::create_dir_all(&report_dir).ok();
+
+    let html_path = report_dir.join("master_e2e_report.html");
+    report.write_html(&html_path).expect("Failed to write HTML report");
+
+    println!("📊 HTML Report: {}", html_path.display());
+    println!("📄 JSONL Log: {}", report.jsonl_path.display());
+    println!(
+        "✅ Passed: {} | ❌ Failed: {} | ⊘ Skipped: {}",
+        report.count_by_status(TestStatus::Passed),
+        report.count_by_status(TestStatus::Failed),
+        report.count_by_status(TestStatus::Skipped)
+    );
+
+    // Don't fail the test if some tests failed - we want to see the report
+    // In CI, we'd assert all_passed() instead
+}

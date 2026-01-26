@@ -199,6 +199,7 @@ pub struct E2eConfig {
 
 /// Base event structure that all events share.
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 struct BaseEvent {
     ts: String,
     event: String,
@@ -545,7 +546,7 @@ impl E2eLogger {
 
         // Convert to ISO-8601 format
         let datetime = chrono::DateTime::from_timestamp(secs as i64, millis * 1_000_000)
-            .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+            .unwrap_or(chrono::DateTime::UNIX_EPOCH);
         datetime.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
     }
 
@@ -555,7 +556,7 @@ impl E2eLogger {
             .unwrap_or_default();
         let secs = now.as_secs();
         let datetime = chrono::DateTime::from_timestamp(secs as i64, 0)
-            .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+            .unwrap_or(chrono::DateTime::UNIX_EPOCH);
         datetime.format("%Y%m%d_%H%M%S").to_string()
     }
 
