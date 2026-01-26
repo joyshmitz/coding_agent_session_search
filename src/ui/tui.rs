@@ -1339,8 +1339,10 @@ fn parse_message_content(content: &str, query: &str, palette: ThemePalette) -> V
         }
 
         // Try to detect and format JSON objects on a single line
-        if ((trimmed.starts_with('{') && trimmed.ends_with('}'))
-            || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+        // Limit check to lines < 10KB to avoid stalling on huge minified lines
+        if trimmed.len() < 10000
+            && ((trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']')))
             && let Ok(json_val) = serde_json::from_str::<serde_json::Value>(trimmed)
         {
             // Pretty print JSON
@@ -1579,8 +1581,12 @@ fn rebuild_panes_with_filter(
     } else if *active_pane >= *pane_scroll_offset + max_visible_panes {
         *pane_scroll_offset = active_pane.saturating_sub(max_visible_panes - 1);
     }
+    // Fix: Ensure pane_scroll_offset allows showing enough panes if available.
+    // If we have room to show more panes to the left without hiding active_pane, we should?
+    // Actually the current logic prefers keeping offset stable unless active moves out.
+    // But we must ensure offset is valid against total length.
     if *pane_scroll_offset > panes.len().saturating_sub(1) {
-        *pane_scroll_offset = 0;
+        *pane_scroll_offset = panes.len().saturating_sub(1);
     }
 
     panes
@@ -1634,8 +1640,8 @@ fn workspace_suggestions(input: &str, known_workspaces: &[String]) -> Vec<String
 fn suggest_correction(query: &str, history: &std::collections::VecDeque<String>) -> Option<String> {
     use strsim::levenshtein;
 
-    if query.len() < 3 {
-        return None; // Don't suggest for very short queries
+    if query.len() < 3 || query.len() > 100 {
+        return None; // Don't suggest for very short or very long queries
     }
 
     let query_lower = query.to_lowercase();
@@ -2617,6 +2623,19 @@ pub fn run_tui(
     let mut stdout = io::stdout();
     enable_raw_mode()?;
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+    // RAII guard to restore terminal state on exit or panic
+    struct TuiGuard;
+    impl Drop for TuiGuard {
+        fn drop(&mut self) {
+            let _ = disable_raw_mode();
+            let mut stdout = io::stdout();
+            let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+            let _ = execute!(stdout, crossterm::cursor::Show);
+        }
+    }
+    let _guard = TuiGuard;
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2635,7 +2654,7 @@ pub fn run_tui(
     // UI metrics flag (bead 020) - emit privacy-safe local metrics when enabled
     // Set CASS_UI_METRICS=1 to enable tracing of UI interactions
     let ui_metrics_enabled = dotenvy::var("CASS_UI_METRICS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
         .unwrap_or(false);
 
     // Open a read-only connection for the UI to fetch details efficiently.
@@ -2743,7 +2762,7 @@ pub fn run_tui(
     // Staggered reveal animation state (bead 013)
     // Env flag to disable animations for performance-sensitive terminals
     let animations_enabled = !dotenvy::var("CASS_DISABLE_ANIMATIONS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
         .unwrap_or(false);
     // When new results arrive, we start a staggered reveal animation
     let mut reveal_anim_start: Option<Instant> = None;
@@ -3011,7 +3030,7 @@ pub fn run_tui(
             }
             DensityMode::Spacious => {
                 // Spacious: full details - all metrics + both sparklines
-                let bar_width = 8;
+                let bar_width = 20;
                 let pct_eff = if total == 0 { 5 } else { pct };
                 let filled = ((pct_eff * bar_width).saturating_add(99)) / 100;
                 let empty = bar_width.saturating_sub(filled.min(bar_width));

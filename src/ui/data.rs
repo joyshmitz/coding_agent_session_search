@@ -180,7 +180,7 @@ impl ConversationCache {
 
 /// Global conversation cache instance.
 pub static CONVERSATION_CACHE: Lazy<ConversationCache> = Lazy::new(|| {
-    let capacity = std::env::var("CASS_CONV_CACHE_SIZE")
+    let capacity = dotenvy::var("CASS_CONV_CACHE_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_CAPACITY_PER_SHARD);
