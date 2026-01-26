@@ -27,7 +27,7 @@ fn create_claude_temp() -> TempDir {
 #[test]
 fn claude_skips_invalid_json_syntax() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -41,7 +41,7 @@ fn claude_skips_invalid_json_syntax() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -55,7 +55,7 @@ fn claude_skips_invalid_json_syntax() {
 #[test]
 fn claude_skips_missing_type_field() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -67,7 +67,7 @@ fn claude_skips_missing_type_field() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -81,7 +81,7 @@ fn claude_skips_missing_type_field() {
 #[test]
 fn claude_handles_wrong_field_types() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -94,7 +94,7 @@ fn claude_handles_wrong_field_types() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -109,7 +109,7 @@ fn claude_handles_wrong_field_types() {
 #[test]
 fn claude_handles_truncated_json() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -119,7 +119,7 @@ fn claude_handles_truncated_json() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -133,7 +133,7 @@ fn claude_handles_truncated_json() {
 #[test]
 fn claude_handles_binary_in_content() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -150,7 +150,7 @@ fn claude_handles_binary_in_content() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -165,7 +165,7 @@ fn claude_handles_binary_in_content() {
 #[test]
 fn claude_returns_error_on_invalid_utf8() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -177,7 +177,7 @@ fn claude_returns_error_on_invalid_utf8() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -201,7 +201,7 @@ fn claude_returns_error_on_invalid_utf8() {
 #[test]
 fn claude_handles_empty_file() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -209,7 +209,7 @@ fn claude_handles_empty_file() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -222,7 +222,7 @@ fn claude_handles_empty_file() {
 #[test]
 fn claude_handles_whitespace_only_file() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -230,7 +230,7 @@ fn claude_handles_whitespace_only_file() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -446,7 +446,7 @@ fn cline_handles_missing_task_history() {
 #[test]
 fn claude_processes_valid_files_despite_bad_ones() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects");
+    let projects = dir.path().join("fixture-claude/projects");
 
     // Create good project
     let good_proj = projects.join("good-proj");
@@ -464,7 +464,7 @@ fn claude_processes_valid_files_despite_bad_ones() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -485,7 +485,7 @@ fn claude_processes_valid_files_despite_bad_ones() {
 #[test]
 fn claude_handles_extremely_long_content() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -498,7 +498,7 @@ fn claude_handles_extremely_long_content() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -511,7 +511,7 @@ fn claude_handles_extremely_long_content() {
 #[test]
 fn claude_handles_deeply_nested_json() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -527,7 +527,7 @@ fn claude_handles_deeply_nested_json() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
