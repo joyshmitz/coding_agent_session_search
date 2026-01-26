@@ -213,10 +213,18 @@ async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
         return build_response(400, "text/plain", b"Invalid Path".to_vec());
     }
 
+    // Check if it's a directory and append index.html if so
+    let mut file_to_read = canonical.clone();
+    if let Ok(meta) = tokio::fs::metadata(&canonical).await
+        && meta.is_dir()
+    {
+        file_to_read = canonical.join("index.html");
+    }
+
     // Read the file
-    match tokio::fs::read(&canonical).await {
+    match tokio::fs::read(&file_to_read).await {
         Ok(contents) => {
-            let mime = guess_mime_type(&canonical);
+            let mime = guess_mime_type(&file_to_read);
             if method == "HEAD" {
                 // For HEAD requests, return headers only
                 build_response(200, mime, vec![])

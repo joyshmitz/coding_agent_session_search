@@ -746,8 +746,7 @@ mod tests {
     /// Copy model fixtures from tests/fixtures/models/ to the target directory.
     /// Returns the list of files copied.
     fn copy_model_fixtures(target_dir: &Path) -> std::io::Result<()> {
-        let fixture_dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models");
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models");
         fs::create_dir_all(target_dir)?;
 
         // Copy model.onnx from placeholder
@@ -827,8 +826,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let model_dir = tmp.path().join("model");
         // Use fixture files instead of fake content - only copy model.onnx
-        let fixture_dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models");
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models");
         fs::create_dir_all(&model_dir).unwrap();
         fs::copy(
             fixture_dir.join("model.onnx.placeholder"),
