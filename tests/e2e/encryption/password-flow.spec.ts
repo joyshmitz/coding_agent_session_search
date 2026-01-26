@@ -8,7 +8,7 @@ test.describe('Encrypted Export - Password Prompt', () => {
 
     // Modal should be visible
     const modal = page.locator(
-      '#decrypt-modal, .decrypt-modal, [data-testid="decrypt-modal"], .modal:has(input[type="password"])'
+      '#password-modal, .decrypt-modal, [data-testid="decrypt-modal"], .modal:has(input[type="password"])'
     );
 
     await expect(modal.first()).toBeVisible({ timeout: 5000 });
@@ -67,7 +67,7 @@ test.describe('Encrypted Export - Correct Password', () => {
     await page.waitForTimeout(2000);
 
     // Modal should disappear
-    const modal = page.locator('#decrypt-modal, .decrypt-modal, [data-testid="decrypt-modal"]');
+    const modal = page.locator('#password-modal, .decrypt-modal, [data-testid="decrypt-modal"]');
     await expect(modal.first()).not.toBeVisible({ timeout: 10000 });
 
     // Content should now be visible

@@ -1,6 +1,10 @@
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /**
  * Global setup for HTML export E2E tests.
@@ -24,7 +28,26 @@ async function globalSetup() {
     console.warn('Cargo build failed, trying with existing binary...');
   }
 
-  const cassPath = path.join(projectRoot, 'target/release/cass');
+  // Find the cass binary - check CARGO_TARGET_DIR or common locations
+  const possiblePaths = [
+    process.env.CARGO_TARGET_DIR ? path.join(process.env.CARGO_TARGET_DIR, 'release/cass') : null,
+    '/data/tmp/cargo-target/release/cass',
+    path.join(projectRoot, 'target/release/cass'),
+  ].filter(Boolean) as string[];
+
+  let cassPath = '';
+  for (const p of possiblePaths) {
+    if (existsSync(p)) {
+      cassPath = p;
+      break;
+    }
+  }
+
+  if (!cassPath) {
+    throw new Error(`Could not find cass binary. Checked: ${possiblePaths.join(', ')}`);
+  }
+
+  console.log(`Using cass binary: ${cassPath}`);
 
   // Generate test exports
   const exports = [
@@ -56,7 +79,7 @@ async function globalSetup() {
     {
       name: 'test-no-cdn',
       fixture: 'claude_code_auth_fix.jsonl',
-      args: ['--no-cdn'],
+      args: ['--no-cdns'],
     },
   ];
 
@@ -78,7 +101,8 @@ async function globalSetup() {
         cassPath,
         'export-html',
         fixturePath,
-        '--output', outputPath,
+        '--output-dir', path.dirname(outputPath),
+        '--filename', path.basename(outputPath),
         ...args,
       ].join(' ');
 

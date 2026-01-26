@@ -162,7 +162,7 @@ test.describe('Copy to Clipboard', () => {
 
     // Look for copy buttons near code blocks
     const copyBtns = page.locator(
-      '.copy-btn, [data-action="copy"], button[aria-label*="copy" i]'
+      '.copy-code-btn, [data-action="copy"], button[aria-label*="copy" i]'
     );
     const copyBtnCount = await copyBtns.count();
 
@@ -179,7 +179,7 @@ test.describe('Copy to Clipboard', () => {
     await page.goto(`file://${exportPath}`);
     await waitForPageReady(page);
 
-    const copyBtn = page.locator('.copy-btn, [data-action="copy"]').first();
+    const copyBtn = page.locator('.copy-code-btn, [data-action="copy"]').first();
     const copyExists = (await copyBtn.count()) > 0;
 
     if (!copyExists) {
@@ -221,7 +221,7 @@ test.describe('Copy to Clipboard', () => {
     const expectedContent = await codeBlock.textContent();
 
     // Find associated copy button (might be sibling or parent has it)
-    const copyBtn = page.locator('.copy-btn, [data-action="copy"]').first();
+    const copyBtn = page.locator('.copy-code-btn, [data-action="copy"]').first();
 
     if ((await copyBtn.count()) === 0) {
       test.skip(true, 'No copy button found');

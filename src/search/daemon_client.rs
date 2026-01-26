@@ -193,7 +193,7 @@ impl DaemonState {
         self.next_retry_at = None;
     }
 
-    fn record_failure(&mut self, config: &DaemonRetryConfig, err: &DaemonError) {
+    fn record_failure(&mut self, config: &DaemonRetryConfig, err: &DaemonError) -> Duration {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let retry_after = match err {
             DaemonError::Overloaded { retry_after, .. } => *retry_after,
@@ -201,6 +201,7 @@ impl DaemonState {
         };
         let backoff = config.backoff_for_attempt(self.consecutive_failures, retry_after);
         self.next_retry_at = Some(Instant::now() + backoff);
+        backoff
     }
 }
 
@@ -293,11 +294,12 @@ impl DaemonFallbackEmbedder {
                 }
                 Err(err) => {
                     let should_retry = Self::should_retry(&err);
-                    self.state.lock().record_failure(&self.config, &err);
+                    let backoff = self.state.lock().record_failure(&self.config, &err);
                     last_err = Some(err);
                     if !should_retry || attempts >= self.config.max_attempts {
                         break;
                     }
+                    std::thread::sleep(backoff);
                 }
             }
         }
@@ -343,11 +345,12 @@ impl DaemonFallbackEmbedder {
                 }
                 Err(err) => {
                     let should_retry = Self::should_retry(&err);
-                    self.state.lock().record_failure(&self.config, &err);
+                    let backoff = self.state.lock().record_failure(&self.config, &err);
                     last_err = Some(err);
                     if !should_retry || attempts >= self.config.max_attempts {
                         break;
                     }
+                    std::thread::sleep(backoff);
                 }
             }
         }
@@ -467,11 +470,12 @@ impl DaemonFallbackReranker {
                 }
                 Err(err) => {
                     let should_retry = DaemonFallbackEmbedder::should_retry(&err);
-                    self.state.lock().record_failure(&self.config, &err);
+                    let backoff = self.state.lock().record_failure(&self.config, &err);
                     last_err = Some(err);
                     if !should_retry || attempts >= self.config.max_attempts {
                         break;
                     }
+                    std::thread::sleep(backoff);
                 }
             }
         }

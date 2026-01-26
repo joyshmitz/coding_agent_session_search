@@ -859,7 +859,7 @@ cass search "error" --robot --trace-file /tmp/cass-trace.json
 | `--robot-meta` | Include `_meta` block (elapsed_ms, cache stats, index freshness) |
 | `--fields minimal\|summary\|<list>` | Reduce payload size |
 | `--max-content-length N` | Truncate content fields to N chars |
-| `--max-tokens N` | Soft token budget (~4 chars/token) |
+| `--max-tokens N` | Truncate content fields to N chars |
 | `--timeout N` | Timeout in milliseconds; returns partial results on expiry |
 | `--cursor <token>` | Cursor-based pagination (from `_meta.next_cursor`) |
 | `--request-id ID` | Echoed in response for correlation |
@@ -1806,7 +1806,7 @@ flowchart LR
 - **Non-Blocking**: The indexer runs in a background thread. You can search while it works.
 - **Parallel Discovery**: Connector detection and scanning run in parallel across all CPU cores using rayon, significantly reducing startup time when multiple agents are installed.
 - **Watch Mode**: Uses file system watchers (`notify`) to detect changes in agent logs. When you save a file or an agent replies, `cass` re-indexes just that conversation and refreshes the search view automatically.
-- **Real-Time Progress**: The TUI footer updates in real-time showing discovered agents during scanning (e.g., "🔍 Discovering (5 agents found)") and indexing progress with sparkline visualization (e.g., "📦 Indexing 150/2000 (7%) ▁▂▄▆█").
+- **Real-Time Progress**: The TUI footer updates in real-time showing discovered agent count and conversation totals with sparkline visualization (e.g., "📦 Indexing 150/2000 (7%) ▁▂▄▆█").
 
 ## 🔍 Deep Dive: Internals
 
@@ -1896,7 +1896,7 @@ This ensures that version upgrades with schema changes automatically rebuild the
 | Condition | Detection | Action |
 |-----------|-----------|--------|
 | Schema version change | Hash mismatch in `schema_hash.json` | Full rebuild |
-| Missing `meta.json` | Tantivy can't open index | Recreate index directory |
+| Missing `meta.json` | Tantivy can't open index | Delete and recreate |
 | Corrupted index files | `Index::open_in_dir()` fails | Delete and recreate |
 | Explicit request | `--force-rebuild` flag | Clean slate rebuild |
 
@@ -1916,7 +1916,7 @@ The SQLite database uses versioned schema migrations:
 
 | Version | Changes |
 |---------|---------|
-| v1 | Initial schema: agents, conversations, messages |
+| v1 | Initial schema: agents, workspaces, conversations, messages, snippets, tags |
 | v2 | Added FTS5 full-text search |
 | v3 | Added source provenance tracking |
 | v4 | Added vector embeddings support |
@@ -2102,7 +2102,8 @@ cass sources add user@laptop.local --preset macos-defaults
 # Sync sessions from all sources
 cass sources sync
 
-# Filter by source in TUI: F11 cycles, Shift+F11 opens menu
+# Check source health and connectivity
+cass sources doctor
 ```
 
 See [Remote Sources (Multi-Machine Search)](#-remote-sources-multi-machine-search) for full documentation.
@@ -2160,7 +2161,7 @@ cass completions bash > ~/.bash_completion.d/cass
 | `health` | Minimal health check (<50ms), exit 0=healthy, 1=unhealthy |
 | `capabilities` | Discover features, versions, limits (for agent introspection) |
 | `introspect` | Full API schema: commands, arguments, response shapes |
-| `context <path>` | Find sessions related by workspace, day, or agent |
+| `context <path>` | Find related sessions by workspace, day, or agent |
 | `view <path> -n N` | View source file at specific line (follow-up on search) |
 | `export <path>` | Export conversation to markdown/JSON |
 | `export-html <path>` | Export as self-contained HTML with optional encryption |
@@ -2554,658 +2555,10433 @@ cargo test --test e2e_filters -- --test-threads=1
 
 ---
 
-## 💾 TUI State Persistence
+## ⚙️ Environment
 
-The TUI automatically saves your preferences to `tui_state.json` in the data directory.
+- **Config**: Loads `.env` via `dotenvy::dotenv().ok()`; configure API/base paths there. Do not overwrite `.env`.
 
-### What's Persisted
+- **Data Location**: Defaults to standard platform data directories (e.g., `~/.local/share/coding-agent-search`). Override with `CASS_DATA_DIR` or `--data-dir`.
 
-| Setting | Description |
-|---------|-------------|
-| `match_mode` | Prefix vs standard matching |
-| `ranking` | Current ranking mode (recent/balanced/relevance/quality/newest/oldest) |
-| `density_mode` | Compact/Cozy/Spacious |
-| `context_window` | S/M/L/XL preview size |
-| `query_history` | Recent searches (deduplicated, max 100) |
-| `saved_views` | Filter/query snapshots for slots 1-9 |
-| `help_pinned` | Whether help strip is always visible |
-| `pane_limit` | Items per pane (overrides density default) |
+- **ChatGPT Support**: The ChatGPT macOS app stores conversations in versioned formats:
+  - **v1** (legacy): Unencrypted JSON in `conversations-{uuid}/` — fully indexed.
+  - **v2/v3**: Encrypted with AES-256-GCM, key stored in macOS Keychain (OpenAI-signed apps only) — detected but skipped.
 
-### State File Location
+  Encrypted conversations require keychain access which isn't available to third-party apps. Legacy unencrypted conversations are indexed automatically.
 
-- Linux: `~/.local/share/coding-agent-search/tui_state.json`
-- macOS: `~/Library/Application Support/coding-agent-search/tui_state.json`
-- Windows: `%APPDATA%\coding-agent-search\tui_state.json`
+- **Logs**: Written to `cass.log` (daily rotating) in the data directory.
 
-### Crash-Safe Persistence
+- **Updates**: Interactive TUI checks for GitHub releases on startup. Skip with `CODING_AGENT_SEARCH_NO_UPDATE_PROMPT=1` or `TUI_HEADLESS=1`.
 
-State is saved using atomic file operations: data is first written to a temporary file (`tui_state.json.tmp`), then atomically renamed to the final location. This prevents corruption if the application crashes mid-save or during unexpected termination. See [Atomic File Operations](#atomic-file-operations) for technical details.
+- **Cache tuning**: `CASS_CACHE_SHARD_CAP` (per-shard entries, default 256) and `CASS_CACHE_TOTAL_CAP` (total cached hits across shards, default 2048) control prefix cache size; raise cautiously to avoid memory bloat.
 
-### Resetting State
+- **Cache debug**: set `CASS_DEBUG_CACHE_METRICS=1` to emit cache hit/miss/shortfall/reload stats via tracing (debug level).
+
+- **Watch testing (dev only)**: `cass index --watch --watch-once path1,path2` triggers a single reindex without filesystem notify (also respects `CASS_TEST_WATCH_PATHS` for backward compatibility); useful for deterministic tests/smoke runs.
+
+### Complete Environment Variable Reference
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| **Core** | | |
+| `CASS_DATA_DIR` | Platform default | Override data directory |
+| `CASS_DB_PATH` | `$CASS_DATA_DIR/agent_search.db` | Override database path |
+| `NO_COLOR` / `CASS_NO_COLOR` | unset | Disable ANSI color output |
+| **Search & Cache** | | |
+| `CASS_CACHE_SHARD_CAP` | 256 | Per-shard LRU cache entries |
+| `CASS_CACHE_TOTAL_CAP` | 2048 | Total cached search hits |
+| `CASS_CACHE_BYTE_CAP` | 10485760 | Cache byte limit (10MB) |
+| `CASS_WARM_DEBOUNCE_MS` | 120 | Warm-up search debounce |
+| `CASS_DEBUG_CACHE_METRICS` | unset | Enable cache hit/miss logging |
+| **Semantic Search** | | |
+| `CASS_SEMANTIC_EMBEDDER` | auto | Force embedder: `hash` or `minilm` |
+| **TUI** | | |
+| `TUI_HEADLESS` | unset | Disable interactive features |
+| `CASS_UI_METRICS` | unset | Enable UI interaction tracing |
+| `CASS_DISABLE_ANIMATIONS` | unset | Disable UI animations |
+| `EDITOR` | `$VISUAL` or `vi` | External editor command |
+| `EDITOR_LINE_FLAG` | `+` | Line number flag (e.g., `+42`) |
+| **Updates** | | |
+| `CODING_AGENT_SEARCH_NO_UPDATE_PROMPT` | unset | Disable update notifications |
+| **Connector Overrides** | | |
+| `CASS_AIDER_DATA_ROOT` | `~/.aider.chat.history.md` | Aider history location |
+| `PI_CODING_AGENT_DIR` | `~/.pi/agent/sessions` | Pi-Agent sessions |
+| `CODEX_HOME` | `~/.codex` | Codex data directory |
+| `GEMINI_HOME` | `~/.gemini` | Gemini CLI directory |
+| `OPENCODE_STORAGE_ROOT` | (scans home) | OpenCode storage |
+| `CHATGPT_ENCRYPTION_KEY` | unset | Base64-encoded AES key for ChatGPT v2/v3 |
+
+---
+
+## 🩺 Troubleshooting
+
+- **Checksum mismatch**: Ensure `.sha256` is reachable or pass `--checksum` explicitly. Check proxies/firewalls.
+
+- **Binary not on PATH**: Append `~/.local/bin` (or your `--dest`) to `PATH`; re-open shell.
+
+- **Nightly missing in CI**: Set `RUSTUP_INIT_SKIP=1` if toolchain is preinstalled; otherwise allow installer to run rustup.
+
+- **Watch mode not triggering**: Confirm `watch_state.json` updates and that connector roots are accessible; `notify` relies on OS file events (inotify/FSEvents).
+
+- **Reset TUI state**: Run `cass tui --reset-state` (or press `Ctrl+Shift+Del` in the TUI) to delete `tui_state.json` and restore defaults.
+
+
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
 
 ```bash
-# Via CLI flag
-cass tui --reset-state
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 
-# Via keyboard (in TUI)
-Ctrl+Shift+Del
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
 ```
 
-This deletes `tui_state.json` and restores all defaults.
+### Release Build Optimizations
 
-## 🔍 Deep Dive: How Key Subsystems Work
+The release profile is aggressively optimized for binary size and performance:
 
-### Tantivy schema & preview field (v4)
-- Schema v4 (hash `tantivy-schema-v4-edge-ngram-preview`) stores agent/workspace/source_path/msg_idx/created_at/title/content plus edge-ngrams (`title_prefix`, `content_prefix`) for type-ahead matching.
-- New `preview` field keeps a short, stored excerpt (~200 chars + ellipsis) so prefix-only queries can render snippets without pulling full content.
-- Rebuilds auto-trigger when the schema hash changes; index directory is recreated as needed. Tokenizer: `hyphen_normalize` to keep “cma-es” searchable while enabling prefix splits.
-
-### Search pipeline (src/search/query.rs)
-- **Wildcard patterns**: `WildcardPattern` enum supports `Exact`, `Prefix` (foo*), `Suffix` (*foo), and `Substring` (*foo*). Prefix uses edge n-grams; suffix/substring use Tantivy `RegexQuery` with escaped special characters.
-- **Auto-fuzzy fallback**: `search_with_fallback()` wraps the base search; if results < threshold and query has no wildcards, retries with `*term*` patterns and sets `wildcard_fallback` flag for UI indicator.
-- Cache-first: per-agent + global LRU shards (env `CASS_CACHE_SHARD_CAP`, default 256). Cached hits store lowered content/title/snippet and a 64-bit bloom mask; bloom + substring keeps validation fast.
-- Fallback order: Tantivy (primary) → SQLite FTS (consistency) with deduping/noise filtering. Prefix-only snippet path tries cached prefix snippet, then a cheap local snippet, else Tantivy `SnippetGenerator`.
-- Warm worker: runtime-aware, debounced (env `CASS_WARM_DEBOUNCE_MS`, default 120 ms), runs a tiny 1-doc search to keep the reader hot; reloads are debounced (300 ms) and counted in metrics (cache hit/miss/shortfall/reloads tracked internally).
-
-### Indexer (src/indexer/mod.rs)
-- Opens SQLite + Tantivy; `--full` clears tables/FTS and wipes Tantivy docs; `--force-rebuild` recreates index dir when schema changes.
-- Parallel connector loop: detect → scan runs concurrently across all connectors using rayon's parallel iterator, with atomic progress counters updating discovered agent count and conversation totals in real-time. Ingestion into SQLite and Tantivy happens sequentially after all scans complete. Watch mode: debounced filesystem watcher, path classification per connector, since_ts tracked in `watch_state.json`, incremental reindex of touched sources. TUI startup spawns a background indexer with watch enabled.
-
-#### Real-Time Progress Visualization
-
-The TUI footer displays live indexing progress through the `IndexingProgress` struct:
-
-**Phase Indicators**:
-| Phase | Display | Meaning |
-|-------|---------|---------|
-| 0 (Idle) | No indicator | Indexer idle or complete |
-| 1 (Scanning) | `🔍 Scanning...` | Discovering agents and files |
-| 2 (Indexing) | `📦 Indexing N/M (X%)` | Processing conversations |
-
-**Progress Components**:
-- **Agent Discovery**: During scanning, shows which agents were found (e.g., "Found: claude_code, codex, cursor")
-- **Conversation Count**: Total conversations discovered across all agents
-- **Sparkline Visualization**: Mini bar chart showing indexing velocity (`▁▂▄▆█`)
-- **Rebuild Indicator**: Special badge when performing full schema rebuild vs. incremental update
-
-**Implementation Details**:
-```rust
-pub struct IndexingProgress {
-    pub total: AtomicUsize,              // Total items to process
-    pub current: AtomicUsize,            // Items processed so far
-    pub phase: AtomicUsize,              // 0=Idle, 1=Scanning, 2=Indexing
-    pub is_rebuilding: AtomicBool,       // Full rebuild vs incremental
-    pub discovered_agents: AtomicUsize,  // Count of agents found
-    pub discovered_agent_names: Mutex<Vec<String>>,  // Agent names for display
-    pub last_error: Mutex<Option<String>>,  // Background indexer errors
-}
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
 ```
 
-All counters use `AtomicUsize` with relaxed ordering for lock-free updates from the background indexer thread. The TUI polls these at ~10Hz for smooth progress display without synchronization overhead.
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
 
-### Storage (src/storage/sqlite.rs)
-- Normalized relational model (agents, workspaces, conversations, messages, snippets, tags) with FTS mirror on messages. Single-transaction insert/upsert, append-only unless `--full`. `schema_version` guard; bundled modern SQLite.
+### CI Pipeline & Artifacts
 
-### UI (src/ui/tui.rs)
-- Three-pane layout (agents → results → detail), responsive splits, focus model (Tab/Shift+Tab), mouse support. Detail tabs (Messages/Snippets/Raw) plus full-screen modal with role colors, code blocks, JSON pretty-print, highlights. Footer packs shortcuts + mode badges; state persisted in `tui_state.json`.
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
 
-### Connectors (src/connectors/*.rs)
-- Each connector implements `detect` (root discovery) and `scan` (since_ts-aware ingestion). External IDs preserved for dedupe; workspace/source paths carried through; roles normalized.
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
 
-### Installers (install.sh / install.ps1)
-- Checksum-verified easy/normal modes, optional quickstart (index on first run), rustup bootstrap if needed. PATH hints appended with warnings; SHA256 required.
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
 
-### Benchmarks & Tests
-- Benches: `index_perf` measures full index build; `runtime_perf` covers search latency + indexing micro-cases.
-- Tests: unit + integration + headless TUI e2e; installer checksum fixtures; watch-mode and index/search integration; cache/bloom UTF-8 safety and bloom gate tests.
-- CI guardrails: PRs run Criterion benches and compare against the latest main baseline (critcmp, 10% regression threshold). Targets: `search_latency` < 50µs, `vector_index_search_50k` < 10ms, `index_small_batch` < 20ms, `canonicalize_long_message` < 500µs.
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
 
-### Already-Shipped Optimizations (Round 0)
-- **Title-prefix n-gram reuse** (`src/search/tantivy.rs:261`): Precomputes per-conversation values once (source/workspace/title/title_prefix/started_at), reducing indexing alloc ~8.3% and time ~100ms.
-- **Sessions output short-circuit** (`src/lib.rs:3672`): For `--robot-format sessions`, builds `BTreeSet<&str>` of `source_path` and returns early, reducing sessions search alloc ~29.4 MB → 27.0 MB.
-
-### Optimization PR Workflow (One Optimization per PR)
-
-Each optimization MUST be implemented in a single, focused PR with before/after benchmarks.
-
-**PR Title Format**
-```
-perf(vector): Opt N: <Short Description>
-
-Examples:
-- perf(vector): Opt 1: Pre-convert F16 slab to F32 at load time
-- perf(vector): Opt 2: Explicit SIMD dot product using wide crate
-- perf(vector): Opt 3: Parallel vector search with Rayon
-```
-
-**PR Description Template**
-```markdown
-## Summary
-Brief description of the optimization.
-
-## Benchmark Comparison
-| Benchmark | Before | After | Change |
-|-----------|--------|-------|--------|
-| vector_index_search_50k | 56ms | 30ms | -46% |
-
-## Implementation Details
-- What was changed
-- Code locations modified
-- Trade-offs made
-
-## Rollback
-Env var: `CASS_<NAME>=0` to disable
-
-## Testing
-- [ ] Equivalence oracle tests pass
-- [ ] Benchmark comparison attached
-- [ ] All validation commands pass
-
-## Checklist
-- [ ] cargo fmt --check
-- [ ] cargo check --all-targets
-- [ ] cargo clippy --all-targets -- -D warnings
-- [ ] cargo test
-- [ ] Benchmark comparison included
-```
-
-**Benchmark Comparison Commands**
 ```bash
-# Before making changes
-cargo bench --bench search_perf -- --save-baseline before
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
 
-# After making changes
-cargo bench --bench search_perf -- --save-baseline after
-
-# Generate comparison
-cargo install critcmp
-critcmp before after --export > bench_comparison.md
-
-# Include in PR
-cat bench_comparison.md
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
 ```
-
-**PR Review Checklist**
-- Single optimization (no unrelated refactors)
-- Before/after benchmarks included
-- Rollback env var implemented and tested
-- Equivalence oracle tests pass
-- No regression in unrelated benchmarks
-
-**Anti-Patterns to Avoid**
-- Combining multiple optimizations in one PR
-- Adding unrelated refactors
-- Skipping benchmark comparison
-- Not testing rollback path
 
 ---
 
-## 🎯 Design Philosophy & Trade-offs
+## 🧪 Developer Workflow
 
-### Core Principles
+We target **Rust Nightly** to leverage the latest optimizations.
 
-**1. Speed Over Space**
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 
-`cass` makes deliberate trade-offs favoring query latency over storage efficiency:
+# Build & Test
+cargo build --release
+cargo test
 
-- **Edge N-grams**: We pre-compute prefix substrings (length 2-20) for every token during indexing. This multiplies index size but enables O(1) prefix lookups instead of O(n) regex scans.
-- **Dual Storage**: Data lives in both SQLite (relational queries, ACID guarantees) and Tantivy (full-text search). This redundancy costs disk space but provides optimal performance for each access pattern.
-- **Bloom Filter Caching**: Each cached search hit stores a 64-bit bloom mask plus lowercase copies of content/title/snippet. Memory cost per cached hit: ~500 bytes. Benefit: sub-millisecond cache filtering.
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
 
-**2. Local-First, Privacy by Design**
+### Release Build Optimizations
 
-Your coding sessions contain sensitive information—API keys, internal codenames, debugging strategies. `cass` is architected to never transmit data:
+The release profile is aggressively optimized for binary size and performance:
 
-- No telemetry, analytics, or crash reporting
-- No network calls except optional GitHub release checks (easily disabled)
-- Index and database stored in user-controlled directories
-- Source agent files are read-only—never modified
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
 
-**3. Resilience Over Strictness**
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
 
-AI agents make mistakes. Humans make typos. `cass` is aggressively forgiving:
+### CI Pipeline & Artifacts
 
-- **Typo Correction**: Levenshtein distance ≤2 flags are auto-corrected with teaching feedback
-- **Case Normalization**: `--Robot`, `--LIMIT` → `--robot`, `--limit`
-- **Command Aliases**: `find`/`query`/`q` all resolve to `search`
-- **Graceful Degradation**: Encrypted ChatGPT conversations are detected and skipped rather than crashing
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
 
-**4. Incremental by Default**
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
 
-Full reindexing is expensive. `cass` minimizes work through careful state tracking:
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
 
-- **File Modification Times**: Connectors skip unchanged files using mtime comparison with 1-second slack for filesystem granularity
-- **Append-Only Messages**: When a conversation grows, only new messages (where `idx > max_existing_idx`) are inserted
-- **Watch State Persistence**: Per-connector timestamps in `watch_state.json` enable surgical re-scanning
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
 
-### Architectural Decisions
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
 
-| Decision | Rationale | Trade-off |
-|----------|-----------|-----------|
-| **Rust** | Memory safety without GC pauses; excellent async/parallelism | Steeper learning curve; longer compile times |
-| **SQLite + Tantivy** | Best-in-class for each job (relational vs. FTS) | Data duplication; two systems to maintain |
-| **Edge N-grams** | Sub-60ms prefix search on 100K+ documents | 3-5x index size increase |
-| **Sharded LRU Cache** | Reduces mutex contention in async searcher | Memory overhead; cache coherence complexity |
-| **Connector Trait** | Clean abstraction for diverse agent formats | Each new agent requires dedicated connector code |
-| **Atomic Progress Counters** | Lock-free UI updates during indexing | Relaxed ordering may show slightly stale counts |
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
 
 ---
 
-## 🔬 Under the Hood: Core Algorithms
+## 🧪 Developer Workflow
 
-### Edge N-gram Indexing
+We target **Rust Nightly** to leverage the latest optimizations.
 
-Traditional full-text search requires expensive wildcard expansion for prefix queries. `cass` inverts this by pre-computing all prefixes at index time:
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 
-```
-Input token: "authentication"
-Generated n-grams: "au", "aut", "auth", "authe", "authen", "authent", "authenti",
-                   "authentic", "authentica", "authenticat", "authenticati",
-                   "authenticatio", "authentication"
-```
+# Build & Test
+cargo build --release
+cargo test
 
-**Implementation** (`src/search/tantivy.rs:288-305`):
-- N-gram lengths: 2 to 20 characters
-- Stored in separate Tantivy fields: `title_prefix`, `content_prefix`
-- These fields are indexed but NOT stored (saves disk space)
-- Query "auth*" becomes a simple term lookup on the prefix field
-
-**Performance Impact**:
-- Index build time: ~20% slower
-- Index size: ~3x larger
-- Query time for prefixes: O(1) instead of O(n) regex scan
-
-### Bloom Filter Cache Gating
-
-When filtering cached search results against a refined query, string comparison is expensive. `cass` uses a 64-bit bloom filter as a fast negative gate:
-
-```rust
-fn hash_token(tok: &str) -> u64 {
-    let mut h: u64 = 5381;  // djb2 initial value
-    for b in tok.as_bytes() {
-        h = ((h << 5).wrapping_add(h)).wrapping_add(u64::from(*b));
-    }
-    1u64 << (h % 64)  // Map to single bit position
-}
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
 ```
 
-**How It Works**:
-1. During caching, compute `bloom64 = hash(token1) | hash(token2) | ...` for all content tokens
-2. On cache lookup, compute query bloom mask the same way
-3. If `(cached.bloom64 & query_bloom) != query_bloom`, the cached hit cannot match—skip expensive string comparison
-4. If bloom passes, proceed with actual substring matching
+### Release Build Optimizations
 
-**False Positive Rate**: With 64 bits and typical 5-15 tokens per query, ~70% of non-matching hits are rejected by bloom alone.
+The release profile is aggressively optimized for binary size and performance:
 
-### BM25 Ranking with Freshness Decay
-
-Tantivy provides BM25 (Best Match 25) scoring out of the box. `cass` extends this with:
-
-**Match Type Quality Factors**:
-| Match Type | Quality Factor |
-|------------|---------------|
-| Exact | 1.0 |
-| Prefix | 0.9 |
-| Suffix | 0.8 |
-| Substring | 0.7 |
-| Implicit Wildcard (fallback) | 0.6 |
-
-**Ranking Mode Formulas**:
-```
-Recent Heavy:    score = bm25 × 0.3 + recency × 0.7
-Balanced:        score = bm25 × 0.5 + recency × 0.5
-Relevance Heavy: score = bm25 × 0.8 + recency × 0.2
-Match Quality:   score = bm25 × 0.7 + recency × 0.2 + quality_factor × 0.1
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
 ```
 
-Where `recency` is an exponential decay: `e^(-age_days / decay_constant)`
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
 
-### Parallel Connector Scanning
+### CI Pipeline & Artifacts
 
-`cass` uses Rayon's work-stealing thread pool for parallel agent discovery:
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
 
-```rust
-let pending_batches: Vec<_> = connector_factories
-    .into_par_iter()
-    .filter_map(|(name, factory)| {
-        let conn = factory();  // Each thread gets fresh instance
-        if !conn.detect().detected { return None; }
-        conn.scan(&ctx).ok().map(|convs| (name, convs))
-    })
-    .collect();  // Parallel collection
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
 ```
-
-**Why This Matters**:
-- 11 connectors × ~100ms average scan time = 1100ms sequential
-- With 4 cores: ~250ms parallel (3.6x speedup)
-- Atomic counters provide lock-free progress updates to UI
-
-### Wildcard Query Strategy Selection
-
-`cass` automatically selects the optimal query strategy based on pattern:
-
-| Pattern | Strategy | Implementation |
-|---------|----------|----------------|
-| `foo` (exact) | Term query + edge n-gram | Direct Tantivy lookup |
-| `foo*` (prefix) | Edge n-gram field query | Uses pre-computed prefixes |
-| `*foo` (suffix) | Regex query | `RegexQuery(".*foo")` |
-| `*foo*` (substring) | Regex query | `RegexQuery(".*foo.*")` |
-
-**Auto-Fallback Logic**: When exact search returns <3 results and query has 1-2 terms, automatically retry with `*term*` wildcards. Results are flagged with `wildcard_fallback: true`.
 
 ---
 
-## 📈 Performance Characteristics
+## 🧪 Developer Workflow
 
-### Benchmarked Operations
+We target **Rust Nightly** to leverage the latest optimizations.
 
-| Operation | Typical Latency | Conditions |
-|-----------|-----------------|------------|
-| Prefix search (cached) | 2-8ms | Warm cache, <1000 results |
-| Prefix search (cold) | 40-60ms | First query, index in page cache |
-| Vector search 50k (F16, loaded) | 1.8ms / 4.6ms | Pre-convert on/off (search_perf::vector_index_search_50k_loaded, 2026-01-11) |
-| Substring search | 80-200ms | Regex fallback required |
-| Full reindex | 5-30s | Depending on total conversation count |
-| Incremental reindex | 50-500ms | Single conversation update |
-| TUI render frame | <16ms | 60 FPS target achieved |
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 
-Note: Benchmark timings are machine-dependent; values shown are from local dev runs.
+# Build & Test
+cargo build --release
+cargo test
 
-### Memory Usage
-
-| Component | Typical Size | Notes |
-|-----------|--------------|-------|
-| Base process | ~30MB | Rust binary + runtime |
-| SQLite connection | ~5MB | WAL mode, shared cache |
-| Tantivy reader | ~20-50MB | Segment metadata + mmap overhead |
-| Search cache | ~10-50MB | 2048 entries × ~500 bytes + hit data |
-| TUI state | ~2MB | Result buffers, render state |
-
-**Total typical footprint**: 70-140MB for a 50K message corpus.
-
-### Disk Usage
-
-| Component | Size Formula | Example (50K messages) |
-|-----------|--------------|------------------------|
-| SQLite database | ~200 bytes/message | ~10MB |
-| Tantivy index (base) | ~150 bytes/message | ~7.5MB |
-| Edge n-gram overhead | ~3x base index | ~22MB |
-| **Total** | ~600 bytes/message | ~30MB |
-
-### Scaling Characteristics
-
-`cass` is designed for individual developer use (1K-500K messages). Beyond that:
-
-| Message Count | Search Latency | Index Build | Recommendation |
-|---------------|----------------|-------------|----------------|
-| <10K | <20ms | <5s | Excellent performance |
-| 10K-100K | 20-60ms | 5-30s | Target operating range |
-| 100K-500K | 60-150ms | 30-120s | Consider periodic pruning |
-| >500K | >200ms | >2min | Archive old sessions |
-
----
-
-## 🔐 Security & Privacy Model
-
-### Data Access Patterns
-
-**What `cass` Reads**:
-- Agent session files (JSONL, JSON, SQLite, Markdown)
-- File modification times (for incremental indexing)
-- Environment variables (configuration only)
-
-**What `cass` Writes**:
-- `~/.local/share/coding-agent-search/` (or platform equivalent):
-  - `agent_search.db` - SQLite database
-  - `tantivy_index/` - Full-text search index
-  - `models/all-MiniLM-L6-v2/` - Optional local semantic model files
-  - `vector_index/` - Optional semantic vector index (`.cvvi`)
-  - `tui_state.json` - UI preferences
-  - `watch_state.json` - Incremental index state
-  - `cass.log` - Rotating log file
-
-**What `cass` NEVER Does**:
-- Modify source agent files (strictly read-only)
-- Make network requests (except optional update checks or explicit user-initiated model installs)
-- Execute code from indexed content
-- Access files outside known agent directories
-
-### Encryption Handling
-
-**ChatGPT Encrypted Conversations**:
-- Versions 2 and 3 of the ChatGPT macOS app use AES-256-GCM encryption
-- Keys are stored in the macOS Keychain, accessible only to OpenAI-signed apps
-- `cass` detects encrypted files and gracefully skips them
-- Optional: Provide your own key via `CHATGPT_ENCRYPTION_KEY` (base64) or `~/.config/cass/chatgpt_key.bin`
-
-**No Sensitive Data in Logs**:
-- Log files contain operation traces, not message content
-- Error messages are sanitized to avoid leaking paths/content
-
-### Threat Model
-
-`cass` assumes:
-- The local filesystem is trusted
-- The user running `cass` should have access to all indexed content
-- Network is untrusted (hence no network calls)
-
-`cass` does NOT protect against:
-- Root/admin access to the machine
-- Memory forensics while running
-- Physical access to the storage device
-
----
-
-## ⚖️ Comparison with Alternatives
-
-### Why Not Just `grep`/`ripgrep`?
-
-| Capability | grep/rg | cass |
-|------------|---------|------|
-| Raw text search | ✅ Excellent | ✅ Good |
-| Structured JSON parsing | ❌ Manual | ✅ Automatic |
-| Cross-format unification | ❌ No | ✅ 9 formats |
-| Relevance ranking | ❌ No | ✅ BM25 + recency |
-| Prefix search | ❌ Regex only | ✅ O(1) via n-grams |
-| Incremental indexing | ❌ N/A | ✅ Built-in |
-| Interactive TUI | ❌ No | ✅ Rich UI |
-
-**Verdict**: `grep` is better for one-off searches in known files. `cass` excels at exploring your entire coding history across agents.
-
-### Why Not a Cloud Search Service?
-
-| Aspect | Cloud Search | cass |
-|--------|--------------|------|
-| Privacy | ❌ Data leaves your machine | ✅ 100% local |
-| Latency | ~100-500ms (network) | ~20-60ms (local) |
-| Cost | 💰 Usage-based pricing | ✅ Free |
-| Offline use | ❌ Requires internet | ✅ Always available |
-| Setup | Minutes (API keys, etc.) | `curl | bash` |
-
-**Verdict**: Cloud search makes sense for team collaboration. `cass` is for individual developers who want speed and privacy.
-
-### Why Not SQLite FTS5 Alone?
-
-`cass` actually uses SQLite FTS5 as a fallback! But Tantivy provides:
-
-| Feature | SQLite FTS5 | Tantivy |
-|---------|-------------|---------|
-| BM25 scoring | ✅ Basic | ✅ Tunable |
-| Prefix queries | ❌ No native support | ✅ Via edge n-grams |
-| Concurrent reads | ⚠️ WAL helps | ✅ Designed for it |
-| Index compaction | ❌ Manual VACUUM | ✅ Automatic merges |
-| Memory mapping | ❌ No | ✅ Efficient mmap |
-
-**Verdict**: SQLite FTS5 is great for simple search. Tantivy handles the sophisticated queries `cass` needs.
-
----
-
-## 🔧 Extensibility: Adding New Connectors
-
-### The Connector Trait
-
-Every agent connector implements this interface (`src/connectors/mod.rs`):
-
-```rust
-pub trait Connector {
-    /// Check if this agent's data exists on the system
-    fn detect(&self) -> DetectionResult;
-
-    /// Scan and normalize all conversations (respecting since_ts for incremental)
-    fn scan(&self, ctx: &ScanContext) -> anyhow::Result<Vec<NormalizedConversation>>;
-}
-
-pub struct DetectionResult {
-    pub detected: bool,
-    pub root_paths: Vec<PathBuf>,  // Where to watch for changes
-    pub version: Option<String>,
-}
-
-pub struct ScanContext {
-    pub data_dir: PathBuf,         // Primary data directory (cass internal state)
-    pub scan_roots: Vec<ScanRoot>, // Scan roots for agent logs (empty = use default detection)
-    pub since_ts: Option<i64>,     // Only scan files modified after this timestamp
-}
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
 ```
 
-### Implementing a New Connector
+### Release Build Optimizations
 
-**Step 1**: Create the connector file (`src/connectors/my_agent.rs`):
+The release profile is aggressively optimized for binary size and performance:
 
-```rust
-use super::*;
-
-pub struct MyAgentConnector;
-
-impl Connector for MyAgentConnector {
-    fn detect(&self) -> DetectionResult {
-        let root = dirs::home_dir()
-            .map(|h| h.join(".my-agent/sessions"));
-
-        DetectionResult {
-            detected: root.as_ref().map(|p| p.exists()).unwrap_or(false),
-            root_paths: root.into_iter().collect(),
-            version: None,
-        }
-    }
-
-    fn scan(&self, ctx: &ScanContext) -> anyhow::Result<Vec<NormalizedConversation>> {
-        // Determine scan root - check if data_dir looks like our storage (for testing)
-        // or fall back to default detection
-        let looks_like_storage = |p: &PathBuf| {
-            p.to_str().map(|s| s.contains("my-agent")).unwrap_or(false)
-        };
-
-        let root = if ctx.use_default_detection() {
-            if looks_like_storage(&ctx.data_dir) && ctx.data_dir.exists() {
-                ctx.data_dir.clone()
-            } else {
-                // Fall back to default location
-                match dirs::home_dir().map(|h| h.join(".my-agent/sessions")) {
-                    Some(r) if r.exists() => r,
-                    _ => return Ok(Vec::new()),
-                }
-            }
-        } else {
-            // Explicit scan_roots provided
-            ctx.scan_roots.first()
-                .map(|sr| sr.path.clone())
-                .unwrap_or_else(|| ctx.data_dir.clone())
-        };
-
-        let mut conversations = Vec::new();
-
-        // Find session files
-        for entry in walkdir::WalkDir::new(&root) {
-            let entry = entry?;
-            if !entry.path().extension().map(|e| e == "json").unwrap_or(false) {
-                continue;
-            }
-
-            // Skip unchanged files for incremental indexing
-            if let Some(since) = ctx.since_ts {
-                if !file_modified_since(entry.path(), since) {
-                    continue;
-                }
-            }
-
-            // Parse and normalize
-            let conv = parse_my_agent_file(entry.path())?;
-            conversations.push(conv);
-        }
-
-        Ok(conversations)
-    }
-}
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
 ```
 
-**Step 2**: Register in the connector factory (`src/indexer/mod.rs`):
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
 
-```rust
-let connector_factories: Vec<(&'static str, fn() -> Box<dyn Connector + Send>)> = vec![
-    ("codex", || Box::new(CodexConnector::new())),
-    ("my_agent", || Box::new(MyAgentConnector)),  // Add here
-    // ...
-];
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
 ```
-
-**Step 3**: Add watch path classification (`src/indexer/mod.rs:classify_paths`):
-
-```rust
-if path_str.contains(".my-agent") {
-    kinds.insert(ConnectorKind::MyAgent);
-}
-```
-
-### Normalization Guidelines
-
-When converting agent-specific formats to `NormalizedConversation`:
-
-1. **Roles**: Map to `"user"`, `"assistant"`, `"system"`, `"tool"`, or `"agent"`
-2. **Timestamps**: Convert to milliseconds since Unix epoch (i64)
-3. **External ID**: Use a stable identifier unique within the agent (file path, UUID, etc.)
-4. **Content Flattening**: Extract searchable text from nested structures:
-   ```rust
-   // Tool calls become searchable text
-   "[Tool: ReadFile] path=/src/main.rs, lines=1-50"
-   ```
-5. **Workspace Detection**: Extract working directory from session metadata when available
 
 ---
 
-## 🗺️ Roadmap & Future Directions
+## 🧪 Developer Workflow
 
-### Near-Term (Next Few Releases)
+We target **Rust Nightly** to leverage the latest optimizations.
 
-- [ ] **Semantic Search**: Embed conversations using local models (Ollama integration) for meaning-based retrieval
-- [ ] **Session Grouping**: Automatically cluster related conversations by project/topic
-- [ ] **Export Improvements**: Better markdown/HTML export with syntax highlighting
-- [ ] **Windows Native**: First-class Windows support with native installer
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 
-### Medium-Term
+# Build & Test
+cargo build --release
+cargo test
 
-- [ ] **MCP Server Mode**: Run as a Model Context Protocol server for direct agent integration
-- [ ] **Conversation Analytics**: Token usage tracking, agent comparison dashboards
-- [ ] **Collaborative Features**: Optional encrypted sync between machines
-- [ ] **Plugin System**: User-defined connectors without recompiling
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
 
-### Long-Term Vision
+### Release Build Optimizations
 
-- [ ] **Agent Memory Layer**: Let AI agents query their own history as working memory
-- [ ] **Team Knowledge Base**: Shared, searchable repository of team coding sessions
-- [ ] **Learning from History**: Surface patterns in how problems were solved across sessions
+The release profile is aggressively optimized for binary size and performance:
 
-### Non-Goals
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
 
-These are explicitly out of scope:
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
 
-- **Cloud hosting**: `cass` will always be local-first
-- **Real-time collaboration**: That's a different tool category
-- **Agent execution**: `cass` searches history, it doesn't run agents
-- **Universal file search**: Focus remains on AI coding agent sessions
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
 
 ---
 
-## 📜 License
+## 🧪 Developer Workflow
 
-MIT. See [LICENSE](LICENSE) for details.
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target ** Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|
+| `check` | fmt, clippy, tests, benches, UBS scan | None |
+| `e2e` | Integration tests (install, index, filters) | `test-artifacts-e2e` (traces, logs) |
+| `coverage` | Code coverage with llvm-cov | `coverage-report` (lcov.info, summary) |
+
+**Coverage Reports:**
+- `lcov.info` - LCOV format for tools like codecov
+- `coverage-summary.txt` - Human-readable summary
+- Coverage % shown in GitHub Actions step summary
+
+**Test Artifacts:**
+- Trace files from `--trace-file` runs
+- Test run summary logs
+- Retained for 7 days (e2e) / 30 days (coverage)
+
+```bash
+# Generate coverage locally
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-features --workspace --text
+
+# Run specific e2e tests
+cargo test --test e2e_filters -- --test-threads=1
+```
+
+---
+
+## 🧪 Developer Workflow
+
+We target **Rust Nightly** to leverage the latest optimizations.
+
+```bash
+# Format & Lint
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+# Build & Test
+cargo build --release
+cargo test
+
+# Run End-to-End Tests
+cargo test --test e2e_index_tui
+cargo test --test install_scripts
+```
+
+### Release Build Optimizations
+
+The release profile is aggressively optimized for binary size and performance:
+
+```toml
+[profile.release]
+lto = true              # Link-time optimization across all crates
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Remove debug symbols from binary
+panic = "abort"         # Smaller panic handling (no unwinding)
+opt-level = "z"         # Optimize for size over speed
+```
+
+**Trade-offs**:
+- Build time is significantly longer (~3-5x)
+- Binary size is ~40-50% smaller
+- No stack traces on panic (use debug builds for development)
+
+### CI Pipeline & Artifacts
+
+The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
+
+| Job | Purpose | Artifacts |
+|-----|---------|-----------|

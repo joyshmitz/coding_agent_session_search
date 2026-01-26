@@ -1,6 +1,10 @@
 import { test as base, expect, Page } from '@playwright/test';
 import { readFileSync, existsSync } from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load environment variables from .env.test
 const envPath = path.resolve(__dirname, '../.env.test');
