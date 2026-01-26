@@ -40,6 +40,7 @@ export default defineConfig({
   },
 
   projects: [
+    // Desktop browsers
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
@@ -52,7 +53,17 @@ export default defineConfig({
       name: 'webkit',
       use: { ...devices['Desktop Safari'] },
     },
+    // Mobile devices (P6.2 cross-browser testing)
+    {
+      name: 'mobile-chrome',
+      use: { ...devices['Pixel 5'] },
+    },
+    {
+      name: 'mobile-safari',
+      use: { ...devices['iPhone 12'] },
+    },
   ],
 
   globalSetup: path.join(__dirname, 'e2e/setup/global-setup.ts'),
+  globalTeardown: path.join(__dirname, 'e2e/setup/global-teardown.ts'),
 });
