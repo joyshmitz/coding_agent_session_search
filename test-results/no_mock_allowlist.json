@@ -171,26 +171,6 @@
       "transitional": true
     },
     {
-      "path": "src/ui/tui.rs",
-      "pattern": "MockHit",
-      "rationale": "TRANSITIONAL: Mock search hit for TUI testing",
-      "owner": "ui-team",
-      "review_date": "2026-03-26",
-      "downstream_task": "bd-1c25",
-      "cfg_test_only": true,
-      "transitional": true
-    },
-    {
-      "path": "src/ui/tui.rs",
-      "pattern": "MockPane",
-      "rationale": "TRANSITIONAL: Mock pane for TUI testing",
-      "owner": "ui-team",
-      "review_date": "2026-03-26",
-      "downstream_task": "bd-1c25",
-      "cfg_test_only": true,
-      "transitional": true
-    },
-    {
       "path": "tests/e2e_cli_flows.rs",
       "pattern": "no mocks",
       "rationale": "Documentation comment stating tests use no mocks (false positive)",

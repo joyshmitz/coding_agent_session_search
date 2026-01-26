@@ -9487,40 +9487,29 @@ mod tests {
         selected.insert((0, 3));
         selected.insert((1, 0));
 
-        // Simulate panes structure
-        struct MockHit {
-            source_path: String,
-        }
-        struct MockPane {
-            hits: Vec<MockHit>,
-        }
-
-        let panes = [
-            MockPane {
+        // Use real AgentPane and SearchHit structures
+        let panes = vec![
+            AgentPane {
+                agent: "codex".into(),
                 hits: vec![
-                    MockHit {
-                        source_path: "path0".into(),
-                    },
-                    MockHit {
-                        source_path: "path1".into(),
-                    },
-                    MockHit {
-                        source_path: "path2".into(),
-                    },
-                    MockHit {
-                        source_path: "path3".into(),
-                    },
+                    make_hit("codex", "path0", 5.0, "snippet0"),
+                    make_hit("codex", "path1", 4.0, "snippet1"),
+                    make_hit("codex", "path2", 3.0, "snippet2"),
+                    make_hit("codex", "path3", 2.0, "snippet3"),
                 ],
+                selected: 0,
+                total_count: 4,
             },
-            MockPane {
-                hits: vec![MockHit {
-                    source_path: "pane1_path0".into(),
-                }],
+            AgentPane {
+                agent: "claude_code".into(),
+                hits: vec![make_hit("claude_code", "pane1_path0", 6.0, "snippet_p1")],
+                selected: 0,
+                total_count: 1,
             },
         ];
 
         // Collect selected hits like the bulk action does
-        let selected_hits: Vec<&MockHit> = selected
+        let selected_hits: Vec<&SearchHit> = selected
             .iter()
             .filter_map(|&(pane_idx, hit_idx)| {
                 panes.get(pane_idx).and_then(|p| p.hits.get(hit_idx))
