@@ -300,3 +300,32 @@ fn daemon_integration_crash_falls_back() {
     let scores = reranker.rerank("q", &["doc"]).unwrap();
     assert_eq!(scores, vec![0.5]);
 }
+
+#[test]
+fn daemon_integration_timeout_backoff_with_jitter() {
+    let harness = DaemonHarness::new(DaemonMode::Drop);
+    let daemon = harness.client();
+
+    let fallback = Arc::new(StaticEmbedder { dim: 4, value: 1.0 });
+    let cfg = DaemonRetryConfig {
+        max_attempts: 1,
+        base_delay: Duration::from_millis(20),
+        max_delay: Duration::from_millis(50),
+        jitter_pct: 0.5,
+    };
+
+    let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg.clone());
+    let _ = embedder.embed("first").unwrap();
+    let calls_after_first = harness.calls();
+
+    let _ = embedder.embed("second").unwrap();
+    let calls_after_second = harness.calls();
+    assert_eq!(calls_after_first, calls_after_second);
+
+    let max_jitter_ms = (cfg.base_delay.as_millis() as f64 * (1.0 + cfg.jitter_pct)).ceil();
+    std::thread::sleep(Duration::from_millis(max_jitter_ms as u64 + 10));
+
+    let _ = embedder.embed("third").unwrap();
+    let calls_after_third = harness.calls();
+    assert!(calls_after_third > calls_after_second);
+}

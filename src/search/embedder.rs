@@ -187,7 +187,15 @@ impl fmt::Display for EmbedderInfo {
 mod tests {
     use super::*;
 
-    /// Mock embedder for testing.
+    // ALLOWLIST: MockEmbedder is a test utility that verifies the Embedder trait contract
+    // without requiring ONNX runtime or model files. This is necessary because:
+    // 1. Unit tests need to verify trait behavior (dimension, id, is_semantic) independently
+    // 2. Tests should run without external dependencies or model downloads
+    // 3. This only tests the trait abstraction, not real embedding quality
+    // Integration tests use HashEmbedder or real models for semantic verification.
+    //
+    // Classification: (c) ALLOWLIST - Trait verification test utility
+    // See: test-results/no_mock_audit.md
     struct MockEmbedder {
         dimension: usize,
         is_semantic: bool,
