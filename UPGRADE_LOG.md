@@ -104,7 +104,11 @@ cargo update -p security-framework@2.11.1 --precise 3.5.1
 
 ## Tests
 
-- Not run yet (no dependency updates applied).
+- `cargo fmt --check` ✅
+- `CARGO_TARGET_DIR=target_upgrade_checks cargo check --all-targets` ✅ (initial run surfaced unused `ExportTaskEvent`; removed enum + unused import)
+- `CARGO_TARGET_DIR=target_upgrade_checks_2 cargo check --all-targets -q` ⏳ still running (build load from other cargo jobs)
+- `cargo clippy --all-targets -- -D warnings` ⏳ pending
+- `cargo test --all-targets` ⏳ pending
 
 ---
 
@@ -115,6 +119,10 @@ cargo outdated -w
 cargo update -p thiserror@1.0.69 --precise 2.0.18
 cargo update -p rand@0.8.5 --precise 0.9.2
 cargo update -p security-framework@2.11.1 --precise 3.5.1
+cargo fmt --check
+CARGO_TARGET_DIR=target_upgrade_checks cargo check --all-targets
+CARGO_TARGET_DIR=target_upgrade_checks_2 cargo check --all-targets -q
+cargo audit
 ```
 
 ---
@@ -123,3 +131,12 @@ cargo update -p security-framework@2.11.1 --precise 3.5.1
 
 - Upgrades are blocked by upstream dependencies that already appear to be at their latest stable versions.
 - Revisit when `ratatui`/`termwiz`, `tantivy`, or `native-tls` move to newer major versions that lift these constraints.
+
+## Security Notes
+
+`cargo audit` reported advisory warnings:
+- RUSTSEC-2025-0141: `bincode 1.3.3` (unmaintained) via `syntect`
+- RUSTSEC-2025-0057: `fxhash 0.2.1` (unmaintained)
+- RUSTSEC-2024-0436: `paste 1.0.15` (unmaintained) via `tokenizers`/`macro_rules_attribute`
+- RUSTSEC-2024-0320: `yaml-rust 0.4.5` (unmaintained) via `syntect`
+- RUSTSEC-2026-0002: `lru 0.12.5` (unsound) via `tantivy`

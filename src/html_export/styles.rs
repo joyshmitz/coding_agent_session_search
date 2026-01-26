@@ -2725,6 +2725,8 @@ const WORLD_CLASS_ENHANCEMENTS: &str = r#"
 }
 
 .floating-btn {
+    position: relative;
+    overflow: hidden;
     width: 44px;
     height: 44px;
     display: flex;

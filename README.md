@@ -239,6 +239,37 @@ cass search "auth error handling" --mode hybrid --robot
 - **Theming**: Adaptive Dark/Light modes with role-colored messages (User/Assistant/System). Toggle border style (`Ctrl+B`) between rounded Unicode and plain ASCII.
 - **Ranking Modes**: Cycle through `recent`/`balanced`/`relevance`/`quality` with `F12`; quality mode penalizes fuzzy matches.
 
+### 📄 HTML Session Export
+
+Export conversations as beautiful, self-contained HTML files with optional encryption:
+
+- **Self-Contained**: All CSS and JS inlined for offline viewing—no external dependencies required
+- **Progressive Enhancement**: CDN resources (Tailwind, Prism.js) enhance styling when online, graceful fallback when offline
+- **Password Protection**: AES-256-GCM encryption with PBKDF2 key derivation (600,000 iterations)—opens directly in any browser
+- **Rich Styling**: Dark/light themes, syntax-highlighted code blocks, collapsible tool calls
+- **Print-Friendly**: Optimized print styles with page breaks and footers
+- **Searchable**: Built-in search functionality within the exported document
+
+**TUI Usage**: Press `e` in the detail view to open the export modal, or `Ctrl+E` for quick export with defaults.
+
+**CLI Usage**:
+```bash
+# Basic export
+cass export-html /path/to/session.jsonl
+
+# With encryption
+cass export-html /path/to/session.jsonl --encrypt --password "secret"
+
+# Custom output location
+cass export-html session.jsonl --output-dir ~/exports --filename "my-session"
+
+# Open in browser after export
+cass export-html session.jsonl --open
+
+# Robot mode (JSON output)
+cass export-html session.jsonl --json
+```
+
 ### 🔗 Universal Connectors
 Ingests history from all major local agents, normalizing them into a unified `Conversation -> Message -> Snippet` model:
 - **Codex**: `~/.codex/sessions` (Rollout JSONL)
@@ -671,8 +702,12 @@ Beyond search, `cass` provides commands for deep-diving into specific sessions:
 ```bash
 # Export full conversation to shareable format
 cass export /path/to/session.jsonl --format markdown -o conversation.md
-cass export /path/to/session.jsonl --format html -o conversation.html
 cass export /path/to/session.jsonl --format json --include-tools
+
+# Export as self-contained HTML with encryption (recommended for sharing)
+cass export-html /path/to/session.jsonl                     # To Downloads folder
+cass export-html session.jsonl --encrypt --password "pwd"   # With password protection
+cass export-html session.jsonl --open --json                # Open in browser, JSON output
 
 # Expand context around a specific line (from search result)
 cass expand /path/to/session.jsonl -n 42 -C 5 --json
@@ -2127,7 +2162,8 @@ cass completions bash > ~/.bash_completion.d/cass
 | `introspect` | Full API schema: commands, arguments, response shapes |
 | `context <path>` | Find sessions related by workspace, day, or agent |
 | `view <path> -n N` | View source file at specific line (follow-up on search) |
-| `export <path>` | Export conversation to markdown/HTML/JSON |
+| `export <path>` | Export conversation to markdown/JSON |
+| `export-html <path>` | Export as self-contained HTML with optional encryption |
 | `expand <path> -n N` | Show messages around a specific line number |
 | `timeline` | Activity timeline with grouping by hour/day |
 | `sources` | Manage remote sources: add/list/remove/doctor/sync/mappings |

@@ -6,7 +6,7 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -558,7 +558,7 @@ fn render_preview(frame: &mut Frame, state: &ExportModalState, area: Rect, palet
         .border_style(Style::default().fg(palette.border))
         .title(Span::styled(" Preview ", Style::default().fg(palette.hint)));
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             &state.filename_preview,
             Style::default().fg(palette.fg),
@@ -568,6 +568,40 @@ fn render_preview(frame: &mut Frame, state: &ExportModalState, area: Rect, palet
             Style::default().fg(palette.hint),
         )),
     ];
+
+    let (progress_line, progress_style) = match &state.progress {
+        ExportProgress::Idle => (None, Style::default()),
+        ExportProgress::Preparing => (
+            Some("Preparing export...".to_string()),
+            Style::default().fg(palette.accent),
+        ),
+        ExportProgress::Encrypting => (
+            Some("Encrypting content...".to_string()),
+            Style::default().fg(palette.accent),
+        ),
+        ExportProgress::Writing => (
+            Some("Writing HTML file...".to_string()),
+            Style::default().fg(palette.accent),
+        ),
+        ExportProgress::Complete(path) => {
+            let filename = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            (
+                Some(format!("Exported: {filename}")),
+                Style::default().fg(palette.user),
+            )
+        }
+        ExportProgress::Error(message) => (
+            Some(format!("Error: {message}")),
+            Style::default().fg(Color::Rgb(247, 118, 142)),
+        ),
+    };
+
+    if let Some(line) = progress_line {
+        lines.push(Line::from(Span::styled(line, progress_style)));
+    }
 
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }

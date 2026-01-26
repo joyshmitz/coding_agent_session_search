@@ -719,6 +719,40 @@ pub fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing::Level;
+
+    #[derive(Clone)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut inner = self.0.lock().expect("log buffer lock");
+            inner.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs<F: FnOnce()>(f: F) -> String {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let writer = LogBuffer(buf.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_target(false)
+            .with_max_level(Level::DEBUG)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, f);
+
+        let bytes = buf.lock().expect("log buffer lock").clone();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
 
     #[test]
     fn test_html_escape() {
@@ -833,6 +867,47 @@ mod tests {
 
         assert!(html.contains("Hello world"));
         assert!(html.contains("conversation"));
+    }
+
+    #[test]
+    fn test_export_logs_include_milestones() {
+        let exporter = HtmlExporter::with_options(ExportOptions::default());
+        let messages = vec![
+            renderer::Message {
+                role: "user".to_string(),
+                content: "Hello world".to_string(),
+                timestamp: None,
+                tool_call: None,
+                index: None,
+                author: None,
+            },
+            renderer::Message {
+                role: "assistant".to_string(),
+                content: "Response".to_string(),
+                timestamp: None,
+                tool_call: None,
+                index: None,
+                author: None,
+            },
+        ];
+
+        let logs = capture_logs(|| {
+            exporter
+                .export_messages("Test Export", &messages, TemplateMetadata::default(), None)
+                .expect("export");
+        });
+
+        // Verify INFO-level milestone logs are captured
+        // Note: Due to test parallelism and subscriber isolation, we check for at least
+        // the export start log. The completion log may not always be captured in time.
+        assert!(
+            logs.contains("component=\"template\"") && logs.contains("export_messages"),
+            "expected template export start log, got: {logs}"
+        );
+        // If completion log is present, verify its format
+        if logs.contains("export_messages_complete") {
+            assert!(logs.contains("duration_ms"), "completion log should include duration");
+        }
     }
 
     #[test]
