@@ -160,6 +160,55 @@ tests/fixtures/
 3. Keep fixtures small but representative
 4. Document the fixture's purpose in a README
 
+### Fixture Helpers Module
+
+Use `tests/fixture_helpers.rs` for setting up connector tests:
+
+```rust
+use crate::fixture_helpers::{setup_connector_test, create_project_dir, write_session_file};
+
+#[test]
+fn test_my_connector() {
+    // Creates temp dir with "fixture-{agent}" naming
+    let (dir, data_dir) = setup_connector_test("claude");
+
+    // Create project structure
+    let project_dir = create_project_dir(&data_dir, "my-project");
+    write_session_file(&project_dir, "session.jsonl", &content);
+
+    // ... run connector tests ...
+}
+```
+
+**Important**: Use `fixture-{agent}` naming (not `mock-{agent}`) for temp directories.
+
+### Fixture Provenance (MANIFEST.json)
+
+All connector fixtures are tracked in `tests/fixtures/connectors/MANIFEST.json`:
+
+```json
+{
+  "fixtures": {
+    "claude": {
+      "source": "tests/fixtures/claude_code_real",
+      "capture_date": "2025-11-25",
+      "redaction_policy": "usernames_anonymized",
+      "files": [
+        {
+          "path": "projects/-test-project/agent-test123.jsonl",
+          "sha256": "89dd0a299dd4e761d185a65b652d6a29982cbc71aa9e07cfa3aa07475696c202"
+        }
+      ]
+    }
+  }
+}
+```
+
+When adding new fixtures:
+1. Add an entry to the MANIFEST.json
+2. Compute SHA256 hash: `sha256sum <file>`
+3. Document the capture date and redaction policy
+
 ### Loading Fixtures in Tests
 
 ```rust
