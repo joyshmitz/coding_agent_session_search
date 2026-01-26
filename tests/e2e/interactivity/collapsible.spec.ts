@@ -8,8 +8,8 @@ test.describe('Collapsible Sections', () => {
     await waitForPageReady(page);
 
     // Find details/collapsible elements
-    const details = page.locator('details.tool-call, details.tool, details:has(.tool-content)');
-    const detailsCount = await details.count();
+    let details = page.locator('details.tool-call, details.tool, details:has(.tool-content)');
+    let detailsCount = await details.count();
 
     if (detailsCount === 0) {
       // Try alternative selectors
@@ -20,6 +20,9 @@ test.describe('Collapsible Sections', () => {
         test.skip(true, 'No collapsible tool calls found');
         return;
       }
+      // Use alternative selector since it found elements
+      details = altCollapsibles;
+      detailsCount = altCount;
     }
 
     const firstDetails = details.first();
@@ -27,9 +30,10 @@ test.describe('Collapsible Sections', () => {
     // Should start collapsed (no 'open' attribute)
     const initiallyOpen = await firstDetails.getAttribute('open');
 
-    // Click to toggle
+    // Click to toggle - scroll into view first for stability
     const summary = firstDetails.locator('summary');
-    await summary.click();
+    await summary.evaluate((el) => el.scrollIntoView({ behavior: 'instant', block: 'center' }));
+    await summary.click({ force: true });
     await page.waitForTimeout(200);
 
     // Should now be open (state should have changed)
@@ -54,9 +58,10 @@ test.describe('Collapsible Sections', () => {
     const firstDetails = details.first();
     const content = firstDetails.locator('.tool-content, .tool-output, pre, code');
 
-    // Open the details
+    // Open the details - scroll into view first for stability
     const summary = firstDetails.locator('summary');
-    await summary.click();
+    await summary.evaluate((el) => el.scrollIntoView({ behavior: 'instant', block: 'center' }));
+    await summary.click({ force: true });
     await page.waitForTimeout(200);
 
     // Content should be visible
@@ -90,7 +95,9 @@ test.describe('Collapsible Sections', () => {
     const details = page.locator('details');
 
     if (hasExpandAll) {
-      await expandAllBtn.first().click();
+      const btn = expandAllBtn.first();
+      await btn.evaluate((el) => el.scrollIntoView({ behavior: 'instant', block: 'center' }));
+      await btn.click({ force: true });
       await page.waitForTimeout(300);
 
       // All should be open
@@ -101,7 +108,9 @@ test.describe('Collapsible Sections', () => {
     }
 
     if (hasCollapseAll) {
-      await collapseAllBtn.first().click();
+      const btn = collapseAllBtn.first();
+      await btn.evaluate((el) => el.scrollIntoView({ behavior: 'instant', block: 'center' }));
+      await btn.click({ force: true });
       await page.waitForTimeout(300);
 
       // All should be closed
@@ -252,7 +261,10 @@ test.describe('Copy to Clipboard', () => {
     // Read clipboard
     const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
 
-    // Should have some content
+    // Should have some content and match the original code
     expect(clipboardText.length).toBeGreaterThan(0);
+    if (expectedContent) {
+      expect(clipboardText.trim()).toBe(expectedContent.trim());
+    }
   });
 });
