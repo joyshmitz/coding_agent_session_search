@@ -1267,14 +1267,13 @@ impl CacheShards {
         let shard = self.shard_mut(shard_name);
         let new_cost = value.len();
         let new_bytes: usize = value.iter().map(CachedHit::approx_bytes).sum();
-        // Subtract old entry's cost/bytes if replacing
-        // Note: LruCache.get() with Arc<str> key works via Borrow<str>
-        let (old_cost, old_bytes) = shard.get(&key).map_or((0, 0), |v| {
+        let old_val = shard.put(key, value);
+        let (old_cost, old_bytes) = old_val.as_ref().map_or((0, 0), |v| {
             (v.len(), v.iter().map(CachedHit::approx_bytes).sum())
         });
-        shard.put(key, value);
-        self.total_cost += new_cost.saturating_sub(old_cost);
-        self.total_bytes += new_bytes.saturating_sub(old_bytes);
+
+        self.total_cost = self.total_cost.saturating_add(new_cost).saturating_sub(old_cost);
+        self.total_bytes = self.total_bytes.saturating_add(new_bytes).saturating_sub(old_bytes);
         self.evict_until_within_cap();
     }
 
