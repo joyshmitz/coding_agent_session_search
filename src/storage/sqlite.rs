@@ -18,7 +18,7 @@ use thiserror::Error;
 /// Serialize a JSON value to MessagePack bytes.
 /// Returns None for null/empty values to save storage.
 fn serialize_json_to_msgpack(value: &serde_json::Value) -> Option<Vec<u8>> {
-    if value.is_null() || (value.is_object() && value.as_object().unwrap().is_empty()) {
+    if value.is_null() || value.as_object().is_some_and(|o| o.is_empty()) {
         return None;
     }
     rmp_serde::to_vec(value).ok()
@@ -1481,7 +1481,7 @@ impl SqliteStorage {
     /// Convert a millisecond timestamp to a day_id (days since 2020-01-01).
     pub fn day_id_from_millis(timestamp_ms: i64) -> i64 {
         let secs = timestamp_ms / 1000;
-        (secs - Self::EPOCH_2020_SECS) / 86400
+        (secs - Self::EPOCH_2020_SECS).div_euclid(86400)
     }
 
     /// Convert a day_id back to a timestamp (milliseconds, start of day UTC).
@@ -1644,7 +1644,12 @@ impl SqliteStorage {
         tx.execute(
             r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
               SELECT
-                  COALESCE(CAST((c.started_at / 1000 - 1577836800) / 86400 AS INTEGER), 0) as day_id,
+                  COALESCE(
+                  CASE
+                    WHEN (c.started_at / 1000 - 1577836800) >= 0 THEN (c.started_at / 1000 - 1577836800) / 86400
+                    ELSE (c.started_at / 1000 - 1577836800 - 86399) / 86400
+                  END,
+                0) as day_id,
                   a.slug as agent_slug,
                   c.source_id,
                   COUNT(DISTINCT c.id) as session_count,
@@ -1662,7 +1667,12 @@ impl SqliteStorage {
         tx.execute(
             r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
               SELECT
-                  COALESCE(CAST((c.started_at / 1000 - 1577836800) / 86400 AS INTEGER), 0) as day_id,
+                  COALESCE(
+                  CASE
+                    WHEN (c.started_at / 1000 - 1577836800) >= 0 THEN (c.started_at / 1000 - 1577836800) / 86400
+                    ELSE (c.started_at / 1000 - 1577836800 - 86399) / 86400
+                  END,
+                0) as day_id,
                   'all',
                   c.source_id,
                   COUNT(DISTINCT c.id) as session_count,
@@ -1679,7 +1689,12 @@ impl SqliteStorage {
         tx.execute(
             r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
               SELECT
-                  COALESCE(CAST((c.started_at / 1000 - 1577836800) / 86400 AS INTEGER), 0) as day_id,
+                  COALESCE(
+                  CASE
+                    WHEN (c.started_at / 1000 - 1577836800) >= 0 THEN (c.started_at / 1000 - 1577836800) / 86400
+                    ELSE (c.started_at / 1000 - 1577836800 - 86399) / 86400
+                  END,
+                0) as day_id,
                   a.slug,
                   'all',
                   COUNT(DISTINCT c.id) as session_count,
@@ -1697,7 +1712,12 @@ impl SqliteStorage {
         tx.execute(
             r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
               SELECT
-                  COALESCE(CAST((c.started_at / 1000 - 1577836800) / 86400 AS INTEGER), 0) as day_id,
+                  COALESCE(
+                  CASE
+                    WHEN (c.started_at / 1000 - 1577836800) >= 0 THEN (c.started_at / 1000 - 1577836800) / 86400
+                    ELSE (c.started_at / 1000 - 1577836800 - 86399) / 86400
+                  END,
+                0) as day_id,
                   'all',
                   'all',
                   COUNT(DISTINCT c.id) as session_count,
