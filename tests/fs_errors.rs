@@ -302,7 +302,9 @@ fn newlines_only_file_handles_gracefully() {
 #[test]
 fn path_with_spaces_is_handled() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("fixture-claude/projects/project with spaces");
+    let projects = tmp
+        .path()
+        .join("fixture-claude/projects/project with spaces");
     fs::create_dir_all(&projects).unwrap();
 
     fs::write(

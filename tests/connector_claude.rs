@@ -4,9 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-// Migration note: Using "fixture-claude" naming instead of legacy "fixture-claude".
+// Migration note: Using "fixture-claude" naming instead of legacy "mock-claude".
 // See tests/fixtures/connectors/MANIFEST.json for provenance tracking.
-const FIXTURE_DIR_NAME: &str = "fixture-claude";
 
 #[test]
 fn claude_parses_project_fixture() {
