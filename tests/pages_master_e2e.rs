@@ -29,9 +29,11 @@ use coding_agent_search::model::types::{Agent, AgentKind};
 use coding_agent_search::pages::bundle::{BundleBuilder, BundleResult};
 use coding_agent_search::pages::encrypt::{DecryptionEngine, EncryptionEngine, load_config};
 use coding_agent_search::pages::export::{ExportEngine, ExportFilter, PathMode};
+use coding_agent_search::pages::fts::escape_fts5_query;
 use coding_agent_search::pages::key_management::{key_add_password, key_list, key_revoke};
 use coding_agent_search::pages::verify::verify_bundle;
 use coding_agent_search::storage::sqlite::SqliteStorage;
+use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -307,6 +309,18 @@ fn test_password_authentication_flow() {
         fs::read(&decrypted_path).unwrap(),
         "Decrypted content should match original"
     );
+
+    // Verify FTS search works on decrypted database
+    let conn = Connection::open(&decrypted_path).expect("open decrypted db");
+    let query = escape_fts5_query("optimize");
+    let hit_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?",
+            [query],
+            |r| r.get(0),
+        )
+        .expect("fts query");
+    assert!(hit_count > 0, "FTS should return matches after decrypt");
 
     // Test invalid password
     let enc_config = load_config(&artifacts.bundle.site_dir).expect("Failed to load config");

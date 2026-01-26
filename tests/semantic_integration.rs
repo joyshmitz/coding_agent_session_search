@@ -981,13 +981,14 @@ fn test_models_install_from_file_error() {
     let data_dir = tmp.path().join("cass_data");
     fs::create_dir_all(&data_dir).unwrap();
 
-    // Create a fake model file
-    let fake_model = tmp.path().join("fake_model.onnx");
-    fs::write(&fake_model, b"fake model content").unwrap();
+    // Use fixture model file instead of fake content
+    let fixture_dir = PathBuf::from("tests/fixtures/models");
+    let model_file = tmp.path().join("model.onnx");
+    fs::copy(fixture_dir.join("model.onnx.placeholder"), &model_file).unwrap();
 
     let output = cargo_bin_cmd!("cass")
         .args(["models", "install", "--from-file"])
-        .arg(&fake_model)
+        .arg(&model_file)
         .arg("--data-dir")
         .arg(&data_dir)
         .arg("-y")
