@@ -24,7 +24,8 @@ fn setup_encrypted_archive(dir: &Path, password: &str) -> Result<EncryptionConfi
 
     let mut engine = EncryptionEngine::default();
     engine.add_password_slot(password)?;
-    let config = engine.encrypt_file(&test_file, dir, |_, _| {})?;
+    let dir_buf = dir.to_path_buf();
+    let config = engine.encrypt_file(&test_file, &dir_buf, |_, _| {})?;
 
     fs::remove_file(&test_file)?;
     Ok(config)
@@ -39,7 +40,8 @@ fn setup_archive_with_recovery(dir: &Path, password: &str) -> Result<(Encryption
     engine.add_password_slot(password)?;
     let secret = RecoverySecret::generate();
     engine.add_recovery_slot(secret.as_bytes())?;
-    let config = engine.encrypt_file(&test_file, dir, |_, _| {})?;
+    let dir_buf = dir.to_path_buf();
+    let config = engine.encrypt_file(&test_file, &dir_buf, |_, _| {})?;
 
     fs::remove_file(&test_file)?;
     Ok((config, secret))

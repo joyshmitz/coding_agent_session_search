@@ -24,7 +24,8 @@ fn setup_encrypted_archive(dir: &Path, password: &str, content: &[u8]) -> Result
 
     let mut engine = EncryptionEngine::default();
     engine.add_password_slot(password)?;
-    let config = engine.encrypt_file(&test_file, dir, |_, _| {})?;
+    let dir_buf = dir.to_path_buf();
+    let config = engine.encrypt_file(&test_file, &dir_buf, |_, _| {})?;
 
     fs::remove_file(&test_file)?;
     Ok(config)
@@ -39,7 +40,8 @@ fn setup_multi_chunk_archive(dir: &Path, password: &str) -> Result<EncryptionCon
 
     let mut engine = EncryptionEngine::default();
     engine.add_password_slot(password)?;
-    let config = engine.encrypt_file(&test_file, dir, |_, _| {})?;
+    let dir_buf = dir.to_path_buf();
+    let config = engine.encrypt_file(&test_file, &dir_buf, |_, _| {})?;
 
     fs::remove_file(&test_file)?;
     Ok(config)
@@ -231,9 +233,9 @@ fn test_integrity_manifest_validates_files() -> Result<()> {
         let manifest: IntegrityManifest = serde_json::from_str(&content)?;
 
         // Verify each file's hash
-        for entry in &manifest.files {
-            let file_path = archive_dir.join(&entry.path);
-            assert!(file_path.exists(), "File {} should exist", entry.path);
+        for (path, _entry) in &manifest.files {
+            let file_path = archive_dir.join(path);
+            assert!(file_path.exists(), "File {} should exist", path);
         }
     }
 
@@ -261,8 +263,7 @@ fn test_detect_integrity_mismatch() -> Result<()> {
         let manifest: IntegrityManifest = serde_json::from_str(&integrity_content)?;
 
         // Find config.json entry and verify hash would mismatch
-        let config_entry = manifest.files.iter().find(|e| e.path == "config.json");
-        if let Some(entry) = config_entry {
+        if let Some(entry) = manifest.files.get("config.json") {
             let actual_content = fs::read(&config_path)?;
             let actual_hash = sha256_hex(&actual_content);
             assert_ne!(
@@ -512,7 +513,7 @@ fn test_error_messages_are_informative() -> Result<()> {
     let result = DecryptionEngine::unlock_with_password(config, "wrong-password");
     assert!(result.is_err(), "Wrong password should fail");
 
-    let error_msg = result.unwrap_err().to_string().to_lowercase();
+    let error_msg = result.err().expect("Expected error").to_string().to_lowercase();
     assert!(
         error_msg.contains("password") || error_msg.contains("key") || error_msg.contains("invalid"),
         "Error should mention password/key issue: {}",

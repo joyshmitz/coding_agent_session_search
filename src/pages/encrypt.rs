@@ -162,6 +162,14 @@ impl EncryptionEngine {
 
     /// Add a password-based key slot using Argon2id
     pub fn add_password_slot(&mut self, password: &str) -> Result<u8> {
+        // Validate password
+        if password.is_empty() {
+            anyhow::bail!("Password cannot be empty");
+        }
+        if password.trim().is_empty() {
+            anyhow::bail!("Password cannot be whitespace-only");
+        }
+
         let slot_id = self.key_slots.len() as u8;
 
         // Generate salt
