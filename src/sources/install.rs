@@ -515,10 +515,7 @@ impl RemoteInstaller {
             elapsed: start.elapsed(),
         });
 
-        let archive_name = url
-            .split('/')
-            .next_back()
-            .unwrap_or("cass-prebuilt.tar.gz");
+        let archive_name = url.split('/').next_back().unwrap_or("cass-prebuilt.tar.gz");
         let remote_archive_path = format!("/tmp/{}", archive_name);
 
         // Use curl or wget depending on availability
