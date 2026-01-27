@@ -3851,23 +3851,23 @@ fn run_cli_search(
             enable_warm: false,
         },
     )
-        .map_err(|e| CliError {
-            code: 9,
-            kind: "open-index",
-            message: format!("failed to open index: {e}"),
-            hint: Some("try cass index --full".to_string()),
-            retryable: true,
-        })?
-        .ok_or_else(|| CliError {
-            code: 3,
-            kind: "missing-index",
-            message: format!(
-                "Index not found at {}. Run 'cass index --full' first.",
-                index_path.display()
-            ),
-            hint: None,
-            retryable: true,
-        })?;
+    .map_err(|e| CliError {
+        code: 9,
+        kind: "open-index",
+        message: format!("failed to open index: {e}"),
+        hint: Some("try cass index --full".to_string()),
+        retryable: true,
+    })?
+    .ok_or_else(|| CliError {
+        code: 3,
+        kind: "missing-index",
+        message: format!(
+            "Index not found at {}. Run 'cass index --full' first.",
+            index_path.display()
+        ),
+        hint: None,
+        retryable: true,
+    })?;
 
     // Determine effective search mode (default to Lexical)
     let effective_mode = mode.unwrap_or(SearchMode::Lexical);
