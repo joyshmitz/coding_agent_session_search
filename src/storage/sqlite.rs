@@ -2243,19 +2243,17 @@ fn batch_insert_fts_messages(tx: &Transaction<'_>, entries: &[FtsEntry]) -> Resu
         );
 
         // Flatten parameters
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(chunk.len() * 7);
+        // Capacity: chunk.len() * 7
+        let mut params_refs: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() * 7);
         for entry in chunk {
-            params_vec.push(Box::new(entry.content.clone()));
-            params_vec.push(Box::new(entry.title.clone()));
-            params_vec.push(Box::new(entry.agent.clone()));
-            params_vec.push(Box::new(entry.workspace.clone()));
-            params_vec.push(Box::new(entry.source_path.clone()));
-            params_vec.push(Box::new(entry.created_at));
-            params_vec.push(Box::new(entry.message_id));
+            params_refs.push(&entry.content);
+            params_refs.push(&entry.title);
+            params_refs.push(&entry.agent);
+            params_refs.push(&entry.workspace);
+            params_refs.push(&entry.source_path);
+            params_refs.push(&entry.created_at);
+            params_refs.push(&entry.message_id);
         }
-
-        let params_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
 
         if let Err(e) = tx.execute(&sql, params_refs.as_slice()) {
             // FTS is best-effort; log and continue

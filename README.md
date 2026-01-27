@@ -3,6 +3,7 @@
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
 ![Rust](https://img.shields.io/badge/Rust-nightly-orange.svg)
 ![Status](https://img.shields.io/badge/status-alpha-purple.svg)
+[![Coverage](https://codecov.io/gh/Dicklesworthstone/coding_agent_session_search/branch/main/graph/badge.svg)](https://codecov.io/gh/Dicklesworthstone/coding_agent_session_search)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 **Unified, high-performance TUI to index and search your local coding agent history.**
