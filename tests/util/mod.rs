@@ -1,5 +1,39 @@
 pub mod e2e_log;
 
+// =============================================================================
+// Verbose Logging Support
+// =============================================================================
+
+/// Check if verbose logging is enabled via E2E_VERBOSE environment variable.
+#[allow(dead_code)]
+pub fn is_verbose() -> bool {
+    std::env::var("E2E_VERBOSE").is_ok()
+}
+
+/// Log a verbose message to stderr if E2E_VERBOSE is set.
+/// Includes ISO-8601 timestamp for correlation with other logs.
+#[allow(dead_code)]
+pub fn verbose_log(msg: &str) {
+    if is_verbose() {
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+        eprintln!("[{} VERBOSE] {}", timestamp, msg);
+    }
+}
+
+/// Macro for verbose logging with format string support.
+///
+/// # Example
+/// ```ignore
+/// verbose!("Starting test with {} fixtures", fixture_count);
+/// verbose!("Created temp directory at {:?}", temp_dir);
+/// ```
+#[macro_export]
+macro_rules! verbose {
+    ($($arg:tt)*) => {
+        $crate::util::verbose_log(&format!($($arg)*))
+    };
+}
+
 use coding_agent_search::connectors::{
     NormalizedConversation, NormalizedMessage, NormalizedSnippet,
 };

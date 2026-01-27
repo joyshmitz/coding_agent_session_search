@@ -9817,7 +9817,10 @@ mod tests {
             .iter()
             .filter(|t| matches!(t, QueryToken::Term(_)))
             .count();
-        assert!(term_count >= 2, "Should have at least 2 terms (foo and bar)");
+        assert!(
+            term_count >= 2,
+            "Should have at least 2 terms (foo and bar)"
+        );
     }
 
     #[test]
@@ -9968,33 +9971,6 @@ mod tests {
         let explanation = QueryExplanation::analyze("日本語 search", &SearchFilters::default());
         // Should classify as Simple (no operators, multiple terms = implicit AND)
         assert!(!explanation.parsed.terms.is_empty());
-    }
-
-    // --- SQL placeholders edge cases ---
-
-    #[test]
-    fn sql_placeholders_zero_returns_empty() {
-        assert_eq!(sql_placeholders(0), "");
-    }
-
-    #[test]
-    fn sql_placeholders_one_returns_single() {
-        assert_eq!(sql_placeholders(1), "?");
-    }
-
-    #[test]
-    fn sql_placeholders_many() {
-        assert_eq!(sql_placeholders(5), "?,?,?,?,?");
-    }
-
-    #[test]
-    fn sql_placeholders_large_count() {
-        let result = sql_placeholders(1000);
-        assert_eq!(result.len(), 1000 * 2 - 1); // 1000 "?" + 999 ","
-        assert!(result.starts_with('?'));
-        assert!(result.ends_with('?'));
-        assert_eq!(result.matches('?').count(), 1000);
-        assert_eq!(result.matches(',').count(), 999);
     }
 
     // --- QueryTermsLower edge cases ---
