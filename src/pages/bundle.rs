@@ -50,6 +50,7 @@ const PAGES_ASSETS: &[(&str, &[u8])] = &[
         "attachments.js",
         include_bytes!("../pages_assets/attachments.js"),
     ),
+    ("settings.js", include_bytes!("../pages_assets/settings.js")),
 ];
 
 /// Integrity entry for a single file
