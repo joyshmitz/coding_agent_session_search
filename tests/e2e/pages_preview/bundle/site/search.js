@@ -562,6 +562,31 @@ function renderDirectResults() {
 }
 
 /**
+ * Sanitize FTS5 snippet HTML
+ * Escapes all content but preserves <mark> tags
+ */
+function sanitizeSnippet(html) {
+    if (!html) return '';
+    
+    // Use rare private use characters as placeholders
+    const MARK_OPEN = '\uE000';
+    const MARK_CLOSE = '\uE001';
+    
+    // Replace markers with placeholders
+    const safe = html
+        .replace(/<mark>/g, MARK_OPEN)
+        .replace(/<\/mark>/g, MARK_CLOSE);
+        
+    // Escape the entire string (handling all user content)
+    const escaped = escapeHtml(safe);
+    
+    // Restore markers
+    return escaped
+        .replace(new RegExp(MARK_OPEN, 'g'), '<mark>')
+        .replace(new RegExp(MARK_CLOSE, 'g'), '</mark>');
+}
+
+/**
  * Create a result card element (for virtual list)
  * @private
  */
@@ -582,7 +607,7 @@ function createResultCard(result, index) {
             <span class="result-agent">${escapeHtml(formatAgentName(result.agent))}</span>
         </div>
         ${result.snippet ? `
-            <div class="result-snippet">${result.snippet}</div>
+            <div class="result-snippet">${sanitizeSnippet(result.snippet)}</div>
         ` : ''}
         <div class="result-meta">
             ${result.workspace ? `<span class="result-workspace">${escapeHtml(formatWorkspace(result.workspace))}</span>` : ''}
@@ -624,7 +649,7 @@ function createResultCardHtml(result) {
                 <span class="result-agent">${escapeHtml(formatAgentName(result.agent))}</span>
             </div>
             ${result.snippet ? `
-                <div class="result-snippet">${result.snippet}</div>
+                <div class="result-snippet">${sanitizeSnippet(result.snippet)}</div>
             ` : ''}
             <div class="result-meta">
                 ${result.workspace ? `<span class="result-workspace">${escapeHtml(formatWorkspace(result.workspace))}</span>` : ''}
@@ -798,9 +823,32 @@ function escapeHtml(text) {
 }
 
 /**
+ * Set the search query programmatically.
+ * Optionally triggers a search (default true).
+ */
+export async function setSearchQuery(query, options = {}) {
+    const { runSearch = true } = options;
+    if (!elements.searchInput) {
+        return;
+    }
+
+    const normalized = (query ?? '').toString();
+    elements.searchInput.value = normalized;
+    clearTimeout(searchTimeout);
+
+    if (runSearch) {
+        await handleSearch(normalized);
+    } else {
+        currentQuery = normalized.trim();
+        updateSearchModeIndicator(currentQuery);
+    }
+}
+
+/**
  * Clear search and reset to initial state
  */
 export function clearSearch() {
+    clearTimeout(searchTimeout);
     currentQuery = '';
     currentFilters = { agent: null, since: null, until: null };
     currentSearchMode = 'auto';
@@ -809,6 +857,7 @@ export function clearSearch() {
 
     // Clean up virtual list if it exists
     destroyVirtualList();
+    hideLoading();
 
     if (elements.searchInput) {
         elements.searchInput.value = '';

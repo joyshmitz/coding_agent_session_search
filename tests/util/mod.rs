@@ -4,19 +4,65 @@ pub mod e2e_log;
 // Verbose Logging Support
 // =============================================================================
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::sync::Mutex;
+
+/// Global verbose log file handle (lazily initialized).
+static VERBOSE_LOG_FILE: std::sync::LazyLock<Mutex<Option<File>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
 /// Check if verbose logging is enabled via E2E_VERBOSE environment variable.
 #[allow(dead_code)]
 pub fn is_verbose() -> bool {
     std::env::var("E2E_VERBOSE").is_ok()
 }
 
-/// Log a verbose message to stderr if E2E_VERBOSE is set.
+/// Initialize verbose logging with a specific log file path.
+/// Called automatically by VerboseLogger, but can be called manually for custom paths.
+#[allow(dead_code)]
+pub fn init_verbose_log(path: &std::path::Path) -> std::io::Result<()> {
+    if !is_verbose() {
+        return Ok(());
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+
+    let mut guard = VERBOSE_LOG_FILE.lock().unwrap();
+    *guard = Some(file);
+
+    // Write init message
+    drop(guard);
+    verbose_log("Verbose logging initialized");
+    Ok(())
+}
+
+/// Log a verbose message if E2E_VERBOSE is set.
+/// Writes to both stderr and a file (if initialized).
 /// Includes ISO-8601 timestamp for correlation with other logs.
 #[allow(dead_code)]
 pub fn verbose_log(msg: &str) {
-    if is_verbose() {
-        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
-        eprintln!("[{} VERBOSE] {}", timestamp, msg);
+    if !is_verbose() {
+        return;
+    }
+
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+    let line = format!("[{} VERBOSE] {}", timestamp, msg);
+
+    // Write to stderr
+    eprintln!("{}", line);
+
+    // Write to file if initialized
+    if let Ok(mut guard) = VERBOSE_LOG_FILE.lock()
+        && let Some(ref mut file) = *guard
+    {
+        let _ = writeln!(file, "{}", line);
+        let _ = file.flush();
     }
 }
 
@@ -32,6 +78,85 @@ macro_rules! verbose {
     ($($arg:tt)*) => {
         $crate::util::verbose_log(&format!($($arg)*))
     };
+}
+
+/// RAII guard for verbose logging session.
+/// Automatically initializes the verbose log file and provides structured logging.
+#[allow(dead_code)]
+pub struct VerboseLogger {
+    log_path: std::path::PathBuf,
+}
+
+#[allow(dead_code)]
+impl VerboseLogger {
+    /// Create a new VerboseLogger for a test.
+    /// Log file is written to: test-results/e2e/verbose_{suite}_{test}_{timestamp}.log
+    pub fn new(suite: &str, test_name: &str) -> Self {
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            });
+
+        let log_path = manifest_dir
+            .join("test-results")
+            .join("e2e")
+            .join(format!("verbose_rust_{}_{}.log", suite, timestamp));
+
+        if is_verbose() {
+            let _ = init_verbose_log(&log_path);
+            verbose_log(&format!("=== Verbose log for {suite}::{test_name} ==="));
+        }
+
+        Self { log_path }
+    }
+
+    /// Get the path to the verbose log file.
+    pub fn log_path(&self) -> &std::path::Path {
+        &self.log_path
+    }
+
+    /// Log a phase start.
+    pub fn phase_start(&self, phase: &str, description: Option<&str>) {
+        if let Some(desc) = description {
+            verbose_log(&format!("PHASE_START name={phase} description=\"{desc}\""));
+        } else {
+            verbose_log(&format!("PHASE_START name={phase}"));
+        }
+    }
+
+    /// Log a phase end with duration.
+    pub fn phase_end(&self, phase: &str, duration_ms: u64) {
+        verbose_log(&format!("PHASE_END name={phase} duration_ms={duration_ms}"));
+    }
+
+    /// Log an operation with context.
+    pub fn operation(&self, op: &str, details: &str) {
+        verbose_log(&format!("{op}: {details}"));
+    }
+
+    /// Log a file operation.
+    pub fn file_op(&self, op: &str, path: &std::path::Path) {
+        verbose_log(&format!("FILE_{op} path={}", path.display()));
+    }
+
+    /// Log a command execution.
+    pub fn command(&self, cmd: &str, args: &[&str]) {
+        verbose_log(&format!("COMMAND {} {}", cmd, args.join(" ")));
+    }
+
+    /// Log an assertion with context.
+    pub fn assertion(&self, name: &str, expected: &str, actual: &str) {
+        verbose_log(&format!(
+            "ASSERT {name}: expected={expected} actual={actual}"
+        ));
+    }
+
+    /// Log state transition.
+    pub fn state(&self, key: &str, value: &str) {
+        verbose_log(&format!("STATE {key}={value}"));
+    }
 }
 
 use coding_agent_search::connectors::{
@@ -65,10 +190,8 @@ pub fn load_probe_fixture(name: &str) -> HostProbeResult {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/sources/probe")
         .join(format!("{}.json", name));
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("Failed to read probe fixture '{}': {}", name, e));
-    serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("Failed to parse probe fixture '{}': {}", name, e))
+    let content = std::fs::read_to_string(&path).expect("Failed to read probe fixture");
+    serde_json::from_str(&content).expect("Failed to parse probe fixture")
 }
 
 /// Pre-built probe fixtures for common test scenarios.

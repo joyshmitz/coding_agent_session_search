@@ -1,7 +1,7 @@
-Integrity Fingerprint: 1071cbcf6c8ab110
+Integrity Fingerprint: 75a340430fa1b4b8
 
-Generated: 2026-01-26T16:24:52.373395547+00:00
+Generated: 2026-01-27T23:00:48.835114568+00:00
 
 Verify this fingerprint matches the one displayed in the web viewer
-before entering your password. If it doesn't match, the archive may
-have been tampered with.
+before proceeding. If it doesn't match, the archive may have been
+tampered with.

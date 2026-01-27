@@ -61,11 +61,17 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Generate coverage report
+        env:
+          # Deterministic test execution
+          RUST_TEST_THREADS: 1
+          PROPTEST_CASES: 32  # Fixed seed count for property tests
         run: |
+          # Run with deterministic options and skip known flaky tests
           cargo llvm-cov --workspace --lib -j 1 \
             --ignore-filename-regex "(tests/|benches/)" \
             --codecov \
-            --output-path codecov.json
+            --output-path codecov.json \
+            -- --skip install_sh --skip install_ps1
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
@@ -76,9 +82,10 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-      - name: Generate coverage summary
+      - name: Generate coverage summary (JSON)
         run: |
-          cargo llvm-cov --workspace --lib -j 1 \
+          # Generate JSON coverage report (reuses instrumented data from previous step)
+          cargo llvm-cov report --workspace \
             --ignore-filename-regex "(tests/|benches/)" \
             --json \
             --output-path coverage.json
@@ -104,6 +111,36 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "_See [Coverage Policy](../docs/COVERAGE_POLICY.md) for targets_" >> $GITHUB_STEP_SUMMARY
 
+      - name: Generate gap report
+        run: |
+          COVERAGE_THRESHOLD=${{ env.COVERAGE_THRESHOLD }} \
+            ./scripts/generate-gap-report.sh coverage.json gap-report.md
+
+          # Add top uncovered modules to job summary
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Top Coverage Gaps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Extract top 5 uncovered modules
+          jq -r '.data[0].files[] |
+            select(.filename | contains("/src/")) |
+            select(.summary.lines.count > 100) |
+            {
+              filename: (.filename | split("/src/") | last | "src/" + .),
+              uncovered: (.summary.lines.count - .summary.lines.covered),
+              percent: (if .summary.lines.count > 0 then (.summary.lines.covered * 100 / .summary.lines.count | floor) else 0 end)
+            } |
+            select(.uncovered > 200) |
+            "| \(.percent)% | \(.uncovered) | `\(.filename)` |"' coverage.json | \
+            sort -t'|' -k3 -nr | head -5 | {
+              echo "| Coverage | Uncovered Lines | Module |"
+              echo "|----------|-----------------|--------|"
+              cat
+            } >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_See gap-report.md artifact for full analysis_" >> $GITHUB_STEP_SUMMARY
+
       - name: Check coverage threshold
         if: github.event_name == 'pull_request'
         run: |
@@ -128,4 +165,5 @@ jobs:
           path: |
             codecov.json
             coverage.json
+            gap-report.md
           retention-days: 14

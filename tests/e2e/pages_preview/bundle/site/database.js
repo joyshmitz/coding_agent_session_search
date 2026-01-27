@@ -2,8 +2,10 @@
  * cass Archive Database Module
  *
  * sqlite-wasm integration for browser-based database queries.
- * Uses OPFS for persistence when available, falls back to in-memory.
+ * Uses OPFS for persistence when user has opted in, falls back to in-memory.
  */
+
+import { isOpfsEnabled } from './storage.js';
 
 // Module state
 let sqlite3 = null;
@@ -26,8 +28,8 @@ export async function initDatabase(dbBytes) {
     // Load sqlite-wasm module
     sqlite3 = await loadSqliteWasm();
 
-    // Try OPFS first (better performance, persists in cache)
-    if (sqlite3.oo1.OpfsDb && navigator.storage?.getDirectory) {
+    // Try OPFS first (better performance, persists in cache) if user opted in
+    if (isOpfsEnabled() && sqlite3.oo1.OpfsDb && navigator.storage?.getDirectory) {
         try {
             await writeBytesToOPFS(dbBytes);
             db = new sqlite3.oo1.OpfsDb('/cass-archive.sqlite3');
