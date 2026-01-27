@@ -373,6 +373,20 @@ impl SyncEngine {
         remote_home: Option<&str>,
     ) -> PathSyncResult {
         let start = Instant::now();
+        if remote_path.starts_with('~') && remote_home.is_none() {
+            let local_path = dest_dir.join(path_to_safe_dirname(remote_path));
+            return PathSyncResult {
+                remote_path: remote_path.to_string(),
+                local_path,
+                success: false,
+                error: Some(
+                    "Cannot expand '~' in remote path; failed to determine remote home directory"
+                        .to_string(),
+                ),
+                duration_ms: start.elapsed().as_millis() as u64,
+                ..Default::default()
+            };
+        }
 
         // Expand ~ using pre-fetched home directory (no SSH call here)
         let expanded_path = Self::expand_tilde_with_home(remote_path, remote_home);
@@ -528,6 +542,20 @@ impl SyncEngine {
         remote_home: Option<&str>,
     ) -> PathSyncResult {
         let start = Instant::now();
+        if remote_path.starts_with('~') && remote_home.is_none() {
+            let local_path = dest_dir.join(path_to_safe_dirname(remote_path));
+            return PathSyncResult {
+                remote_path: remote_path.to_string(),
+                local_path,
+                success: false,
+                error: Some(
+                    "Cannot expand '~' in remote path; failed to determine remote home directory"
+                        .to_string(),
+                ),
+                duration_ms: start.elapsed().as_millis() as u64,
+                ..Default::default()
+            };
+        }
         let expanded_path = Self::expand_tilde_with_home(remote_path, remote_home);
         // Use raw remote_path for stability (independent of home expansion success)
         let local_path = dest_dir.join(path_to_safe_dirname(remote_path));
