@@ -60,7 +60,11 @@ fn api_version_reports_contract() {
     let json: Value = serde_json::from_str(stdout.trim()).expect("valid api-version json");
     assert_eq!(json["api_version"], 1);
     assert_eq!(json["contract_version"], "1");
-    assert!(json["crate_version"].is_string());
+    assert!(
+        json["crate_version"].is_string(),
+        "crate_version should be a string, got: {:?}",
+        json["crate_version"]
+    );
 }
 
 #[test]
@@ -100,18 +104,46 @@ fn introspect_global_flags_have_types_and_defaults() {
                 assert_eq!(flag["value_type"], "enum");
                 assert_eq!(flag["default"], "auto");
                 let enums = flag["enum_values"].as_array().unwrap();
-                assert!(enums.iter().any(|v| v == "auto"));
-                assert!(enums.iter().any(|v| v == "never"));
-                assert!(enums.iter().any(|v| v == "always"));
+                assert!(
+                    enums.iter().any(|v| v == "auto"),
+                    "color enum should have 'auto', got: {:?}",
+                    enums
+                );
+                assert!(
+                    enums.iter().any(|v| v == "never"),
+                    "color enum should have 'never', got: {:?}",
+                    enums
+                );
+                assert!(
+                    enums.iter().any(|v| v == "always"),
+                    "color enum should have 'always', got: {:?}",
+                    enums
+                );
             }
             "progress" => {
                 assert_eq!(flag["value_type"], "enum");
                 assert_eq!(flag["default"], "auto");
                 let enums = flag["enum_values"].as_array().unwrap();
-                assert!(enums.iter().any(|v| v == "auto"));
-                assert!(enums.iter().any(|v| v == "bars"));
-                assert!(enums.iter().any(|v| v == "plain"));
-                assert!(enums.iter().any(|v| v == "none"));
+                assert!(
+                    enums.iter().any(|v| v == "auto"),
+                    "progress enum should have 'auto', got: {:?}",
+                    enums
+                );
+                assert!(
+                    enums.iter().any(|v| v == "bars"),
+                    "progress enum should have 'bars', got: {:?}",
+                    enums
+                );
+                assert!(
+                    enums.iter().any(|v| v == "plain"),
+                    "progress enum should have 'plain', got: {:?}",
+                    enums
+                );
+                assert!(
+                    enums.iter().any(|v| v == "none"),
+                    "progress enum should have 'none', got: {:?}",
+                    enums
+                );
             }
             "db" => {
                 assert_eq!(flag["value_type"], "path");

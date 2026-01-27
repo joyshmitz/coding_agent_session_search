@@ -66,7 +66,12 @@ fn sources_list_empty() {
     );
 
     let start = tracker.start("verify_output", Some("Verify empty sources message"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("No sources configured") || stdout.contains("0 sources"),
@@ -110,7 +115,12 @@ sync_schedule = "manual"
     tracker.end("run_sources_list", Some("Run sources list"), start);
 
     let start = tracker.start("verify_output", Some("Verify source appears in output"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("laptop"),
@@ -172,7 +182,12 @@ sync_schedule = "daily"
         "verify_output",
         Some("Verify verbose output contains details"),
     );
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("workstation"), "Missing source name");
     assert!(
@@ -224,7 +239,12 @@ paths = ["~/.claude/projects"]
     );
 
     let start = tracker.start("verify_json", Some("Verify JSON structure and content"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("valid JSON output");
     assert!(
@@ -409,7 +429,11 @@ fn sources_add_no_paths_error() {
     );
 
     let start = tracker.start("verify_error", Some("Verify paths error reported"));
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "command should have failed but succeeded with: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("No paths") || stderr.contains("path"),
@@ -468,7 +492,11 @@ paths = ["~/.claude/projects"]
     );
 
     let start = tracker.start("verify_error", Some("Verify duplicate error"));
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "command should have failed but succeeded with: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("already exists") || stderr.contains("duplicate"),
@@ -515,7 +543,11 @@ fn sources_add_invalid_url() {
     );
 
     let start = tracker.start("verify_error", Some("Verify invalid URL error"));
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "command should have failed but succeeded with: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("username") || stderr.contains("Invalid"),
@@ -559,7 +591,12 @@ fn sources_add_auto_name() {
     );
 
     let start = tracker.start("verify_auto_name", Some("Verify auto-generated name"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let config_content = read_sources_config(&config_dir);
     assert!(
         config_content.contains("name = \"devlaptop\""),
@@ -685,7 +722,11 @@ paths = ["~/.claude/projects"]
 
     let start = tracker.start("verify_error", Some("Verify not found error"));
     // Should fail gracefully
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "command should have failed but succeeded with: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not found") || stderr.contains("does not exist"),
@@ -809,7 +850,12 @@ fn sources_doctor_no_sources() {
 
     let start = tracker.start("verify_output", Some("Verify no sources message"));
     // Should succeed but indicate no sources
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("No") && stdout.contains("sources"),
@@ -998,7 +1044,12 @@ fn sources_sync_no_sources() {
     );
 
     let start = tracker.start("verify_output", Some("Verify no sources message"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("No") && stdout.contains("sources"),
@@ -1253,7 +1304,12 @@ fn sources_workflow_add_list_remove() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources add command");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     tracker.end("add_source", Some("Add server source"), start);
 
     // 2. List sources - should show the added source
@@ -1266,7 +1322,12 @@ fn sources_workflow_add_list_remove() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources list command");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("server"));
     tracker.end(
@@ -1282,7 +1343,12 @@ fn sources_workflow_add_list_remove() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources remove command");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     tracker.end("remove_source", Some("Remove server source"), start);
 
     // 4. List again - should be empty
@@ -1292,7 +1358,12 @@ fn sources_workflow_add_list_remove() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources list command");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stdout.contains("server"),
@@ -1361,7 +1432,12 @@ fn sources_multiple_add_list() {
         .output()
         .expect("sources list command");
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
     let sources = json["sources"].as_array().expect("sources array");
 
@@ -1424,7 +1500,12 @@ paths = ["~/.claude/projects"]
     );
 
     let start = tracker.start("verify_output", Some("Verify empty mappings message"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("No") || stdout.contains("0 mapping"),
@@ -1485,7 +1566,12 @@ to = "/Users/me/projects"
     );
 
     let start = tracker.start("verify_output", Some("Verify mapping paths in output"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("/home/user/projects") && stdout.contains("/Users/me/projects"),
@@ -1546,7 +1632,12 @@ to = "/Users/me/projects"
     );
 
     let start = tracker.start("verify_json", Some("Verify JSON contains mappings field"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("valid JSON output");
 
@@ -1604,7 +1695,11 @@ paths = ["~/.claude/projects"]
     );
 
     let start = tracker.start("verify_error", Some("Verify not found error"));
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "command should have failed but succeeded with: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not found") || stderr.contains("does not exist"),
@@ -1883,7 +1978,11 @@ paths = ["~/.claude/projects"]
     );
 
     let start = tracker.start("verify_error", Some("Verify not found error"));
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "command should have failed but succeeded with: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not found") || stderr.contains("does not exist"),
@@ -2017,7 +2116,11 @@ to = "/Users/me"
     );
 
     let start = tracker.start("verify_error", Some("Verify index out of range error"));
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "command should have failed but succeeded with: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("index") || stderr.contains("out of") || stderr.contains("range"),
@@ -2073,7 +2176,11 @@ paths = ["~/.claude/projects"]
     );
 
     let start = tracker.start("verify_error", Some("Verify empty mappings error"));
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "command should have failed but succeeded with: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("no mapping") || stderr.contains("empty") || stderr.contains("index"),
@@ -2136,7 +2243,12 @@ to = "/Users/me/projects"
     );
 
     let start = tracker.start("verify_rewritten_path", Some("Verify path was rewritten"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("/Users/me/projects/myapp/src/main.rs"),
@@ -2205,7 +2317,12 @@ to = "/Users/me/projects"
         "verify_unchanged_path",
         Some("Verify path unchanged or no match"),
     );
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Path should be unchanged or indicate no match
     assert!(
@@ -2283,7 +2400,12 @@ agents = ["claude_code"]
         "verify_rewritten_path",
         Some("Verify path rewritten for matching agent"),
     );
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("/Users/me/file.rs"),
@@ -2352,7 +2474,12 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("list command");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/remote/path"));
     tracker.end(
@@ -2374,7 +2501,12 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("test command");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/local/path/subdir/file.rs"));
     tracker.end("test_mapping", Some("Test path rewriting"), start);
@@ -2395,7 +2527,12 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("list command");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     // After removal, should show "No path mappings" message
     assert!(

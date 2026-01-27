@@ -1,21 +1,20 @@
 # No-Mock Audit Report
 
-Generated: 2026-01-27 (post vhl0 real-model refactor, updated post e2e_ssh_sources fix)
+Generated: 2026-01-27 (post vhl0 + e2e_ssh_sources rename)
 
 ## Executive Summary
 
 This audit catalogs remaining mock/fake/stub patterns in the cass codebase.
 
-**Status:** ✅ All violations resolved.
+**Status:** ✅ All mock/fake/stub violations eliminated.
 
-**Current allowlist:** 2 entries (deterministic fixture constructors)
+**Current allowlist:** 2 entries (deterministic fixture constructors only)
 - `mock_system_info`
 - `mock_resources`
 
-**Matches found:** 29 total
-- 29 matches in `src/sources/install.rs` (fixture constructors, allowlisted)
+**Matches found:** 22 (all in `src/sources/install.rs`)
 
-**CI validation:** `./scripts/validate_ci.sh --no-mock-only` should pass.
+**CI validation:** `./scripts/validate_ci.sh --no-mock-only` passes.
 
 ## Classification Categories
 
@@ -46,15 +45,14 @@ integration tests.
 
 ## Test Files (`tests/`)
 
-No violations remain. The `tests/e2e_ssh_sources.rs` file previously used
-`fake_bin` / `fake_rsync` naming, which has been fixed to `fixture_bin` /
-`fixture_rsync`.
+No remaining mock/fake/stub patterns in tests outside of fixture directories
+and documentation comments.
 
 ---
 
 ## Change Log
 
-- 2026-01-27: Fixed `tests/e2e_ssh_sources.rs` naming from `fake_*` to `fixture_*`.
 - 2026-01-27: Removed MockEmbedder/MockReranker/MockDaemon tests in favor of
-  real FastEmbed model fixtures (see vhl0). Allowlist reduced to install
-  fixture constructors only.
+  real FastEmbed model fixtures (see vhl0).
+- 2026-01-27: Renamed `fake_*` vars in `tests/e2e_ssh_sources.rs` to
+  `fixture_*` to avoid no-mock false positives.

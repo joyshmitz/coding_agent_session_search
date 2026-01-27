@@ -37,20 +37,12 @@ Mocks are problematic because they:
 
 ### Allowlist: True Boundaries
 
-Some test scenarios require mock implementations. These are explicitly allowlisted:
+Some scenarios require deterministic fixture constructors. These are explicitly
+allowlisted (see `test-results/no_mock_allowlist.json`):
 
-**Allowlisted patterns** (see `test-results/no_mock_allowlist.json`):
-
-1. **Trait abstraction tests** (`#[cfg(test)]` only):
-   - `MockEmbedder` in `src/search/embedder.rs` - tests Embedder trait contract
-   - `MockReranker` in `src/search/reranker.rs` - tests Reranker trait contract
-   - `MockDaemon` in `src/search/daemon_client.rs` - tests daemon retry logic
-
-2. **Integration test harnesses**:
-   - `ChannelDaemonClient` - real channel communication, not a mock
-
-3. **Feature functionality** (not test infrastructure):
-   - `src/pages/redact.rs` - privacy feature that replaces usernames
+1. **Fixture constructors** (`#[cfg(test)]` only):
+   - `mock_system_info` in `src/sources/install.rs` - deterministic SystemInfo for pure logic tests
+   - `mock_resources` in `src/sources/install.rs` - deterministic ResourceInfo for pure logic tests
 
 ### CI Enforcement
 

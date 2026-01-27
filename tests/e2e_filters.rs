@@ -114,7 +114,12 @@ fn filter_by_agent_codex() {
     tracker.end("test_agent_filter", Some("Search with --agent codex"), ps);
 
     let ps = tracker.start("verify_results", Some("Verify only codex hits returned"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -207,7 +212,12 @@ fn filter_by_time_since() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify only new session returned"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -305,7 +315,12 @@ fn filter_by_time_until() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify only old session returned"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -425,7 +440,12 @@ fn filter_by_time_range() {
         "verify_results",
         Some("Verify only middle session returned"),
     );
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -548,7 +568,12 @@ fn filter_combined_agent_and_time() {
         "verify_results",
         Some("Verify only new codex session returned"),
     );
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -643,7 +668,12 @@ fn filter_no_matches() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify empty result set"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -739,7 +769,12 @@ fn filter_by_workspace() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify only workspace-alpha hits"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -835,7 +870,12 @@ fn filter_by_days() {
         "verify_results",
         Some("Verify only recent session returned"),
     );
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -926,7 +966,12 @@ fn filter_by_source_local() {
     tracker.end("test_source_local", Some("Search with --source local"), ps);
 
     let ps = tracker.start("verify_results", Some("Verify local source hits"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -1017,7 +1062,12 @@ fn filter_by_source_specific_name() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify results found"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -1093,7 +1143,12 @@ fn filter_by_source_nonexistent() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify empty results"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -1161,7 +1216,12 @@ fn filter_by_source_remote_empty() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify no remote hits"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -1225,7 +1285,12 @@ fn filter_by_source_all_explicit() {
     tracker.end("test_source_all", Some("Search with --source all"), ps);
 
     let ps = tracker.start("verify_results", Some("Verify results found"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -1290,7 +1355,12 @@ fn filter_by_source_remote_returns_empty_without_remote_indexing() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify empty remote results"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -1361,7 +1431,12 @@ fn filter_by_source_specific_unindexed_source() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify empty results"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
         .get("hits")
@@ -1429,7 +1504,12 @@ fn timeline_source_local() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify timeline structure"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
 
     assert!(
@@ -1489,7 +1569,12 @@ fn timeline_source_remote_empty() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify 0 remote sessions"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
 
     let total = json
@@ -1553,7 +1638,12 @@ fn timeline_source_specific() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify valid timeline structure"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
 
     assert!(
@@ -1618,7 +1708,12 @@ fn stats_source_local() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify local stats"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
 
     let count = json
@@ -1688,7 +1783,12 @@ fn stats_source_remote_empty() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify 0 remote conversations"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
 
     let count = json
@@ -1745,7 +1845,12 @@ fn stats_by_source_grouping() {
     tracker.end("test_stats_by_source", Some("Stats with --by-source"), ps);
 
     let ps = tracker.start("verify_results", Some("Verify by_source grouping"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
 
     let by_source = json.get("by_source");
@@ -1832,7 +1937,12 @@ fn stats_by_source_with_filter() {
     );
 
     let ps = tracker.start("verify_results", Some("Verify filtered by_source data"));
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
 
     let by_source = json.get("by_source").and_then(|s| s.as_array());

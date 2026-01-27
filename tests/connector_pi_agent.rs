@@ -30,14 +30,39 @@ fn pi_agent_connector_reads_session_jsonl() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation from session file"
+    );
     let c = &convs[0];
-    assert_eq!(c.agent_slug, "pi_agent");
-    assert_eq!(c.messages.len(), 2);
-    assert!(c.title.as_ref().unwrap().contains("create a Rust struct"));
-    assert_eq!(c.workspace, Some(PathBuf::from("/Users/test/project")));
-    assert!(c.started_at.is_some());
-    assert!(c.ended_at.is_some());
+    assert_eq!(
+        c.agent_slug, "pi_agent",
+        "agent_slug should be 'pi_agent' for PiAgentConnector"
+    );
+    assert_eq!(
+        c.messages.len(),
+        2,
+        "expected 2 messages (1 user + 1 assistant) but got {}",
+        c.messages.len()
+    );
+    assert!(
+        c.title.as_ref().unwrap().contains("create a Rust struct"),
+        "title should contain first user message text"
+    );
+    assert_eq!(
+        c.workspace,
+        Some(PathBuf::from("/Users/test/project")),
+        "workspace should match cwd from session header"
+    );
+    assert!(
+        c.started_at.is_some(),
+        "started_at timestamp should be populated from session"
+    );
+    assert!(
+        c.ended_at.is_some(),
+        "ended_at timestamp should be populated from last message"
+    );
 }
 
 #[test]
@@ -65,16 +90,33 @@ fn pi_agent_connector_includes_thinking_content() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation from session file"
+    );
     let c = &convs[0];
 
-    assert_eq!(c.messages.len(), 2);
+    assert_eq!(
+        c.messages.len(),
+        2,
+        "expected 2 messages (user + assistant with thinking)"
+    );
 
     // Check thinking content is included
     let assistant = &c.messages[1];
-    assert!(assistant.content.contains("[Thinking]"));
-    assert!(assistant.content.contains("think about this carefully"));
-    assert!(assistant.content.contains("Here is the solution"));
+    assert!(
+        assistant.content.contains("[Thinking]"),
+        "assistant message should include [Thinking] marker"
+    );
+    assert!(
+        assistant.content.contains("think about this carefully"),
+        "thinking content should be preserved in message"
+    );
+    assert!(
+        assistant.content.contains("Here is the solution"),
+        "text content should be preserved after thinking block"
+    );
 }
 
 #[test]
@@ -103,20 +145,40 @@ fn pi_agent_connector_handles_tool_calls() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation from session file"
+    );
     let c = &convs[0];
 
-    assert_eq!(c.messages.len(), 3);
+    assert_eq!(
+        c.messages.len(),
+        3,
+        "expected 3 messages (user + assistant + tool result)"
+    );
 
     // Check tool call is flattened
     let assistant = &c.messages[1];
-    assert!(assistant.content.contains("[Tool: read]"));
-    assert!(assistant.content.contains("file_path=/src/main.rs"));
+    assert!(
+        assistant.content.contains("[Tool: read]"),
+        "tool call should be formatted with [Tool: name] marker"
+    );
+    assert!(
+        assistant.content.contains("file_path=/src/main.rs"),
+        "tool arguments should be flattened into content"
+    );
 
     // Check tool result is included
     let tool_result = &c.messages[2];
-    assert_eq!(tool_result.role, "tool");
-    assert!(tool_result.content.contains("fn main()"));
+    assert_eq!(
+        tool_result.role, "tool",
+        "tool result message should have role 'tool'"
+    );
+    assert!(
+        tool_result.content.contains("fn main()"),
+        "tool result content should be preserved"
+    );
 }
 
 #[test]
@@ -146,22 +208,23 @@ fn pi_agent_connector_handles_model_change() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(convs.len(), 1, "expected exactly 1 conversation from session with model change");
     let c = &convs[0];
 
-    assert_eq!(c.messages.len(), 3);
+    assert_eq!(c.messages.len(), 3, "expected 3 messages (user + 2 assistant)");
 
     // Model change events are tracked in metadata (final model)
     assert_eq!(
         c.metadata.get("model_id").and_then(|v| v.as_str()),
-        Some("claude-opus-4")
+        Some("claude-opus-4"),
+        "metadata model_id should reflect final model after model_change events"
     );
 
     // First assistant message (before model_change) uses initial modelId
-    assert_eq!(c.messages[1].author, Some("claude-sonnet-4".to_string()));
+    assert_eq!(c.messages[1].author, Some("claude-sonnet-4".to_string()), "first assistant should use initial model from session header");
 
     // Second assistant message (after model_change) uses updated modelId
-    assert_eq!(c.messages[2].author, Some("claude-opus-4".to_string()));
+    assert_eq!(c.messages[2].author, Some("claude-opus-4".to_string()), "second assistant should use updated model after model_change");
 }
 
 #[test]
@@ -177,8 +240,8 @@ fn pi_agent_connector_detection_with_sessions_dir() {
 
     let connector = PiAgentConnector::new();
     let result = connector.detect();
-    assert!(result.detected);
-    assert!(!result.evidence.is_empty());
+    assert!(result.detected, "connector should detect pi_agent when sessions dir exists");
+    assert!(!result.evidence.is_empty(), "detection evidence should be non-empty when detected");
 }
 
 #[test]
@@ -193,7 +256,7 @@ fn pi_agent_connector_detection_without_sessions_dir() {
 
     let connector = PiAgentConnector::new();
     let result = connector.detect();
-    assert!(!result.detected);
+    assert!(!result.detected, "connector should not detect pi_agent when sessions dir is missing");
 }
 
 #[test]

@@ -22,9 +22,137 @@ env:
   RUST_LOG: debug
 
 jobs:
+  # No-mock policy audit
+  no-mock-audit:
+    name: No-Mock Policy Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Run no-mock audit
+        id: audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+
+          ALLOWLIST_FILE="test-results/no_mock_allowlist.json"
+          AUDIT_REPORT="test-results/no_mock_ci_audit.md"
+
+          echo "# No-Mock CI Audit" > "$AUDIT_REPORT"
+          echo "" >> "$AUDIT_REPORT"
+          echo "**Run:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$AUDIT_REPORT"
+          echo "**Commit:** ${{ github.sha }}" >> "$AUDIT_REPORT"
+          echo "" >> "$AUDIT_REPORT"
+
+          # Search for mock/fake/stub patterns
+          VIOLATIONS=$(mktemp)
+          rg -n "(Mock[A-Z][a-z]|Fake[A-Z][a-z]|Stub[A-Z][a-z]|mock_|fake_|stub_)" \
+              --glob '!**/node_modules/**' \
+              --glob '!target/**' \
+              --glob '!.git/**' \
+              --glob '!tests/fixtures/**' \
+              --glob '!test-results/**' \
+              --glob '!*.md' \
+              --glob '!*.json' \
+              src/ tests/ 2>/dev/null > "$VIOLATIONS" || true
+
+          VIOLATION_COUNT=$(wc -l < "$VIOLATIONS" | tr -d ' ')
+
+          if [ "$VIOLATION_COUNT" -eq 0 ]; then
+            echo "## Status: ✅ PASS" >> "$AUDIT_REPORT"
+            echo "" >> "$AUDIT_REPORT"
+            echo "No mock/fake/stub patterns found." >> "$AUDIT_REPORT"
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            rm -f "$VIOLATIONS"
+            exit 0
+          fi
+
+          echo "Found $VIOLATION_COUNT pattern(s), checking allowlist..."
+
+          if [ ! -f "$ALLOWLIST_FILE" ]; then
+            echo "## Status: ❌ FAIL" >> "$AUDIT_REPORT"
+            echo "" >> "$AUDIT_REPORT"
+            echo "Allowlist file not found: $ALLOWLIST_FILE" >> "$AUDIT_REPORT"
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            rm -f "$VIOLATIONS"
+            exit 1
+          fi
+
+          ALLOWLIST_ENTRIES=$(jq -r '.entries[] | "\(.path):\(.pattern)"' "$ALLOWLIST_FILE" 2>/dev/null || echo "")
+          UNALLOWED_COUNT=0
+          UNALLOWED_LIST=""
+
+          while IFS= read -r line; do
+            FILE=$(echo "$line" | cut -d: -f1)
+            PATTERN=$(echo "$line" | grep -oiE "(Mock[A-Z][a-zA-Z]*|Fake[A-Z][a-zA-Z]*|Stub[A-Z][a-zA-Z]*|mock_[a-z_]+|fake_[a-z_]+|stub_[a-z_]+)" | head -1)
+
+            ALLOWED=false
+            for entry in $ALLOWLIST_ENTRIES; do
+              ENTRY_PATH=$(echo "$entry" | cut -d: -f1)
+              ENTRY_PATTERN=$(echo "$entry" | cut -d: -f2)
+
+              if [[ "$FILE" == *"$ENTRY_PATH"* ]] && [[ "$PATTERN" == *"$ENTRY_PATTERN"* || "$ENTRY_PATTERN" == *"$PATTERN"* ]]; then
+                ALLOWED=true
+                break
+              fi
+            done
+
+            if [ "$ALLOWED" = false ]; then
+              UNALLOWED_COUNT=$((UNALLOWED_COUNT + 1))
+              UNALLOWED_LIST="${UNALLOWED_LIST}\n- \`${line}\`"
+            fi
+          done < "$VIOLATIONS"
+
+          rm -f "$VIOLATIONS"
+
+          if [ "$UNALLOWED_COUNT" -gt 0 ]; then
+            echo "## Status: ❌ FAIL" >> "$AUDIT_REPORT"
+            echo "" >> "$AUDIT_REPORT"
+            echo "**Unapproved patterns:** $UNALLOWED_COUNT" >> "$AUDIT_REPORT"
+            echo "" >> "$AUDIT_REPORT"
+            echo "### Violations" >> "$AUDIT_REPORT"
+            echo -e "$UNALLOWED_LIST" >> "$AUDIT_REPORT"
+            echo "" >> "$AUDIT_REPORT"
+            echo "### How to Fix" >> "$AUDIT_REPORT"
+            echo "" >> "$AUDIT_REPORT"
+            echo "1. Replace mock/fake/stub with real fixtures (preferred)" >> "$AUDIT_REPORT"
+            echo "2. OR add to \`test-results/no_mock_allowlist.json\` with:" >> "$AUDIT_REPORT"
+            echo "   - \`rationale\`: Why this exception is necessary" >> "$AUDIT_REPORT"
+            echo "   - \`review_date\`: 6-month review date" >> "$AUDIT_REPORT"
+            echo "   - \`permanent: true\` only for true platform boundaries" >> "$AUDIT_REPORT"
+            echo "" >> "$AUDIT_REPORT"
+            echo "See TESTING.md 'No-Mock Policy' for details." >> "$AUDIT_REPORT"
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "## Status: ✅ PASS" >> "$AUDIT_REPORT"
+          echo "" >> "$AUDIT_REPORT"
+          echo "**Total patterns found:** $VIOLATION_COUNT" >> "$AUDIT_REPORT"
+          echo "**All patterns allowlisted:** Yes" >> "$AUDIT_REPORT"
+          echo "" >> "$AUDIT_REPORT"
+          echo "### Allowlist Summary" >> "$AUDIT_REPORT"
+          echo "" >> "$AUDIT_REPORT"
+          jq -r '.entries[] | "- `\(.path)`: \(.pattern)` — \(.rationale)"' "$ALLOWLIST_FILE" >> "$AUDIT_REPORT"
+          echo "status=pass" >> "$GITHUB_OUTPUT"
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: no-mock-audit
+          path: test-results/no_mock_ci_audit.md
+          retention-days: 30
+
   # Rust linting and formatting
   lint:
     name: Lint
+    needs: [no-mock-audit]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
