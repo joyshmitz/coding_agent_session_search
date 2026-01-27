@@ -287,7 +287,7 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
         /// Filter by source: 'local', 'remote', 'all', or a specific source hostname
         #[arg(long)]
@@ -302,7 +302,7 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
         /// Include verbose information (file sizes, timestamps)
         #[arg(long, short)]
@@ -314,7 +314,7 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
         /// Output as JSON (default for robot consumption)
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
         /// Include _meta block (elapsed, freshness, data_dir/db_path)
         #[arg(long, default_value_t = false)]
@@ -326,7 +326,7 @@ pub enum Commands {
     /// Discover available features, versions, and limits for agent introspection
     Capabilities {
         /// Output as JSON (default for robot consumption)
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Quick state/health check (alias of status)
@@ -335,7 +335,7 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
         /// Output as JSON (default for robot consumption)
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
         /// Include _meta block (elapsed, freshness, data_dir/db_path)
         #[arg(long, default_value_t = false)]
@@ -347,13 +347,13 @@ pub enum Commands {
     /// Show API + contract version info
     ApiVersion {
         /// Output as JSON (default for robot consumption)
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Full API schema introspection - commands, arguments, and response schemas
     Introspect {
         /// Output as JSON (default for robot consumption)
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// View a source file at a specific line (follow up on search results)
@@ -367,7 +367,7 @@ pub enum Commands {
         #[arg(long, short = 'C', default_value_t = 5)]
         context: usize,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Minimal health check (<50ms). Exit 0=healthy, 1=unhealthy. For agent pre-flight checks.
@@ -376,7 +376,7 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
         /// Output as JSON (`{"healthy": bool, "latency_ms": N}`)
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
         /// Include _meta block (elapsed, freshness, data_dir/db_path)
         #[arg(long, default_value_t = false)]
@@ -412,7 +412,7 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
         /// Maximum results per relation type (default: 5)
         #[arg(long, default_value_t = 5)]
@@ -501,7 +501,7 @@ pub enum Commands {
         #[arg(long, short = 'C', default_value_t = 3)]
         context: usize,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Show activity timeline for a time range
@@ -522,7 +522,7 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
         /// Group by: hour, day, or none
         #[arg(long, value_enum, default_value_t = TimelineGrouping::Hour)]
@@ -582,7 +582,7 @@ pub enum Commands {
         secrets_deny: Vec<String>,
 
         /// Output results as JSON (for verify and secret scan)
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
 
         /// Verbose output (show detailed check results)

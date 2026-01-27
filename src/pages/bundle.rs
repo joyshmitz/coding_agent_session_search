@@ -46,6 +46,10 @@ const PAGES_ASSETS: &[(&str, &[u8])] = &[
         "coi-detector.js",
         include_bytes!("../pages_assets/coi-detector.js"),
     ),
+    (
+        "attachments.js",
+        include_bytes!("../pages_assets/attachments.js"),
+    ),
 ];
 
 /// Integrity entry for a single file
@@ -226,6 +230,16 @@ impl BundleBuilder {
         // Copy payload chunks to site/payload/
         let chunk_count = copy_payload_chunks(&payload_dir, &site_payload_dir)?;
 
+        // Copy attachment blobs if present
+        let blobs_dir = encrypted_dir.join("blobs");
+        let attachment_count = if blobs_dir.exists() && blobs_dir.is_dir() {
+            progress("attachments", "Copying encrypted attachments...");
+            let site_blobs_dir = site_dir.join("blobs");
+            copy_blobs_directory(&blobs_dir, &site_blobs_dir)?
+        } else {
+            0
+        };
+
         progress("config", "Writing configuration files...");
 
         // Write config.json to site/ (already has public params only)
@@ -294,6 +308,7 @@ impl BundleBuilder {
             site_dir,
             private_dir,
             chunk_count,
+            attachment_count,
             fingerprint,
             total_files: integrity_manifest.files.len(),
         })
@@ -309,6 +324,8 @@ pub struct BundleResult {
     pub private_dir: PathBuf,
     /// Number of encrypted payload chunks
     pub chunk_count: usize,
+    /// Number of encrypted attachment blobs
+    pub attachment_count: usize,
     /// Integrity fingerprint (for visual verification)
     pub fingerprint: String,
     /// Total number of files in site/
@@ -324,6 +341,27 @@ fn copy_payload_chunks(src_dir: &Path, dest_dir: &Path) -> Result<usize> {
         let path = entry.path();
 
         if path.is_file() && path.extension().map(|e| e == "bin").unwrap_or(false) {
+            let filename = path.file_name().unwrap();
+            let dest_path = dest_dir.join(filename);
+            fs::copy(&path, &dest_path)?;
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Copy encrypted attachment blobs from source to destination
+fn copy_blobs_directory(src_dir: &Path, dest_dir: &Path) -> Result<usize> {
+    fs::create_dir_all(dest_dir).context("Failed to create blobs directory")?;
+
+    let mut count = 0;
+
+    for entry in fs::read_dir(src_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_file() {
             let filename = path.file_name().unwrap();
             let dest_path = dest_dir.join(filename);
             fs::copy(&path, &dest_path)?;
