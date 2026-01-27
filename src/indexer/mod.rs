@@ -39,6 +39,34 @@ pub enum IndexerEvent {
     Command(ReindexCommand),
 }
 
+/// Per-connector statistics for structured logging (T7.4).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ConnectorStats {
+    pub name: String,
+    pub conversations: usize,
+    pub messages: usize,
+    pub scan_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Aggregate indexing statistics for JSON output (T7.4).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct IndexingStats {
+    /// Time spent in scanning phase (ms)
+    pub scan_ms: u64,
+    /// Time spent in indexing phase (ms)
+    pub index_ms: u64,
+    /// Per-connector breakdown
+    pub connectors: Vec<ConnectorStats>,
+    /// Agents discovered during scan
+    pub agents_discovered: Vec<String>,
+    /// Total conversations indexed
+    pub total_conversations: usize,
+    /// Total messages indexed
+    pub total_messages: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct IndexingProgress {
     pub total: AtomicUsize,
@@ -52,6 +80,8 @@ pub struct IndexingProgress {
     pub discovered_agent_names: Mutex<Vec<String>>,
     /// Last error message from background indexer, if any
     pub last_error: Mutex<Option<String>>,
+    /// Structured stats for JSON output (T7.4)
+    pub stats: Mutex<IndexingStats>,
 }
 
 #[derive(Clone)]
@@ -87,6 +117,8 @@ pub enum IndexMessage {
         conversations: Vec<NormalizedConversation>,
         /// Whether this connector was newly discovered
         is_discovered: bool,
+        /// Message count in this batch (for stats)
+        message_count: usize,
     },
     /// A scan error occurred (non-fatal, logged but continues)
     ScanError {
@@ -94,7 +126,11 @@ pub enum IndexMessage {
         error: String,
     },
     /// Producer has finished scanning
-    Done { connector_name: &'static str },
+    Done {
+        connector_name: &'static str,
+        /// Time spent scanning this connector (ms)
+        scan_ms: u64,
+    },
 }
 
 /// Default channel buffer size for streaming indexing.
@@ -127,6 +163,7 @@ fn spawn_connector_producer(
     progress: Option<Arc<IndexingProgress>>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
+        let scan_start = std::time::Instant::now();
         let conn = factory();
         let detect = conn.detect();
         let was_detected = detect.detected;
@@ -150,11 +187,15 @@ fn spawn_connector_producer(
                     }
 
                     if !local_convs.is_empty() {
+                        // Count messages for stats
+                        let message_count: usize =
+                            local_convs.iter().map(|c| c.messages.len()).sum();
                         // Send batch through channel (blocking if full - backpressure!)
                         let _ = tx.send(IndexMessage::Batch {
                             connector_name: name,
                             conversations: local_convs,
                             is_discovered,
+                            message_count,
                         });
                     }
                 }
@@ -179,7 +220,7 @@ fn spawn_connector_producer(
                 Ok(mut remote_convs) => {
                     for conv in &mut remote_convs {
                         inject_provenance(conv, &root.origin);
-                        apply_workspace_rewrite(conv, &root.workspace_rewrites);
+                        apply_workspace_rewrite(conv, root);
                     }
 
                     // Check if discovered via remote scan
@@ -191,10 +232,14 @@ fn spawn_connector_producer(
                     }
 
                     if !remote_convs.is_empty() {
+                        // Count messages for stats
+                        let message_count: usize =
+                            remote_convs.iter().map(|c| c.messages.len()).sum();
                         let _ = tx.send(IndexMessage::Batch {
                             connector_name: name,
                             conversations: remote_convs,
                             is_discovered,
+                            message_count,
                         });
                     }
                 }
@@ -208,20 +253,18 @@ fn spawn_connector_producer(
             }
         }
 
-        // Mark this connector as scanned for discovery progress
-        if let Some(p) = &progress {
-            p.current.fetch_add(1, Ordering::Relaxed);
-        }
-
+        let scan_ms = scan_start.elapsed().as_millis() as u64;
         tracing::info!(
             connector = name,
             discovered = is_discovered,
+            scan_ms,
             "streaming_scan_complete"
         );
 
-        // Signal completion
+        // Signal completion with timing
         let _ = tx.send(IndexMessage::Done {
             connector_name: name,
+            scan_ms,
         });
     })
 }
@@ -239,11 +282,18 @@ fn run_streaming_consumer(
     progress: &Option<Arc<IndexingProgress>>,
     needs_rebuild: bool,
 ) -> Result<Vec<String>> {
+    use std::collections::HashMap;
+
     let mut active_producers = num_producers;
     let mut discovered_names: Vec<String> = Vec::new();
     let mut total_conversations = 0usize;
+    let mut total_messages = 0usize;
     let mut switched_to_indexing = false;
     let mut last_commit = std::time::Instant::now();
+    let index_start = std::time::Instant::now();
+
+    // Per-connector stats tracking (T7.4)
+    let mut connector_stats: HashMap<String, ConnectorStats> = HashMap::new();
 
     loop {
         match rx.recv() {
@@ -251,9 +301,21 @@ fn run_streaming_consumer(
                 connector_name,
                 conversations,
                 is_discovered,
+                message_count,
             }) => {
                 let batch_size = conversations.len();
                 total_conversations += batch_size;
+                total_messages += message_count;
+
+                // Update per-connector stats
+                let stats = connector_stats
+                    .entry(connector_name.to_string())
+                    .or_insert_with(|| ConnectorStats {
+                        name: connector_name.to_string(),
+                        ..Default::default()
+                    });
+                stats.conversations += batch_size;
+                stats.messages += message_count;
 
                 // Switch to indexing phase on first batch (reset total/current for accurate progress)
                 if !switched_to_indexing {
@@ -291,6 +353,7 @@ fn run_streaming_consumer(
                 tracing::info!(
                     connector = connector_name,
                     conversations = batch_size,
+                    messages = message_count,
                     "streaming_ingest"
                 );
             }
@@ -298,6 +361,15 @@ fn run_streaming_consumer(
                 connector_name,
                 error,
             }) => {
+                // Record error in connector stats
+                let stats = connector_stats
+                    .entry(connector_name.to_string())
+                    .or_insert_with(|| ConnectorStats {
+                        name: connector_name.to_string(),
+                        ..Default::default()
+                    });
+                stats.error = Some(error.clone());
+
                 tracing::warn!(
                     connector = connector_name,
                     error = %error,
@@ -305,10 +377,30 @@ fn run_streaming_consumer(
                 );
                 // Continue processing - scan errors are non-fatal
             }
-            Ok(IndexMessage::Done { connector_name }) => {
+            Ok(IndexMessage::Done {
+                connector_name,
+                scan_ms,
+            }) => {
                 active_producers -= 1;
+
+                // Record scan timing in connector stats
+                let stats = connector_stats
+                    .entry(connector_name.to_string())
+                    .or_insert_with(|| ConnectorStats {
+                        name: connector_name.to_string(),
+                        ..Default::default()
+                    });
+                stats.scan_ms = scan_ms;
+
+                // If we haven't switched to indexing phase yet, this Done message represents
+                // a completed scan step. Increment current to show scanning progress.
+                if !switched_to_indexing && let Some(p) = progress {
+                    p.current.fetch_add(1, Ordering::Relaxed);
+                }
+
                 tracing::debug!(
                     connector = connector_name,
+                    scan_ms,
                     remaining = active_producers,
                     "streaming_producer_done"
                 );
@@ -327,8 +419,32 @@ fn run_streaming_consumer(
     // Final commit to ensure all data is persisted
     t_index.commit()?;
 
+    let index_ms = index_start.elapsed().as_millis() as u64;
+
+    // Calculate total scan time (max of all connector scan times since they run in parallel)
+    let scan_ms = connector_stats
+        .values()
+        .map(|s| s.scan_ms)
+        .max()
+        .unwrap_or(0);
+
+    // Update progress with final stats (T7.4)
+    if let Some(p) = progress
+        && let Ok(mut stats) = p.stats.lock()
+    {
+        stats.scan_ms = scan_ms;
+        stats.index_ms = index_ms;
+        stats.connectors = connector_stats.values().cloned().collect();
+        stats.agents_discovered = discovered_names.clone();
+        stats.total_conversations = total_conversations;
+        stats.total_messages = total_messages;
+    }
+
     tracing::info!(
         total_conversations,
+        total_messages,
+        scan_ms,
+        index_ms,
         discovered = discovered_names.len(),
         "streaming_indexing_complete"
     );
@@ -495,7 +611,7 @@ fn run_batch_index(
                             Ok(mut remote_convs) => {
                                 for conv in &mut remote_convs {
                                     inject_provenance(conv, &root.origin);
-                                    apply_workspace_rewrite(conv, &root.workspace_rewrites);
+                                    apply_workspace_rewrite(conv, root);
                                 }
                                 convs.extend(remote_convs);
                             }
@@ -830,9 +946,14 @@ fn ingest_batch(
                 .map(SqliteStorage::day_id_from_millis)
                 .unwrap_or(0);
 
-            // Use LOCAL_SOURCE_ID since NormalizedConversation doesn't carry source origin
-            // (origin is associated at persist time based on ScanRoot)
-            let source_id = LOCAL_SOURCE_ID;
+            // Extract provenance from metadata to correctly attribute daily stats
+            let source_id = conv
+                .metadata
+                .get("cass")
+                .and_then(|c| c.get("origin"))
+                .and_then(|o| o.get("source_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(LOCAL_SOURCE_ID);
 
             let message_count = conv.messages.len() as i64;
             let total_chars: i64 = conv.messages.iter().map(|m| m.content.len() as i64).sum();
@@ -1125,7 +1246,7 @@ fn reindex_paths(
         // Provenance injection and path rewriting
         for conv in &mut convs {
             inject_provenance(conv, &root.origin);
-            apply_workspace_rewrite(conv, &root.workspace_rewrites);
+            apply_workspace_rewrite(conv, &root);
         }
 
         // Update total and phase to indexing
@@ -1549,12 +1670,9 @@ fn inject_provenance(conv: &mut NormalizedConversation, origin: &Origin) {
 /// for display/audit purposes.
 ///
 /// Part of P6.2 - Apply path mappings at ingest time.
-pub fn apply_workspace_rewrite(
-    conv: &mut NormalizedConversation,
-    workspace_rewrites: &[crate::sources::config::PathMapping],
-) {
+pub fn apply_workspace_rewrite(conv: &mut NormalizedConversation, root: &ScanRoot) {
     // Only apply if we have a workspace and rewrites
-    if workspace_rewrites.is_empty() {
+    if root.workspace_rewrites.is_empty() {
         return;
     }
 
@@ -1564,51 +1682,38 @@ pub fn apply_workspace_rewrite(
         None => return,
     };
 
-    // Sort by prefix length descending for longest-prefix match
-    let mut mappings: Vec<_> = workspace_rewrites.iter().collect();
-    mappings.sort_by_key(|m| std::cmp::Reverse(m.from.len()));
+    // Use optimized trie lookup via ScanRoot
+    let rewritten = root.rewrite_workspace(&original_workspace, Some(&conv.agent_slug));
 
-    // Try to apply a mapping
-    for mapping in mappings {
-        // Optionally filter by agent
-        if !mapping.applies_to_agent(Some(&conv.agent_slug)) {
-            continue;
+    // Only proceed if the rewrite actually changed something
+    if rewritten != original_workspace {
+        // Store original in metadata
+        if !conv.metadata.is_object() {
+            conv.metadata = serde_json::json!({});
         }
 
-        if let Some(rewritten) = mapping.apply(&original_workspace) {
-            // Only proceed if the rewrite actually changed something
-            if rewritten != original_workspace {
-                // Store original in metadata
-                if !conv.metadata.is_object() {
-                    conv.metadata = serde_json::json!({});
-                }
-
-                if let Some(obj) = conv.metadata.as_object_mut() {
-                    // Get or create cass object
-                    let cass = obj
-                        .entry("cass".to_string())
-                        .or_insert_with(|| serde_json::json!({}));
-                    if let Some(cass_obj) = cass.as_object_mut() {
-                        cass_obj.insert(
-                            "workspace_original".to_string(),
-                            serde_json::Value::String(original_workspace.clone()),
-                        );
-                    }
-                }
-
-                // Update workspace to rewritten path
-                conv.workspace = Some(std::path::PathBuf::from(&rewritten));
-
-                tracing::debug!(
-                    original = %original_workspace,
-                    rewritten = %rewritten,
-                    agent = %conv.agent_slug,
-                    "workspace_rewritten"
+        if let Some(obj) = conv.metadata.as_object_mut() {
+            // Get or create cass object
+            let cass = obj
+                .entry("cass".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(cass_obj) = cass.as_object_mut() {
+                cass_obj.insert(
+                    "workspace_original".to_string(),
+                    serde_json::Value::String(original_workspace.clone()),
                 );
             }
-            // Stop after first match (longest prefix already matched)
-            return;
         }
+
+        // Update workspace to rewritten path
+        conv.workspace = Some(std::path::PathBuf::from(&rewritten));
+
+        tracing::debug!(
+            original = %original_workspace,
+            rewritten = %rewritten,
+            agent = %conv.agent_slug,
+            "workspace_rewritten"
+        );
     }
 }
 
@@ -2490,7 +2595,8 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         let mut conv = norm_conv(None, vec![norm_msg(0, 1000)]);
         conv.workspace = Some(PathBuf::from("/home/user/projects/app"));
 
-        apply_workspace_rewrite(&mut conv, &[]);
+        let root = crate::connectors::ScanRoot::local(PathBuf::from("/"));
+        apply_workspace_rewrite(&mut conv, &root);
 
         // Workspace unchanged when no rewrites
         assert_eq!(
@@ -2516,7 +2622,9 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             "/Users/me",
         )];
 
-        apply_workspace_rewrite(&mut conv, &mappings);
+        let mut root = crate::connectors::ScanRoot::local(PathBuf::from("/"));
+        root.workspace_rewrites = mappings;
+        apply_workspace_rewrite(&mut conv, &root);
 
         // Still None
         assert!(conv.workspace.is_none());
@@ -2532,7 +2640,9 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             "/Users/me",
         )];
 
-        apply_workspace_rewrite(&mut conv, &mappings);
+        let mut root = crate::connectors::ScanRoot::local(PathBuf::from("/"));
+        root.workspace_rewrites = mappings;
+        apply_workspace_rewrite(&mut conv, &root);
 
         // Workspace rewritten
         assert_eq!(
@@ -2562,7 +2672,9 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             ),
         ];
 
-        apply_workspace_rewrite(&mut conv, &mappings);
+        let mut root = crate::connectors::ScanRoot::local(PathBuf::from("/"));
+        root.workspace_rewrites = mappings;
+        apply_workspace_rewrite(&mut conv, &root);
 
         // Should use longer prefix match
         assert_eq!(conv.workspace, Some(PathBuf::from("/Volumes/Special/app")));
@@ -2578,7 +2690,9 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             "/Users/me",
         )];
 
-        apply_workspace_rewrite(&mut conv, &mappings);
+        let mut root = crate::connectors::ScanRoot::local(PathBuf::from("/"));
+        root.workspace_rewrites = mappings;
+        apply_workspace_rewrite(&mut conv, &root);
 
         // Workspace unchanged - no matching prefix
         assert_eq!(conv.workspace, Some(PathBuf::from("/opt/other/path")));
@@ -2607,7 +2721,9 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             ),
         ];
 
-        apply_workspace_rewrite(&mut conv, &mappings);
+        let mut root = crate::connectors::ScanRoot::local(PathBuf::from("/"));
+        root.workspace_rewrites = mappings;
+        apply_workspace_rewrite(&mut conv, &root);
 
         // Should NOT use cursor-specific mapping, falls back to general
         assert_eq!(
@@ -2635,7 +2751,9 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             "/Users/me",
         )];
 
-        apply_workspace_rewrite(&mut conv, &mappings);
+        let mut root = crate::connectors::ScanRoot::local(PathBuf::from("/"));
+        root.workspace_rewrites = mappings;
+        apply_workspace_rewrite(&mut conv, &root);
 
         // Origin preserved
         assert_eq!(

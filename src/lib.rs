@@ -1201,6 +1201,26 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         "encrypt",
         "password",
         "theme",
+        // Added flags
+        "watch-once",
+        "semantic",
+        "embedder",
+        "idempotency-key",
+        "model",
+        "rerank",
+        "reranker",
+        "daemon",
+        "no-daemon",
+        "preview",
+        "port",
+        "config",
+        "validate-config",
+        "example-config",
+        "skip-install",
+        "skip-index",
+        "skip-sync",
+        "resume",
+        "non-interactive",
     ];
 
     // Subcommand aliases for common mistakes
@@ -1802,7 +1822,24 @@ fn heuristic_parse_recovery(
             let (key, val) = arg.split_once('=').unwrap();
             let flag_candidate = format!("--{key}");
             // Quick check if adding -- makes it a valid flag
-            let known_flags = ["--limit", "--offset", "--agent", "--workspace", "--days"];
+            let known_flags = [
+                "--limit",
+                "--offset",
+                "--agent",
+                "--workspace",
+                "--days",
+                "--since",
+                "--until",
+                "--source",
+                "--output",
+                "--format",
+                "--model",
+                "--reranker",
+                "--embedder",
+                "--timeout",
+                "--fields",
+                "--max-tokens",
+            ];
             if known_flags.contains(&flag_candidate.as_str()) {
                 final_args.push(flag_candidate);
                 final_args.push(val.to_string());
@@ -3785,7 +3822,9 @@ fn run_cli_search(
     semantic_opts: SemanticSearchOptions,
 ) -> CliResult<()> {
     use crate::search::model_manager::{load_hash_semantic_context, load_semantic_context};
-    use crate::search::query::{QueryExplanation, SearchClient, SearchFilters, SearchMode};
+    use crate::search::query::{
+        QueryExplanation, SearchClient, SearchClientOptions, SearchFilters, SearchMode,
+    };
     use crate::search::tantivy::index_dir;
     use crate::sources::provenance::SourceFilter;
     use std::collections::HashSet;
@@ -3804,7 +3843,14 @@ fn run_cli_search(
     })?;
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
 
-    let client = SearchClient::open(&index_path, Some(&db_path))
+    let client = SearchClient::open_with_options(
+        &index_path,
+        Some(&db_path),
+        SearchClientOptions {
+            enable_reload: false,
+            enable_warm: false,
+        },
+    )
         .map_err(|e| CliError {
             code: 9,
             kind: "open-index",
