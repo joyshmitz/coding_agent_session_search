@@ -232,15 +232,22 @@ pub enum QueryCost {
     High,
 }
 
+/// Sub-component of a parsed term
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ParsedSubTerm {
+    pub text: String,
+    pub pattern: String,
+}
+
 /// Parsed term from the query
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ParsedTerm {
     /// Original term text
     pub text: String,
-    /// Wildcard pattern applied
-    pub pattern: String,
     /// Whether this is negated (NOT/-)
     pub negated: bool,
+    /// Sub-terms if split (implicit AND)
+    pub subterms: Vec<ParsedSubTerm>,
 }
 
 /// Parsed structure of the query
@@ -312,6 +319,7 @@ impl QueryExplanation {
                         next_negated = false;
                         continue;
                     }
+                    let mut subterms = Vec::new();
                     for part in parts {
                         let pattern = WildcardPattern::parse(&part);
                         let pattern_str = match &pattern {
@@ -321,12 +329,16 @@ impl QueryExplanation {
                             WildcardPattern::Substring(_) => "substring (*)",
                             WildcardPattern::Complex(_) => "complex (*)",
                         };
-                        parsed.terms.push(ParsedTerm {
+                        subterms.push(ParsedSubTerm {
                             text: part,
                             pattern: pattern_str.to_string(),
-                            negated: next_negated,
                         });
                     }
+                    parsed.terms.push(ParsedTerm {
+                        text: t.clone(),
+                        negated: next_negated,
+                        subterms,
+                    });
                     next_negated = false;
                 }
                 QueryToken::Phrase(p) => {
@@ -410,7 +422,9 @@ impl QueryExplanation {
         }
 
         // Check for wildcards
-        let has_wildcards = parsed.terms.iter().any(|t| t.pattern != "exact");
+        let has_wildcards = parsed.terms.iter()
+            .flat_map(|t| &t.subterms)
+            .any(|t| t.pattern != "exact");
         if has_wildcards {
             return QueryType::Wildcard;
         }
@@ -427,6 +441,7 @@ impl QueryExplanation {
         let has_leading_wildcard = parsed
             .terms
             .iter()
+            .flat_map(|t| &t.subterms)
             .any(|t| t.pattern == "suffix (*)" || t.pattern == "substring (*)");
 
         if has_leading_wildcard {
@@ -461,7 +476,7 @@ impl QueryExplanation {
         let has_time_filter = filters.created_from.is_some() || filters.created_to.is_some();
 
         // Count complexity factors
-        let term_count = parsed.terms.len();
+        let term_count: usize = parsed.terms.iter().map(|t| t.subterms.len()).sum();
         let operator_count = parsed.operators.len();
         let phrase_count = parsed.phrases.len();
 
@@ -525,6 +540,7 @@ impl QueryExplanation {
         let has_leading_wildcard = parsed
             .terms
             .iter()
+            .flat_map(|t| &t.subterms)
             .any(|t| t.pattern == "suffix (*)" || t.pattern == "substring (*)");
         if has_leading_wildcard {
             warnings.push(
@@ -535,11 +551,13 @@ impl QueryExplanation {
 
         // Warn about very short terms
         for term in &parsed.terms {
-            if term.text.trim_matches('*').len() < 2 {
-                warnings.push(format!(
-                    "Very short term '{}' may match many documents",
-                    term.text
-                ));
+            for sub in &term.subterms {
+                if sub.text.trim_matches('*').len() < 2 {
+                    warnings.push(format!(
+                        "Very short term '{}' may match many documents",
+                        sub.text
+                    ));
+                }
             }
         }
 
