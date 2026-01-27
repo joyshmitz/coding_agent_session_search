@@ -4196,6 +4196,7 @@ fn run_cli_search(
     let search_ms = search_start.elapsed().as_millis() as u64;
 
     // Apply reranking if enabled (bd-2t2d)
+    let rerank_start = Instant::now();
     let result = if semantic_opts.rerank && !result.hits.is_empty() {
         use crate::search::daemon_client::{
             DaemonFallbackReranker, DaemonRetryConfig, NoopDaemonClient,
@@ -4294,6 +4295,12 @@ fn run_cli_search(
         }
     } else {
         result
+    };
+    // Track reranking time (0 if not applied) (T7.4)
+    let rerank_ms = if semantic_opts.rerank {
+        rerank_start.elapsed().as_millis() as u64
+    } else {
+        0
     };
 
     // Check if search exceeded timeout - return partial results with timeout indicator
@@ -4452,6 +4459,8 @@ fn run_cli_search(
             timed_out,
             timeout_ms,
             effective_mode,
+            search_ms,
+            rerank_ms,
         )?;
     } else if display_result.hits.is_empty() {
         eprintln!("No results found.");
@@ -4851,6 +4860,8 @@ fn output_robot_results(
     timed_out: bool,
     timeout_ms: Option<u64>,
     search_mode: crate::search::query::SearchMode,
+    search_ms: u64,
+    rerank_ms: u64,
 ) -> CliResult<()> {
     if matches!(format, RobotFormat::Sessions) {
         // Output unique session paths only, one per line.
@@ -4937,6 +4948,12 @@ fn output_robot_results(
                         "hits": result.cache_stats.cache_hits,
                         "misses": result.cache_stats.cache_miss,
                         "shortfall": result.cache_stats.cache_shortfall,
+                    },
+                    // Search pipeline timing breakdown (T7.4)
+                    "timing": {
+                        "search_ms": search_ms,
+                        "rerank_ms": rerank_ms,
+                        "other_ms": elapsed_ms.saturating_sub(search_ms).saturating_sub(rerank_ms),
                     },
                     "tokens_estimated": tokens_estimated,
                     "max_tokens": max_tokens,
