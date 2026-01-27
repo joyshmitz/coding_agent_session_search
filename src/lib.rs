@@ -7877,13 +7877,15 @@ fn run_config_based_export(
     let running = Arc::new(AtomicBool::new(true));
     let stats = export_engine.execute(|_current, _total| {}, Some(running))?;
 
-    // Handle encryption if enabled
-    if wizard_state.no_encryption && !wizard_state.unencrypted_confirmed {
-        anyhow::bail!("Unencrypted export requested without explicit risk acknowledgment");
+    // Unencrypted bundles are not supported yet (viewer requires encrypted config)
+    if wizard_state.no_encryption {
+        anyhow::bail!(
+            "Unencrypted pages bundles are not supported yet. Use --export-only for raw DB exports."
+        );
     }
 
     let mut recovery_secret: Option<Vec<u8>> = None;
-    let encryption_enabled = !wizard_state.no_encryption;
+    let encryption_enabled = true;
 
     if encryption_enabled {
         let password = wizard_state
@@ -7908,20 +7910,6 @@ fn run_config_based_export(
         // Write config.json
         let config_path = encrypted_dir.join("config.json");
         std::fs::write(&config_path, serde_json::to_string_pretty(&enc_config)?)?;
-    } else {
-        // Unencrypted mode: place export.db in payload and write minimal config.json
-        let payload_dir = encrypted_dir.join("payload");
-        std::fs::create_dir_all(&payload_dir)?;
-        let dest_db = payload_dir.join("data.db");
-        std::fs::copy(&export_db_path, &dest_db)?;
-
-        let config_json = serde_json::json!({
-            "encrypted": false,
-            "version": "1.0.0",
-            "warning": "UNENCRYPTED - All content is publicly readable"
-        });
-        let config_path = encrypted_dir.join("config.json");
-        std::fs::write(&config_path, serde_json::to_string_pretty(&config_json)?)?;
     }
 
     // Build bundle
