@@ -194,9 +194,15 @@ fn search_combines_mode_semantic_and_approximate() {
 
 #[test]
 fn search_combines_mode_hybrid_and_approximate() {
-    let cli =
-        Cli::try_parse_from(["cass", "search", "query", "--mode", "hybrid", "--approximate"])
-            .expect("parse search flags");
+    let cli = Cli::try_parse_from([
+        "cass",
+        "search",
+        "query",
+        "--mode",
+        "hybrid",
+        "--approximate",
+    ])
+    .expect("parse search flags");
 
     match cli.command {
         Some(Commands::Search {

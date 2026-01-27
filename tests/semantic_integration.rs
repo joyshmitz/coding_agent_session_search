@@ -1260,7 +1260,13 @@ fn test_index_build_hnsw_flag() {
     // Index with --build-hnsw (requires --semantic to be meaningful)
     // This tests that the flag is parsed correctly
     let output = cargo_bin_cmd!("cass")
-        .args(["index", "--full", "--semantic", "--build-hnsw", "--data-dir"])
+        .args([
+            "index",
+            "--full",
+            "--semantic",
+            "--build-hnsw",
+            "--data-dir",
+        ])
         .arg(&data_dir)
         .env("CODEX_HOME", &codex_home)
         .env("HOME", home)

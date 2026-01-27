@@ -112,7 +112,7 @@ fn build_full_pipeline(
     include_password: bool,
     include_recovery: bool,
 ) -> PipelineArtifacts {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("build_full_pipeline");
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let data_dir = temp_dir.path().join("data");
     fs::create_dir_all(&data_dir).expect("Failed to create data directory");
@@ -314,7 +314,7 @@ fn test_full_export_pipeline_dual_auth() {
 /// Test that decrypted payload matches original export database.
 #[test]
 fn test_integrity_decrypt_roundtrip_password() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_integrity_decrypt_roundtrip_password");
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_integrity_decrypt_roundtrip_password\",\"status\":\"START\"}}");
 
@@ -357,7 +357,7 @@ fn test_integrity_decrypt_roundtrip_password() {
 /// Test that decrypted payload matches original using recovery key.
 #[test]
 fn test_integrity_decrypt_roundtrip_recovery() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_integrity_decrypt_roundtrip_recovery");
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_integrity_decrypt_roundtrip_recovery\",\"status\":\"START\"}}");
 
@@ -413,7 +413,7 @@ fn test_integrity_decrypt_roundtrip_recovery() {
 /// Test that tampering with a chunk fails authentication.
 #[test]
 fn test_tampering_fails_authentication() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_tampering_fails_authentication");
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_tampering_fails_authentication\",\"status\":\"START\"}}");
 
@@ -486,7 +486,7 @@ fn test_tampering_fails_authentication() {
 fn test_cli_verify_command() {
     use assert_cmd::cargo::cargo_bin_cmd;
 
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_cli_verify_command");
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_cli_verify_command\",\"status\":\"START\"}}");
 
@@ -523,7 +523,7 @@ fn test_cli_verify_command() {
 /// Test that we can query the decrypted export database.
 #[test]
 fn test_search_in_decrypted_archive() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_search_in_decrypted_archive");
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_search_in_decrypted_archive\",\"status\":\"START\"}}");
 

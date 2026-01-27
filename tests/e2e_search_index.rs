@@ -16,63 +16,14 @@ use std::time::Instant;
 
 mod util;
 use util::EnvGuard;
-use util::e2e_log::{E2eLogger, E2ePerformanceMetrics, E2ePhase};
+use util::e2e_log::{E2ePerformanceMetrics, PhaseTracker};
 
 // =============================================================================
 // E2E Logger Support
 // =============================================================================
 
-fn e2e_logging_enabled() -> bool {
-    std::env::var("E2E_LOG").is_ok()
-}
-
-struct PhaseTracker {
-    logger: Option<E2eLogger>,
-}
-
-impl PhaseTracker {
-    fn new() -> Self {
-        let logger = if e2e_logging_enabled() {
-            E2eLogger::new("rust").ok()
-        } else {
-            None
-        };
-        Self { logger }
-    }
-
-    fn start(&self, name: &str, description: Option<&str>) -> Instant {
-        let phase = E2ePhase {
-            name: name.to_string(),
-            description: description.map(String::from),
-        };
-        if let Some(ref lg) = self.logger {
-            let _ = lg.phase_start(&phase);
-        }
-        Instant::now()
-    }
-
-    fn end(&self, name: &str, description: Option<&str>, start: Instant) {
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let phase = E2ePhase {
-            name: name.to_string(),
-            description: description.map(String::from),
-        };
-        if let Some(ref lg) = self.logger {
-            let _ = lg.phase_end(&phase, duration_ms);
-        }
-    }
-
-    fn metrics(&self, name: &str, metrics: &E2ePerformanceMetrics) {
-        if let Some(ref lg) = self.logger {
-            let _ = lg.metrics(name, metrics);
-        }
-    }
-
-    fn flush(&self) {
-        if let Some(ref lg) = self.logger {
-            let _ = lg.flush();
-        }
-    }
+fn tracker_for(test_name: &str) -> PhaseTracker {
+    PhaseTracker::new("e2e_search_index", test_name)
 }
 
 /// Helper to create Codex session with modern envelope format.
@@ -128,7 +79,7 @@ fn count_messages(db_path: &Path) -> i64 {
 /// Test: Full index pipeline - index --full creates DB and index
 #[test]
 fn index_full_creates_artifacts() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("index_full_creates_artifacts");
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -218,7 +169,7 @@ fn index_full_creates_artifacts() {
 /// Incremental re-index must preserve existing messages and ingest new ones from the same file.
 #[test]
 fn incremental_reindex_preserves_and_appends_messages() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("incremental_reindex_preserves_and_appends_messages");
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
