@@ -424,18 +424,21 @@ fn check_payload_manifest(site_dir: &Path) -> CheckResult {
         ArchiveConfig::Encrypted(enc) => {
             // Check each expected chunk file exists
             for (i, expected_file) in enc.payload.files.iter().enumerate() {
-                let chunk_path = site_dir.join(expected_file);
-                if !chunk_path.exists() {
-                    errors.push(format!("Missing chunk file: {}", expected_file));
-                }
-
-                // Verify filename follows pattern
+                // Security: Verify filename follows expected pattern first (defense-in-depth)
+                // This also implicitly prevents path traversal since valid patterns are "payload/chunk-NNNNN.bin"
                 let expected_name = format!("payload/chunk-{:05}.bin", i);
                 if *expected_file != expected_name {
                     errors.push(format!(
                         "Chunk {} has unexpected name: {} (expected {})",
                         i, expected_file, expected_name
                     ));
+                    // Skip existence check for malformed paths to prevent path traversal
+                    continue;
+                }
+
+                let chunk_path = site_dir.join(expected_file);
+                if !chunk_path.exists() {
+                    errors.push(format!("Missing chunk file: {}", expected_file));
                 }
             }
 
@@ -578,7 +581,41 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
     for (rel_path, entry) in &manifest.files {
         checked_files.insert(rel_path.clone());
 
+        // Security: Validate path doesn't escape site_dir via traversal
+        let path = Path::new(rel_path);
+        if path.is_absolute() {
+            errors.push(format!(
+                "integrity.json contains absolute path (security violation): {}",
+                rel_path
+            ));
+            continue;
+        }
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            errors.push(format!(
+                "integrity.json contains path traversal (security violation): {}",
+                rel_path
+            ));
+            continue;
+        }
+
         let file_path = site_dir.join(rel_path);
+
+        // Extra safety: verify resolved path is still under site_dir
+        if let (Ok(canonical_site), Ok(canonical_file)) =
+            (site_dir.canonicalize(), file_path.canonicalize())
+        {
+            if !canonical_file.starts_with(&canonical_site) {
+                errors.push(format!(
+                    "integrity.json path escapes site directory (security violation): {}",
+                    rel_path
+                ));
+                continue;
+            }
+        }
+
         if !file_path.exists() {
             errors.push(format!("File in manifest but missing: {}", rel_path));
             continue;
@@ -1080,5 +1117,71 @@ mod tests {
 
         let result = check_size_limits(site_dir);
         assert!(result.passed);
+    }
+
+    #[test]
+    fn test_integrity_path_traversal_blocked() {
+        use std::collections::BTreeMap;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+
+        // Create integrity.json with path traversal attempt
+        let mut files = BTreeMap::new();
+        files.insert(
+            "../../../etc/passwd".to_string(),
+            super::bundle::IntegrityEntry {
+                sha256: "deadbeef".repeat(8),
+                size: 100,
+            },
+        );
+        let manifest = IntegrityManifest { files };
+        let manifest_json = serde_json::to_string(&manifest).unwrap();
+        fs::write(site_dir.join("integrity.json"), manifest_json).unwrap();
+
+        // Verify the check catches the path traversal
+        let result = check_integrity(site_dir, false);
+        assert!(!result.passed, "Path traversal should be blocked");
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|d| d.contains("security violation"))
+                .unwrap_or(false),
+            "Should mention security violation"
+        );
+    }
+
+    #[test]
+    fn test_integrity_absolute_path_blocked() {
+        use std::collections::BTreeMap;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+
+        // Create integrity.json with absolute path
+        let mut files = BTreeMap::new();
+        files.insert(
+            "/etc/passwd".to_string(),
+            super::bundle::IntegrityEntry {
+                sha256: "deadbeef".repeat(8),
+                size: 100,
+            },
+        );
+        let manifest = IntegrityManifest { files };
+        let manifest_json = serde_json::to_string(&manifest).unwrap();
+        fs::write(site_dir.join("integrity.json"), manifest_json).unwrap();
+
+        // Verify the check catches the absolute path
+        let result = check_integrity(site_dir, false);
+        assert!(!result.passed, "Absolute path should be blocked");
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|d| d.contains("security violation"))
+                .unwrap_or(false),
+            "Should mention security violation"
+        );
     }
 }
