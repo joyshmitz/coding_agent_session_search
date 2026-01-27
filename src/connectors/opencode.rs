@@ -119,6 +119,7 @@ struct PartInfo {
     #[serde(default, alias = "order", alias = "sequence")]
     index: Option<i64>,
     #[serde(rename = "messageID", default)]
+    #[allow(dead_code)]
     message_id: Option<String>,
     #[serde(rename = "type", default)]
     part_type: Option<String>,
@@ -340,7 +341,7 @@ fn session_has_updates(
 }
 
 /// Parse a session JSON file
-fn parse_session_file(path: &PathBuf) -> Result<SessionInfo> {
+fn parse_session_file(path: &Path) -> Result<SessionInfo> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("read session file {}", path.display()))?;
     let session: SessionInfo = serde_json::from_str(&content)
@@ -349,7 +350,7 @@ fn parse_session_file(path: &PathBuf) -> Result<SessionInfo> {
 }
 
 /// Load all messages for a session
-fn load_messages(session_msg_dir: &PathBuf, part_dir: &PathBuf) -> Result<Vec<NormalizedMessage>> {
+fn load_messages(session_msg_dir: &Path, part_dir: &Path) -> Result<Vec<NormalizedMessage>> {
     let mut pending: Vec<(Option<i64>, String, NormalizedMessage)> = Vec::new();
 
     // Find all message files for this session
