@@ -4171,7 +4171,7 @@ fn run_cli_search(
                 retryable: true,
             })?,
         SearchMode::Semantic => {
-            let hits = client
+            let (hits, ann_stats) = client
                 .search_semantic(
                     query,
                     filters.clone(),
@@ -4219,7 +4219,7 @@ fn run_cli_search(
                 wildcard_fallback: false,
                 cache_stats: crate::search::query::CacheStats::default(),
                 suggestions: Vec::new(),
-                ann_stats: None,
+                ann_stats,
             }
         }
         SearchMode::Hybrid => client
