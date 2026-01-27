@@ -363,7 +363,9 @@ fn copy_payload_chunks(src_dir: &Path, dest_dir: &Path) -> Result<usize> {
         let path = entry.path();
 
         if path.is_file() && path.extension().map(|e| e == "bin").unwrap_or(false) {
-            let filename = path.file_name().unwrap();
+            let Some(filename) = path.file_name() else {
+                continue; // Skip entries without valid filenames
+            };
             let dest_path = dest_dir.join(filename);
             fs::copy(&path, &dest_path)?;
             count += 1;
@@ -418,7 +420,9 @@ fn copy_blobs_directory(src_dir: &Path, dest_dir: &Path) -> Result<usize> {
         let path = entry.path();
 
         if path.is_file() {
-            let filename = path.file_name().unwrap();
+            let Some(filename) = path.file_name() else {
+                continue; // Skip entries without valid filenames
+            };
             let dest_path = dest_dir.join(filename);
             fs::copy(&path, &dest_path)?;
             count += 1;

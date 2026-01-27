@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 
 use rusqlite::Connection;
 
-use crate::search::ann_index::{HnswIndex, DEFAULT_EF_SEARCH};
+use crate::search::ann_index::{DEFAULT_EF_SEARCH, HnswIndex};
 use crate::search::canonicalize::canonicalize_for_embedding;
 use crate::search::embedder::Embedder;
 use crate::search::tantivy::fields_from_schema;
@@ -2434,9 +2434,7 @@ impl SearchClient {
                 .ann_index
                 .as_ref()
                 .ok_or_else(|| anyhow!("HNSW index failed to initialize"))?;
-            let candidate = fetch
-                .saturating_mul(ANN_CANDIDATE_MULTIPLIER)
-                .max(fetch);
+            let candidate = fetch.saturating_mul(ANN_CANDIDATE_MULTIPLIER).max(fetch);
             let ef = DEFAULT_EF_SEARCH.max(candidate);
             let ann_results = ann.search(&embedding, candidate, ef)?;
 

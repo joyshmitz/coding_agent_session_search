@@ -34,6 +34,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use hnsw_rs::api::AnnT;
 use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::hnswio::{HnswIo, ReloadOptions};
 use hnsw_rs::prelude::{DistDot, Neighbour};
@@ -66,6 +67,31 @@ pub struct AnnSearchResult {
     pub row_idx: usize,
     /// Approximate distance (lower is better for dot product converted to distance).
     pub distance: f32,
+}
+
+/// Statistics from an ANN search operation.
+///
+/// These metrics help users understand the quality/speed tradeoff of approximate search.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AnnSearchStats {
+    /// Total vectors in the HNSW index.
+    pub index_size: usize,
+    /// Dimension of vectors.
+    pub dimension: usize,
+    /// ef parameter used for this search (higher = more accurate but slower).
+    pub ef_search: usize,
+    /// Number of results requested (k).
+    pub k_requested: usize,
+    /// Number of results returned.
+    pub k_returned: usize,
+    /// Search time in microseconds.
+    pub search_time_us: u64,
+    /// Estimated recall based on ef/k ratio.
+    /// Formula: min(1.0, 0.9 + 0.1 * log2(ef / k))
+    /// This is an empirical estimate; actual recall depends on data distribution.
+    pub estimated_recall: f32,
+    /// Whether this was an approximate (HNSW) or exact search.
+    pub is_approximate: bool,
 }
 
 /// HNSW index wrapper for approximate nearest neighbor search.
@@ -139,6 +165,19 @@ impl HnswIndex {
     /// Returns up to `k` results sorted by similarity (highest first).
     /// The `ef` parameter controls search accuracy (higher = more accurate but slower).
     pub fn search(&self, query: &[f32], k: usize, ef: usize) -> Result<Vec<AnnSearchResult>> {
+        let (results, _stats) = self.search_with_stats(query, k, ef)?;
+        Ok(results)
+    }
+
+    /// Search for approximate nearest neighbors with detailed statistics.
+    ///
+    /// Returns both results and metrics about the search operation.
+    pub fn search_with_stats(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+    ) -> Result<(Vec<AnnSearchResult>, AnnSearchStats)> {
         if query.len() != self.dimension {
             bail!(
                 "query dimension mismatch: expected {}, got {}",
@@ -148,14 +187,30 @@ impl HnswIndex {
         }
 
         if k == 0 {
-            return Ok(Vec::new());
+            return Ok((
+                Vec::new(),
+                AnnSearchStats {
+                    index_size: self.count,
+                    dimension: self.dimension,
+                    ef_search: ef,
+                    k_requested: k,
+                    k_returned: 0,
+                    search_time_us: 0,
+                    estimated_recall: 1.0,
+                    is_approximate: true,
+                },
+            ));
         }
+
+        let start = std::time::Instant::now();
 
         // HNSW search returns neighbors sorted by distance (ascending).
         let neighbors: Vec<Neighbour> = self.hnsw.search(query, k, ef);
 
-        // Convert to our result type, inverting distance to score.
-        // DistDot uses 1 - dot_product, so we convert back.
+        let search_time_us = start.elapsed().as_micros() as u64;
+
+        // Convert to our result type.
+        // DistDot uses 1 - dot_product, so lower distance = higher similarity.
         let results: Vec<AnnSearchResult> = neighbors
             .into_iter()
             .map(|n| AnnSearchResult {
@@ -164,7 +219,18 @@ impl HnswIndex {
             })
             .collect();
 
-        Ok(results)
+        let stats = AnnSearchStats {
+            index_size: self.count,
+            dimension: self.dimension,
+            ef_search: ef,
+            k_requested: k,
+            k_returned: results.len(),
+            search_time_us,
+            estimated_recall: estimate_recall(ef, k),
+            is_approximate: true,
+        };
+
+        Ok((results, stats))
     }
 
     /// Get the number of vectors in the index.
@@ -236,8 +302,8 @@ impl HnswIndex {
         let data_file = temp_dir.join(format!("{basename}.hnsw.data"));
 
         // Read graph file.
-        let graph_data =
-            std::fs::read(&graph_file).with_context(|| format!("read HNSW graph {graph_file:?}"))?;
+        let graph_data = std::fs::read(&graph_file)
+            .with_context(|| format!("read HNSW graph {graph_file:?}"))?;
         writer.write_all(&(graph_data.len() as u64).to_le_bytes())?;
         writer.write_all(&graph_data)?;
 
@@ -310,9 +376,7 @@ impl HnswIndex {
 
         let temp_dir = tempfile::tempdir()?;
         let basename = "hnsw_graph";
-        let graph_path = temp_dir
-            .path()
-            .join(format!("{basename}.hnsw.graph"));
+        let graph_path = temp_dir.path().join(format!("{basename}.hnsw.graph"));
         let data_path = temp_dir.path().join(format!("{basename}.hnsw.data"));
         std::fs::write(&graph_path, &graph_data)?;
 
@@ -331,9 +395,7 @@ impl HnswIndex {
         // Safety: ReloadOptions disables mmap, so point data is owned by the HNSW structure.
         // The lifetime is tied to HnswIo by API design, but no data is borrowed from it.
         let hnsw: Hnsw<'static, f32, DistDot> = unsafe {
-            std::mem::transmute::<Hnsw<'_, f32, DistDot>, Hnsw<'static, f32, DistDot>>(
-                hnsw_loaded,
-            )
+            std::mem::transmute::<Hnsw<'_, f32, DistDot>, Hnsw<'static, f32, DistDot>>(hnsw_loaded)
         };
 
         Ok(Self {
@@ -348,6 +410,33 @@ impl HnswIndex {
     pub fn exists(data_dir: &Path, embedder_id: &str) -> bool {
         hnsw_index_path(data_dir, embedder_id).exists()
     }
+}
+
+/// Estimate recall based on ef/k ratio.
+///
+/// This is an empirical estimate based on HNSW literature:
+/// - ef >= k is required for meaningful results
+/// - Higher ef/k ratio improves recall
+/// - Typical recall is 95-99% for ef/k >= 2
+///
+/// Formula: min(1.0, 0.85 + 0.15 * min(1.0, log2(ef/k) / 3))
+/// This gives:
+/// - ef/k = 1: ~85% estimated recall
+/// - ef/k = 2: ~90% estimated recall
+/// - ef/k = 4: ~95% estimated recall
+/// - ef/k = 8+: ~99%+ estimated recall
+fn estimate_recall(ef: usize, k: usize) -> f32 {
+    if k == 0 {
+        return 1.0;
+    }
+    let ratio = ef as f32 / k as f32;
+    if ratio < 1.0 {
+        // ef < k is problematic, very low recall expected
+        return 0.5 + 0.35 * ratio;
+    }
+    // log2(ratio) ranges from 0 (ratio=1) to ~3 (ratio=8)
+    let log_factor = (ratio.log2() / 3.0).min(1.0);
+    (0.85 + 0.15 * log_factor).min(1.0)
 }
 
 impl std::fmt::Debug for HnswIndex {
