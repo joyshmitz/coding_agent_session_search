@@ -49,7 +49,7 @@ impl MergeStatus {
 }
 
 // Bump this when schema/tokenizer changes. Used to trigger rebuilds.
-pub const SCHEMA_HASH: &str = "tantivy-schema-v6-provenance-indexed";
+pub const SCHEMA_HASH: &str = "tantivy-schema-v6-long-tokens";
 
 /// Returns true if the given stored hash matches the current schema hash.
 pub fn schema_hash_matches(stored: &str) -> bool {
@@ -476,7 +476,7 @@ pub fn ensure_tokenizer(index: &mut Index) {
     use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer};
     let analyzer = TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(LowerCaser)
-        .filter(RemoveLongFilter::limit(40))
+        .filter(RemoveLongFilter::limit(256))
         .build();
     index.tokenizers().register("hyphen_normalize", analyzer);
 }
