@@ -449,6 +449,20 @@ impl PagesConfig {
             );
         }
 
+        if self.encryption.generate_qr && !self.encryption.generate_recovery {
+            warnings.push(
+                "generate_qr is enabled but generate_recovery is false. QR codes are generated for recovery secrets only."
+                    .to_string(),
+            );
+        }
+
+        if self.deployment.target.to_lowercase() == "github" && self.deployment.branch.is_some() {
+            warnings.push(
+                "deployment.branch is set for GitHub Pages, but cass always deploys to gh-pages. The value will be ignored."
+                    .to_string(),
+            );
+        }
+
         let valid = errors.is_empty();
         let resolved = if valid {
             Some(self.to_resolved())

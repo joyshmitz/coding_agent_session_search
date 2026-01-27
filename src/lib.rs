@@ -642,7 +642,7 @@ pub enum SourcesCommand {
         #[arg(long, short)]
         verbose: bool,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Add a new remote source
@@ -679,7 +679,7 @@ pub enum SourcesCommand {
         #[arg(long, short)]
         source: Option<String>,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Synchronize sessions from remote sources
@@ -697,7 +697,7 @@ pub enum SourcesCommand {
         #[arg(long)]
         dry_run: bool,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Manage path mappings for a source (P6.3)
@@ -712,7 +712,7 @@ pub enum SourcesCommand {
         #[arg(long)]
         skip_existing: bool,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Interactive wizard to discover, configure, and set up remote sources.
@@ -797,7 +797,7 @@ pub enum SourcesCommand {
         #[arg(long, short)]
         verbose: bool,
         /// Output progress as JSON (implies non-interactive, for scripting)
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
 }
@@ -808,7 +808,7 @@ pub enum ModelsCommand {
     /// Show model installation status
     Status {
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Download and install the semantic search model
@@ -838,7 +838,7 @@ pub enum ModelsCommand {
         #[arg(long)]
         data_dir: Option<PathBuf>,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Remove model files to free disk space
@@ -856,7 +856,7 @@ pub enum ModelsCommand {
     /// Check for model updates
     CheckUpdate {
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
         /// Override data dir
         #[arg(long)]
@@ -872,7 +872,7 @@ pub enum MappingsAction {
         /// Source name
         source: String,
         /// Output as JSON
-        #[arg(long)]
+        #[arg(long, visible_alias = "robot")]
         json: bool,
     },
     /// Add a path mapping
@@ -7826,6 +7826,7 @@ fn run_config_based_export(
     _verbose: bool,
 ) -> anyhow::Result<()> {
     use chrono::DateTime;
+    use rand::RngCore;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -7843,13 +7844,15 @@ fn run_config_based_export(
         return Ok(());
     }
 
-    // Create output directory
+    // Output directory is the bundle root (contains site/ and private/)
     let output_dir = &wizard_state.output_dir;
     std::fs::create_dir_all(output_dir)?;
 
-    // Create temp directory for intermediate export
+    // Create temp directory for intermediate export and encryption output
     let temp_dir = tempfile::tempdir()?;
     let export_db_path = temp_dir.path().join("export.db");
+    let encrypted_dir = temp_dir.path().join("encrypted");
+    std::fs::create_dir_all(&encrypted_dir)?;
 
     // Parse time filters to DateTime<Utc>
     let since_dt = config.since_ts().and_then(DateTime::from_timestamp_millis);
@@ -7875,37 +7878,50 @@ fn run_config_based_export(
     let stats = export_engine.execute(|_current, _total| {}, Some(running))?;
 
     // Handle encryption if enabled
-    let encryption_enabled = !wizard_state.no_encryption && wizard_state.password.is_some();
+    if wizard_state.no_encryption && !wizard_state.unencrypted_confirmed {
+        anyhow::bail!("Unencrypted export requested without explicit risk acknowledgment");
+    }
+
+    let mut recovery_secret: Option<Vec<u8>> = None;
+    let encryption_enabled = !wizard_state.no_encryption;
 
     if encryption_enabled {
-        let password = wizard_state.password.as_ref().unwrap();
+        let password = wizard_state
+            .password
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Encryption enabled but no password provided"))?;
         let chunk_size = config.encryption.chunk_size.unwrap_or(8 * 1024 * 1024) as usize;
         let mut enc_engine = crate::pages::encrypt::EncryptionEngine::new(chunk_size);
         enc_engine.add_password_slot(password)?;
 
         // Add recovery slot if requested
         if wizard_state.generate_recovery {
-            let recovery_bytes: [u8; 32] = rand::random();
+            let mut recovery_bytes = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut recovery_bytes);
             enc_engine.add_recovery_slot(&recovery_bytes)?;
+            recovery_secret = Some(recovery_bytes.to_vec());
         }
 
-        // Encrypt the database
-        let enc_config = enc_engine.encrypt_file(&export_db_path, output_dir, |_, _| {})?;
+        // Encrypt the database into the temp encrypted dir
+        let enc_config = enc_engine.encrypt_file(&export_db_path, &encrypted_dir, |_, _| {})?;
 
         // Write config.json
-        let config_path = output_dir.join("config.json");
+        let config_path = encrypted_dir.join("config.json");
         std::fs::write(&config_path, serde_json::to_string_pretty(&enc_config)?)?;
-
-        // Generate QR code if requested
-        #[cfg(feature = "qr")]
-        if wizard_state.generate_qr {
-            let qr_path = output_dir.join("password-qr.png");
-            let qr_bytes = crate::pages::qr::generate_qr_png(password)?;
-            std::fs::write(&qr_path, qr_bytes)?;
-        }
     } else {
-        // No encryption - just copy the database
-        std::fs::copy(&export_db_path, output_dir.join("export.db"))?;
+        // Unencrypted mode: place export.db in payload and write minimal config.json
+        let payload_dir = encrypted_dir.join("payload");
+        std::fs::create_dir_all(&payload_dir)?;
+        let dest_db = payload_dir.join("data.db");
+        std::fs::copy(&export_db_path, &dest_db)?;
+
+        let config_json = serde_json::json!({
+            "encrypted": false,
+            "version": "1.0.0",
+            "warning": "UNENCRYPTED - All content is publicly readable"
+        });
+        let config_path = encrypted_dir.join("config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config_json)?)?;
     }
 
     // Build bundle
@@ -7913,21 +7929,61 @@ fn run_config_based_export(
         title: wizard_state.title.clone(),
         description: wizard_state.description.clone(),
         hide_metadata: wizard_state.hide_metadata,
-        recovery_secret: None, // Already handled via encryption slots
+        recovery_secret,
         generate_qr: wizard_state.generate_qr,
         generated_docs: vec![],
     };
 
-    let bundle_output_dir = output_dir.join("bundle");
     let bundle_builder = crate::pages::bundle::BundleBuilder::with_config(bundle_config);
-    let bundle_result = bundle_builder.build(output_dir, &bundle_output_dir, |_phase, _msg| {})?;
+    let bundle_result = bundle_builder.build(&encrypted_dir, output_dir, |_phase, _msg| {})?;
+
+    // Optional deployment
+    let deploy_result = match wizard_state.target {
+        crate::pages::wizard::DeployTarget::Local => None,
+        crate::pages::wizard::DeployTarget::GitHubPages => {
+            let repo = wizard_state
+                .repo_name
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("GitHub deployment requires deployment.repo"))?;
+            let deployer = crate::pages::deploy_github::GitHubDeployer::new(repo.clone());
+            Some(serde_json::to_value(
+                deployer.deploy(&bundle_result.site_dir, |_phase, _msg| {})?,
+            )?)
+        }
+        crate::pages::wizard::DeployTarget::CloudflarePages => {
+            let project_name = wizard_state
+                .repo_name
+                .clone()
+                .unwrap_or_else(|| "cass-archive".to_string());
+            let branch = config
+                .deployment
+                .branch
+                .clone()
+                .unwrap_or_else(|| "main".to_string());
+            let deployer = crate::pages::deploy_cloudflare::CloudflareDeployer::new(
+                crate::pages::deploy_cloudflare::CloudflareConfig {
+                    project_name: project_name.clone(),
+                    custom_domain: None,
+                    create_if_missing: true,
+                    branch,
+                    account_id: dotenvy::var("CLOUDFLARE_ACCOUNT_ID").ok(),
+                    api_token: dotenvy::var("CLOUDFLARE_API_TOKEN").ok(),
+                },
+            );
+            Some(serde_json::to_value(
+                deployer.deploy(&bundle_result.site_dir, |_phase, _msg| {})?,
+            )?)
+        }
+    };
 
     // Output results
     if json_output {
         let result = serde_json::json!({
             "status": "success",
             "output_dir": output_dir,
-            "bundle_dir": bundle_output_dir,
+            "bundle_dir": output_dir,
+            "site_dir": bundle_result.site_dir,
+            "private_dir": bundle_result.private_dir,
             "stats": {
                 "conversations": stats.conversations_processed,
                 "messages": stats.messages_processed,
@@ -7940,13 +7996,15 @@ fn run_config_based_export(
             "bundle": {
                 "total_files": bundle_result.total_files,
                 "fingerprint": bundle_result.fingerprint,
-            }
+            },
+            "deployment": deploy_result,
         });
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
         println!("Export complete:");
         println!("  Output: {}", output_dir.display());
-        println!("  Bundle: {}", bundle_output_dir.display());
+        println!("  Site: {}", bundle_result.site_dir.display());
+        println!("  Private: {}", bundle_result.private_dir.display());
         println!("  Conversations: {}", stats.conversations_processed);
         println!("  Messages: {}", stats.messages_processed);
         if encryption_enabled {
@@ -7955,6 +8013,10 @@ fn run_config_based_export(
             println!("  Encryption: DISABLED (content is public)");
         }
         println!("  Fingerprint: {}", &bundle_result.fingerprint[..8]);
+
+        if let Some(deploy) = deploy_result {
+            println!("  Deployment: {}", deploy);
+        }
     }
 
     Ok(())

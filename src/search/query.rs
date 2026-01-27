@@ -319,6 +319,7 @@ impl QueryExplanation {
                             WildcardPattern::Prefix(_) => "prefix (*)",
                             WildcardPattern::Suffix(_) => "suffix (*)",
                             WildcardPattern::Substring(_) => "substring (*)",
+                            WildcardPattern::Complex(_) => "complex (*)",
                         };
                         parsed.terms.push(ParsedTerm {
                             text: part,
@@ -598,6 +599,8 @@ pub enum MatchType {
     Suffix,
     /// Matched via both wildcards (*foo*) - uses regex
     Substring,
+    /// Matched via complex wildcard (e.g. f*o) - uses regex
+    Wildcard,
     /// Matched via automatic wildcard fallback when exact search was sparse
     ImplicitWildcard,
 }
@@ -610,6 +613,7 @@ impl MatchType {
             MatchType::Prefix => 0.9,
             MatchType::Suffix => 0.8,
             MatchType::Substring => 0.7,
+            MatchType::Wildcard => 0.65,
             MatchType::ImplicitWildcard => 0.6,
         }
     }
@@ -1430,6 +1434,8 @@ enum WildcardPattern {
     Suffix(String),
     /// Both wildcards: *foo* (substring match - requires regex)
     Substring(String),
+    /// Complex wildcard: f*o, *f*o, f*o* (requires regex)
+    Complex(String),
 }
 
 impl WildcardPattern {
@@ -1440,6 +1446,12 @@ impl WildcardPattern {
         let core = term.trim_matches('*').to_lowercase();
         if core.is_empty() {
             return WildcardPattern::Exact(String::new());
+        }
+
+        // Check for internal wildcards (e.g. f*o)
+        // If the core itself contains stars, it's a complex pattern
+        if core.contains('*') {
+            return WildcardPattern::Complex(term.to_lowercase());
         }
 
         match (starts_with_star, ends_with_star) {
@@ -1455,6 +1467,44 @@ impl WildcardPattern {
         match self {
             WildcardPattern::Suffix(core) => Some(format!(".*{}", escape_regex(core))),
             WildcardPattern::Substring(core) => Some(format!(".*{}.*", escape_regex(core))),
+            WildcardPattern::Complex(full_term) => {
+                let mut regex = String::with_capacity(full_term.len() * 2 + 2);
+
+                // If the pattern doesn't start with *, anchor it to start
+                if !full_term.starts_with('*') {
+                    regex.push('^');
+                } else {
+                    regex.push_str(".*");
+                }
+
+                let trimmed_start = full_term.trim_start_matches('*');
+                let trimmed = trimmed_start.trim_end_matches('*');
+
+                // Internal parts
+                for c in trimmed.chars() {
+                    if c == '*' {
+                        regex.push_str(".*");
+                    } else {
+                        match c {
+                            '\\' | '.' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
+                            | '^' | '$' => {
+                                regex.push('\\');
+                                regex.push(c);
+                            }
+                            _ => regex.push(c),
+                        }
+                    }
+                }
+
+                // If the pattern doesn't end with *, anchor it to end
+                if !full_term.ends_with('*') {
+                    regex.push('$');
+                } else {
+                    regex.push_str(".*");
+                }
+
+                Some(regex)
+            }
             _ => None,
         }
     }
@@ -1466,6 +1516,7 @@ impl WildcardPattern {
             WildcardPattern::Prefix(_) => MatchType::Prefix,
             WildcardPattern::Suffix(_) => MatchType::Suffix,
             WildcardPattern::Substring(_) => MatchType::Substring,
+            WildcardPattern::Complex(_) => MatchType::Wildcard,
         }
     }
 }
@@ -1825,8 +1876,10 @@ fn build_term_query_clauses(
                 )),
             ));
         }
-        WildcardPattern::Suffix(term) | WildcardPattern::Substring(term) => {
-            // For suffix and substring patterns, use RegexQuery
+        WildcardPattern::Suffix(term)
+        | WildcardPattern::Substring(term)
+        | WildcardPattern::Complex(term) => {
+            // For suffix, substring, and complex patterns, use RegexQuery
             if term.is_empty() {
                 return shoulds;
             }

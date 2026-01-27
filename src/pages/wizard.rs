@@ -1837,8 +1837,8 @@ impl PagesWizard {
                     custom_domain: None,
                     create_if_missing: true,
                     branch: "main".to_string(),
-                    account_id: std::env::var("CLOUDFLARE_ACCOUNT_ID").ok(),
-                    api_token: std::env::var("CLOUDFLARE_API_TOKEN").ok(),
+                    account_id: dotenvy::var("CLOUDFLARE_ACCOUNT_ID").ok(),
+                    api_token: dotenvy::var("CLOUDFLARE_API_TOKEN").ok(),
                 });
 
                 // Check prerequisites first
