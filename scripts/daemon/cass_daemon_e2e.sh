@@ -285,7 +285,7 @@ run_step "version" "$CASS_BIN" --version
 emit_phase_start "setup_sandbox" "Prepare test fixtures"
 log "INFO" "Preparing sandbox data"
 mkdir -p "${CODEX_HOME}/sessions/2024/11/20"
-cat > "${CODEX_HOME}/sessions/2024/11/20/daemon-e2e.jsonl" <<'JSONL'
+cat > "${CODEX_HOME}/sessions/2024/11/20/rollout-daemon-e2e.jsonl" <<'JSONL'
 {"type":"event_msg","timestamp":1732118400000,"payload":{"type":"user_message","message":"Explain daemon fallback behavior"}}
 {"type":"response_item","timestamp":1732118401000,"payload":{"role":"assistant","content":"Daemon fallback should be transparent to users."}}
 {"type":"event_msg","timestamp":1732118402000,"payload":{"type":"user_message","message":"Add retry logic with jittered backoff"}}
@@ -303,7 +303,7 @@ pushd "${SANDBOX_DIR}" >/dev/null
 # Phase: Indexing
 emit_phase_start "indexing" "Build full-text and semantic indexes"
 run_step "index_full" "$CASS_BIN" index --full --data-dir "${DATA_DIR}"
-run_step "index_semantic" "$CASS_BIN" index --semantic --embedder "${EMBEDDER}" --data-dir "${DATA_DIR}"
+run_step "index_semantic" "$CASS_BIN" index --semantic --full --embedder "${EMBEDDER}" --data-dir "${DATA_DIR}"
 emit_phase_end "indexing"
 
 # =============================================================================
