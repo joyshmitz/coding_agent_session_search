@@ -489,7 +489,10 @@ mod tests {
     fn test_estimate_recall_ef_less_than_k() {
         // When ef < k, recall is low
         let recall = estimate_recall(5, 10);
-        assert!(recall < 0.85, "recall should be < 0.85 when ef < k, got {recall}");
+        assert!(
+            recall < 0.85,
+            "recall should be < 0.85 when ef < k, got {recall}"
+        );
         assert!(recall > 0.5, "recall should be > 0.5, got {recall}");
     }
 
@@ -508,7 +511,7 @@ mod tests {
         // ef = 2k gives approximately 90% recall
         let recall = estimate_recall(20, 10);
         assert!(
-            recall >= 0.88 && recall <= 0.92,
+            (0.88..=0.92).contains(&recall),
             "recall should be ~0.90 when ef=2k, got {recall}"
         );
     }
@@ -518,7 +521,7 @@ mod tests {
         // ef = 4k gives approximately 95% recall
         let recall = estimate_recall(40, 10);
         assert!(
-            recall >= 0.93 && recall <= 0.97,
+            (0.93..=0.97).contains(&recall),
             "recall should be ~0.95 when ef=4k, got {recall}"
         );
     }
@@ -528,7 +531,10 @@ mod tests {
         // High ef/k ratio should approach 1.0 but never exceed it
         let recall = estimate_recall(1000, 10);
         assert!(recall <= 1.0, "recall should not exceed 1.0, got {recall}");
-        assert!(recall >= 0.98, "recall should be >= 0.98 with high ef, got {recall}");
+        assert!(
+            recall >= 0.98,
+            "recall should be >= 0.98 with high ef, got {recall}"
+        );
     }
 
     #[test]
