@@ -122,7 +122,27 @@ impl PathMapping {
         let boundary_ok =
             self.from.ends_with('/') || self.from.ends_with('\\') || rest.starts_with(['/', '\\']);
         if boundary_ok {
-            Some(format!("{}{}", self.to, rest))
+            // Fix: ensure separator if 'from' ends with one but 'to' does not (and 'rest' doesn't start with one)
+            // This prevents "/a/" -> "/b" mapping "/a/file" to "/bfile"
+            let from_sep = if self.from.ends_with('/') {
+                Some('/')
+            } else if self.from.ends_with('\\') {
+                Some('\\')
+            } else {
+                None
+            };
+
+            let needs_sep = from_sep.is_some()
+                && !self.to.ends_with('/')
+                && !self.to.ends_with('\\')
+                && !rest.starts_with(['/', '\\']);
+
+            if needs_sep {
+                // Use the separator style from 'from' as a reasonable default
+                Some(format!("{}{}{}", self.to, from_sep.unwrap(), rest))
+            } else {
+                Some(format!("{}{}", self.to, rest))
+            }
         } else {
             None
         }
