@@ -1647,23 +1647,23 @@ impl FailureDump {
             .arg("SELECT name FROM sqlite_master WHERE type='table';")
             .output();
 
-        if let Ok(output) = tables_output {
-            if output.status.success() {
-                let tables = String::from_utf8_lossy(&output.stdout);
-                writeln!(f, "Tables:")?;
-                for table in tables.lines().take(20) {
-                    // Get row count for each table
-                    let count_output = std::process::Command::new("sqlite3")
-                        .arg(db_path)
-                        .arg(format!("SELECT COUNT(*) FROM \"{}\";", table))
-                        .output();
-                    let count = count_output
-                        .ok()
-                        .filter(|o| o.status.success())
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                        .unwrap_or_else(|| "?".to_string());
-                    writeln!(f, "  {} ({} rows)", table, count)?;
-                }
+        if let Ok(output) = tables_output
+            && output.status.success()
+        {
+            let tables = String::from_utf8_lossy(&output.stdout);
+            writeln!(f, "Tables:")?;
+            for table in tables.lines().take(20) {
+                // Get row count for each table
+                let count_output = std::process::Command::new("sqlite3")
+                    .arg(db_path)
+                    .arg(format!("SELECT COUNT(*) FROM \"{}\";", table))
+                    .output();
+                let count = count_output
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                writeln!(f, "  {} ({} rows)", table, count)?;
             }
         }
         Ok(())
@@ -1676,47 +1676,47 @@ impl FailureDump {
         let branch_output = std::process::Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .output();
-        if let Ok(output) = branch_output {
-            if output.status.success() {
-                writeln!(
-                    f,
-                    "Branch: {}",
-                    String::from_utf8_lossy(&output.stdout).trim()
-                )?;
-            }
+        if let Ok(output) = branch_output
+            && output.status.success()
+        {
+            writeln!(
+                f,
+                "Branch: {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            )?;
         }
 
         // Current commit
         let commit_output = std::process::Command::new("git")
             .args(["rev-parse", "--short", "HEAD"])
             .output();
-        if let Ok(output) = commit_output {
-            if output.status.success() {
-                writeln!(
-                    f,
-                    "Commit: {}",
-                    String::from_utf8_lossy(&output.stdout).trim()
-                )?;
-            }
+        if let Ok(output) = commit_output
+            && output.status.success()
+        {
+            writeln!(
+                f,
+                "Commit: {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            )?;
         }
 
         // Uncommitted changes (short status)
         let status_output = std::process::Command::new("git")
             .args(["status", "--short"])
             .output();
-        if let Ok(output) = status_output {
-            if output.status.success() {
-                let status = String::from_utf8_lossy(&output.stdout);
-                if status.trim().is_empty() {
-                    writeln!(f, "Status: (clean)")?;
-                } else {
-                    writeln!(f, "Uncommitted changes:")?;
-                    for line in status.lines().take(20) {
-                        writeln!(f, "  {}", line)?;
-                    }
-                    if status.lines().count() > 20 {
-                        writeln!(f, "  ... (truncated)")?;
-                    }
+        if let Ok(output) = status_output
+            && output.status.success()
+        {
+            let status = String::from_utf8_lossy(&output.stdout);
+            if status.trim().is_empty() {
+                writeln!(f, "Status: (clean)")?;
+            } else {
+                writeln!(f, "Uncommitted changes:")?;
+                for line in status.lines().take(20) {
+                    writeln!(f, "  {}", line)?;
+                }
+                if status.lines().count() > 20 {
+                    writeln!(f, "  ... (truncated)")?;
                 }
             }
         }
