@@ -26,7 +26,7 @@ self.onmessage = async (event) => {
                 break;
 
             case 'DECRYPT_DATABASE':
-                await handleDecryptDatabase(data.dek, data.config);
+                await handleDecryptDatabase(data.dek, data.config, data.opfsEnabled);
                 break;
 
             case 'CLEAR_KEYS':
@@ -227,9 +227,10 @@ async function unwrapDek(kek, slot, exportId) {
 /**
  * Handle database decryption
  */
-async function handleDecryptDatabase(dekBase64, cfg) {
+async function handleDecryptDatabase(dekBase64, cfg, opfsEnabled) {
     config = cfg;
     dek = base64ToArray(dekBase64);
+    const allowOpfs = opfsEnabled === true;
 
     const { payload } = config;
     const totalChunks = payload.chunk_count;
@@ -319,7 +320,7 @@ async function handleDecryptDatabase(dekBase64, cfg) {
     });
 
     // Initialize sqlite-wasm with the database
-    await initDatabase(dbBytes);
+    await initDatabase(dbBytes, allowOpfs);
 }
 
 /**
@@ -412,7 +413,7 @@ async function decompressDeflate(compressed) {
 /**
  * Initialize sqlite-wasm with decrypted database
  */
-async function initDatabase(dbBytes) {
+async function initDatabase(dbBytes, opfsEnabled) {
     // Load sqlite-wasm if not loaded
     if (!self.sqlite3) {
         await loadSqlite();
@@ -422,9 +423,9 @@ async function initDatabase(dbBytes) {
         // Initialize sqlite-wasm
         const sqlite3 = await self.sqlite3InitModule();
 
-        // Try OPFS first (persistent, better performance)
+        // Try OPFS first (persistent, better performance) if user opted in
         let db;
-        if (sqlite3.oo1.OpfsDb) {
+        if (opfsEnabled && sqlite3.oo1.OpfsDb) {
             try {
                 // Write to OPFS
                 const opfs = await navigator.storage.getDirectory();
