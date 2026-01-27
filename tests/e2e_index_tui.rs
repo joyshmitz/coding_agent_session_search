@@ -9,7 +9,11 @@ use util::e2e_log::{E2eError, E2eErrorContext, E2ePerformanceMetrics, PhaseTrack
 fn truncate_output(bytes: &[u8], max_len: usize) -> String {
     let s = String::from_utf8_lossy(bytes);
     if s.len() > max_len {
-        format!("{}... [truncated {} bytes]", &s[..max_len], s.len() - max_len)
+        format!(
+            "{}... [truncated {} bytes]",
+            &s[..max_len],
+            s.len() - max_len
+        )
     } else {
         s.to_string()
     }
@@ -51,7 +55,11 @@ fn index_then_tui_once_headless() {
     // Codex fixture under CODEX_HOME to satisfy detection.
     let _guard_codex = EnvGuard::set("CODEX_HOME", data_dir.to_string_lossy());
     make_codex_fixture(&data_dir);
-    tracker.end("setup_fixtures", Some("Test environment ready"), setup_start);
+    tracker.end(
+        "setup_fixtures",
+        Some("Test environment ready"),
+        setup_start,
+    );
 
     // Phase: run index
     let index_start = tracker.start("run_index", Some("Running cass index --full"));
@@ -68,10 +76,22 @@ fn index_then_tui_once_headless() {
             .with_command("cass index --full")
             .capture_cwd()
             .add_state("exit_code", serde_json::json!(output.status.code()))
-            .add_state("stdout_tail", serde_json::json!(truncate_output(&output.stdout, 1000)))
-            .add_state("stderr_tail", serde_json::json!(truncate_output(&output.stderr, 1000)));
-        tracker.fail(E2eError::with_type("cass index --full failed", "COMMAND_FAILED").with_context(ctx));
-        panic!("cass index --full failed (exit {:?}): {}", output.status.code(), truncate_output(&output.stderr, 500));
+            .add_state(
+                "stdout_tail",
+                serde_json::json!(truncate_output(&output.stdout, 1000)),
+            )
+            .add_state(
+                "stderr_tail",
+                serde_json::json!(truncate_output(&output.stderr, 1000)),
+            );
+        tracker.fail(
+            E2eError::with_type("cass index --full failed", "COMMAND_FAILED").with_context(ctx),
+        );
+        panic!(
+            "cass index --full failed (exit {:?}): {}",
+            output.status.code(),
+            truncate_output(&output.stderr, 500)
+        );
     }
     let index_ms = index_start.elapsed().as_millis() as u64;
     tracker.end("run_index", Some("Index complete"), index_start);
@@ -99,10 +119,22 @@ fn index_then_tui_once_headless() {
             .with_command("cass tui --once")
             .capture_cwd()
             .add_state("exit_code", serde_json::json!(output.status.code()))
-            .add_state("stdout_tail", serde_json::json!(truncate_output(&output.stdout, 1000)))
-            .add_state("stderr_tail", serde_json::json!(truncate_output(&output.stderr, 1000)));
-        tracker.fail(E2eError::with_type("cass tui --once failed", "COMMAND_FAILED").with_context(ctx));
-        panic!("cass tui --once failed (exit {:?}): {}", output.status.code(), truncate_output(&output.stderr, 500));
+            .add_state(
+                "stdout_tail",
+                serde_json::json!(truncate_output(&output.stdout, 1000)),
+            )
+            .add_state(
+                "stderr_tail",
+                serde_json::json!(truncate_output(&output.stderr, 1000)),
+            );
+        tracker.fail(
+            E2eError::with_type("cass tui --once failed", "COMMAND_FAILED").with_context(ctx),
+        );
+        panic!(
+            "cass tui --once failed (exit {:?}): {}",
+            output.status.code(),
+            truncate_output(&output.stderr, 500)
+        );
     }
     let tui_ms = tui_start.elapsed().as_millis() as u64;
     tracker.end("run_tui", Some("TUI headless smoke test passed"), tui_start);

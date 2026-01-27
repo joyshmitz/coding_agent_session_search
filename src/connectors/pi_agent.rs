@@ -1120,7 +1120,11 @@ mod tests {
     fn edge_whitespace_only_file_returns_no_conversations() {
         let dir = TempDir::new().unwrap();
         let storage = create_pi_agent_storage(&dir);
-        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &["   ", "\t", "  "]);
+        write_session_file(
+            &storage,
+            "2025-12-01T10-00-00_uuid1.jsonl",
+            &["   ", "\t", "  "],
+        );
 
         let connector = PiAgentConnector::new();
         let ctx = ScanContext::local_default(storage.clone(), None);
@@ -1320,10 +1324,7 @@ mod tests {
         let convs = connector.scan(&ctx).unwrap();
         assert_eq!(convs.len(), 1);
         // Should use the latest model_change
-        assert_eq!(
-            convs[0].messages[0].author,
-            Some("claude-opus".to_string())
-        );
+        assert_eq!(convs[0].messages[0].author, Some("claude-opus".to_string()));
     }
 
     #[test]

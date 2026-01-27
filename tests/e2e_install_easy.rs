@@ -17,7 +17,11 @@ use util::e2e_log::{E2eError, E2eErrorContext, E2ePerformanceMetrics, PhaseTrack
 fn truncate_output(bytes: &[u8], max_len: usize) -> String {
     let s = String::from_utf8_lossy(bytes);
     if s.len() > max_len {
-        format!("{}... [truncated {} bytes]", &s[..max_len], s.len() - max_len)
+        format!(
+            "{}... [truncated {} bytes]",
+            &s[..max_len],
+            s.len() - max_len
+        )
     } else {
         s.to_string()
     }
@@ -48,7 +52,11 @@ fn install_easy_mode_end_to_end() {
 
     let temp_home = tempfile::TempDir::new().unwrap();
     let dest = tempfile::TempDir::new().unwrap();
-    tracker.end("setup", Some("Create isolated test environment"), phase_start);
+    tracker.end(
+        "setup",
+        Some("Create isolated test environment"),
+        phase_start,
+    );
 
     // Phase: Run install.sh with real system toolchain
     let phase_start = tracker.start("run_install", Some("Run install.sh with real toolchain"));
@@ -80,12 +88,25 @@ fn install_easy_mode_end_to_end() {
             .with_command("bash install.sh --version vtest --easy-mode --verify")
             .capture_cwd()
             .add_state("exit_code", serde_json::json!(output.status.code()))
-            .add_state("stdout_tail", serde_json::json!(truncate_output(&output.stdout, 1000)))
-            .add_state("stderr_tail", serde_json::json!(truncate_output(&output.stderr, 1000)));
+            .add_state(
+                "stdout_tail",
+                serde_json::json!(truncate_output(&output.stdout, 1000)),
+            )
+            .add_state(
+                "stderr_tail",
+                serde_json::json!(truncate_output(&output.stderr, 1000)),
+            );
         tracker.fail(E2eError::with_type("install.sh failed", "COMMAND_FAILED").with_context(ctx));
-        panic!("install.sh failed (exit {:?})\nstdout: {stdout}\nstderr: {stderr}", output.status.code());
+        panic!(
+            "install.sh failed (exit {:?})\nstdout: {stdout}\nstderr: {stderr}",
+            output.status.code()
+        );
     }
-    tracker.end("run_install", Some("Run install.sh with real toolchain"), phase_start);
+    tracker.end(
+        "run_install",
+        Some("Run install.sh with real toolchain"),
+        phase_start,
+    );
 
     // Phase: Verify installation artifacts and checksums
     let phase_start = tracker.start("verify_install", Some("Verify binary and checksums"));
@@ -108,10 +129,7 @@ fn install_easy_mode_end_to_end() {
         .arg("--help")
         .output()
         .expect("run binary --help");
-    assert!(
-        help_output.status.success(),
-        "Binary --help should succeed"
-    );
+    assert!(help_output.status.success(), "Binary --help should succeed");
 
     // Verify installed binary content matches fixture source
     let installed_binary = fs::read(&bin).expect("read installed binary");
@@ -122,7 +140,11 @@ fn install_easy_mode_end_to_end() {
         "Installed binary should match fixture binary"
     );
 
-    tracker.end("verify_install", Some("Verify binary and checksums"), phase_start);
+    tracker.end(
+        "verify_install",
+        Some("Verify binary and checksums"),
+        phase_start,
+    );
 
     tracker.metrics(
         "install_easy_mode",

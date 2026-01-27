@@ -1358,10 +1358,7 @@ not valid json at all
         let convs = result.unwrap();
         assert_eq!(convs.len(), 1);
         assert!(
-            convs[0]
-                .messages
-                .iter()
-                .any(|m| m.content == "Correct"),
+            convs[0].messages.iter().any(|m| m.content == "Correct"),
             "should extract the correctly typed entry"
         );
     }
@@ -1452,7 +1449,7 @@ not valid json at all
         );
         let convs = result.unwrap();
         assert_eq!(convs.len(), 1);
-        assert!(convs[0].messages.len() >= 1);
+        assert!(!convs[0].messages.is_empty());
     }
 
     #[test]
@@ -1480,7 +1477,7 @@ not valid json at all
         let convs = result.unwrap();
         assert_eq!(convs.len(), 1);
         assert!(
-            convs[0].messages.len() >= 1,
+            !convs[0].messages.is_empty(),
             "should extract at least the second line after BOM"
         );
         assert!(
@@ -1513,10 +1510,7 @@ not valid json at all
         let ctx = ScanContext::local_default(codex_dir.clone(), None);
         let result = connector.scan(&ctx);
 
-        assert!(
-            result.is_ok(),
-            "missing payload should not cause errors"
-        );
+        assert!(result.is_ok(), "missing payload should not cause errors");
         let convs = result.unwrap();
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].messages.len(), 1);
@@ -1599,7 +1593,7 @@ not valid json at all
 
         let convs2 = connector.scan(&ctx).unwrap();
         assert!(
-            convs2.len() >= 1,
+            !convs2.is_empty(),
             "unicode workspace paths should be handled"
         );
     }
@@ -1686,6 +1680,10 @@ not valid json at all
         assert_eq!(convs[0].messages.len(), 2);
         // flatten_content should handle tool_use blocks
         assert!(convs[0].messages[0].content.contains("Let me check"));
-        assert!(convs[0].messages[1].content.contains("Here are the results"));
+        assert!(
+            convs[0].messages[1]
+                .content
+                .contains("Here are the results")
+        );
     }
 }

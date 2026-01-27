@@ -349,7 +349,10 @@ fn filter_by_time_range() {
     let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
     let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
 
-    let ps = tracker.start("setup_fixtures", Some("Create early, middle, and late sessions"));
+    let ps = tracker.start(
+        "setup_fixtures",
+        Some("Create early, middle, and late sessions"),
+    );
     make_codex_session_at(
         &codex_home,
         "2024/11/10",
@@ -414,7 +417,10 @@ fn filter_by_time_range() {
         ps,
     );
 
-    let ps = tracker.start("verify_results", Some("Verify only middle session returned"));
+    let ps = tracker.start(
+        "verify_results",
+        Some("Verify only middle session returned"),
+    );
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
@@ -794,11 +800,7 @@ fn filter_by_days() {
         "oldsession daystest",
         thirty_days_ago,
     );
-    tracker.end(
-        "setup_fixtures",
-        Some("Create recent and old sessions"),
-        ps,
-    );
+    tracker.end("setup_fixtures", Some("Create recent and old sessions"), ps);
 
     let ps = tracker.start("run_index", Some("Run full index"));
     cargo_bin_cmd!("cass")
@@ -821,7 +823,10 @@ fn filter_by_days() {
     let filter_duration = ps.elapsed().as_millis() as u64;
     tracker.end("test_days_filter", Some("Search with --days 7"), ps);
 
-    let ps = tracker.start("verify_results", Some("Verify only recent session returned"));
+    let ps = tracker.start(
+        "verify_results",
+        Some("Verify only recent session returned"),
+    );
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     let hits = json
@@ -1537,7 +1542,11 @@ fn timeline_source_specific() {
         json.get("groups").is_some() || json.get("total_sessions").is_some(),
         "Timeline with --source local should return valid structure"
     );
-    tracker.end("verify_results", Some("Verify valid timeline structure"), ps);
+    tracker.end(
+        "verify_results",
+        Some("Verify valid timeline structure"),
+        ps,
+    );
 }
 
 // =============================================================================

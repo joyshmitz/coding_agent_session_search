@@ -58,7 +58,11 @@ fn sources_list_empty() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources list command");
-    tracker.end("run_sources_list", Some("Run sources list with no config"), start);
+    tracker.end(
+        "run_sources_list",
+        Some("Run sources list with no config"),
+        start,
+    );
 
     let start = tracker.start("verify_output", Some("Verify empty sources message"));
     assert!(output.status.success());
@@ -110,7 +114,11 @@ sync_schedule = "manual"
         stdout.contains("laptop"),
         "Expected source name in output, got: {stdout}"
     );
-    tracker.end("verify_output", Some("Verify source appears in output"), start);
+    tracker.end(
+        "verify_output",
+        Some("Verify source appears in output"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -136,17 +144,31 @@ sync_schedule = "daily"
 "#,
     );
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
-    tracker.end("setup", Some("Create config with verbose-testable source"), start);
+    tracker.end(
+        "setup",
+        Some("Create config with verbose-testable source"),
+        start,
+    );
 
-    let start = tracker.start("run_sources_list_verbose", Some("Run sources list --verbose"));
+    let start = tracker.start(
+        "run_sources_list_verbose",
+        Some("Run sources list --verbose"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "list", "--verbose"])
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources list --verbose command");
-    tracker.end("run_sources_list_verbose", Some("Run sources list --verbose"), start);
+    tracker.end(
+        "run_sources_list_verbose",
+        Some("Run sources list --verbose"),
+        start,
+    );
 
-    let start = tracker.start("verify_output", Some("Verify verbose output contains details"));
+    let start = tracker.start(
+        "verify_output",
+        Some("Verify verbose output contains details"),
+    );
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("workstation"), "Missing source name");
@@ -154,7 +176,11 @@ sync_schedule = "daily"
         stdout.contains("work.example.com") || stdout.contains("dev@work"),
         "Missing host info in verbose output"
     );
-    tracker.end("verify_output", Some("Verify verbose output contains details"), start);
+    tracker.end(
+        "verify_output",
+        Some("Verify verbose output contains details"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -187,7 +213,11 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources list --json command");
-    tracker.end("run_sources_list_json", Some("Run sources list --json"), start);
+    tracker.end(
+        "run_sources_list_json",
+        Some("Run sources list --json"),
+        start,
+    );
 
     let start = tracker.start("verify_json", Some("Verify JSON structure and content"));
     assert!(output.status.success());
@@ -200,7 +230,11 @@ paths = ["~/.claude/projects"]
     let sources = json["sources"].as_array().expect("sources should be array");
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0]["name"], "laptop");
-    tracker.end("verify_json", Some("Verify JSON structure and content"), start);
+    tracker.end(
+        "verify_json",
+        Some("Verify JSON structure and content"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -236,9 +270,16 @@ fn sources_add_no_test() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources add command");
-    tracker.end("run_sources_add", Some("Run sources add with --no-test"), start);
+    tracker.end(
+        "run_sources_add",
+        Some("Run sources add with --no-test"),
+        start,
+    );
 
-    let start = tracker.start("verify_output", Some("Verify add success and config written"));
+    let start = tracker.start(
+        "verify_output",
+        Some("Verify add success and config written"),
+    );
     assert!(
         output.status.success(),
         "sources add failed: {}",
@@ -258,7 +299,11 @@ fn sources_add_no_test() {
         config_content.contains("user@myserver.local"),
         "Host not in config file"
     );
-    tracker.end("verify_output", Some("Verify add success and config written"), start);
+    tracker.end(
+        "verify_output",
+        Some("Verify add success and config written"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -275,7 +320,10 @@ fn sources_add_explicit_paths() {
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     tracker.end("setup", Some("Create temp config directory"), start);
 
-    let start = tracker.start("run_sources_add", Some("Run sources add with explicit paths"));
+    let start = tracker.start(
+        "run_sources_add",
+        Some("Run sources add with explicit paths"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args([
             "sources",
@@ -292,7 +340,11 @@ fn sources_add_explicit_paths() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources add command");
-    tracker.end("run_sources_add", Some("Run sources add with explicit paths"), start);
+    tracker.end(
+        "run_sources_add",
+        Some("Run sources add with explicit paths"),
+        start,
+    );
 
     let start = tracker.start("verify_config", Some("Verify paths in config file"));
     assert!(
@@ -343,7 +395,11 @@ fn sources_add_no_paths_error() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources add command");
-    tracker.end("run_sources_add", Some("Run sources add without paths"), start);
+    tracker.end(
+        "run_sources_add",
+        Some("Run sources add without paths"),
+        start,
+    );
 
     let start = tracker.start("verify_error", Some("Verify paths error reported"));
     assert!(!output.status.success());
@@ -379,7 +435,10 @@ paths = ["~/.claude/projects"]
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     tracker.end("setup", Some("Create config with existing source"), start);
 
-    let start = tracker.start("run_sources_add_duplicate", Some("Add source with duplicate name"));
+    let start = tracker.start(
+        "run_sources_add_duplicate",
+        Some("Add source with duplicate name"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args([
             "sources",
@@ -394,7 +453,11 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources add command");
-    tracker.end("run_sources_add_duplicate", Some("Add source with duplicate name"), start);
+    tracker.end(
+        "run_sources_add_duplicate",
+        Some("Add source with duplicate name"),
+        start,
+    );
 
     let start = tracker.start("verify_error", Some("Verify duplicate error"));
     assert!(!output.status.success());
@@ -420,7 +483,10 @@ fn sources_add_invalid_url() {
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     tracker.end("setup", Some("Create temp config directory"), start);
 
-    let start = tracker.start("run_sources_add_invalid", Some("Add source with invalid URL"));
+    let start = tracker.start(
+        "run_sources_add_invalid",
+        Some("Add source with invalid URL"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args([
             "sources",
@@ -433,7 +499,11 @@ fn sources_add_invalid_url() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources add command");
-    tracker.end("run_sources_add_invalid", Some("Add source with invalid URL"), start);
+    tracker.end(
+        "run_sources_add_invalid",
+        Some("Add source with invalid URL"),
+        start,
+    );
 
     let start = tracker.start("verify_error", Some("Verify invalid URL error"));
     assert!(!output.status.success());
@@ -472,7 +542,11 @@ fn sources_add_auto_name() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources add command");
-    tracker.end("run_sources_add", Some("Add source without explicit name"), start);
+    tracker.end(
+        "run_sources_add",
+        Some("Add source without explicit name"),
+        start,
+    );
 
     let start = tracker.start("verify_auto_name", Some("Verify auto-generated name"));
     assert!(output.status.success());
@@ -481,7 +555,11 @@ fn sources_add_auto_name() {
         config_content.contains("name = \"devlaptop\""),
         "Auto-generated name not found in config: {config_content}"
     );
-    tracker.end("verify_auto_name", Some("Verify auto-generated name"), start);
+    tracker.end(
+        "verify_auto_name",
+        Some("Verify auto-generated name"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -528,7 +606,10 @@ paths = ["~/.claude/projects"]
         .expect("sources remove command");
     tracker.end("run_sources_remove", Some("Remove laptop source"), start);
 
-    let start = tracker.start("verify_removal", Some("Verify laptop removed and workstation kept"));
+    let start = tracker.start(
+        "verify_removal",
+        Some("Verify laptop removed and workstation kept"),
+    );
     assert!(
         output.status.success(),
         "sources remove failed: {}",
@@ -545,7 +626,11 @@ paths = ["~/.claude/projects"]
         config_content.contains("workstation"),
         "Other source incorrectly removed"
     );
-    tracker.end("verify_removal", Some("Verify laptop removed and workstation kept"), start);
+    tracker.end(
+        "verify_removal",
+        Some("Verify laptop removed and workstation kept"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -580,7 +665,11 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources remove command");
-    tracker.end("run_sources_remove", Some("Remove nonexistent source"), start);
+    tracker.end(
+        "run_sources_remove",
+        Some("Remove nonexistent source"),
+        start,
+    );
 
     let start = tracker.start("verify_error", Some("Verify not found error"));
     // Should fail gracefully
@@ -600,7 +689,10 @@ paths = ["~/.claude/projects"]
 fn sources_remove_with_purge() {
     let tracker = tracker_for("sources_remove_with_purge");
 
-    let start = tracker.start("setup", Some("Create config and data directory for purge test"));
+    let start = tracker.start(
+        "setup",
+        Some("Create config and data directory for purge test"),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     let config_dir = tmp.path().join("config");
     let data_dir = tmp.path().join("data");
@@ -625,16 +717,27 @@ paths = ["~/.claude/projects"]
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
-    tracker.end("setup", Some("Create config and data directory for purge test"), start);
+    tracker.end(
+        "setup",
+        Some("Create config and data directory for purge test"),
+        start,
+    );
 
-    let start = tracker.start("run_sources_remove_purge", Some("Remove source with --purge"));
+    let start = tracker.start(
+        "run_sources_remove_purge",
+        Some("Remove source with --purge"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "remove", "laptop", "--purge", "-y"])
         .env("XDG_CONFIG_HOME", &config_dir)
         .env("XDG_DATA_HOME", &data_dir)
         .output()
         .expect("sources remove --purge command");
-    tracker.end("run_sources_remove_purge", Some("Remove source with --purge"), start);
+    tracker.end(
+        "run_sources_remove_purge",
+        Some("Remove source with --purge"),
+        start,
+    );
 
     let start = tracker.start("verify_removal", Some("Verify source removed from config"));
     assert!(
@@ -649,7 +752,11 @@ paths = ["~/.claude/projects"]
         !config_content.contains("laptop"),
         "Removed source still in config"
     );
-    tracker.end("verify_removal", Some("Verify source removed from config"), start);
+    tracker.end(
+        "verify_removal",
+        Some("Verify source removed from config"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -671,13 +778,20 @@ fn sources_doctor_no_sources() {
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     tracker.end("setup", Some("Create empty config directory"), start);
 
-    let start = tracker.start("run_sources_doctor", Some("Run sources doctor with no sources"));
+    let start = tracker.start(
+        "run_sources_doctor",
+        Some("Run sources doctor with no sources"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "doctor"])
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources doctor command");
-    tracker.end("run_sources_doctor", Some("Run sources doctor with no sources"), start);
+    tracker.end(
+        "run_sources_doctor",
+        Some("Run sources doctor with no sources"),
+        start,
+    );
 
     let start = tracker.start("verify_output", Some("Verify no sources message"));
     // Should succeed but indicate no sources
@@ -697,7 +811,10 @@ fn sources_doctor_no_sources() {
 fn sources_doctor_json() {
     let tracker = tracker_for("sources_doctor_json");
 
-    let start = tracker.start("setup", Some("Create config with one source for doctor JSON"));
+    let start = tracker.start(
+        "setup",
+        Some("Create config with one source for doctor JSON"),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     let config_dir = tmp.path().join("config");
     fs::create_dir_all(&config_dir).unwrap();
@@ -714,7 +831,11 @@ paths = ["~/.claude/projects"]
     );
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
-    tracker.end("setup", Some("Create config with one source for doctor JSON"), start);
+    tracker.end(
+        "setup",
+        Some("Create config with one source for doctor JSON"),
+        start,
+    );
 
     let start = tracker.start("run_sources_doctor_json", Some("Run sources doctor --json"));
     let output = cargo_bin_cmd!("cass")
@@ -722,9 +843,16 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources doctor --json command");
-    tracker.end("run_sources_doctor_json", Some("Run sources doctor --json"), start);
+    tracker.end(
+        "run_sources_doctor_json",
+        Some("Run sources doctor --json"),
+        start,
+    );
 
-    let start = tracker.start("verify_json", Some("Verify JSON array with laptop diagnostics"));
+    let start = tracker.start(
+        "verify_json",
+        Some("Verify JSON array with laptop diagnostics"),
+    );
     // Should output valid JSON (even if connectivity fails)
     // Note: The output is an array of source diagnostics
     let json: serde_json::Value =
@@ -740,7 +868,11 @@ paths = ["~/.claude/projects"]
     let arr = json.as_array().unwrap();
     assert_eq!(arr.len(), 1, "Expected one source in diagnostics");
     assert_eq!(arr[0]["source_id"], "laptop");
-    tracker.end("verify_json", Some("Verify JSON array with laptop diagnostics"), start);
+    tracker.end(
+        "verify_json",
+        Some("Verify JSON array with laptop diagnostics"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -775,15 +907,25 @@ paths = ["~/.claude/projects"]
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     tracker.end("setup", Some("Create config with two sources"), start);
 
-    let start = tracker.start("run_sources_doctor_filtered", Some("Run doctor filtered to laptop"));
+    let start = tracker.start(
+        "run_sources_doctor_filtered",
+        Some("Run doctor filtered to laptop"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "doctor", "--source", "laptop", "--json"])
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources doctor --source command");
-    tracker.end("run_sources_doctor_filtered", Some("Run doctor filtered to laptop"), start);
+    tracker.end(
+        "run_sources_doctor_filtered",
+        Some("Run doctor filtered to laptop"),
+        start,
+    );
 
-    let start = tracker.start("verify_filtered_output", Some("Verify only laptop in output"));
+    let start = tracker.start(
+        "verify_filtered_output",
+        Some("Verify only laptop in output"),
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("valid JSON output");
 
@@ -792,7 +934,11 @@ paths = ["~/.claude/projects"]
         assert_eq!(sources.len(), 1, "Should only have one source in output");
         assert_eq!(sources[0]["name"], "laptop");
     }
-    tracker.end("verify_filtered_output", Some("Verify only laptop in output"), start);
+    tracker.end(
+        "verify_filtered_output",
+        Some("Verify only laptop in output"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -815,7 +961,11 @@ fn sources_sync_no_sources() {
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
-    tracker.end("setup", Some("Create empty config and data directories"), start);
+    tracker.end(
+        "setup",
+        Some("Create empty config and data directories"),
+        start,
+    );
 
     let start = tracker.start("run_sources_sync", Some("Run sources sync with no sources"));
     let output = cargo_bin_cmd!("cass")
@@ -824,7 +974,11 @@ fn sources_sync_no_sources() {
         .env("XDG_DATA_HOME", &data_dir)
         .output()
         .expect("sources sync command");
-    tracker.end("run_sources_sync", Some("Run sources sync with no sources"), start);
+    tracker.end(
+        "run_sources_sync",
+        Some("Run sources sync with no sources"),
+        start,
+    );
 
     let start = tracker.start("verify_output", Some("Verify no sources message"));
     assert!(output.status.success());
@@ -863,16 +1017,27 @@ paths = ["~/.claude/projects"]
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
-    tracker.end("setup", Some("Create config with one source for dry-run"), start);
+    tracker.end(
+        "setup",
+        Some("Create config with one source for dry-run"),
+        start,
+    );
 
-    let start = tracker.start("run_sources_sync_dry_run", Some("Run sources sync --dry-run"));
+    let start = tracker.start(
+        "run_sources_sync_dry_run",
+        Some("Run sources sync --dry-run"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "sync", "--dry-run"])
         .env("XDG_CONFIG_HOME", &config_dir)
         .env("XDG_DATA_HOME", &data_dir)
         .output()
         .expect("sources sync --dry-run command");
-    tracker.end("run_sources_sync_dry_run", Some("Run sources sync --dry-run"), start);
+    tracker.end(
+        "run_sources_sync_dry_run",
+        Some("Run sources sync --dry-run"),
+        start,
+    );
 
     let start = tracker.start("verify_output", Some("Verify dry run mentions source"));
     // Dry run should indicate the source would be synced
@@ -885,7 +1050,11 @@ paths = ["~/.claude/projects"]
         combined.contains("laptop") || combined.contains("dry"),
         "Expected source name or dry run message, got: {combined}"
     );
-    tracker.end("verify_output", Some("Verify dry run mentions source"), start);
+    tracker.end(
+        "verify_output",
+        Some("Verify dry run mentions source"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -895,7 +1064,10 @@ paths = ["~/.claude/projects"]
 fn sources_sync_single_source() {
     let tracker = tracker_for("sources_sync_single_source");
 
-    let start = tracker.start("setup", Some("Create config with two sources for filtered sync"));
+    let start = tracker.start(
+        "setup",
+        Some("Create config with two sources for filtered sync"),
+    );
     let tmp = tempfile::TempDir::new().unwrap();
     let config_dir = tmp.path().join("config");
     let data_dir = tmp.path().join("data");
@@ -921,18 +1093,32 @@ paths = ["~/.claude/projects"]
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
-    tracker.end("setup", Some("Create config with two sources for filtered sync"), start);
+    tracker.end(
+        "setup",
+        Some("Create config with two sources for filtered sync"),
+        start,
+    );
 
-    let start = tracker.start("run_sources_sync_filtered", Some("Run sync filtered to laptop"));
+    let start = tracker.start(
+        "run_sources_sync_filtered",
+        Some("Run sync filtered to laptop"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "sync", "--source", "laptop", "--dry-run"])
         .env("XDG_CONFIG_HOME", &config_dir)
         .env("XDG_DATA_HOME", &data_dir)
         .output()
         .expect("sources sync --source command");
-    tracker.end("run_sources_sync_filtered", Some("Run sync filtered to laptop"), start);
+    tracker.end(
+        "run_sources_sync_filtered",
+        Some("Run sync filtered to laptop"),
+        start,
+    );
 
-    let start = tracker.start("verify_filtered_output", Some("Verify only laptop in output"));
+    let start = tracker.start(
+        "verify_filtered_output",
+        Some("Verify only laptop in output"),
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{stdout}{stderr}");
@@ -943,7 +1129,11 @@ paths = ["~/.claude/projects"]
         "Expected laptop in output, got: {combined}"
     );
     // The source filter should work even if sync fails due to SSH
-    tracker.end("verify_filtered_output", Some("Verify only laptop in output"), start);
+    tracker.end(
+        "verify_filtered_output",
+        Some("Verify only laptop in output"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -975,14 +1165,21 @@ paths = ["~/.claude/projects"]
     let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
     tracker.end("setup", Some("Create config for sync JSON test"), start);
 
-    let start = tracker.start("run_sources_sync_json", Some("Run sources sync --json --dry-run"));
+    let start = tracker.start(
+        "run_sources_sync_json",
+        Some("Run sources sync --json --dry-run"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "sync", "--json", "--dry-run"])
         .env("XDG_CONFIG_HOME", &config_dir)
         .env("XDG_DATA_HOME", &data_dir)
         .output()
         .expect("sources sync --json command");
-    tracker.end("run_sources_sync_json", Some("Run sources sync --json --dry-run"), start);
+    tracker.end(
+        "run_sources_sync_json",
+        Some("Run sources sync --json --dry-run"),
+        start,
+    );
 
     let start = tracker.start("verify_json", Some("Verify valid JSON output"));
     // Should output valid JSON even if sync fails
@@ -1039,7 +1236,10 @@ fn sources_workflow_add_list_remove() {
     tracker.end("add_source", Some("Add server source"), start);
 
     // 2. List sources - should show the added source
-    let start = tracker.start("list_sources", Some("List sources and verify server present"));
+    let start = tracker.start(
+        "list_sources",
+        Some("List sources and verify server present"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "list"])
         .env("XDG_CONFIG_HOME", &config_dir)
@@ -1048,7 +1248,11 @@ fn sources_workflow_add_list_remove() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("server"));
-    tracker.end("list_sources", Some("List sources and verify server present"), start);
+    tracker.end(
+        "list_sources",
+        Some("List sources and verify server present"),
+        start,
+    );
 
     // 3. Remove the source
     let start = tracker.start("remove_source", Some("Remove server source"));
@@ -1143,7 +1347,11 @@ fn sources_multiple_add_list() {
     let names: Vec<&str> = sources.iter().filter_map(|s| s["name"].as_str()).collect();
     assert!(names.contains(&"laptop"));
     assert!(names.contains(&"workstation"));
-    tracker.end("verify_list", Some("List sources and verify both present"), start);
+    tracker.end(
+        "verify_list",
+        Some("List sources and verify both present"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1174,7 +1382,11 @@ paths = ["~/.claude/projects"]
     );
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
-    tracker.end("setup", Some("Create config with source but no mappings"), start);
+    tracker.end(
+        "setup",
+        Some("Create config with source but no mappings"),
+        start,
+    );
 
     let start = tracker.start("run_mappings_list", Some("Run mappings list for laptop"));
     let output = cargo_bin_cmd!("cass")
@@ -1182,7 +1394,11 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings list command");
-    tracker.end("run_mappings_list", Some("Run mappings list for laptop"), start);
+    tracker.end(
+        "run_mappings_list",
+        Some("Run mappings list for laptop"),
+        start,
+    );
 
     let start = tracker.start("verify_output", Some("Verify empty mappings message"));
     assert!(output.status.success());
@@ -1191,7 +1407,11 @@ paths = ["~/.claude/projects"]
         stdout.contains("No") || stdout.contains("0 mapping"),
         "Expected no mappings message, got: {stdout}"
     );
-    tracker.end("verify_output", Some("Verify empty mappings message"), start);
+    tracker.end(
+        "verify_output",
+        Some("Verify empty mappings message"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1222,7 +1442,11 @@ to = "/Users/me/projects"
     );
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
-    tracker.end("setup", Some("Create config with source and path mapping"), start);
+    tracker.end(
+        "setup",
+        Some("Create config with source and path mapping"),
+        start,
+    );
 
     let start = tracker.start("run_mappings_list", Some("Run mappings list for laptop"));
     let output = cargo_bin_cmd!("cass")
@@ -1230,7 +1454,11 @@ to = "/Users/me/projects"
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings list command");
-    tracker.end("run_mappings_list", Some("Run mappings list for laptop"), start);
+    tracker.end(
+        "run_mappings_list",
+        Some("Run mappings list for laptop"),
+        start,
+    );
 
     let start = tracker.start("verify_output", Some("Verify mapping paths in output"));
     assert!(output.status.success());
@@ -1239,7 +1467,11 @@ to = "/Users/me/projects"
         stdout.contains("/home/user/projects") && stdout.contains("/Users/me/projects"),
         "Expected mapping paths in output, got: {stdout}"
     );
-    tracker.end("verify_output", Some("Verify mapping paths in output"), start);
+    tracker.end(
+        "verify_output",
+        Some("Verify mapping paths in output"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1270,7 +1502,11 @@ to = "/Users/me/projects"
     );
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
-    tracker.end("setup", Some("Create config with mapping for JSON test"), start);
+    tracker.end(
+        "setup",
+        Some("Create config with mapping for JSON test"),
+        start,
+    );
 
     let start = tracker.start("run_mappings_list_json", Some("Run mappings list --json"));
     let output = cargo_bin_cmd!("cass")
@@ -1278,7 +1514,11 @@ to = "/Users/me/projects"
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings list --json command");
-    tracker.end("run_mappings_list_json", Some("Run mappings list --json"), start);
+    tracker.end(
+        "run_mappings_list_json",
+        Some("Run mappings list --json"),
+        start,
+    );
 
     let start = tracker.start("verify_json", Some("Verify JSON contains mappings field"));
     assert!(output.status.success());
@@ -1289,7 +1529,11 @@ to = "/Users/me/projects"
         json.get("mappings").is_some(),
         "Expected 'mappings' field in JSON"
     );
-    tracker.end("verify_json", Some("Verify JSON contains mappings field"), start);
+    tracker.end(
+        "verify_json",
+        Some("Verify JSON contains mappings field"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1318,13 +1562,20 @@ paths = ["~/.claude/projects"]
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     tracker.end("setup", Some("Create config with laptop source"), start);
 
-    let start = tracker.start("run_mappings_list", Some("List mappings for nonexistent source"));
+    let start = tracker.start(
+        "run_mappings_list",
+        Some("List mappings for nonexistent source"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "mappings", "list", "nonexistent"])
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings list command");
-    tracker.end("run_mappings_list", Some("List mappings for nonexistent source"), start);
+    tracker.end(
+        "run_mappings_list",
+        Some("List mappings for nonexistent source"),
+        start,
+    );
 
     let start = tracker.start("verify_error", Some("Verify not found error"));
     assert!(!output.status.success());
@@ -1396,7 +1647,11 @@ paths = ["~/.claude/projects"]
         config_content.contains("/remote/path") && config_content.contains("/local/path"),
         "Mapping not in config: {config_content}"
     );
-    tracker.end("verify_config", Some("Verify mapping in config file"), start);
+    tracker.end(
+        "verify_config",
+        Some("Verify mapping in config file"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1442,7 +1697,11 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings add command");
-    tracker.end("run_mappings_add", Some("Add mapping with agent filter"), start);
+    tracker.end(
+        "run_mappings_add",
+        Some("Add mapping with agent filter"),
+        start,
+    );
 
     let start = tracker.start("verify_config", Some("Verify agent filter in config"));
     assert!(
@@ -1456,7 +1715,11 @@ paths = ["~/.claude/projects"]
         config_content.contains("claude_code") || config_content.contains("agents"),
         "Agent filter not in config: {config_content}"
     );
-    tracker.end("verify_config", Some("Verify agent filter in config"), start);
+    tracker.end(
+        "verify_config",
+        Some("Verify agent filter in config"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1519,7 +1782,11 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .assert()
         .success();
-    tracker.end("add_second_mapping", Some("Add /opt/projects mapping"), start);
+    tracker.end(
+        "add_second_mapping",
+        Some("Add /opt/projects mapping"),
+        start,
+    );
 
     // Verify both mappings are in config
     let start = tracker.start("verify_config", Some("Verify both mappings in config"));
@@ -1528,7 +1795,11 @@ paths = ["~/.claude/projects"]
         config_content.contains("/home/user") && config_content.contains("/opt/projects"),
         "Both mappings not in config: {config_content}"
     );
-    tracker.end("verify_config", Some("Verify both mappings in config"), start);
+    tracker.end(
+        "verify_config",
+        Some("Verify both mappings in config"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1557,7 +1828,10 @@ paths = ["~/.claude/projects"]
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     tracker.end("setup", Some("Create config with laptop source"), start);
 
-    let start = tracker.start("run_mappings_add", Some("Add mapping to nonexistent source"));
+    let start = tracker.start(
+        "run_mappings_add",
+        Some("Add mapping to nonexistent source"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args([
             "sources",
@@ -1572,7 +1846,11 @@ paths = ["~/.claude/projects"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings add command");
-    tracker.end("run_mappings_add", Some("Add mapping to nonexistent source"), start);
+    tracker.end(
+        "run_mappings_add",
+        Some("Add mapping to nonexistent source"),
+        start,
+    );
 
     let start = tracker.start("verify_error", Some("Verify not found error"));
     assert!(!output.status.success());
@@ -1628,9 +1906,16 @@ to = "/Work"
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings remove command");
-    tracker.end("run_mappings_remove", Some("Remove mapping at index 0"), start);
+    tracker.end(
+        "run_mappings_remove",
+        Some("Remove mapping at index 0"),
+        start,
+    );
 
-    let start = tracker.start("verify_removal", Some("Verify first mapping removed, second kept"));
+    let start = tracker.start(
+        "verify_removal",
+        Some("Verify first mapping removed, second kept"),
+    );
     assert!(
         output.status.success(),
         "mappings remove failed: {}",
@@ -1647,7 +1932,11 @@ to = "/Work"
         config_content.contains("/opt/work"),
         "Other mapping incorrectly removed"
     );
-    tracker.end("verify_removal", Some("Verify first mapping removed, second kept"), start);
+    tracker.end(
+        "verify_removal",
+        Some("Verify first mapping removed, second kept"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1680,13 +1969,20 @@ to = "/Users/me"
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     tracker.end("setup", Some("Create config with one path mapping"), start);
 
-    let start = tracker.start("run_mappings_remove", Some("Remove mapping at invalid index 99"));
+    let start = tracker.start(
+        "run_mappings_remove",
+        Some("Remove mapping at invalid index 99"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "mappings", "remove", "laptop", "99"])
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings remove command");
-    tracker.end("run_mappings_remove", Some("Remove mapping at invalid index 99"), start);
+    tracker.end(
+        "run_mappings_remove",
+        Some("Remove mapping at invalid index 99"),
+        start,
+    );
 
     let start = tracker.start("verify_error", Some("Verify index out of range error"));
     assert!(!output.status.success());
@@ -1695,7 +1991,11 @@ to = "/Users/me"
         stderr.contains("index") || stderr.contains("out of") || stderr.contains("range"),
         "Expected index error, got: {stderr}"
     );
-    tracker.end("verify_error", Some("Verify index out of range error"), start);
+    tracker.end(
+        "verify_error",
+        Some("Verify index out of range error"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1724,13 +2024,20 @@ paths = ["~/.claude/projects"]
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     tracker.end("setup", Some("Create config with no mappings"), start);
 
-    let start = tracker.start("run_mappings_remove", Some("Remove from empty mappings list"));
+    let start = tracker.start(
+        "run_mappings_remove",
+        Some("Remove from empty mappings list"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "mappings", "remove", "laptop", "0"])
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings remove command");
-    tracker.end("run_mappings_remove", Some("Remove from empty mappings list"), start);
+    tracker.end(
+        "run_mappings_remove",
+        Some("Remove from empty mappings list"),
+        start,
+    );
 
     let start = tracker.start("verify_error", Some("Verify empty mappings error"));
     assert!(!output.status.success());
@@ -1788,7 +2095,11 @@ to = "/Users/me/projects"
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings test command");
-    tracker.end("run_mappings_test", Some("Test path that matches mapping"), start);
+    tracker.end(
+        "run_mappings_test",
+        Some("Test path that matches mapping"),
+        start,
+    );
 
     let start = tracker.start("verify_rewritten_path", Some("Verify path was rewritten"));
     assert!(output.status.success());
@@ -1797,7 +2108,11 @@ to = "/Users/me/projects"
         stdout.contains("/Users/me/projects/myapp/src/main.rs"),
         "Expected rewritten path, got: {stdout}"
     );
-    tracker.end("verify_rewritten_path", Some("Verify path was rewritten"), start);
+    tracker.end(
+        "verify_rewritten_path",
+        Some("Verify path was rewritten"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1830,7 +2145,10 @@ to = "/Users/me/projects"
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     tracker.end("setup", Some("Create config with path mapping"), start);
 
-    let start = tracker.start("run_mappings_test", Some("Test path that does not match mapping"));
+    let start = tracker.start(
+        "run_mappings_test",
+        Some("Test path that does not match mapping"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args([
             "sources",
@@ -1842,9 +2160,16 @@ to = "/Users/me/projects"
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings test command");
-    tracker.end("run_mappings_test", Some("Test path that does not match mapping"), start);
+    tracker.end(
+        "run_mappings_test",
+        Some("Test path that does not match mapping"),
+        start,
+    );
 
-    let start = tracker.start("verify_unchanged_path", Some("Verify path unchanged or no match"));
+    let start = tracker.start(
+        "verify_unchanged_path",
+        Some("Verify path unchanged or no match"),
+    );
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Path should be unchanged or indicate no match
@@ -1852,7 +2177,11 @@ to = "/Users/me/projects"
         stdout.contains("/opt/other/path/file.rs") || stdout.contains("no match"),
         "Expected unchanged path or no match, got: {stdout}"
     );
-    tracker.end("verify_unchanged_path", Some("Verify path unchanged or no match"), start);
+    tracker.end(
+        "verify_unchanged_path",
+        Some("Verify path unchanged or no match"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1884,10 +2213,17 @@ agents = ["claude_code"]
     );
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
-    tracker.end("setup", Some("Create config with agent-filtered mapping"), start);
+    tracker.end(
+        "setup",
+        Some("Create config with agent-filtered mapping"),
+        start,
+    );
 
     // Test with matching agent
-    let start = tracker.start("run_mappings_test", Some("Test mapping with matching agent"));
+    let start = tracker.start(
+        "run_mappings_test",
+        Some("Test mapping with matching agent"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args([
             "sources",
@@ -1901,16 +2237,27 @@ agents = ["claude_code"]
         .env("XDG_CONFIG_HOME", &config_dir)
         .output()
         .expect("sources mappings test command");
-    tracker.end("run_mappings_test", Some("Test mapping with matching agent"), start);
+    tracker.end(
+        "run_mappings_test",
+        Some("Test mapping with matching agent"),
+        start,
+    );
 
-    let start = tracker.start("verify_rewritten_path", Some("Verify path rewritten for matching agent"));
+    let start = tracker.start(
+        "verify_rewritten_path",
+        Some("Verify path rewritten for matching agent"),
+    );
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("/Users/me/file.rs"),
         "Expected rewritten path for matching agent, got: {stdout}"
     );
-    tracker.end("verify_rewritten_path", Some("Verify path rewritten for matching agent"), start);
+    tracker.end(
+        "verify_rewritten_path",
+        Some("Verify path rewritten for matching agent"),
+        start,
+    );
 
     tracker.complete();
 }
@@ -1971,7 +2318,11 @@ paths = ["~/.claude/projects"]
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("/remote/path"));
-    tracker.end("list_mappings", Some("List mappings and verify added"), start);
+    tracker.end(
+        "list_mappings",
+        Some("List mappings and verify added"),
+        start,
+    );
 
     // 3. Test the mapping
     let start = tracker.start("test_mapping", Some("Test path rewriting"));

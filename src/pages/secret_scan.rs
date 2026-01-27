@@ -910,3 +910,650 @@ fn compile_regexes(patterns: &[String], label: &str) -> Result<Vec<Regex>> {
     }
     Ok(compiled)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // Shannon entropy tests
+    // =========================================================================
+
+    #[test]
+    fn shannon_entropy_empty_string_returns_zero() {
+        assert_eq!(shannon_entropy(""), 0.0);
+    }
+
+    #[test]
+    fn shannon_entropy_single_repeated_char_returns_zero() {
+        assert_eq!(shannon_entropy("aaaaaaaaaa"), 0.0);
+    }
+
+    #[test]
+    fn shannon_entropy_two_equal_chars_returns_one() {
+        let e = shannon_entropy("ab");
+        assert!((e - 1.0).abs() < 0.001, "expected ~1.0, got {}", e);
+    }
+
+    #[test]
+    fn shannon_entropy_high_entropy_base64() {
+        // A string with many distinct chars should have high entropy
+        let token = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let e = shannon_entropy(token);
+        assert!(e > 4.0, "expected entropy > 4.0, got {}", e);
+    }
+
+    #[test]
+    fn shannon_entropy_hex_string() {
+        let hex = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4";
+        let e = shannon_entropy(hex);
+        assert!(e > 3.0, "expected entropy > 3.0 for hex, got {}", e);
+    }
+
+    // =========================================================================
+    // Redact token tests
+    // =========================================================================
+
+    #[test]
+    fn redact_token_short_returns_redacted() {
+        assert_eq!(redact_token("abcd"), "[redacted]");
+        assert_eq!(redact_token("12345678"), "[redacted]");
+    }
+
+    #[test]
+    fn redact_token_long_shows_prefix_suffix_len() {
+        let result = redact_token("sk-abcdefghijklmnop");
+        assert!(
+            result.starts_with("sk"),
+            "should start with first 2 chars: {}",
+            result
+        );
+        assert!(
+            result.contains("op"),
+            "should end with last 2 chars: {}",
+            result
+        );
+        assert!(result.contains("len 19"), "should show length: {}", result);
+    }
+
+    #[test]
+    fn redact_token_nine_chars_shows_format() {
+        let result = redact_token("123456789");
+        assert!(result.starts_with("12"), "{}", result);
+        assert!(result.contains("89"), "{}", result);
+        assert!(result.contains("len 9"), "{}", result);
+    }
+
+    // =========================================================================
+    // Redact context tests
+    // =========================================================================
+
+    #[test]
+    fn redact_context_empty_text_returns_empty() {
+        assert_eq!(redact_context("", 0, 0, 120, "[REDACTED]"), "");
+    }
+
+    #[test]
+    fn redact_context_replaces_match_with_replacement() {
+        let text = "The key is sk-ABCDEFGHIJ and more";
+        let start = 11;
+        let end = 25;
+        let result = redact_context(text, start, end, 120, "[REDACTED]");
+        assert!(result.contains("[REDACTED]"), "result: {}", result);
+        assert!(
+            !result.contains("sk-ABCDEFGHIJ"),
+            "secret should be removed: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn redact_context_match_at_start() {
+        let text = "sk-SECRET rest of the text";
+        let result = redact_context(text, 0, 9, 120, "[R]");
+        assert!(result.starts_with("[R]"), "result: {}", result);
+    }
+
+    #[test]
+    fn redact_context_match_at_end() {
+        let text = "prefix sk-SECRET";
+        let result = redact_context(text, 7, 16, 120, "[R]");
+        assert!(result.ends_with("[R]"), "result: {}", result);
+    }
+
+    #[test]
+    fn redact_context_start_beyond_text_returns_empty() {
+        assert_eq!(redact_context("short", 10, 15, 120, "[R]"), "");
+    }
+
+    // =========================================================================
+    // Allowlist tests
+    // =========================================================================
+
+    #[test]
+    fn is_allowlisted_returns_true_for_matching_pattern() {
+        let config =
+            SecretScanConfig::from_inputs_with_env(&["sk-test.*".to_string()], &[], false).unwrap();
+        assert!(is_allowlisted("sk-test1234567890abcdef", &config));
+    }
+
+    #[test]
+    fn is_allowlisted_returns_false_when_no_match() {
+        let config =
+            SecretScanConfig::from_inputs_with_env(&["sk-test.*".to_string()], &[], false).unwrap();
+        assert!(!is_allowlisted("sk-prod1234567890abcdef", &config));
+    }
+
+    #[test]
+    fn is_allowlisted_empty_list_returns_false() {
+        let config = SecretScanConfig::from_inputs_with_env(&[], &[], false).unwrap();
+        assert!(!is_allowlisted("anything", &config));
+    }
+
+    // =========================================================================
+    // Adjust to char boundary tests
+    // =========================================================================
+
+    #[test]
+    fn adjust_to_char_boundary_ascii() {
+        let text = "hello";
+        assert_eq!(adjust_to_char_boundary(text, 3, true), 3);
+        assert_eq!(adjust_to_char_boundary(text, 3, false), 3);
+    }
+
+    #[test]
+    fn adjust_to_char_boundary_multibyte_forward() {
+        let text = "héllo"; // 'é' is 2 bytes (0xC3 0xA9)
+        // Index 2 is in the middle of 'é', forward should skip to next boundary
+        let idx = adjust_to_char_boundary(text, 2, true);
+        assert!(
+            text.is_char_boundary(idx),
+            "idx {} not a char boundary",
+            idx
+        );
+    }
+
+    #[test]
+    fn adjust_to_char_boundary_multibyte_backward() {
+        let text = "héllo";
+        let idx = adjust_to_char_boundary(text, 2, false);
+        assert!(
+            text.is_char_boundary(idx),
+            "idx {} not a char boundary",
+            idx
+        );
+    }
+
+    #[test]
+    fn adjust_to_char_boundary_beyond_len() {
+        let text = "abc";
+        assert_eq!(adjust_to_char_boundary(text, 100, true), 3);
+    }
+
+    // =========================================================================
+    // Config construction tests
+    // =========================================================================
+
+    #[test]
+    fn config_from_inputs_with_valid_patterns() {
+        let config = SecretScanConfig::from_inputs_with_env(
+            &["allowed_.*".to_string()],
+            &["denied_.*".to_string()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(config.allowlist.len(), 1);
+        assert_eq!(config.denylist.len(), 1);
+        assert_eq!(config.entropy_threshold, DEFAULT_ENTROPY_THRESHOLD);
+    }
+
+    #[test]
+    fn config_from_inputs_with_invalid_regex_returns_error() {
+        let result = SecretScanConfig::from_inputs_with_env(&["[invalid".to_string()], &[], false);
+        assert!(result.is_err(), "invalid regex should return error");
+    }
+
+    #[test]
+    fn config_from_inputs_empty_lists() {
+        let config = SecretScanConfig::from_inputs_with_env(&[], &[], false).unwrap();
+        assert!(config.allowlist.is_empty());
+        assert!(config.denylist.is_empty());
+        assert_eq!(config.max_findings, DEFAULT_MAX_FINDINGS);
+    }
+
+    // =========================================================================
+    // Scan text tests (via scan_database with crafted DB)
+    // =========================================================================
+
+    #[test]
+    fn builtin_patterns_aws_access_key_detected() {
+        let text = "Found key AKIAIOSFODNN7EXAMPLE in config";
+        let pattern = &BUILTIN_PATTERNS[0]; // aws_access_key_id
+        assert!(
+            pattern.regex.is_match(text),
+            "should detect AWS access key ID"
+        );
+    }
+
+    #[test]
+    fn builtin_patterns_github_pat_detected() {
+        let text = "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+        let pattern = &BUILTIN_PATTERNS[2]; // github_pat
+        assert!(pattern.regex.is_match(text), "should detect GitHub PAT");
+    }
+
+    #[test]
+    fn builtin_patterns_anthropic_key_detected() {
+        let text = "sk-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh";
+        let pattern = &BUILTIN_PATTERNS[4]; // anthropic_key
+        assert!(pattern.regex.is_match(text), "should detect Anthropic key");
+    }
+
+    #[test]
+    fn builtin_patterns_jwt_detected() {
+        let text = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123";
+        let pattern = &BUILTIN_PATTERNS[5]; // jwt
+        assert!(pattern.regex.is_match(text), "should detect JWT");
+    }
+
+    #[test]
+    fn builtin_patterns_private_key_detected() {
+        let text = "-----BEGIN RSA PRIVATE KEY-----\nMIIE...";
+        let pattern = &BUILTIN_PATTERNS[6]; // private_key
+        assert!(pattern.regex.is_match(text), "should detect private key");
+    }
+
+    #[test]
+    fn builtin_patterns_database_url_detected() {
+        let text = "database_url=postgres://user:pass@host:5432/db";
+        let pattern = &BUILTIN_PATTERNS[7]; // database_url
+        assert!(pattern.regex.is_match(text), "should detect database URL");
+    }
+
+    #[test]
+    fn builtin_patterns_generic_api_key_detected() {
+        let text = "api_key=abcdefgh12345678";
+        let pattern = &BUILTIN_PATTERNS[8]; // generic_api_key
+        assert!(
+            pattern.regex.is_match(text),
+            "should detect generic API key"
+        );
+    }
+
+    #[test]
+    fn builtin_patterns_safe_text_not_detected() {
+        let safe_text = "This is a normal message about Rust programming.";
+        for pattern in BUILTIN_PATTERNS.iter() {
+            assert!(
+                !pattern.regex.is_match(safe_text),
+                "pattern {} should not match safe text",
+                pattern.id,
+            );
+        }
+    }
+
+    // =========================================================================
+    // Severity ranking tests
+    // =========================================================================
+
+    #[test]
+    fn severity_rank_ordering() {
+        assert!(SecretSeverity::Critical.rank() < SecretSeverity::High.rank());
+        assert!(SecretSeverity::High.rank() < SecretSeverity::Medium.rank());
+        assert!(SecretSeverity::Medium.rank() < SecretSeverity::Low.rank());
+    }
+
+    #[test]
+    fn severity_label_values() {
+        assert_eq!(SecretSeverity::Critical.label(), "critical");
+        assert_eq!(SecretSeverity::High.label(), "high");
+        assert_eq!(SecretSeverity::Medium.label(), "medium");
+        assert_eq!(SecretSeverity::Low.label(), "low");
+    }
+
+    // =========================================================================
+    // SecretLocation label tests
+    // =========================================================================
+
+    #[test]
+    fn location_labels() {
+        assert_eq!(
+            SecretLocation::ConversationTitle.label(),
+            "conversation.title"
+        );
+        assert_eq!(
+            SecretLocation::ConversationMetadata.label(),
+            "conversation.metadata"
+        );
+        assert_eq!(SecretLocation::MessageContent.label(), "message.content");
+        assert_eq!(SecretLocation::MessageMetadata.label(), "message.metadata");
+    }
+
+    // =========================================================================
+    // Build where clause tests
+    // =========================================================================
+
+    #[test]
+    fn build_where_clause_empty_filters() {
+        let filters = SecretScanFilters {
+            agents: None,
+            workspaces: None,
+            since_ts: None,
+            until_ts: None,
+        };
+        let (clause, params) = build_where_clause(&filters).unwrap();
+        assert!(clause.is_empty(), "empty filters should give empty clause");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn build_where_clause_with_agent_filter() {
+        let filters = SecretScanFilters {
+            agents: Some(vec!["claude".to_string(), "codex".to_string()]),
+            workspaces: None,
+            since_ts: None,
+            until_ts: None,
+        };
+        let (clause, params) = build_where_clause(&filters).unwrap();
+        assert!(clause.contains("a.slug IN"), "clause: {}", clause);
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn build_where_clause_with_time_range() {
+        let filters = SecretScanFilters {
+            agents: None,
+            workspaces: None,
+            since_ts: Some(1000),
+            until_ts: Some(2000),
+        };
+        let (clause, params) = build_where_clause(&filters).unwrap();
+        assert!(clause.contains("c.started_at >="), "clause: {}", clause);
+        assert!(clause.contains("c.started_at <="), "clause: {}", clause);
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn build_where_clause_with_workspace_filter() {
+        let filters = SecretScanFilters {
+            agents: None,
+            workspaces: Some(vec![PathBuf::from("/home/user/project")]),
+            since_ts: None,
+            until_ts: None,
+        };
+        let (clause, params) = build_where_clause(&filters).unwrap();
+        assert!(clause.contains("w.path IN"), "clause: {}", clause);
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn build_where_clause_empty_agent_list_ignored() {
+        let filters = SecretScanFilters {
+            agents: Some(vec![]),
+            workspaces: None,
+            since_ts: None,
+            until_ts: None,
+        };
+        let (clause, _) = build_where_clause(&filters).unwrap();
+        assert!(clause.is_empty(), "empty agent list should be ignored");
+    }
+
+    // =========================================================================
+    // Entropy regex tests
+    // =========================================================================
+
+    #[test]
+    fn entropy_base64_regex_matches_long_strings() {
+        assert!(ENTROPY_BASE64_RE.is_match("ABCDEFGHIJKLMNOPQRSTuv"));
+        assert!(!ENTROPY_BASE64_RE.is_match("short"));
+    }
+
+    #[test]
+    fn entropy_hex_regex_matches_32_plus_chars() {
+        assert!(ENTROPY_HEX_RE.is_match("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"));
+        assert!(!ENTROPY_HEX_RE.is_match("a1b2c3d4"));
+    }
+
+    // =========================================================================
+    // Edge case tests — malformed input robustness (br-ig84)
+    // =========================================================================
+
+    #[test]
+    fn scan_text_empty_text_no_findings() {
+        let config = SecretScanConfig::from_inputs_with_env(&[], &[], false).unwrap();
+        let ctx = ScanContext {
+            agent: None,
+            workspace: None,
+            source_path: None,
+            conversation_id: None,
+            message_id: None,
+            message_idx: None,
+        };
+        let mut findings = Vec::new();
+        let mut seen = HashSet::new();
+        let mut truncated = false;
+
+        scan_text(
+            "",
+            SecretLocation::MessageContent,
+            &ctx,
+            &config,
+            &mut findings,
+            &mut seen,
+            &mut truncated,
+        );
+        assert!(findings.is_empty());
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn scan_text_already_truncated_skips() {
+        let config = SecretScanConfig::from_inputs_with_env(&[], &[], false).unwrap();
+        let ctx = ScanContext {
+            agent: None,
+            workspace: None,
+            source_path: None,
+            conversation_id: None,
+            message_id: None,
+            message_idx: None,
+        };
+        let mut findings = Vec::new();
+        let mut seen = HashSet::new();
+        let mut truncated = true; // pre-set
+
+        scan_text(
+            "sk-test1234567890abcdefghijklmnopqr",
+            SecretLocation::MessageContent,
+            &ctx,
+            &config,
+            &mut findings,
+            &mut seen,
+            &mut truncated,
+        );
+        assert!(findings.is_empty(), "should skip when already truncated");
+    }
+
+    #[test]
+    fn scan_text_denylist_always_critical() {
+        let config =
+            SecretScanConfig::from_inputs_with_env(&[], &["FORBIDDEN_TOKEN_.*".to_string()], false)
+                .unwrap();
+        let ctx = ScanContext {
+            agent: Some("test".to_string()),
+            workspace: None,
+            source_path: None,
+            conversation_id: Some(1),
+            message_id: Some(1),
+            message_idx: Some(0),
+        };
+        let mut findings = Vec::new();
+        let mut seen = HashSet::new();
+        let mut truncated = false;
+
+        scan_text(
+            "prefix FORBIDDEN_TOKEN_abc suffix",
+            SecretLocation::MessageContent,
+            &ctx,
+            &config,
+            &mut findings,
+            &mut seen,
+            &mut truncated,
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, SecretSeverity::Critical);
+        assert_eq!(findings[0].kind, "denylist");
+    }
+
+    #[test]
+    fn scan_text_allowlist_suppresses_builtin_match() {
+        let config =
+            SecretScanConfig::from_inputs_with_env(&["sk-test.*".to_string()], &[], false).unwrap();
+        let ctx = ScanContext {
+            agent: None,
+            workspace: None,
+            source_path: None,
+            conversation_id: Some(1),
+            message_id: Some(1),
+            message_idx: Some(0),
+        };
+        let mut findings = Vec::new();
+        let mut seen = HashSet::new();
+        let mut truncated = false;
+
+        scan_text(
+            "sk-testABCDEFGHIJKLMNOPQRSTUVWXYZ12345",
+            SecretLocation::MessageContent,
+            &ctx,
+            &config,
+            &mut findings,
+            &mut seen,
+            &mut truncated,
+        );
+
+        // The openai_key pattern should match but be suppressed by allowlist
+        assert!(
+            !findings.iter().any(|f| f.kind == "openai_key"),
+            "allowlisted key should be suppressed"
+        );
+    }
+
+    #[test]
+    fn scan_text_deduplicates_findings() {
+        let config = SecretScanConfig::from_inputs_with_env(&[], &[], false).unwrap();
+        let ctx = ScanContext {
+            agent: None,
+            workspace: None,
+            source_path: None,
+            conversation_id: Some(1),
+            message_id: Some(1),
+            message_idx: Some(0),
+        };
+        let mut findings = Vec::new();
+        let mut seen = HashSet::new();
+        let mut truncated = false;
+
+        // Scan same text twice — same context, so duplicates should be skipped
+        let text = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789";
+        scan_text(
+            text,
+            SecretLocation::MessageContent,
+            &ctx,
+            &config,
+            &mut findings,
+            &mut seen,
+            &mut truncated,
+        );
+        let count_after_first = findings.len();
+
+        scan_text(
+            text,
+            SecretLocation::MessageContent,
+            &ctx,
+            &config,
+            &mut findings,
+            &mut seen,
+            &mut truncated,
+        );
+        assert_eq!(
+            findings.len(),
+            count_after_first,
+            "duplicate findings should be skipped"
+        );
+    }
+
+    #[test]
+    fn scan_text_max_findings_truncates() {
+        // Use longer tokens (>8 chars) so each gets a unique redacted form for dedup
+        let mut config =
+            SecretScanConfig::from_inputs_with_env(&[], &["LONG_SECRET_\\d+".to_string()], false)
+                .unwrap();
+        config.max_findings = 3;
+
+        let ctx = ScanContext {
+            agent: None,
+            workspace: None,
+            source_path: None,
+            conversation_id: Some(1),
+            message_id: Some(1),
+            message_idx: Some(0),
+        };
+        let mut findings = Vec::new();
+        let mut seen = HashSet::new();
+        let mut truncated = false;
+
+        // Each match is >8 chars so redact_token produces unique output per token
+        let text =
+            "LONG_SECRET_001 LONG_SECRET_002 LONG_SECRET_003 LONG_SECRET_004 LONG_SECRET_005";
+        scan_text(
+            text,
+            SecretLocation::MessageContent,
+            &ctx,
+            &config,
+            &mut findings,
+            &mut seen,
+            &mut truncated,
+        );
+
+        assert!(
+            findings.len() <= 3,
+            "should cap at max_findings: {}",
+            findings.len()
+        );
+        assert!(truncated, "should set truncated flag");
+    }
+
+    #[test]
+    fn scan_text_pure_alphabetic_base64_skipped() {
+        // Pure alphabetic strings (CamelCase identifiers) should NOT trigger entropy detection
+        let config = SecretScanConfig::from_inputs_with_env(&[], &[], false).unwrap();
+        let ctx = ScanContext {
+            agent: None,
+            workspace: None,
+            source_path: None,
+            conversation_id: Some(1),
+            message_id: Some(1),
+            message_idx: Some(0),
+        };
+        let mut findings = Vec::new();
+        let mut seen = HashSet::new();
+        let mut truncated = false;
+
+        // This is a pure alphabetic string — should be skipped by the heuristic
+        let text = "SecretScanConfigFromInputsWithEnvTest";
+        scan_text(
+            text,
+            SecretLocation::MessageContent,
+            &ctx,
+            &config,
+            &mut findings,
+            &mut seen,
+            &mut truncated,
+        );
+
+        assert!(
+            !findings.iter().any(|f| f.kind == "high_entropy_base64"),
+            "pure alphabetic strings should not trigger entropy detection"
+        );
+    }
+}

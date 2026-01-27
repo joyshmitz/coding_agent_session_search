@@ -1407,7 +1407,11 @@ mod tests {
     fn parse_truncated_json_returns_error() {
         let dir = TempDir::new().unwrap();
         let conv_file = dir.path().join("truncated.json");
-        fs::write(&conv_file, r#"{"id": "trunc", "mapping": {"node1": {"message":"#).unwrap();
+        fs::write(
+            &conv_file,
+            r#"{"id": "trunc", "mapping": {"node1": {"message":"#,
+        )
+        .unwrap();
 
         let connector = ChatGptConnector {
             encryption_key: None,
@@ -1484,9 +1488,11 @@ mod tests {
         };
         // Should not panic; may error due to recursion limit
         let result = connector.parse_conversation_file(&conv_file, None, false);
-        match result {
-            Ok(conv) => assert!(conv.is_none(), "deep JSON without mapping should return None"),
-            Err(_) => {} // Parser error is acceptable
+        if let Ok(conv) = result {
+            assert!(
+                conv.is_none(),
+                "deep JSON without mapping should return None"
+            );
         }
     }
 
@@ -1550,8 +1556,11 @@ mod tests {
         let connector = ChatGptConnector {
             encryption_key: None,
         };
-        let result =
-            connector.parse_conversation_file(&PathBuf::from("/nonexistent/file.json"), None, false);
+        let result = connector.parse_conversation_file(
+            &PathBuf::from("/nonexistent/file.json"),
+            None,
+            false,
+        );
         assert!(result.is_err());
     }
 

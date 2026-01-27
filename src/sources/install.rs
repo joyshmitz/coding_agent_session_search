@@ -1258,4 +1258,233 @@ mod tests {
             panic!("Expected PrebuiltBinary variant");
         }
     }
+
+    // =========================================================================
+    // Real system probe integration tests — no mocks
+    // =========================================================================
+
+    /// Build SystemInfo from real local system commands.
+    fn local_system_info() -> SystemInfo {
+        use std::process::Command;
+
+        let os = {
+            let out = Command::new("uname").arg("-s").output().expect("uname -s");
+            String::from_utf8_lossy(&out.stdout).trim().to_lowercase()
+        };
+        let arch = {
+            let out = Command::new("uname").arg("-m").output().expect("uname -m");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let distro = if std::path::Path::new("/etc/os-release").exists() {
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(". /etc/os-release && echo \"$PRETTY_NAME\"")
+                .output()
+                .ok();
+            out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        let has = |cmd: &str| -> bool {
+            Command::new("which")
+                .arg(cmd)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        let home = std::env::var("HOME").unwrap_or_default();
+
+        SystemInfo {
+            os,
+            arch,
+            distro,
+            has_cargo: has("cargo"),
+            has_cargo_binstall: has("cargo-binstall"),
+            has_curl: has("curl"),
+            has_wget: has("wget"),
+            remote_home: home,
+        }
+    }
+
+    /// Build ResourceInfo from real local system commands.
+    fn local_resource_info() -> ResourceInfo {
+        use std::process::Command;
+
+        let disk_mb = {
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg("df -k ~ 2>/dev/null | awk 'NR==2 {print $4}'")
+                .output()
+                .expect("df -k ~");
+            let kb: u64 = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            kb / 1024
+        };
+        let (mem_total_mb, mem_avail_mb) = if std::path::Path::new("/proc/meminfo").exists() {
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg("grep MemTotal /proc/meminfo | awk '{print $2}'")
+                .output()
+                .expect("memtotal");
+            let total_kb: u64 = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            let out2 = Command::new("bash")
+                .arg("-c")
+                .arg("grep MemAvailable /proc/meminfo | awk '{print $2}'")
+                .output()
+                .expect("memavail");
+            let avail_kb: u64 = String::from_utf8_lossy(&out2.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            (total_kb / 1024, avail_kb / 1024)
+        } else {
+            // macOS fallback
+            let out = Command::new("sysctl")
+                .arg("-n")
+                .arg("hw.memsize")
+                .output()
+                .ok();
+            let bytes: u64 = out
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .parse()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            let mb = bytes / (1024 * 1024);
+            (mb, mb)
+        };
+
+        ResourceInfo {
+            disk_available_mb: disk_mb,
+            memory_total_mb: mem_total_mb,
+            memory_available_mb: mem_avail_mb,
+            can_compile: disk_mb >= ResourceInfo::MIN_DISK_MB
+                && mem_total_mb >= ResourceInfo::MIN_MEMORY_MB,
+        }
+    }
+
+    #[test]
+    fn real_system_info_has_valid_fields() {
+        let sys = local_system_info();
+        assert!(
+            sys.os == "linux" || sys.os == "darwin",
+            "unexpected OS: {}",
+            sys.os
+        );
+        assert!(!sys.arch.is_empty(), "arch should not be empty");
+        assert!(!sys.remote_home.is_empty(), "home should not be empty");
+        assert!(
+            sys.remote_home.starts_with('/'),
+            "home should be absolute: {}",
+            sys.remote_home
+        );
+    }
+
+    #[test]
+    fn real_resources_have_nonzero_values() {
+        let res = local_resource_info();
+        assert!(res.disk_available_mb > 0, "disk should be > 0");
+        assert!(res.memory_total_mb > 0, "total memory should be > 0");
+        assert!(
+            res.memory_available_mb > 0,
+            "available memory should be > 0"
+        );
+    }
+
+    #[test]
+    fn real_resources_memory_invariant() {
+        let res = local_resource_info();
+        assert!(
+            res.memory_available_mb <= res.memory_total_mb,
+            "available ({}) > total ({})",
+            res.memory_available_mb,
+            res.memory_total_mb
+        );
+    }
+
+    #[test]
+    fn real_resources_can_compile_matches_thresholds() {
+        let res = local_resource_info();
+        let expected = res.disk_available_mb >= ResourceInfo::MIN_DISK_MB
+            && res.memory_total_mb >= ResourceInfo::MIN_MEMORY_MB;
+        assert_eq!(
+            res.can_compile, expected,
+            "can_compile mismatch: disk={}MB mem={}MB",
+            res.disk_available_mb, res.memory_total_mb
+        );
+    }
+
+    #[test]
+    fn real_system_choose_method_returns_some() {
+        let sys = local_system_info();
+        let res = local_resource_info();
+        // This system should have at least curl or cargo, so a method should exist
+        let installer = RemoteInstaller::new("localhost", sys, res);
+        let method = installer.choose_method();
+        assert!(
+            method.is_some(),
+            "real system should have at least one install method"
+        );
+    }
+
+    #[test]
+    fn real_system_check_resources_ok() {
+        let sys = local_system_info();
+        let res = local_resource_info();
+        // This dev machine should have enough resources
+        let installer = RemoteInstaller::new("localhost", sys, res);
+        assert!(
+            installer.check_resources().is_ok(),
+            "dev machine should pass resource check"
+        );
+    }
+
+    #[test]
+    fn real_system_can_compile_ok() {
+        let sys = local_system_info();
+        let res = local_resource_info();
+        let installer = RemoteInstaller::new("localhost", sys, res);
+        assert!(
+            installer.can_compile().is_ok(),
+            "dev machine should be able to compile"
+        );
+    }
+
+    #[test]
+    fn real_system_prebuilt_url_valid() {
+        let sys = local_system_info();
+        let res = local_resource_info();
+        let installer = RemoteInstaller::new("localhost", sys, res);
+        if let Some(url) = installer.get_prebuilt_url() {
+            assert!(url.starts_with("https://"), "URL should be https: {}", url);
+            assert!(
+                url.contains("linux") || url.contains("darwin"),
+                "URL should contain OS: {}",
+                url
+            );
+        }
+        // Not all architectures have prebuilt URLs, so Some/None both acceptable
+    }
+
+    #[test]
+    fn real_system_tool_detection_consistent() {
+        let sys = local_system_info();
+        // If binstall is available, cargo must be too
+        if sys.has_cargo_binstall {
+            assert!(sys.has_cargo, "binstall requires cargo");
+        }
+        // Dev machine should have at least curl or wget
+        assert!(
+            sys.has_curl || sys.has_wget,
+            "system should have at least one download tool"
+        );
+    }
 }

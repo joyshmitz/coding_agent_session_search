@@ -61,6 +61,10 @@ fn base_cmd() -> Command {
     cmd
 }
 
+fn tracker_for(test_name: &str) -> PhaseTracker {
+    PhaseTracker::new("e2e_cli_flows", test_name)
+}
+
 /// Setup test environment with fixtures and run index.
 fn setup_indexed_env() -> (TempDir, std::path::PathBuf) {
     let tracker = PhaseTracker::new("e2e_cli_flows", "setup_indexed_env");
@@ -117,6 +121,8 @@ fn setup_indexed_env() -> (TempDir, std::path::PathBuf) {
 
 #[test]
 fn search_with_trace_file_creates_trace() {
+    let tracker = tracker_for("search_with_trace_file_creates_trace");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
     let trace_file = tmp.path().join("trace.jsonl");
 
@@ -145,7 +151,8 @@ fn search_with_trace_file_creates_trace() {
 
 #[test]
 fn search_basic_returns_valid_json() {
-    let tracker = PhaseTracker::new("e2e_cli_flows", "search_basic_returns_valid_json");
+    let tracker = tracker_for("search_basic_returns_valid_json");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     let search_start = tracker.start("run_search", Some("Execute basic search command"));
@@ -187,6 +194,8 @@ fn search_basic_returns_valid_json() {
 
 #[test]
 fn search_returns_hits_with_expected_fields() {
+    let tracker = tracker_for("search_returns_hits_with_expected_fields");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     let output = base_cmd()
@@ -232,7 +241,8 @@ fn search_returns_hits_with_expected_fields() {
 
 #[test]
 fn view_command_returns_session_detail() {
-    let tracker = PhaseTracker::new("e2e_cli_flows", "view_command_returns_session_detail");
+    let tracker = tracker_for("view_command_returns_session_detail");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
     let codex_session = tmp
         .path()
@@ -277,6 +287,8 @@ fn view_command_returns_session_detail() {
 
 #[test]
 fn expand_command_with_context() {
+    let tracker = tracker_for("expand_command_with_context");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
     let codex_session = tmp
         .path()
@@ -315,6 +327,8 @@ fn expand_command_with_context() {
 
 #[test]
 fn search_filter_by_agent() {
+    let tracker = tracker_for("search_filter_by_agent");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     // Search for codex agent only
@@ -355,6 +369,8 @@ fn search_filter_by_agent() {
 
 #[test]
 fn search_filter_by_days() {
+    let tracker = tracker_for("search_filter_by_days");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     // Search with days filter (should include recent sessions)
@@ -381,6 +397,8 @@ fn search_filter_by_days() {
 
 #[test]
 fn search_combined_filters() {
+    let tracker = tracker_for("search_combined_filters");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     // Combine multiple filters
@@ -416,6 +434,8 @@ fn search_combined_filters() {
 
 #[test]
 fn search_with_workspace_filter() {
+    let tracker = tracker_for("search_with_workspace_filter");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
     let workspace = tmp.path().join(".claude/projects/myapp");
 
@@ -442,6 +462,8 @@ fn search_with_workspace_filter() {
 
 #[test]
 fn trace_output_contains_operation_markers() {
+    let tracker = tracker_for("trace_output_contains_operation_markers");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     let output = base_cmd()
@@ -468,6 +490,8 @@ fn trace_output_contains_operation_markers() {
 
 #[test]
 fn verbose_mode_increases_logging() {
+    let tracker = tracker_for("verbose_mode_increases_logging");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     // Run with -v for verbose
@@ -492,6 +516,8 @@ fn verbose_mode_increases_logging() {
 
 #[test]
 fn robot_mode_suppresses_ansi() {
+    let tracker = tracker_for("robot_mode_suppresses_ansi");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     let output = base_cmd()
@@ -518,6 +544,8 @@ fn robot_mode_suppresses_ansi() {
 
 #[test]
 fn robot_mode_json_output_only() {
+    let tracker = tracker_for("robot_mode_json_output_only");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     let output = base_cmd()
@@ -542,7 +570,8 @@ fn robot_mode_json_output_only() {
 
 #[test]
 fn health_command_returns_structured_output() {
-    let tracker = PhaseTracker::new("e2e_cli_flows", "health_command_returns_structured_output");
+    let tracker = tracker_for("health_command_returns_structured_output");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     let health_start = tracker.start("run_health", Some("Execute health check command"));
@@ -576,7 +605,8 @@ fn health_command_returns_structured_output() {
 
 #[test]
 fn stats_command_returns_aggregations() {
-    let tracker = PhaseTracker::new("e2e_cli_flows", "stats_command_returns_aggregations");
+    let tracker = tracker_for("stats_command_returns_aggregations");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     let stats_start = tracker.start("run_stats", Some("Execute stats command"));
@@ -614,6 +644,8 @@ fn stats_command_returns_aggregations() {
 
 #[test]
 fn capabilities_command_lists_features() {
+    let tracker = tracker_for("capabilities_command_lists_features");
+    let _trace_guard = tracker.trace_env_guard();
     let output = base_cmd()
         .args(["capabilities", "--json"])
         .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
@@ -640,6 +672,8 @@ fn capabilities_command_lists_features() {
 
 #[test]
 fn search_no_index_handles_gracefully() {
+    let tracker = tracker_for("search_no_index_handles_gracefully");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = TempDir::new().unwrap();
     let data_dir = tmp.path().join("empty_data");
     fs::create_dir_all(&data_dir).unwrap();
@@ -664,6 +698,8 @@ fn search_no_index_handles_gracefully() {
 
 #[test]
 fn truly_invalid_command_returns_error() {
+    let tracker = tracker_for("truly_invalid_command_returns_error");
+    let _trace_guard = tracker.trace_env_guard();
     // Test with a truly malformed command (not interpretable as search)
     let output = base_cmd()
         .args(["--nonexistent-flag-only"])
@@ -682,6 +718,8 @@ fn truly_invalid_command_returns_error() {
 
 #[test]
 fn view_nonexistent_file_handles_gracefully() {
+    let tracker = tracker_for("view_nonexistent_file_handles_gracefully");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = TempDir::new().unwrap();
     let data_dir = tmp.path().join("data");
     fs::create_dir_all(&data_dir).unwrap();
@@ -715,6 +753,8 @@ fn view_nonexistent_file_handles_gracefully() {
 
 #[test]
 fn search_across_multiple_agents() {
+    let tracker = tracker_for("search_across_multiple_agents");
+    let _trace_guard = tracker.trace_env_guard();
     let (tmp, data_dir) = setup_indexed_env();
 
     // Search should find results from both codex and claude

@@ -1100,9 +1100,7 @@ mod tests {
         let amp_dir = create_amp_dir(&dir);
         // UTF-8 BOM + valid JSON
         let mut data = vec![0xEF, 0xBB, 0xBF];
-        data.extend_from_slice(
-            br#"{"messages":[{"role":"user","content":"BOM test"}]}"#,
-        );
+        data.extend_from_slice(br#"{"messages":[{"role":"user","content":"BOM test"}]}"#);
         std::fs::write(amp_dir.join("thread.json"), &data).unwrap();
 
         let connector = AmpConnector::new();

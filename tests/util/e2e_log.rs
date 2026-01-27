@@ -20,10 +20,11 @@
 //! logger.run_end(total, passed, failed, skipped, duration_ms)?;
 //! ```
 
+use super::EnvGuard;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -114,6 +115,8 @@ pub struct E2eTestInfo {
     pub file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl E2eTestInfo {
@@ -123,6 +126,7 @@ impl E2eTestInfo {
             suite: suite.to_string(),
             file: Some(file.to_string()),
             line: Some(line),
+            trace_id: None,
         }
     }
 
@@ -132,6 +136,7 @@ impl E2eTestInfo {
             suite: suite.to_string(),
             file: None,
             line: None,
+            trace_id: None,
         }
     }
 }
@@ -536,6 +541,65 @@ pub struct E2eLogContext {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_name: Option<String>,
+}
+
+/// Paths for per-test E2E artifacts.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct E2eArtifactPaths {
+    pub dir: PathBuf,
+    pub stdout_path: PathBuf,
+    pub stderr_path: PathBuf,
+    pub cass_log_path: PathBuf,
+    pub trace_path: PathBuf,
+    pub trace_id: String,
+}
+
+impl E2eArtifactPaths {
+    pub fn prepare(suite: &str, test_name: &str, trace_id: &str) -> std::io::Result<Self> {
+        let dir = artifact_dir(suite, test_name);
+        fs::create_dir_all(&dir)?;
+
+        let stdout_path = dir.join("stdout");
+        let stderr_path = dir.join("stderr");
+        let cass_log_path = dir.join("cass.log");
+        let trace_path = dir.join("trace.jsonl");
+
+        // Ensure files exist (truncate any previous run output)
+        truncate_file(&stdout_path)?;
+        truncate_file(&stderr_path)?;
+        truncate_file(&cass_log_path)?;
+        truncate_file(&trace_path)?;
+
+        Ok(Self {
+            dir,
+            stdout_path,
+            stderr_path,
+            cass_log_path,
+            trace_path,
+            trace_id: trace_id.to_string(),
+        })
+    }
+}
+
+fn artifact_dir(suite: &str, test_name: &str) -> PathBuf {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    manifest_dir
+        .join("test-results")
+        .join("e2e")
+        .join(suite)
+        .join(test_name)
+}
+
+fn truncate_file(path: &Path) -> std::io::Result<()> {
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    Ok(())
 }
 
 /// Configuration for the E2E logger.
@@ -989,19 +1053,25 @@ pub struct PhaseTracker {
     test_info: E2eTestInfo,
     start_time: Instant,
     completed: bool,
+    artifacts: E2eArtifactPaths,
 }
 
 #[allow(dead_code)]
 impl PhaseTracker {
     /// Create a new PhaseTracker for the given test.
     pub fn new(suite: &str, test_name: &str) -> Self {
+        let trace_id = generate_trace_id();
+        let artifacts = E2eArtifactPaths::prepare(suite, test_name, &trace_id)
+            .unwrap_or_else(|e| panic!("Failed to prepare E2E artifacts: {e}"));
+
         let logger = if std::env::var("E2E_LOG").is_ok() {
-            E2eLogger::new("rust").ok()
+            E2eLogger::with_path("rust", artifacts.cass_log_path.clone()).ok()
         } else {
             None
         };
 
-        let test_info = E2eTestInfo::simple(test_name, suite);
+        let mut test_info = E2eTestInfo::simple(test_name, suite);
+        test_info.trace_id = Some(trace_id.clone());
 
         if let Some(ref lg) = logger {
             let _ = lg.test_start(&test_info);
@@ -1012,7 +1082,23 @@ impl PhaseTracker {
             test_info,
             start_time: Instant::now(),
             completed: false,
+            artifacts,
         }
+    }
+
+    /// Return artifact paths for this test.
+    pub fn artifacts(&self) -> &E2eArtifactPaths {
+        &self.artifacts
+    }
+
+    /// Return the trace ID for this test.
+    pub fn trace_id(&self) -> &str {
+        &self.artifacts.trace_id
+    }
+
+    /// Set environment variables to route trace output to this test's artifacts.
+    pub fn trace_env_guard(&self) -> E2eTraceGuard {
+        E2eTraceGuard::new(&self.artifacts)
     }
 
     /// Execute a phase and log start/end events.
@@ -1099,6 +1185,37 @@ impl PhaseTracker {
     }
 }
 
+/// Guard that configures trace env vars for a test run.
+pub struct E2eTraceGuard {
+    _trace_file: EnvGuard,
+    _trace_id: EnvGuard,
+}
+
+impl E2eTraceGuard {
+    fn new(artifacts: &E2eArtifactPaths) -> Self {
+        let trace_file = artifacts.trace_path.to_string_lossy().to_string();
+        let trace_id = artifacts.trace_id.clone();
+        Self {
+            _trace_file: EnvGuard::set("CASS_TRACE_FILE", trace_file),
+            _trace_id: EnvGuard::set("CASS_TRACE_ID", trace_id),
+        }
+    }
+}
+
+fn generate_trace_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    std::process::id().hash(&mut hasher);
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    format!("{:x}", hasher.finish() & 0xFFFFFF)
+}
+
 impl Drop for PhaseTracker {
     fn drop(&mut self) {
         if self.completed {
@@ -1125,13 +1242,18 @@ pub fn run_logged_test<F>(name: &str, suite: &str, file: &str, line: u32, test_f
 where
     F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
 {
+    let trace_id = generate_trace_id();
+    let artifacts = E2eArtifactPaths::prepare(suite, name, &trace_id)
+        .unwrap_or_else(|e| panic!("Failed to prepare E2E artifacts for {suite}/{name}: {e}"));
+
     let logger = if std::env::var("E2E_LOG").is_ok() {
-        E2eLogger::new("rust").ok()
+        E2eLogger::with_path("rust", artifacts.cass_log_path.clone()).ok()
     } else {
         None
     };
 
-    let test_info = E2eTestInfo::new(name, suite, file, line);
+    let mut test_info = E2eTestInfo::new(name, suite, file, line);
+    test_info.trace_id = Some(trace_id);
     if let Some(ref lg) = logger {
         let _ = lg.test_start(&test_info);
     }
@@ -1690,7 +1812,10 @@ mod tests {
 
         // Multiple phases execute sequentially
         let result2 = tracker.phase("verify", "Verifying results", || "hello");
-        assert_eq!(result2, "hello", "Sequential phases must each return correctly");
+        assert_eq!(
+            result2, "hello",
+            "Sequential phases must each return correctly"
+        );
 
         tracker.complete();
     }

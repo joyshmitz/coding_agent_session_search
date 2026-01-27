@@ -842,4 +842,163 @@ MEM_AVAIL_KB=4194304
         };
         assert!(!low_disk.can_compile);
     }
+
+    // =========================================================================
+    // Real system probe tests — run PROBE_SCRIPT locally without SSH
+    // =========================================================================
+
+    /// Execute PROBE_SCRIPT on the local system via bash, returning stdout.
+    fn run_probe_script_locally() -> String {
+        use std::io::Write;
+        let mut child = Command::new("bash")
+            .arg("-s")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("bash should be available");
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(PROBE_SCRIPT.as_bytes())
+                .expect("write probe script");
+        }
+        let output = child
+            .wait_with_output()
+            .expect("probe script should finish");
+        assert!(
+            output.status.success(),
+            "probe script failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    #[test]
+    fn real_probe_script_produces_valid_markers() {
+        let output = run_probe_script_locally();
+        assert!(
+            output.contains("===PROBE_START==="),
+            "missing PROBE_START marker"
+        );
+        assert!(
+            output.contains("===PROBE_END==="),
+            "missing PROBE_END marker"
+        );
+    }
+
+    #[test]
+    fn real_probe_script_parses_into_reachable_result() {
+        let output = run_probe_script_locally();
+        let result = parse_probe_output("localhost", &output, 0);
+        assert!(
+            result.reachable,
+            "local probe should be reachable: {:?}",
+            result.error
+        );
+        assert!(result.system_info.is_some(), "should have system info");
+        assert!(result.resources.is_some(), "should have resource info");
+    }
+
+    #[test]
+    fn real_probe_system_info_has_valid_os() {
+        let output = run_probe_script_locally();
+        let result = parse_probe_output("localhost", &output, 0);
+        let sys = result.system_info.as_ref().expect("system_info");
+        assert!(
+            sys.os == "linux" || sys.os == "darwin",
+            "OS should be linux or darwin, got: {}",
+            sys.os
+        );
+    }
+
+    #[test]
+    fn real_probe_system_info_has_valid_arch() {
+        let output = run_probe_script_locally();
+        let result = parse_probe_output("localhost", &output, 0);
+        let sys = result.system_info.as_ref().expect("system_info");
+        let valid_archs = [
+            "x86_64", "aarch64", "arm64", "armv7l", "i686", "s390x", "ppc64le",
+        ];
+        assert!(
+            valid_archs.contains(&sys.arch.as_str()),
+            "arch should be a known value, got: {}",
+            sys.arch
+        );
+    }
+
+    #[test]
+    fn real_probe_system_info_has_nonempty_home() {
+        let output = run_probe_script_locally();
+        let result = parse_probe_output("localhost", &output, 0);
+        let sys = result.system_info.as_ref().expect("system_info");
+        assert!(!sys.remote_home.is_empty(), "home should not be empty");
+        assert!(
+            sys.remote_home.starts_with('/'),
+            "home should be absolute: {}",
+            sys.remote_home
+        );
+    }
+
+    #[test]
+    fn real_probe_resources_have_nonzero_disk() {
+        let output = run_probe_script_locally();
+        let result = parse_probe_output("localhost", &output, 0);
+        let res = result.resources.as_ref().expect("resources");
+        assert!(res.disk_available_mb > 0, "disk_available_mb should be > 0");
+    }
+
+    #[test]
+    fn real_probe_resources_have_nonzero_memory() {
+        let output = run_probe_script_locally();
+        let result = parse_probe_output("localhost", &output, 0);
+        let res = result.resources.as_ref().expect("resources");
+        assert!(res.memory_total_mb > 0, "memory_total_mb should be > 0");
+        assert!(
+            res.memory_available_mb > 0,
+            "memory_available_mb should be > 0"
+        );
+    }
+
+    #[test]
+    fn real_probe_resources_memory_invariant() {
+        let output = run_probe_script_locally();
+        let result = parse_probe_output("localhost", &output, 0);
+        let res = result.resources.as_ref().expect("resources");
+        assert!(
+            res.memory_available_mb <= res.memory_total_mb,
+            "available memory ({}) should not exceed total ({})",
+            res.memory_available_mb,
+            res.memory_total_mb
+        );
+    }
+
+    #[test]
+    fn real_probe_resources_can_compile_reflects_thresholds() {
+        let output = run_probe_script_locally();
+        let result = parse_probe_output("localhost", &output, 0);
+        let res = result.resources.as_ref().expect("resources");
+        let expected = res.disk_available_mb >= ResourceInfo::MIN_DISK_MB
+            && res.memory_total_mb >= ResourceInfo::MIN_MEMORY_MB;
+        assert_eq!(
+            res.can_compile, expected,
+            "can_compile should match threshold check: disk={}MB mem={}MB",
+            res.disk_available_mb, res.memory_total_mb
+        );
+    }
+
+    #[test]
+    fn real_probe_tool_detection_is_consistent() {
+        let output = run_probe_script_locally();
+        let result = parse_probe_output("localhost", &output, 0);
+        let sys = result.system_info.as_ref().expect("system_info");
+        // If cargo-binstall is available, cargo must also be available
+        if sys.has_cargo_binstall {
+            assert!(sys.has_cargo, "binstall requires cargo");
+        }
+        // At least one download tool should exist on any modern system
+        assert!(
+            sys.has_curl || sys.has_wget,
+            "system should have at least curl or wget"
+        );
+    }
 }

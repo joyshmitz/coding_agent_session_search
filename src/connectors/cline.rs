@@ -1030,7 +1030,10 @@ mod tests {
         let ctx = ScanContext::local_default(storage.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        assert!(convs[0].messages.len() >= 1, "should extract at least the clean message");
+        assert!(
+            !convs[0].messages.is_empty(),
+            "should extract at least the clean message"
+        );
     }
 
     #[test]

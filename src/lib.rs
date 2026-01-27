@@ -60,7 +60,7 @@ pub struct Cli {
     pub robot_help: bool,
 
     /// Trace command execution to JSONL file (spans)
-    #[arg(long)]
+    #[arg(long, env = "CASS_TRACE_FILE")]
     pub trace_file: Option<PathBuf>,
 
     /// Reduce log noise (warnings and errors only)
@@ -3619,6 +3619,7 @@ fn write_trace_line(
 ) -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let request_id = extract_request_id(cli);
+    let trace_id = std::env::var("CASS_TRACE_ID").ok();
     let payload = serde_json::json!({
         "start_ts": start_ts.to_rfc3339(),
         "end_ts": (*start_ts
@@ -3636,6 +3637,7 @@ fn write_trace_line(
             "retryable": e.retryable,
         })),
         "request_id": request_id,
+        "trace_id": trace_id,
         "contract_version": CONTRACT_VERSION,
         "crate_version": env!("CARGO_PKG_VERSION"),
     });

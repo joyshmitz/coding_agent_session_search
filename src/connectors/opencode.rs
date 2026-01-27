@@ -1651,7 +1651,9 @@ mod tests {
         write_message(&storage, "sess-deep", &message);
 
         // Create a part with deeply nested extra data
-        let mut nested = String::from(r#"{"id":"p-deep","messageID":"msg-deep","type":"text","text":"deep test","extra":"#);
+        let mut nested = String::from(
+            r#"{"id":"p-deep","messageID":"msg-deep","type":"text","text":"deep test","extra":"#,
+        );
         for _ in 0..200 {
             nested.push_str(r#"{"a":"#);
         }

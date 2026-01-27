@@ -1308,7 +1308,7 @@ mod tests {
         for _ in 0..200 {
             nested.push_str("{\"a\":");
         }
-        nested.push_str("1");
+        nested.push('1');
         for _ in 0..200 {
             nested.push('}');
         }
@@ -1419,7 +1419,7 @@ mod tests {
         assert_eq!(convs.len(), 1);
         // Both messages should be extracted; the null byte is valid JSON
         assert!(
-            convs[0].messages.len() >= 1,
+            !convs[0].messages.is_empty(),
             "should extract at least the clean message"
         );
     }
@@ -1453,7 +1453,7 @@ mod tests {
         // We verify the connector doesn't crash and extracts what it can.
         assert_eq!(convs.len(), 1);
         assert!(
-            convs[0].messages.len() >= 1,
+            !convs[0].messages.is_empty(),
             "should extract at least the second message after BOM"
         );
         // The second line (without BOM) should always parse correctly

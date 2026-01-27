@@ -1356,8 +1356,7 @@ mod tests {
         let chats_dir = hash_dir.join("chats");
         fs::create_dir_all(&chats_dir).unwrap();
 
-        let session_json =
-            r#"{"sessionId": "s1", "messages": [{"type": "user", "content": "before\u0000after"}]}"#;
+        let session_json = r#"{"sessionId": "s1", "messages": [{"type": "user", "content": "before\u0000after"}]}"#;
         fs::write(chats_dir.join("session-null.json"), session_json).unwrap();
 
         let connector = GeminiConnector::new();
@@ -1370,7 +1369,7 @@ mod tests {
         );
         let convs = result.unwrap();
         assert_eq!(convs.len(), 1);
-        assert!(convs[0].messages.len() >= 1);
+        assert!(!convs[0].messages.is_empty());
     }
 
     // ==================== Gemini-specific edge cases (br-3n1q) ====================
@@ -1472,10 +1471,16 @@ mod tests {
         let convs = connector.scan(&ctx).unwrap();
 
         assert_eq!(convs.len(), 1);
-        assert_eq!(convs[0].messages[0].content, "According to the documentation...");
+        assert_eq!(
+            convs[0].messages[0].content,
+            "According to the documentation..."
+        );
         // Grounding metadata should be preserved in extra field
         assert!(
-            convs[0].messages[0].extra.get("groundingMetadata").is_some(),
+            convs[0].messages[0]
+                .extra
+                .get("groundingMetadata")
+                .is_some(),
             "groundingMetadata should be preserved in extra"
         );
     }
@@ -1516,9 +1521,13 @@ mod tests {
         );
         let convs = result.unwrap();
         assert_eq!(convs.len(), 1);
-        assert!(convs[0].messages.len() >= 1);
+        assert!(!convs[0].messages.is_empty());
         // The text part should be extracted
-        assert!(convs[0].messages[0].content.contains("What's in this image"));
+        assert!(
+            convs[0].messages[0]
+                .content
+                .contains("What's in this image")
+        );
     }
 
     #[test]

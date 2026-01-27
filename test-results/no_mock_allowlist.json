@@ -113,7 +113,7 @@
       "review_date": "2026-07-26",
       "cfg_test_only": true,
       "permanent": true,
-      "note": "Creates test SystemInfo struct for unit testing choose_method() and related pure functions. Not a mock - just structured test data"
+      "note": "Creates test SystemInfo struct for unit testing choose_method() and related pure functions. Not a mock - just structured test data. Complemented by real_system_* tests that use actual local system probes"
     },
     {
       "path": "src/sources/install.rs",
@@ -123,7 +123,7 @@
       "review_date": "2026-07-26",
       "cfg_test_only": true,
       "permanent": true,
-      "note": "Creates test ResourceInfo struct for unit testing check_resources() and can_compile(). Not a mock - just structured test data"
+      "note": "Creates test ResourceInfo struct for unit testing check_resources() and can_compile(). Not a mock - just structured test data. Complemented by real_resources_* tests that use actual local system probes"
     },
     {
       "path": "src/sources/interactive.rs",

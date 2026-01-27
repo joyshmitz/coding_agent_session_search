@@ -1581,7 +1581,10 @@ mod tests {
             None,
         );
 
-        assert!(conv.is_none(), "truncated JSON should not produce a conversation");
+        assert!(
+            conv.is_none(),
+            "truncated JSON should not produce a conversation"
+        );
     }
 
     #[test]
@@ -1615,7 +1618,10 @@ mod tests {
             None,
         );
 
-        assert!(conv.is_some(), "should extract valid bubbles despite type mismatches");
+        assert!(
+            conv.is_some(),
+            "should extract valid bubbles despite type mismatches"
+        );
         let conv = conv.unwrap();
         assert_eq!(conv.messages.len(), 1);
         assert_eq!(conv.messages[0].content, "Valid bubble");
@@ -1688,9 +1694,11 @@ mod tests {
         let result = CursorConnector::extract_from_db(&db_path, None);
         // rusqlite may open the file lazily; query failures are caught with if-let-Ok
         // The important thing is that it doesn't panic
-        match result {
-            Ok(convs) => assert!(convs.is_empty(), "corrupted DB should produce no conversations"),
-            Err(_) => {} // Error is also acceptable
+        if let Ok(convs) = result {
+            assert!(
+                convs.is_empty(),
+                "corrupted DB should produce no conversations"
+            );
         }
     }
 
@@ -1737,7 +1745,10 @@ mod tests {
 
         let convs = CursorConnector::extract_from_db(&db_path, None).unwrap();
         // Should not crash; no messages means no conversation
-        assert!(convs.is_empty(), "missing bubble references should produce no conversations");
+        assert!(
+            convs.is_empty(),
+            "missing bubble references should produce no conversations"
+        );
     }
 
     #[test]
@@ -1750,7 +1761,11 @@ mod tests {
             });
 
             let msg = CursorConnector::parse_bubble(&bubble, 0);
-            assert!(msg.is_some(), "type {} should still produce a message", type_val);
+            assert!(
+                msg.is_some(),
+                "type {} should still produce a message",
+                type_val
+            );
             assert_eq!(
                 msg.unwrap().role,
                 "assistant",
@@ -1768,7 +1783,10 @@ mod tests {
         });
 
         let msg = CursorConnector::parse_bubble(&bubble, 0);
-        assert!(msg.is_some(), "null bytes in content should not cause errors");
+        assert!(
+            msg.is_some(),
+            "null bytes in content should not cause errors"
+        );
     }
 
     #[test]
@@ -1838,13 +1856,9 @@ mod tests {
         assert!(CursorConnector::parse_workspace_uri("vscode-remote://no-slash-here").is_none());
 
         // URL-encoded file:// path
-        let result =
-            CursorConnector::parse_workspace_uri("file:///home/user/my%20project/src");
+        let result = CursorConnector::parse_workspace_uri("file:///home/user/my%20project/src");
         assert!(result.is_some());
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/home/user/my project/src")
-        );
+        assert_eq!(result.unwrap(), PathBuf::from("/home/user/my project/src"));
     }
 
     #[test]

@@ -108,14 +108,8 @@ fn validate_file_structure(events: &[Value]) -> Vec<String> {
     }
 
     // Count matched test_start / test_end pairs
-    let test_starts = events
-        .iter()
-        .filter(|e| e["event"] == "test_start")
-        .count();
-    let test_ends = events
-        .iter()
-        .filter(|e| e["event"] == "test_end")
-        .count();
+    let test_starts = events.iter().filter(|e| e["event"] == "test_start").count();
+    let test_ends = events.iter().filter(|e| e["event"] == "test_end").count();
     if test_starts != test_ends {
         warnings.push(format!(
             "Mismatched test_start ({test_starts}) and test_end ({test_ends})"
@@ -192,7 +186,11 @@ fn jsonl_files_valid_schema() {
             errors.push(format!("{}: {warning}", path.display()));
         }
     }
-    tracker.end("validate_events", Some("Validate event schema"), phase_start);
+    tracker.end(
+        "validate_events",
+        Some("Validate event schema"),
+        phase_start,
+    );
 
     tracker.metrics(
         "jsonl_validation",
@@ -243,18 +241,22 @@ fn jsonl_timestamps_are_rfc3339() {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Ok(json) = serde_json::from_str::<Value>(line) {
-                    if let Some(ts) = json["ts"].as_str() {
-                        checked += 1;
-                        if chrono::DateTime::parse_from_rfc3339(ts).is_err() {
-                            bad.push(format!("{}:{}: {ts}", path.display(), line_num + 1));
-                        }
+                if let Ok(json) = serde_json::from_str::<Value>(line)
+                    && let Some(ts) = json["ts"].as_str()
+                {
+                    checked += 1;
+                    if chrono::DateTime::parse_from_rfc3339(ts).is_err() {
+                        bad.push(format!("{}:{}: {ts}", path.display(), line_num + 1));
                     }
                 }
             }
         }
     }
-    tracker.end("check_timestamps", Some("Validate all timestamps"), phase_start);
+    tracker.end(
+        "check_timestamps",
+        Some("Validate all timestamps"),
+        phase_start,
+    );
 
     tracker.metrics(
         "timestamp_validation",
@@ -297,10 +299,10 @@ fn jsonl_run_ids_consistent_within_file() {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Ok(json) = serde_json::from_str::<Value>(line) {
-                    if let Some(run_id) = json["run_id"].as_str() {
-                        run_ids.insert(run_id.to_string());
-                    }
+                if let Ok(json) = serde_json::from_str::<Value>(line)
+                    && let Some(run_id) = json["run_id"].as_str()
+                {
+                    run_ids.insert(run_id.to_string());
                 }
             }
 
@@ -314,7 +316,11 @@ fn jsonl_run_ids_consistent_within_file() {
             }
         }
     }
-    tracker.end("check_run_ids", Some("Check run_id consistency"), phase_start);
+    tracker.end(
+        "check_run_ids",
+        Some("Check run_id consistency"),
+        phase_start,
+    );
 
     // Multiple run_ids per file is a warning, not necessarily an error.
     // Some files may accumulate from multiple runs.

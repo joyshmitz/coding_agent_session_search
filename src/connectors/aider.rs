@@ -65,10 +65,10 @@ impl AiderConnector {
                 // Only strip the prefix "> " (or ">") but preserve other whitespace
                 // to maintain indentation (e.g. for code blocks in prompts).
                 let trimmed_start = line.trim_start();
-                let content = if trimmed_start.starts_with("> ") {
-                    &trimmed_start[2..]
-                } else if trimmed_start.starts_with('>') {
-                    &trimmed_start[1..]
+                let content = if let Some(stripped) = trimmed_start.strip_prefix("> ") {
+                    stripped
+                } else if let Some(stripped) = trimmed_start.strip_prefix('>') {
+                    stripped
                 } else {
                     trimmed_start
                 };

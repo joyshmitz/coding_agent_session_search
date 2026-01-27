@@ -719,7 +719,7 @@ fn percent_decode_once(input: &str) -> Result<DecodeOutcome, PercentDecodeError>
         i += 1;
     }
 
-    if out.iter().any(|b| *b == 0) {
+    if out.contains(&0) {
         return Err(PercentDecodeError::NullByte);
     }
 
@@ -740,12 +740,38 @@ fn is_absolute_like(input: &str) -> bool {
     bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
 }
 
+/// Check for Unicode characters that are visual look-alikes for path-sensitive
+/// ASCII characters (`.`, `/`, `\`). These could bypass text-based path checks
+/// on filesystems that perform Unicode compatibility normalization (NFKC).
+fn contains_unicode_path_attack(input: &str) -> bool {
+    for ch in input.chars() {
+        match ch {
+            // Fullwidth look-alikes (NFKC maps to ASCII equivalents)
+            '\u{FF0E}' // FULLWIDTH FULL STOP → .
+            | '\u{FF0F}' // FULLWIDTH SOLIDUS → /
+            | '\u{FF3C}' // FULLWIDTH REVERSE SOLIDUS → \
+            // Small form variants
+            | '\u{FE52}' // SMALL FULL STOP → .
+            // Dot leaders / ellipsis components
+            | '\u{2024}' // ONE DOT LEADER → .
+            // Halfwidth forms
+            | '\u{FF61}' // HALFWIDTH IDEOGRAPHIC FULL STOP
+            => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 fn detect_encoded_path_violation(rel_path: &str) -> Option<String> {
     if contains_path_traversal_like(rel_path) {
         return Some("path traversal".to_string());
     }
     if is_absolute_like(rel_path) {
         return Some("absolute path".to_string());
+    }
+    if contains_unicode_path_attack(rel_path) {
+        return Some("unicode normalization attack".to_string());
     }
 
     if !rel_path.contains('%') {
@@ -767,6 +793,9 @@ fn detect_encoded_path_violation(rel_path: &str) -> Option<String> {
         }
         if is_absolute_like(&current) {
             return Some("url-encoded absolute path".to_string());
+        }
+        if contains_unicode_path_attack(&current) {
+            return Some("url-encoded unicode normalization attack".to_string());
         }
         if !current.contains('%') {
             break;
@@ -1383,5 +1412,382 @@ mod tests {
     #[test]
     fn test_integrity_url_encoded_traversal_blocked_separator_confusion() {
         assert_integrity_path_blocked(r"..\/..\/etc\/passwd");
+    }
+
+    // --- Unicode normalization attack tests ---
+
+    #[test]
+    fn test_integrity_unicode_fullwidth_dots_blocked() {
+        // U+FF0E FULLWIDTH FULL STOP looks like '.' but is a different codepoint.
+        // Two fullwidth dots form a visual ".." that bypasses naive ASCII checks.
+        assert_integrity_path_blocked("\u{FF0E}\u{FF0E}/etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_fullwidth_slash_blocked() {
+        // U+FF0F FULLWIDTH SOLIDUS looks like '/' but is a different codepoint.
+        assert_integrity_path_blocked("payload\u{FF0F}..\\..\\etc\\passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_fullwidth_backslash_blocked() {
+        // U+FF3C FULLWIDTH REVERSE SOLIDUS looks like '\' but is a different codepoint.
+        assert_integrity_path_blocked("payload\u{FF3C}..\\..\\etc\\passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_small_full_stop_blocked() {
+        // U+FE52 SMALL FULL STOP - a compatibility variant of '.'
+        assert_integrity_path_blocked("\u{FE52}\u{FE52}/etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_one_dot_leader_blocked() {
+        // U+2024 ONE DOT LEADER - looks nearly identical to '.'
+        assert_integrity_path_blocked("\u{2024}\u{2024}/etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_halfwidth_ideographic_full_stop_blocked() {
+        // U+FF61 HALFWIDTH IDEOGRAPHIC FULL STOP
+        assert_integrity_path_blocked("\u{FF61}\u{FF61}/etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_mixed_fullwidth_and_ascii_blocked() {
+        // Mix fullwidth and ASCII dots — the fullwidth char alone should trigger
+        assert_integrity_path_blocked(".\u{FF0E}/etc/passwd");
+        assert_integrity_path_blocked("\u{FF0E}./etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_percent_encoded_unicode_fullwidth_dot_blocked() {
+        // Percent-encoded UTF-8 for U+FF0E (FULLWIDTH FULL STOP): 0xEF 0xBC 0x8E
+        assert_integrity_path_blocked("%ef%bc%8e%ef%bc%8e/etc/passwd");
+    }
+
+    // --- Case sensitivity / Windows path tests ---
+
+    #[test]
+    fn test_integrity_windows_drive_letter_blocked() {
+        assert_integrity_path_blocked("C:\\Windows\\System32\\config\\SAM");
+    }
+
+    #[test]
+    fn test_integrity_windows_drive_letter_lowercase_blocked() {
+        assert_integrity_path_blocked("c:\\windows\\system32");
+    }
+
+    #[test]
+    fn test_integrity_windows_drive_letter_forward_slash_blocked() {
+        assert_integrity_path_blocked("C:/Windows/System32");
+    }
+
+    #[test]
+    fn test_integrity_windows_unc_path_blocked() {
+        // UNC paths start with \\ — should be caught as absolute
+        assert_integrity_path_blocked("\\\\server\\share\\file.txt");
+    }
+
+    // --- Symlink traversal tests ---
+
+    #[test]
+    fn test_integrity_symlink_traversal_blocked() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+
+        // Create a target file outside the site directory
+        let outside_dir = TempDir::new().unwrap();
+        let secret_file = outside_dir.path().join("secret.txt");
+        fs::write(&secret_file, "sensitive data").unwrap();
+
+        // Create a symlink inside the site directory that points outside
+        let link_path = site_dir.join("evil_link.txt");
+        symlink(&secret_file, &link_path).unwrap();
+
+        // Compute hash of the file the symlink points to
+        let hash = compute_file_hash(&link_path).unwrap();
+        let size = fs::metadata(&link_path).unwrap().len();
+
+        let mut files = BTreeMap::new();
+        files.insert(
+            "evil_link.txt".to_string(),
+            IntegrityEntry { sha256: hash, size },
+        );
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
+        fs::write(
+            site_dir.join("integrity.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        // The canonicalize check should detect the symlink escapes site_dir
+        let result = check_integrity(site_dir, false);
+        assert!(
+            !result.passed,
+            "Symlink traversal outside site_dir should be blocked"
+        );
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|d| d.contains("security violation"))
+                .unwrap_or(false),
+            "Should mention security violation for symlink escape"
+        );
+    }
+
+    #[test]
+    fn test_integrity_symlink_within_site_dir_allowed() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+
+        // Create a real file inside site_dir
+        let real_file = site_dir.join("real.txt");
+        fs::write(&real_file, "legitimate data").unwrap();
+
+        // Create a symlink that points to a file inside site_dir
+        let link_path = site_dir.join("link_to_real.txt");
+        symlink(&real_file, &link_path).unwrap();
+
+        let hash = compute_file_hash(&link_path).unwrap();
+        let size = fs::metadata(&link_path).unwrap().len();
+
+        let mut files = BTreeMap::new();
+        files.insert(
+            "link_to_real.txt".to_string(),
+            IntegrityEntry { sha256: hash, size },
+        );
+        // Also include the real file and integrity.json in manifest
+        let real_hash = compute_file_hash(&real_file).unwrap();
+        let real_size = fs::metadata(&real_file).unwrap().len();
+        files.insert(
+            "real.txt".to_string(),
+            IntegrityEntry {
+                sha256: real_hash,
+                size: real_size,
+            },
+        );
+
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
+        fs::write(
+            site_dir.join("integrity.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        // Symlink within site_dir should be OK
+        let result = check_integrity(site_dir, false);
+        assert!(
+            result.passed,
+            "Symlink within site_dir should be allowed: {:?}",
+            result.details
+        );
+    }
+
+    // --- False positive tests: legitimate paths should NOT be blocked ---
+
+    #[test]
+    fn test_integrity_legitimate_dotted_version_not_blocked() {
+        // "v2.1.0" contains dots but they're version numbers, not traversal
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let target = site_dir.join("assets/v2.1.0/bundle.js");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "// bundle").unwrap();
+
+        let hash = compute_file_hash(&target).unwrap();
+        let size = fs::metadata(&target).unwrap().len();
+        let mut files = BTreeMap::new();
+        files.insert(
+            "assets/v2.1.0/bundle.js".to_string(),
+            IntegrityEntry { sha256: hash, size },
+        );
+
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
+        fs::write(
+            site_dir.join("integrity.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let result = check_integrity(site_dir, false);
+        assert!(
+            result.passed,
+            "Dotted version path should not be blocked: {:?}",
+            result.details
+        );
+    }
+
+    #[test]
+    fn test_integrity_legitimate_hidden_file_not_blocked() {
+        // ".nojekyll" starts with a dot — should not be confused with traversal
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let target = site_dir.join(".nojekyll");
+        fs::write(&target, "").unwrap();
+
+        let hash = compute_file_hash(&target).unwrap();
+        let size = fs::metadata(&target).unwrap().len();
+        let mut files = BTreeMap::new();
+        files.insert(
+            ".nojekyll".to_string(),
+            IntegrityEntry { sha256: hash, size },
+        );
+
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
+        fs::write(
+            site_dir.join("integrity.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let result = check_integrity(site_dir, false);
+        assert!(
+            result.passed,
+            "Hidden file (.nojekyll) should not be blocked: {:?}",
+            result.details
+        );
+    }
+
+    #[test]
+    fn test_integrity_legitimate_payload_subdir_not_blocked() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let target = site_dir.join("payload/data/sessions.db");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "sqlite").unwrap();
+
+        let hash = compute_file_hash(&target).unwrap();
+        let size = fs::metadata(&target).unwrap().len();
+        let mut files = BTreeMap::new();
+        files.insert(
+            "payload/data/sessions.db".to_string(),
+            IntegrityEntry { sha256: hash, size },
+        );
+
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
+        fs::write(
+            site_dir.join("integrity.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let result = check_integrity(site_dir, false);
+        assert!(
+            result.passed,
+            "Legitimate payload subdirectory should not be blocked: {:?}",
+            result.details
+        );
+    }
+
+    #[test]
+    fn test_integrity_legitimate_hyphens_underscores_not_blocked() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let target = site_dir.join("css/main-v2_final.css");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "body{}").unwrap();
+
+        let hash = compute_file_hash(&target).unwrap();
+        let size = fs::metadata(&target).unwrap().len();
+        let mut files = BTreeMap::new();
+        files.insert(
+            "css/main-v2_final.css".to_string(),
+            IntegrityEntry { sha256: hash, size },
+        );
+
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
+        fs::write(
+            site_dir.join("integrity.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let result = check_integrity(site_dir, false);
+        assert!(
+            result.passed,
+            "Path with hyphens/underscores should not be blocked: {:?}",
+            result.details
+        );
+    }
+
+    // --- Unit tests for helper functions ---
+
+    #[test]
+    fn test_contains_unicode_path_attack_detects_fullwidth_period() {
+        assert!(contains_unicode_path_attack("\u{FF0E}"));
+        assert!(contains_unicode_path_attack("foo\u{FF0E}bar"));
+    }
+
+    #[test]
+    fn test_contains_unicode_path_attack_detects_fullwidth_solidus() {
+        assert!(contains_unicode_path_attack("\u{FF0F}"));
+    }
+
+    #[test]
+    fn test_contains_unicode_path_attack_detects_fullwidth_reverse_solidus() {
+        assert!(contains_unicode_path_attack("\u{FF3C}"));
+    }
+
+    #[test]
+    fn test_contains_unicode_path_attack_detects_small_full_stop() {
+        assert!(contains_unicode_path_attack("\u{FE52}"));
+    }
+
+    #[test]
+    fn test_contains_unicode_path_attack_detects_one_dot_leader() {
+        assert!(contains_unicode_path_attack("\u{2024}"));
+    }
+
+    #[test]
+    fn test_contains_unicode_path_attack_allows_ascii() {
+        assert!(!contains_unicode_path_attack("payload/chunk-00000.bin"));
+        assert!(!contains_unicode_path_attack("../etc/passwd")); // traversal, but ASCII
+        assert!(!contains_unicode_path_attack(".nojekyll"));
+    }
+
+    #[test]
+    fn test_detect_encoded_path_violation_unicode_attack() {
+        let result = detect_encoded_path_violation("\u{FF0E}\u{FF0E}/etc/passwd");
+        assert_eq!(result, Some("unicode normalization attack".to_string()));
+    }
+
+    #[test]
+    fn test_detect_encoded_path_violation_percent_encoded_unicode() {
+        // %EF%BC%8E = UTF-8 encoding of U+FF0E (FULLWIDTH FULL STOP)
+        let result = detect_encoded_path_violation("%ef%bc%8e%ef%bc%8e/etc/passwd");
+        assert_eq!(
+            result,
+            Some("url-encoded unicode normalization attack".to_string())
+        );
     }
 }

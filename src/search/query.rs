@@ -453,7 +453,14 @@ impl QueryExplanation {
         }
 
         // Boolean queries use combination strategy
-        if !parsed.operators.is_empty() || parsed.terms.len() > 1 || !parsed.phrases.is_empty() {
+        // Also if any single term is split into multiple subterms (compound term like "foo-bar")
+        let has_compound_terms = parsed.terms.iter().any(|t| t.subterms.len() > 1);
+
+        if !parsed.operators.is_empty()
+            || parsed.terms.len() > 1
+            || !parsed.phrases.is_empty()
+            || has_compound_terms
+        {
             return IndexStrategy::BooleanCombination;
         }
 
@@ -8332,5 +8339,815 @@ mod tests {
             })
             .collect();
         assert_eq!(terms, vec!["a", "b", "c"]);
+    }
+
+    // ==========================================================================
+    // Unicode Query Parsing Tests (br-327c)
+    // Comprehensive Unicode handling tests covering emoji, CJK, RTL, mixed
+    // scripts, zero-width characters, combining characters, normalization,
+    // supplementary plane characters, and bidirectional text.
+    // ==========================================================================
+
+    // --- Emoji queries ---
+
+    #[test]
+    fn unicode_emoji_treated_as_separator() {
+        // Emoji are not alphanumeric per Unicode, so sanitize_query replaces them with spaces
+        let sanitized = sanitize_query("🚀 launch");
+        assert_eq!(sanitized, "  launch", "Emoji should become space");
+    }
+
+    #[test]
+    fn unicode_emoji_splits_terms() {
+        // Emoji between words acts as a separator
+        let sanitized = sanitize_query("hot🔥code");
+        assert_eq!(sanitized, "hot code", "Emoji between words splits them");
+    }
+
+    #[test]
+    fn unicode_multiple_emoji_become_spaces() {
+        let sanitized = sanitize_query("🚀🔥💻");
+        assert_eq!(
+            sanitized.trim(),
+            "",
+            "All-emoji query sanitizes to whitespace"
+        );
+    }
+
+    #[test]
+    fn unicode_emoji_query_parses_without_panic() {
+        let tokens = parse_boolean_query("🚀 launch code 🔥");
+        let terms: Vec<_> = tokens
+            .iter()
+            .filter_map(|t| match t {
+                QueryToken::Term(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        // Emoji removed by sanitization in normalize_term_parts, only words remain
+        assert!(
+            terms
+                .iter()
+                .any(|t| t.contains("launch") || t.contains("code"))
+        );
+    }
+
+    #[test]
+    fn unicode_emoji_query_terms_lower() {
+        let terms = QueryTermsLower::from_query("🚀 LAUNCH");
+        // Emoji becomes space, LAUNCH lowercased
+        let tokens: Vec<&str> = terms.tokens().collect();
+        assert!(
+            tokens.contains(&"launch"),
+            "Should extract 'launch' from emoji query"
+        );
+    }
+
+    // --- CJK character queries ---
+
+    #[test]
+    fn unicode_cjk_chinese_preserved() {
+        assert_eq!(sanitize_query("测试代码"), "测试代码");
+        assert_eq!(sanitize_query("测试 代码"), "测试 代码");
+    }
+
+    #[test]
+    fn unicode_cjk_japanese_preserved() {
+        assert_eq!(sanitize_query("テスト"), "テスト");
+        // Hiragana and Katakana are alphanumeric
+        assert_eq!(sanitize_query("こんにちは世界"), "こんにちは世界");
+    }
+
+    #[test]
+    fn unicode_cjk_korean_preserved() {
+        assert_eq!(sanitize_query("테스트"), "테스트");
+        assert_eq!(sanitize_query("안녕하세요"), "안녕하세요");
+    }
+
+    #[test]
+    fn unicode_cjk_parsed_as_terms() {
+        let tokens = parse_boolean_query("测试 代码 search");
+        let terms: Vec<_> = tokens
+            .iter()
+            .filter_map(|t| match t {
+                QueryToken::Term(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terms, vec!["测试", "代码", "search"]);
+    }
+
+    #[test]
+    fn unicode_cjk_query_terms_lower() {
+        let terms = QueryTermsLower::from_query("测试 代码");
+        let tokens: Vec<&str> = terms.tokens().collect();
+        assert_eq!(tokens, vec!["测试", "代码"]);
+    }
+
+    // --- RTL text queries ---
+
+    #[test]
+    fn unicode_hebrew_preserved() {
+        assert_eq!(sanitize_query("שלום עולם"), "שלום עולם");
+    }
+
+    #[test]
+    fn unicode_arabic_preserved() {
+        assert_eq!(sanitize_query("مرحبا"), "مرحبا");
+    }
+
+    #[test]
+    fn unicode_hebrew_parsed_as_terms() {
+        let tokens = parse_boolean_query("שלום עולם");
+        let terms: Vec<_> = tokens
+            .iter()
+            .filter_map(|t| match t {
+                QueryToken::Term(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terms, vec!["שלום", "עולם"]);
+    }
+
+    #[test]
+    fn unicode_arabic_query_terms_lower() {
+        // Arabic doesn't have case, so lowercasing is a no-op
+        let terms = QueryTermsLower::from_query("مرحبا بالعالم");
+        let tokens: Vec<&str> = terms.tokens().collect();
+        assert_eq!(tokens, vec!["مرحبا", "بالعالم"]);
+    }
+
+    // --- Mixed script queries ---
+
+    #[test]
+    fn unicode_mixed_scripts_preserved() {
+        let sanitized = sanitize_query("Hello 世界 мир");
+        assert_eq!(sanitized, "Hello 世界 мир");
+    }
+
+    #[test]
+    fn unicode_mixed_scripts_parsed() {
+        let tokens = parse_boolean_query("Hello 世界 мир");
+        let terms: Vec<_> = tokens
+            .iter()
+            .filter_map(|t| match t {
+                QueryToken::Term(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terms, vec!["Hello", "世界", "мир"]);
+    }
+
+    #[test]
+    fn unicode_mixed_scripts_with_emoji() {
+        // Emoji stripped, scripts preserved
+        let sanitized = sanitize_query("Hello 🌍 世界");
+        assert_eq!(sanitized, "Hello   世界");
+    }
+
+    #[test]
+    fn unicode_latin_cyrillic_arabic_query() {
+        let terms = QueryTermsLower::from_query("Hello Мир مرحبا");
+        let tokens: Vec<&str> = terms.tokens().collect();
+        assert_eq!(tokens, vec!["hello", "мир", "مرحبا"]);
+    }
+
+    // --- Zero-width characters ---
+
+    #[test]
+    fn unicode_zero_width_joiner_removed() {
+        // Zero-width joiner (U+200D) is not alphanumeric → becomes space
+        let sanitized = sanitize_query("test\u{200D}query");
+        assert_eq!(sanitized, "test query");
+    }
+
+    #[test]
+    fn unicode_zero_width_non_joiner_removed() {
+        // Zero-width non-joiner (U+200C) is not alphanumeric → becomes space
+        let sanitized = sanitize_query("test\u{200C}query");
+        assert_eq!(sanitized, "test query");
+    }
+
+    #[test]
+    fn unicode_zero_width_space_removed() {
+        // Zero-width space (U+200B) is not alphanumeric → becomes space
+        let sanitized = sanitize_query("test\u{200B}query");
+        assert_eq!(sanitized, "test query");
+    }
+
+    #[test]
+    fn unicode_bom_removed() {
+        // Byte-order mark (U+FEFF) should not appear in search terms
+        let sanitized = sanitize_query("\u{FEFF}test");
+        assert_eq!(sanitized, " test");
+    }
+
+    // --- Combining characters ---
+
+    #[test]
+    fn unicode_precomposed_accent_preserved() {
+        // Precomposed é (U+00E9) is a single letter → alphanumeric
+        let sanitized = sanitize_query("café");
+        assert_eq!(sanitized, "café");
+    }
+
+    #[test]
+    fn unicode_combining_accent_becomes_separator() {
+        // Decomposed: 'e' + combining acute accent (U+0301)
+        // The combining mark itself is NOT alphanumeric → becomes space
+        // This means "cafe\u{0301}" becomes "cafe " (accent stripped)
+        let input = "cafe\u{0301}";
+        let sanitized = sanitize_query(input);
+        // 'c','a','f','e' are alphanumeric; U+0301 is Mark category → space
+        assert_eq!(sanitized, "cafe ");
+    }
+
+    #[test]
+    fn unicode_nfc_vs_nfd_differ_in_sanitization() {
+        // NFC (precomposed): é = U+00E9 (single char, alphanumeric)
+        let nfc = "caf\u{00E9}";
+        // NFD (decomposed): e + ◌́ = U+0065 U+0301 (two chars, accent not alphanumeric)
+        let nfd = "cafe\u{0301}";
+
+        let san_nfc = sanitize_query(nfc);
+        let san_nfd = sanitize_query(nfd);
+
+        // NFC preserves the é
+        assert_eq!(san_nfc, "café");
+        // NFD strips the combining accent
+        assert_eq!(san_nfd, "cafe ");
+        // They differ — this is expected behavior (no normalization applied)
+        assert_ne!(san_nfc, san_nfd);
+    }
+
+    #[test]
+    fn unicode_combining_marks_do_not_panic() {
+        // Multiple combining marks stacked (e.g., Zalgo text)
+        let zalgo = "t\u{0301}\u{0302}\u{0303}e\u{0304}\u{0305}st";
+        let sanitized = sanitize_query(zalgo);
+        // Should not panic; combining marks become spaces
+        assert!(sanitized.contains('t'));
+        assert!(sanitized.contains('s'));
+    }
+
+    // --- Supplementary plane characters (outside BMP) ---
+
+    #[test]
+    fn unicode_mathematical_bold_letters_preserved() {
+        // Mathematical Bold Capital A (U+1D400) — classified as Letter
+        let input = "\u{1D400}\u{1D401}\u{1D402}";
+        let sanitized = sanitize_query(input);
+        assert_eq!(
+            sanitized, input,
+            "Mathematical bold letters are alphanumeric"
+        );
+    }
+
+    #[test]
+    fn unicode_supplementary_ideograph_preserved() {
+        // CJK Unified Ideographs Extension B character (U+20000)
+        let input = "\u{20000}";
+        let sanitized = sanitize_query(input);
+        assert_eq!(
+            sanitized, input,
+            "Supplementary CJK ideographs are alphanumeric"
+        );
+    }
+
+    #[test]
+    fn unicode_supplementary_emoji_removed() {
+        // Grinning face (U+1F600) — Symbol, not alphanumeric
+        let input = "test\u{1F600}query";
+        let sanitized = sanitize_query(input);
+        assert_eq!(sanitized, "test query");
+    }
+
+    // --- Bidirectional text ---
+
+    #[test]
+    fn unicode_bidi_mixed_ltr_rtl_no_panic() {
+        let input = "hello שלום world עולם";
+        let tokens = parse_boolean_query(input);
+        let terms: Vec<_> = tokens
+            .iter()
+            .filter_map(|t| match t {
+                QueryToken::Term(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terms.len(), 4);
+        assert!(terms.contains(&"hello"));
+        assert!(terms.contains(&"שלום"));
+        assert!(terms.contains(&"world"));
+        assert!(terms.contains(&"עולם"));
+    }
+
+    #[test]
+    fn unicode_bidi_override_chars_removed() {
+        // Left-to-right override (U+202D) and pop directional (U+202C)
+        // These are format characters, not alphanumeric
+        let input = "test\u{202D}content\u{202C}end";
+        let sanitized = sanitize_query(input);
+        assert_eq!(sanitized, "test content end");
+    }
+
+    #[test]
+    fn unicode_bidi_rtl_mark_removed() {
+        // Right-to-left mark (U+200F) is not alphanumeric
+        let input = "test\u{200F}content";
+        let sanitized = sanitize_query(input);
+        assert_eq!(sanitized, "test content");
+    }
+
+    // --- Full pipeline integration tests ---
+
+    #[test]
+    fn unicode_full_pipeline_cjk_query() {
+        let explanation = QueryExplanation::analyze("测试 代码", &SearchFilters::default());
+        assert_eq!(explanation.parsed.terms.len(), 2);
+        assert!(!explanation.parsed.terms[0].text.is_empty());
+        assert!(!explanation.parsed.terms[1].text.is_empty());
+    }
+
+    #[test]
+    fn unicode_full_pipeline_mixed_script_boolean() {
+        let explanation =
+            QueryExplanation::analyze("Hello AND 世界 OR مرحبا", &SearchFilters::default());
+        // Should parse operators correctly even with mixed scripts
+        assert!(
+            explanation.parsed.operators.iter().any(|op| op == "AND"),
+            "AND operator should be recognized in mixed-script query"
+        );
+    }
+
+    #[test]
+    fn unicode_full_pipeline_emoji_query_type() {
+        // An all-emoji query sanitizes to empty — should handle gracefully
+        let explanation = QueryExplanation::analyze("🚀🔥💻", &SearchFilters::default());
+        // Should not panic; terms may be empty after sanitization
+        assert!(
+            explanation.parsed.terms.is_empty()
+                || explanation
+                    .parsed
+                    .terms
+                    .iter()
+                    .all(|t| t.subterms.is_empty()),
+            "All-emoji query should produce no meaningful terms"
+        );
+    }
+
+    #[test]
+    fn unicode_full_pipeline_phrase_with_cjk() {
+        let explanation = QueryExplanation::analyze("\"测试代码\"", &SearchFilters::default());
+        assert!(
+            !explanation.parsed.phrases.is_empty(),
+            "CJK phrase should be recognized"
+        );
+    }
+
+    #[test]
+    fn unicode_full_pipeline_wildcard_with_unicode() {
+        let explanation = QueryExplanation::analyze("*测试*", &SearchFilters::default());
+        assert!(
+            !explanation.parsed.terms.is_empty(),
+            "Wildcard with CJK should produce terms"
+        );
+        // Check that the term has a substring/wildcard pattern
+        if let Some(term) = explanation.parsed.terms.first() {
+            assert!(
+                term.subterms
+                    .iter()
+                    .any(|s| s.pattern.contains("*") || s.pattern == "exact"),
+                "CJK wildcard should produce wildcard or exact pattern"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_query_terms_lower_case_folding() {
+        // German sharp s (ß) lowercases to ß (not ss in Rust)
+        let terms = QueryTermsLower::from_query("STRAßE");
+        assert_eq!(terms.query_lower, "straße");
+
+        // Turkish dotless I (İ → i with dot below in some locales, but
+        // Rust uses simple Unicode case mapping)
+        let terms2 = QueryTermsLower::from_query("HELLO");
+        assert_eq!(terms2.query_lower, "hello");
+    }
+
+    #[test]
+    fn unicode_normalize_term_parts_cjk() {
+        let parts = normalize_term_parts("测试 代码");
+        assert_eq!(parts, vec!["测试", "代码"]);
+    }
+
+    #[test]
+    fn unicode_normalize_term_parts_strips_emoji() {
+        let parts = normalize_term_parts("🚀launch🔥code");
+        // Emoji replaced with space, splitting into two terms
+        assert!(parts.contains(&"launch".to_string()));
+        assert!(parts.contains(&"code".to_string()));
+    }
+
+    // ── Special character query tests (br-g650) ────────────────────────────
+
+    // Category 1: Unbalanced quotes
+
+    #[test]
+    fn special_char_unbalanced_quote_no_panic() {
+        let tokens = parse_boolean_query("\"hello world");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t, QueryToken::Phrase(p) if p.contains("hello"))),
+            "Unbalanced quote should still produce a phrase: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn special_char_unbalanced_trailing_quote() {
+        let tokens = parse_boolean_query("test\"");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t, QueryToken::Term(w) if w == "test")),
+            "Text before trailing quote should parse as term: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn special_char_multiple_unbalanced_quotes() {
+        let tokens = parse_boolean_query("\"foo \"bar");
+        assert!(
+            !tokens.is_empty(),
+            "Should parse despite odd quotes: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn special_char_empty_quotes() {
+        let tokens = parse_boolean_query("\"\" test");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t, QueryToken::Term(w) if w == "test")),
+            "Empty quotes should be skipped: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn special_char_unbalanced_via_sanitize() {
+        let sanitized = sanitize_query("\"hello world");
+        assert!(
+            sanitized.contains('"'),
+            "Quotes preserved by sanitize_query"
+        );
+    }
+
+    // Category 2: Escaped quotes
+
+    #[test]
+    fn special_char_backslash_quote_sanitize() {
+        let sanitized = sanitize_query("\\\"test\\\"");
+        assert!(sanitized.contains('"'));
+        assert!(!sanitized.contains('\\'), "Backslash should be stripped");
+    }
+
+    #[test]
+    fn special_char_backslash_quote_parse() {
+        let tokens = parse_boolean_query("\\\"test\\\"");
+        assert!(!tokens.is_empty(), "Should parse without panic: {tokens:?}");
+    }
+
+    #[test]
+    fn special_char_inner_escaped_quotes() {
+        let tokens = parse_boolean_query("\"test \\\"inner\\\" test\"");
+        assert!(
+            !tokens.is_empty(),
+            "Nested escaped quotes should not panic: {tokens:?}"
+        );
+    }
+
+    // Category 3: Backslash sequences
+
+    #[test]
+    fn special_char_windows_path_sanitize() {
+        let sanitized = sanitize_query("C:\\Users\\test");
+        assert_eq!(sanitized, "C  Users test");
+    }
+
+    #[test]
+    fn special_char_unc_path_sanitize() {
+        let sanitized = sanitize_query("\\\\server\\share");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert!(parts.contains(&"server"));
+        assert!(parts.contains(&"share"));
+    }
+
+    #[test]
+    fn special_char_windows_path_terms() {
+        let parts = normalize_term_parts("C:\\Users\\test\\file.rs");
+        assert!(parts.contains(&"C".to_string()));
+        assert!(parts.contains(&"Users".to_string()));
+        assert!(parts.contains(&"test".to_string()));
+        assert!(parts.contains(&"file".to_string()));
+        assert!(parts.contains(&"rs".to_string()));
+    }
+
+    // Category 4: Regex metacharacters
+
+    #[test]
+    fn special_char_regex_dot_star() {
+        let sanitized = sanitize_query("foo.*bar");
+        assert_eq!(sanitized, "foo *bar");
+    }
+
+    #[test]
+    fn special_char_regex_char_class() {
+        let sanitized = sanitize_query("[a-z]+");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["a", "z"]);
+    }
+
+    #[test]
+    fn special_char_regex_anchors() {
+        let sanitized = sanitize_query("^start$");
+        assert_eq!(sanitized.trim(), "start");
+    }
+
+    #[test]
+    fn special_char_regex_pipe_groups() {
+        let sanitized = sanitize_query("(foo|bar)");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["foo", "bar"]);
+    }
+
+    // Category 5: SQL injection patterns
+
+    #[test]
+    fn special_char_sql_injection_or() {
+        let sanitized = sanitize_query("'OR 1=1--");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert!(parts.contains(&"OR"));
+        assert!(parts.contains(&"1"));
+        assert!(!sanitized.contains('\''));
+        assert!(!sanitized.contains('='));
+    }
+
+    #[test]
+    fn special_char_sql_injection_drop() {
+        let sanitized = sanitize_query("; DROP TABLE users;--");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert!(parts.contains(&"DROP"));
+        assert!(parts.contains(&"TABLE"));
+        assert!(parts.contains(&"users"));
+        assert!(!sanitized.contains(';'));
+    }
+
+    #[test]
+    fn special_char_sql_injection_union() {
+        let sanitized = sanitize_query("' UNION SELECT * FROM passwords --");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert!(parts.contains(&"UNION"));
+        assert!(parts.contains(&"SELECT"));
+        assert!(parts.contains(&"*"));
+        assert!(parts.contains(&"FROM"));
+        assert!(parts.contains(&"passwords"));
+    }
+
+    #[test]
+    fn special_char_sql_parse_as_literal() {
+        let tokens = parse_boolean_query("OR 1=1");
+        assert!(
+            tokens.iter().any(|t| matches!(t, QueryToken::Or)),
+            "OR should be parsed as Or operator: {tokens:?}"
+        );
+    }
+
+    // Category 6: Shell injection patterns
+
+    #[test]
+    fn special_char_shell_subshell() {
+        let sanitized = sanitize_query("$(cmd)");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["cmd"]);
+    }
+
+    #[test]
+    fn special_char_shell_backticks() {
+        let sanitized = sanitize_query("`cmd`");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["cmd"]);
+    }
+
+    #[test]
+    fn special_char_shell_pipe_rm() {
+        let sanitized = sanitize_query("| rm -rf /");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert!(parts.contains(&"rm"));
+        assert!(parts.contains(&"rf"));
+        assert!(!sanitized.contains('|'));
+        assert!(!sanitized.contains('/'));
+    }
+
+    #[test]
+    fn special_char_shell_semicolon_chain() {
+        let sanitized = sanitize_query("test; echo pwned; cat /etc/passwd");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert!(parts.contains(&"test"));
+        assert!(parts.contains(&"echo"));
+        assert!(parts.contains(&"pwned"));
+        assert!(!sanitized.contains(';'));
+    }
+
+    // Category 7: Null bytes
+
+    #[test]
+    fn special_char_null_byte_mid_string() {
+        let sanitized = sanitize_query("test\x00hidden");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["test", "hidden"]);
+    }
+
+    #[test]
+    fn special_char_null_byte_leading() {
+        let sanitized = sanitize_query("\x00\x00attack");
+        assert_eq!(sanitized.trim(), "attack");
+    }
+
+    #[test]
+    fn special_char_null_byte_trailing() {
+        let sanitized = sanitize_query("query\x00\x00\x00");
+        assert_eq!(sanitized.trim(), "query");
+    }
+
+    #[test]
+    fn special_char_null_byte_parse() {
+        let tokens = parse_boolean_query("test\x00hidden");
+        assert!(
+            !tokens.is_empty(),
+            "Null bytes should not prevent parsing: {tokens:?}"
+        );
+    }
+
+    // Category 8: Control characters
+
+    #[test]
+    fn special_char_control_newline() {
+        let sanitized = sanitize_query("line1\nline2");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["line1", "line2"]);
+    }
+
+    #[test]
+    fn special_char_control_tab_cr() {
+        let sanitized = sanitize_query("tab\there\r\nend");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["tab", "here", "end"]);
+    }
+
+    #[test]
+    fn special_char_control_parse_whitespace() {
+        let tokens = parse_boolean_query("hello\tworld\ntest");
+        let terms: Vec<&str> = tokens
+            .iter()
+            .filter_map(|t| match t {
+                QueryToken::Term(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(terms, vec!["hello", "world", "test"]);
+    }
+
+    #[test]
+    fn special_char_control_bell_escape() {
+        let sanitized = sanitize_query("test\x07\x1b[31mred");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert!(parts.contains(&"test"));
+        assert!(parts.contains(&"31mred"));
+    }
+
+    // Category 9: HTML/XML entities
+
+    #[test]
+    fn special_char_html_entity_lt() {
+        let sanitized = sanitize_query("&lt;script&gt;");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["lt", "script", "gt"]);
+    }
+
+    #[test]
+    fn special_char_html_numeric_entity() {
+        let sanitized = sanitize_query("&#x3C;script&#x3E;");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert!(parts.contains(&"x3C"));
+        assert!(parts.contains(&"script"));
+        assert!(parts.contains(&"x3E"));
+    }
+
+    #[test]
+    fn special_char_html_tags_stripped() {
+        let sanitized = sanitize_query("<script>alert('xss')</script>");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert!(parts.contains(&"script"));
+        assert!(parts.contains(&"alert"));
+        assert!(parts.contains(&"xss"));
+    }
+
+    #[test]
+    fn special_char_html_attribute() {
+        let sanitized = sanitize_query("<img src=\"evil.js\" onerror=\"alert(1)\">");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert!(parts.contains(&"img"));
+        assert!(parts.contains(&"src"));
+        assert!(parts.contains(&"onerror"));
+    }
+
+    // Category 10: URL encoding
+
+    #[test]
+    fn special_char_url_percent_encoding() {
+        let sanitized = sanitize_query("%20space%2Fslash");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["20space", "2Fslash"]);
+    }
+
+    #[test]
+    fn special_char_url_null_byte_encoded() {
+        let sanitized = sanitize_query("test%00hidden");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["test", "00hidden"]);
+    }
+
+    #[test]
+    fn special_char_url_full_query_string() {
+        let sanitized = sanitize_query("search?q=hello&lang=en");
+        let parts: Vec<&str> = sanitized.split_whitespace().collect();
+        assert_eq!(parts, vec!["search", "q", "hello", "lang", "en"]);
+    }
+
+    // Cross-cutting: full pipeline integration
+
+    #[test]
+    fn special_char_explain_sql_injection() {
+        let filters = SearchFilters::default();
+        let explanation = QueryExplanation::analyze("'OR 1=1--", &filters);
+        assert!(
+            !explanation.parsed.terms.is_empty() || !explanation.parsed.phrases.is_empty(),
+            "SQL injection should produce parseable terms"
+        );
+    }
+
+    #[test]
+    fn special_char_explain_shell_injection() {
+        let filters = SearchFilters::default();
+        let explanation = QueryExplanation::analyze("$(rm -rf /)", &filters);
+        assert!(
+            !explanation.parsed.terms.is_empty(),
+            "Shell injection should produce parseable terms"
+        );
+    }
+
+    #[test]
+    fn special_char_explain_html_xss() {
+        let filters = SearchFilters::default();
+        let explanation = QueryExplanation::analyze("<script>alert('xss')</script>", &filters);
+        assert!(
+            !explanation.parsed.terms.is_empty(),
+            "XSS payload should produce parseable terms"
+        );
+    }
+
+    #[test]
+    fn special_char_terms_lower_injection() {
+        let qt = QueryTermsLower::from_query("'; DROP TABLE--");
+        let tokens: Vec<&str> = qt.tokens().collect();
+        for token in &tokens {
+            assert!(
+                token.chars().all(|c| c.is_alphanumeric()),
+                "Token should only contain alphanumeric characters: {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn special_char_terms_lower_null_bytes() {
+        let qt = QueryTermsLower::from_query("test\x00hidden");
+        let tokens: Vec<&str> = qt.tokens().collect();
+        assert!(tokens.contains(&"test"));
+        assert!(tokens.contains(&"hidden"));
+    }
+
+    #[test]
+    fn special_char_boolean_with_injection() {
+        let tokens = parse_boolean_query("search AND 'OR 1=1-- NOT drop");
+        assert!(
+            tokens.iter().any(|t| matches!(t, QueryToken::And)),
+            "Boolean AND should still be recognized: {tokens:?}"
+        );
+        assert!(
+            tokens.iter().any(|t| matches!(t, QueryToken::Not)),
+            "Boolean NOT should still be recognized: {tokens:?}"
+        );
     }
 }
