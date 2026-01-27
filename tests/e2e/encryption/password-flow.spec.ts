@@ -51,29 +51,28 @@ test.describe('Encrypted Export - Correct Password', () => {
   }) => {
     test.skip(!encryptedExportPath, 'Encrypted export path not available');
 
-    await gotoFile(page, encryptedExportPath);
-    await page.waitForTimeout(500);
+    await test.step('Load encrypted export', async () => {
+      await gotoFile(page, encryptedExportPath);
+      await page.waitForTimeout(500);
+    });
 
-    // Find and fill password input
-    const passwordInput = page.locator(
-      '#password-input, input[type="password"], [data-testid="password-input"]'
-    );
-    await passwordInput.first().fill(password);
+    await test.step('Enter password and submit', async () => {
+      const passwordInput = page.locator(
+        '#password-input, input[type="password"], [data-testid="password-input"]'
+      );
+      await passwordInput.first().fill(password);
+      await passwordInput.first().press('Enter');
+      await page.waitForTimeout(2000);
+    });
 
-    // Submit the form via Enter key (more reliable than clicking the button)
-    await passwordInput.first().press('Enter');
+    await test.step('Verify decrypted content', async () => {
+      const modal = page.locator('#password-modal, .decrypt-modal, [data-testid="decrypt-modal"]');
+      await expect(modal.first()).not.toBeVisible({ timeout: 10000 });
 
-    // Wait for decryption
-    await page.waitForTimeout(2000);
-
-    // Modal should disappear
-    const modal = page.locator('#password-modal, .decrypt-modal, [data-testid="decrypt-modal"]');
-    await expect(modal.first()).not.toBeVisible({ timeout: 10000 });
-
-    // Content should now be visible
-    const messages = page.locator('.message');
-    const messageCount = await messages.count();
-    expect(messageCount).toBeGreaterThan(0);
+      const messages = page.locator('.message');
+      const messageCount = await messages.count();
+      expect(messageCount).toBeGreaterThan(0);
+    });
   });
 
   test('decryption completes within 5 seconds', async ({
@@ -136,33 +135,33 @@ test.describe('Encrypted Export - Wrong Password', () => {
   test('shows error with wrong password', async ({ page, encryptedExportPath }) => {
     test.skip(!encryptedExportPath, 'Encrypted export path not available');
 
-    await gotoFile(page, encryptedExportPath);
-    await page.waitForTimeout(500);
+    await test.step('Load encrypted export', async () => {
+      await gotoFile(page, encryptedExportPath);
+      await page.waitForTimeout(500);
+    });
 
-    const passwordInput = page.locator(
-      '#password-input, input[type="password"]'
-    );
-    await passwordInput.first().fill('wrong-password-123');
+    await test.step('Submit wrong password', async () => {
+      const passwordInput = page.locator(
+        '#password-input, input[type="password"]'
+      );
+      await passwordInput.first().fill('wrong-password-123');
+      await passwordInput.first().press('Enter');
+      await page.waitForTimeout(2000);
+    });
 
-    // Submit via Enter key
-    await passwordInput.first().press('Enter');
+    await test.step('Verify error and content hidden', async () => {
+      const error = page.locator(
+        '#decrypt-error, .decrypt-error, .error, [role="alert"]'
+      );
+      await expect(error.first()).toBeVisible({ timeout: 5000 });
 
-    await page.waitForTimeout(2000);
+      const errorText = await error.first().textContent();
+      expect(errorText?.toLowerCase()).toMatch(/incorrect|failed|error|invalid|wrong/);
 
-    // Error message should appear
-    const error = page.locator(
-      '#decrypt-error, .decrypt-error, .error, [role="alert"]'
-    );
-    await expect(error.first()).toBeVisible({ timeout: 5000 });
-
-    // Error should mention failure
-    const errorText = await error.first().textContent();
-    expect(errorText?.toLowerCase()).toMatch(/incorrect|failed|error|invalid|wrong/);
-
-    // Content should still be hidden
-    const messages = page.locator('.message');
-    const messageCount = await messages.count();
-    expect(messageCount).toBe(0);
+      const messages = page.locator('.message');
+      const messageCount = await messages.count();
+      expect(messageCount).toBe(0);
+    });
   });
 
   test('allows retry after wrong password', async ({

@@ -13,6 +13,7 @@ use coding_agent_search::storage::sqlite::SqliteStorage;
 use std::fs;
 use std::path::Path;
 
+#[macro_use]
 mod util;
 use util::EnvGuard;
 use util::e2e_log::{E2ePerformanceMetrics, PhaseTracker};
@@ -78,13 +79,16 @@ fn count_messages(db_path: &Path) -> i64 {
 /// Test: Full index pipeline - index --full creates DB and index
 #[test]
 fn index_full_creates_artifacts() {
+    verbose!("Starting index_full_creates_artifacts test");
     let tracker = tracker_for("index_full_creates_artifacts");
     let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
+    verbose!("Created temp directory at {:?}", home);
     let codex_home = home.join(".codex");
     let data_dir = home.join("cass_data");
     fs::create_dir_all(&data_dir).unwrap();
+    verbose!("Data directory: {:?}", data_dir);
 
     let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
     let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
@@ -129,9 +133,11 @@ fn index_full_creates_artifacts() {
     // Capture memory/IO after indexing
     let mem_after = E2ePerformanceMetrics::capture_memory();
     let io_after = E2ePerformanceMetrics::capture_io();
+    verbose!("Index completed in {}ms", index_duration_ms);
 
     // Verify artifacts created
     let phase_start = tracker.start("verify_artifacts", Some("Verify database and index exist"));
+    verbose!("Verifying artifacts at {:?}", data_dir);
     assert!(
         data_dir.join("agent_search.db").exists(),
         "SQLite DB should be created"
@@ -148,6 +154,7 @@ fn index_full_creates_artifacts() {
 
     // Count messages and emit performance metrics
     let msg_count = count_messages(&data_dir.join("agent_search.db")) as u64;
+    verbose!("Indexed {} messages", msg_count);
     let mut metrics = E2ePerformanceMetrics::new()
         .with_duration(index_duration_ms)
         .with_throughput(msg_count, index_duration_ms);
@@ -164,6 +171,7 @@ fn index_full_creates_artifacts() {
 
     tracker.metrics("index_full", &metrics);
     tracker.flush();
+    verbose!("Test index_full_creates_artifacts completed successfully");
 }
 
 /// Incremental re-index must preserve existing messages and ingest new ones from the same file.

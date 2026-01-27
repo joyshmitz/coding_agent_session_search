@@ -25,8 +25,10 @@ test.describe('Search Functionality', () => {
   test('search highlights matching text', async ({ page, exportPath }) => {
     test.skip(!exportPath, 'Export path not available');
 
-    await page.goto(`file://${exportPath}`, { waitUntil: 'domcontentloaded' });
-    await waitForPageReady(page);
+    await test.step('Load export', async () => {
+      await page.goto(`file://${exportPath}`, { waitUntil: 'domcontentloaded' });
+      await waitForPageReady(page);
+    });
 
     const searchInput = page.locator(
       '#search-input, [data-testid="search"], input[type="search"]'
@@ -38,20 +40,22 @@ test.describe('Search Functionality', () => {
       return;
     }
 
-    // Search for a common word
-    await searchInput.first().fill('function');
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(500);
+    await test.step('Run search query', async () => {
+      await searchInput.first().fill('function');
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(500);
+    });
 
-    // Check for highlights
-    const highlights = page.locator('mark, .highlight, .search-match');
-    const highlightCount = await highlights.count();
+    await test.step('Verify highlights when present', async () => {
+      const highlights = page.locator('mark, .highlight, .search-match');
+      const highlightCount = await highlights.count();
 
-    // If matches found, they should be highlighted
-    // Note: might be 0 if the word isn't in the content
-    if (highlightCount > 0) {
-      await expect(highlights.first()).toBeVisible();
-    }
+      // If matches found, they should be highlighted
+      // Note: might be 0 if the word isn't in the content
+      if (highlightCount > 0) {
+        await expect(highlights.first()).toBeVisible();
+      }
+    });
   });
 
   test('Ctrl+F focuses search input', async ({ page, exportPath }) => {
@@ -85,8 +89,10 @@ test.describe('Search Functionality', () => {
   test('Escape clears search', async ({ page, exportPath }) => {
     test.skip(!exportPath, 'Export path not available');
 
-    await page.goto(`file://${exportPath}`, { waitUntil: 'domcontentloaded' });
-    await waitForPageReady(page);
+    await test.step('Load export', async () => {
+      await page.goto(`file://${exportPath}`, { waitUntil: 'domcontentloaded' });
+      await waitForPageReady(page);
+    });
 
     const searchInput = page.locator(
       '#search-input, [data-testid="search"], input[type="search"]'
@@ -98,16 +104,16 @@ test.describe('Search Functionality', () => {
       return;
     }
 
-    // Type something
-    await searchInput.first().fill('test query');
-    await expect(searchInput.first()).toHaveValue('test query');
+    await test.step('Enter query and press Escape', async () => {
+      await searchInput.first().fill('test query');
+      await expect(searchInput.first()).toHaveValue('test query');
+      await page.keyboard.press('Escape');
+    });
 
-    // Press Escape
-    await page.keyboard.press('Escape');
-
-    // Search should be cleared
-    const value = await searchInput.first().inputValue();
-    expect(value === '' || value === 'test query').toBe(true); // Some implementations don't clear
+    await test.step('Verify search cleared or left intact', async () => {
+      const value = await searchInput.first().inputValue();
+      expect(value === '' || value === 'test query').toBe(true);
+    });
   });
 
   test('search shows result count', async ({ page, exportPath }) => {

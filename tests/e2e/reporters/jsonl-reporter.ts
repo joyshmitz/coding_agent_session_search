@@ -15,6 +15,7 @@ import {
   Reporter,
   TestCase,
   TestResult,
+  TestStep,
   FullConfig,
   Suite,
   FullResult,
@@ -47,6 +48,11 @@ interface E2eTestResult {
   retries?: number;
 }
 
+interface E2ePhase {
+  name: string;
+  description?: string;
+}
+
 interface E2eError {
   message: string;
   type?: string;
@@ -66,6 +72,8 @@ type E2eEvent =
   | { event: 'run_start'; env: E2eEnvironment; config?: Record<string, unknown> }
   | { event: 'test_start'; test: E2eTestInfo }
   | { event: 'test_end'; test: E2eTestInfo; result: E2eTestResult; error?: E2eError }
+  | { event: 'phase_start'; test: E2eTestInfo; phase: E2ePhase }
+  | { event: 'phase_end'; test: E2eTestInfo; phase: E2ePhase; duration_ms: number }
   | { event: 'run_end'; summary: E2eRunSummary; exit_code: number };
 
 function nowIso(): string {
@@ -88,6 +96,14 @@ function execOrNull(cmd: string): string | null {
   } catch {
     return null;
   }
+}
+
+function slugify(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug.length > 0 ? slug : 'phase';
 }
 
 function captureEnvironment(): E2eEnvironment {
@@ -238,6 +254,35 @@ class JsonlReporter implements Reporter {
       test: this.getTestInfo(test),
       result: testResult,
       ...(error && { error }),
+    });
+  }
+
+  onStepBegin(test: TestCase, _result: TestResult, step: TestStep): void {
+    if (step.category !== 'test.step') return;
+
+    this.writeEvent({
+      event: 'phase_start',
+      test: this.getTestInfo(test),
+      phase: {
+        name: slugify(step.title || 'phase'),
+        description: step.title || undefined,
+      },
+    });
+  }
+
+  onStepEnd(test: TestCase, _result: TestResult, step: TestStep): void {
+    if (step.category !== 'test.step') return;
+
+    const duration = Number.isFinite(step.duration) ? Math.max(0, Math.round(step.duration)) : 0;
+
+    this.writeEvent({
+      event: 'phase_end',
+      test: this.getTestInfo(test),
+      phase: {
+        name: slugify(step.title || 'phase'),
+        description: step.title || undefined,
+      },
+      duration_ms: duration,
     });
   }
 
