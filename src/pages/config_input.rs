@@ -374,6 +374,13 @@ impl PagesConfig {
                     .to_string(),
             );
         }
+        if self.encryption.no_encryption {
+            errors.push(
+                "Unencrypted pages bundles are not supported yet. Use `cass pages --export-only` \
+                 for raw DB exports without encryption."
+                    .to_string(),
+            );
+        }
 
         // Validate path_mode if specified
         if let Some(ref mode) = self.filters.path_mode {
@@ -677,7 +684,8 @@ mod tests {
         config.encryption.no_encryption = true;
         config.encryption.i_understand_risks = true;
         let result = config.validate();
-        assert!(result.valid);
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.contains("not supported")));
     }
 
     #[test]
