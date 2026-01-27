@@ -698,210 +698,232 @@ fn multi_connector_aggregation() {
 /// Test: Incremental indexing works across multiple connectors
 #[test]
 fn multi_connector_incremental_index() {
-    logged_test!(
-        "multi_connector_incremental_index",
-        "e2e_multi_connector",
-        {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let home = tmp.path();
-            let codex_home = home.join(".codex");
-            let claude_home = home.join(".claude");
-            let data_dir = home.join("cass_data");
-            fs::create_dir_all(&data_dir).unwrap();
+    let tracker = tracker_for("multi_connector_incremental_index");
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let claude_home = home.join(".claude");
+    let data_dir = home.join("cass_data");
+    fs::create_dir_all(&data_dir).unwrap();
 
-            let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
-            let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+    let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
 
-            // Phase 1: Create initial sessions
-            make_codex_session(
-                &codex_home,
-                "2024/11/20",
-                "rollout-incr1.jsonl",
-                "incrtest initial_codex",
-                1732118400000,
-            );
-            make_claude_session(
-                &claude_home,
-                "incr-project1",
-                "session-incr1.jsonl",
-                "incrtest initial_claude",
-                "2024-11-20T10:00:00Z",
-            );
-
-            // Full index
-            cargo_bin_cmd!("cass")
-                .args(["index", "--full", "--data-dir"])
-                .arg(&data_dir)
-                .env("CODEX_HOME", &codex_home)
-                .env("HOME", home)
-                .assert()
-                .success();
-
-            // Verify initial sessions indexed
-            let output1 = cargo_bin_cmd!("cass")
-                .args(["search", "incrtest", "--robot", "--data-dir"])
-                .arg(&data_dir)
-                .env("HOME", home)
-                .output()
-                .expect("search command");
-
-            let json1: serde_json::Value =
-                serde_json::from_slice(&output1.stdout).expect("valid json");
-            let hits1 = json1
-                .get("hits")
-                .and_then(|h| h.as_array())
-                .expect("hits array");
-            assert!(hits1.len() >= 2, "Should have initial sessions indexed");
-
-            // Phase 2: Add new sessions
-            std::thread::sleep(std::time::Duration::from_secs(2)); // Ensure mtime difference
-
-            // Use current timestamps so messages aren't filtered out
-            let now_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
-            let now_iso = chrono::Utc::now().to_rfc3339();
-
-            make_codex_session(
-                &codex_home,
-                "2024/11/21",
-                "rollout-incr2.jsonl",
-                "incrtest new_codex",
-                now_ts,
-            );
-            make_claude_session(
-                &claude_home,
-                "incr-project2",
-                "session-incr2.jsonl",
-                "incrtest new_claude",
-                &now_iso,
-            );
-
-            // Incremental index (no --full flag)
-            cargo_bin_cmd!("cass")
-                .args(["index", "--data-dir"])
-                .arg(&data_dir)
-                .env("CODEX_HOME", &codex_home)
-                .env("HOME", home)
-                .assert()
-                .success();
-
-            // Verify all sessions now indexed
-            let output2 = cargo_bin_cmd!("cass")
-                .args(["search", "incrtest", "--robot", "--data-dir"])
-                .arg(&data_dir)
-                .env("HOME", home)
-                .output()
-                .expect("search command");
-
-            let json2: serde_json::Value =
-                serde_json::from_slice(&output2.stdout).expect("valid json");
-            let hits2 = json2
-                .get("hits")
-                .and_then(|h| h.as_array())
-                .expect("hits array");
-
-            // Should have both old and new sessions
-            assert!(
-                hits2.len() > hits1.len(),
-                "Incremental index should add new sessions. hits1={}, hits2={}",
-                hits1.len(),
-                hits2.len()
-            );
-
-            // Check specific content
-            let has_initial = hits2
-                .iter()
-                .any(|h| h["content"].as_str().unwrap_or("").contains("initial"));
-            let has_new = hits2
-                .iter()
-                .any(|h| h["content"].as_str().unwrap_or("").contains("new"));
-
-            assert!(
-                has_initial,
-                "Should still have initial sessions after incremental index"
-            );
-            assert!(has_new, "Should have new sessions after incremental index");
-        }
+    // Phase: Create initial sessions
+    let phase_start = tracker.start("setup_initial_fixtures", Some("Create initial sessions for both connectors"));
+    make_codex_session(
+        &codex_home,
+        "2024/11/20",
+        "rollout-incr1.jsonl",
+        "incrtest initial_codex",
+        1732118400000,
     );
+    make_claude_session(
+        &claude_home,
+        "incr-project1",
+        "session-incr1.jsonl",
+        "incrtest initial_claude",
+        "2024-11-20T10:00:00Z",
+    );
+    tracker.end("setup_initial_fixtures", Some("Create initial sessions for both connectors"), phase_start);
+
+    // Phase: Full index
+    let phase_start = tracker.start("run_full_index", Some("Run full index"));
+    cargo_bin_cmd!("cass")
+        .args(["index", "--full", "--data-dir"])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .assert()
+        .success();
+    tracker.end("run_full_index", Some("Run full index"), phase_start);
+
+    // Phase: Verify initial index
+    let phase_start = tracker.start("verify_initial_index", Some("Verify initial sessions indexed"));
+    let output1 = cargo_bin_cmd!("cass")
+        .args(["search", "incrtest", "--robot", "--data-dir"])
+        .arg(&data_dir)
+        .env("HOME", home)
+        .output()
+        .expect("search command");
+
+    let json1: serde_json::Value =
+        serde_json::from_slice(&output1.stdout).expect("valid json");
+    let hits1 = json1
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .expect("hits array");
+    assert!(hits1.len() >= 2, "Should have initial sessions indexed");
+    tracker.end("verify_initial_index", Some("Verify initial sessions indexed"), phase_start);
+
+    // Phase: Add new sessions and run incremental index
+    let phase_start = tracker.start("incremental_index", Some("Add new sessions and run incremental index"));
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let now_iso = chrono::Utc::now().to_rfc3339();
+
+    make_codex_session(
+        &codex_home,
+        "2024/11/21",
+        "rollout-incr2.jsonl",
+        "incrtest new_codex",
+        now_ts,
+    );
+    make_claude_session(
+        &claude_home,
+        "incr-project2",
+        "session-incr2.jsonl",
+        "incrtest new_claude",
+        &now_iso,
+    );
+
+    let incr_start = std::time::Instant::now();
+    cargo_bin_cmd!("cass")
+        .args(["index", "--data-dir"])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .assert()
+        .success();
+    let incr_duration = incr_start.elapsed().as_millis() as u64;
+    tracker.end("incremental_index", Some("Add new sessions and run incremental index"), phase_start);
+
+    tracker.metrics(
+        "incremental_index",
+        &E2ePerformanceMetrics::new().with_duration(incr_duration),
+    );
+
+    // Phase: Verify incremental results
+    let phase_start = tracker.start("verify_incremental", Some("Verify all sessions indexed after incremental"));
+    let output2 = cargo_bin_cmd!("cass")
+        .args(["search", "incrtest", "--robot", "--data-dir"])
+        .arg(&data_dir)
+        .env("HOME", home)
+        .output()
+        .expect("search command");
+
+    let json2: serde_json::Value =
+        serde_json::from_slice(&output2.stdout).expect("valid json");
+    let hits2 = json2
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .expect("hits array");
+
+    assert!(
+        hits2.len() > hits1.len(),
+        "Incremental index should add new sessions. hits1={}, hits2={}",
+        hits1.len(),
+        hits2.len()
+    );
+
+    let has_initial = hits2
+        .iter()
+        .any(|h| h["content"].as_str().unwrap_or("").contains("initial"));
+    let has_new = hits2
+        .iter()
+        .any(|h| h["content"].as_str().unwrap_or("").contains("new"));
+
+    assert!(has_initial, "Should still have initial sessions after incremental index");
+    assert!(has_new, "Should have new sessions after incremental index");
+    tracker.end("verify_incremental", Some("Verify all sessions indexed after incremental"), phase_start);
+
+    tracker.metrics(
+        "incremental_results",
+        &E2ePerformanceMetrics::new()
+            .with_custom("initial_hit_count", serde_json::json!(hits1.len()))
+            .with_custom("final_hit_count", serde_json::json!(hits2.len())),
+    );
+
+    tracker.complete();
 }
 
 /// Test: Multiple agent filter works correctly
 #[test]
 fn multi_connector_multiple_agent_filter() {
-    logged_test!(
-        "multi_connector_multiple_agent_filter",
-        "e2e_multi_connector",
-        {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let home = tmp.path();
-            let codex_home = home.join(".codex");
-            let claude_home = home.join(".claude");
-            let data_dir = home.join("cass_data");
-            fs::create_dir_all(&data_dir).unwrap();
+    let tracker = tracker_for("multi_connector_multiple_agent_filter");
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let claude_home = home.join(".claude");
+    let data_dir = home.join("cass_data");
+    fs::create_dir_all(&data_dir).unwrap();
 
-            let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
-            let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+    let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
 
-            make_codex_session(
-                &codex_home,
-                "2024/11/20",
-                "rollout-maf.jsonl",
-                "multiagent codex_content",
-                1732118400000,
-            );
-            make_claude_session(
-                &claude_home,
-                "multi-agent-project",
-                "session-maf.jsonl",
-                "multiagent claude_content",
-                "2024-11-20T10:00:00Z",
-            );
-
-            cargo_bin_cmd!("cass")
-                .args(["index", "--full", "--data-dir"])
-                .arg(&data_dir)
-                .env("CODEX_HOME", &codex_home)
-                .env("HOME", home)
-                .assert()
-                .success();
-
-            // Filter by multiple agents (both codex and claude_code)
-            let output = cargo_bin_cmd!("cass")
-                .args([
-                    "search",
-                    "multiagent",
-                    "--agent",
-                    "codex",
-                    "--agent",
-                    "claude_code",
-                    "--robot",
-                    "--data-dir",
-                ])
-                .arg(&data_dir)
-                .env("HOME", home)
-                .output()
-                .expect("search command");
-
-            assert!(output.status.success());
-            let json: serde_json::Value =
-                serde_json::from_slice(&output.stdout).expect("valid json");
-            let hits = json
-                .get("hits")
-                .and_then(|h| h.as_array())
-                .expect("hits array");
-
-            // Should have hits from both specified agents
-            let agents: std::collections::HashSet<_> =
-                hits.iter().filter_map(|h| h["agent"].as_str()).collect();
-
-            assert!(
-                agents.contains("codex") && agents.contains("claude_code"),
-                "Should find results from both specified agents. Found: {agents:?}"
-            );
-        }
+    // Phase: Setup
+    let phase_start = tracker.start("setup_fixtures", Some("Create sessions for both connectors"));
+    make_codex_session(
+        &codex_home,
+        "2024/11/20",
+        "rollout-maf.jsonl",
+        "multiagent codex_content",
+        1732118400000,
     );
+    make_claude_session(
+        &claude_home,
+        "multi-agent-project",
+        "session-maf.jsonl",
+        "multiagent claude_content",
+        "2024-11-20T10:00:00Z",
+    );
+    tracker.end("setup_fixtures", Some("Create sessions for both connectors"), phase_start);
+
+    // Phase: Index
+    let phase_start = tracker.start("run_index", Some("Run full index"));
+    cargo_bin_cmd!("cass")
+        .args(["index", "--full", "--data-dir"])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .assert()
+        .success();
+    tracker.end("run_index", Some("Run full index"), phase_start);
+
+    // Phase: Multi-agent filter search
+    let phase_start = tracker.start("search_multi_agent_filter", Some("Search with multiple --agent filters"));
+    let search_start = std::time::Instant::now();
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "search", "multiagent", "--agent", "codex", "--agent", "claude_code",
+            "--robot", "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("HOME", home)
+        .output()
+        .expect("search command");
+    let search_duration = search_start.elapsed().as_millis() as u64;
+
+    assert!(output.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid json");
+    let hits = json
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .expect("hits array");
+
+    let agents: std::collections::HashSet<_> =
+        hits.iter().filter_map(|h| h["agent"].as_str()).collect();
+
+    assert!(
+        agents.contains("codex") && agents.contains("claude_code"),
+        "Should find results from both specified agents. Found: {agents:?}"
+    );
+    tracker.end("search_multi_agent_filter", Some("Search with multiple --agent filters"), phase_start);
+
+    tracker.metrics(
+        "multi_agent_filter_query",
+        &E2ePerformanceMetrics::new()
+            .with_duration(search_duration)
+            .with_custom("hit_count", serde_json::json!(hits.len()))
+            .with_custom("agent_count", serde_json::json!(agents.len())),
+    );
+
+    tracker.complete();
 }
 
 /// Test: Empty connector doesn't break indexing of other connectors

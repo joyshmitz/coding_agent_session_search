@@ -695,59 +695,69 @@ fn sources_doctor_no_sources() {
 /// Test: sources doctor --json outputs valid JSON.
 #[test]
 fn sources_doctor_json() {
-    logged_test!("sources_doctor_json", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("sources_doctor_json");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with one source for doctor JSON"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with one source for doctor JSON"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "doctor", "--json"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources doctor --json command");
+    let start = tracker.start("run_sources_doctor_json", Some("Run sources doctor --json"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "doctor", "--json"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources doctor --json command");
+    tracker.end("run_sources_doctor_json", Some("Run sources doctor --json"), start);
 
-        // Should output valid JSON (even if connectivity fails)
-        // Note: The output is an array of source diagnostics
-        let json: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("valid JSON output");
+    let start = tracker.start("verify_json", Some("Verify JSON array with laptop diagnostics"));
+    // Should output valid JSON (even if connectivity fails)
+    // Note: The output is an array of source diagnostics
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid JSON output");
 
-        // JSON should be an array of source diagnostics
-        assert!(
-            json.is_array(),
-            "Expected array of source diagnostics, got: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+    // JSON should be an array of source diagnostics
+    assert!(
+        json.is_array(),
+        "Expected array of source diagnostics, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 
-        let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 1, "Expected one source in diagnostics");
-        assert_eq!(arr[0]["source_id"], "laptop");
-    });
+    let arr = json.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "Expected one source in diagnostics");
+    assert_eq!(arr[0]["source_id"], "laptop");
+    tracker.end("verify_json", Some("Verify JSON array with laptop diagnostics"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources doctor --source filters to specific source.
 #[test]
 fn sources_doctor_single_source() {
-    logged_test!("sources_doctor_single_source", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("sources_doctor_single_source");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with two sources"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
@@ -760,25 +770,31 @@ type = "ssh"
 host = "dev@work.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with two sources"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "doctor", "--source", "laptop", "--json"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources doctor --source command");
+    let start = tracker.start("run_sources_doctor_filtered", Some("Run doctor filtered to laptop"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "doctor", "--source", "laptop", "--json"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources doctor --source command");
+    tracker.end("run_sources_doctor_filtered", Some("Run doctor filtered to laptop"), start);
 
-        let json: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("valid JSON output");
+    let start = tracker.start("verify_filtered_output", Some("Verify only laptop in output"));
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid JSON output");
 
-        // Should only contain laptop diagnostics
-        if let Some(sources) = json.get("sources").and_then(|s| s.as_array()) {
-            assert_eq!(sources.len(), 1, "Should only have one source in output");
-            assert_eq!(sources[0]["name"], "laptop");
-        }
-    });
+    // Should only contain laptop diagnostics
+    if let Some(sources) = json.get("sources").and_then(|s| s.as_array()) {
+        assert_eq!(sources.len(), 1, "Should only have one source in output");
+        assert_eq!(sources[0]["name"], "laptop");
+    }
+    tracker.end("verify_filtered_output", Some("Verify only laptop in output"), start);
+
+    tracker.complete();
 }
 
 // =============================================================================
@@ -788,74 +804,90 @@ paths = ["~/.claude/projects"]
 /// Test: sources sync with no sources configured.
 #[test]
 fn sources_sync_no_sources() {
-    logged_test!("sources_sync_no_sources", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        let data_dir = tmp.path().join("data");
-        fs::create_dir_all(&config_dir).unwrap();
-        fs::create_dir_all(&data_dir).unwrap();
+    let tracker = tracker_for("sources_sync_no_sources");
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
-        let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
+    let start = tracker.start("setup", Some("Create empty config and data directories"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "sync"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .env("XDG_DATA_HOME", &data_dir)
-            .output()
-            .expect("sources sync command");
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
+    tracker.end("setup", Some("Create empty config and data directories"), start);
 
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("No") && stdout.contains("sources"),
-            "Expected no sources message, got: {stdout}"
-        );
-    });
+    let start = tracker.start("run_sources_sync", Some("Run sources sync with no sources"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "sync"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("XDG_DATA_HOME", &data_dir)
+        .output()
+        .expect("sources sync command");
+    tracker.end("run_sources_sync", Some("Run sources sync with no sources"), start);
+
+    let start = tracker.start("verify_output", Some("Verify no sources message"));
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No") && stdout.contains("sources"),
+        "Expected no sources message, got: {stdout}"
+    );
+    tracker.end("verify_output", Some("Verify no sources message"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources sync --dry-run shows what would be synced.
 #[test]
 fn sources_sync_dry_run() {
-    logged_test!("sources_sync_dry_run", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        let data_dir = tmp.path().join("data");
-        fs::create_dir_all(&config_dir).unwrap();
-        fs::create_dir_all(&data_dir).unwrap();
+    let tracker = tracker_for("sources_sync_dry_run");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with one source for dry-run"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
-        let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with one source for dry-run"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "sync", "--dry-run"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .env("XDG_DATA_HOME", &data_dir)
-            .output()
-            .expect("sources sync --dry-run command");
+    let start = tracker.start("run_sources_sync_dry_run", Some("Run sources sync --dry-run"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "sync", "--dry-run"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("XDG_DATA_HOME", &data_dir)
+        .output()
+        .expect("sources sync --dry-run command");
+    tracker.end("run_sources_sync_dry_run", Some("Run sources sync --dry-run"), start);
 
-        // Dry run should indicate the source would be synced
-        // Note: Will likely fail SSH connectivity, but should still report the source
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = format!("{stdout}{stderr}");
+    let start = tracker.start("verify_output", Some("Verify dry run mentions source"));
+    // Dry run should indicate the source would be synced
+    // Note: Will likely fail SSH connectivity, but should still report the source
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
 
-        assert!(
-            combined.contains("laptop") || combined.contains("dry"),
-            "Expected source name or dry run message, got: {combined}"
-        );
-    });
+    assert!(
+        combined.contains("laptop") || combined.contains("dry"),
+        "Expected source name or dry run message, got: {combined}"
+    );
+    tracker.end("verify_output", Some("Verify dry run mentions source"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources sync --source filters to specific source.
