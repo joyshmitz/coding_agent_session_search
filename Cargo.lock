@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "coding-agent-search"
-version = "0.1.61"
+version = "0.1.63"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -648,7 +648,7 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "colored",
- "console 0.16.2",
+ "console 0.15.11",
  "crc32fast",
  "criterion",
  "crossbeam-channel",
@@ -667,8 +667,8 @@ dependencies = [
  "image",
  "indicatif",
  "insta",
- "itertools 0.14.0",
- "lru 0.16.3",
+ "itertools 0.13.0",
+ "lru 0.12.5",
  "memmap2",
  "notify",
  "once_cell",
@@ -765,6 +765,7 @@ dependencies = [
  "encode_unicode",
  "libc",
  "once_cell",
+ "unicode-width",
  "windows-sys 0.59.0",
 ]
 
