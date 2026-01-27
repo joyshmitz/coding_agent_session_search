@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use super::archive_config::{ArchiveConfig, UnencryptedConfig};
 use super::bundle::IntegrityManifest;
 use super::encrypt::EncryptionConfig;
+use std::fmt;
 
 /// Maximum chunk file size (GitHub Pages hard limit)
 const MAX_CHUNK_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
@@ -584,6 +585,14 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
     for (rel_path, entry) in &manifest.files {
         checked_files.insert(rel_path.clone());
 
+        if let Some(reason) = detect_encoded_path_violation(rel_path) {
+            errors.push(format!(
+                "integrity.json contains {reason} (security violation): {}",
+                rel_path
+            ));
+            continue;
+        }
+
         // Security: Validate path doesn't escape site_dir via traversal
         let path = Path::new(rel_path);
         if path.is_absolute() {
@@ -659,6 +668,112 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
     } else {
         CheckResult::fail(errors.join("; "))
     }
+}
+
+#[derive(Debug)]
+enum PercentDecodeError {
+    InvalidEncoding,
+    InvalidUtf8,
+    NullByte,
+}
+
+impl fmt::Display for PercentDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidEncoding => write!(f, "invalid percent-encoding"),
+            Self::InvalidUtf8 => write!(f, "invalid UTF-8 after percent-decoding"),
+            Self::NullByte => write!(f, "null byte in decoded path"),
+        }
+    }
+}
+
+struct DecodeOutcome {
+    decoded: String,
+    changed: bool,
+}
+
+fn percent_decode_once(input: &str) -> Result<DecodeOutcome, PercentDecodeError> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    let mut changed = false;
+
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(PercentDecodeError::InvalidEncoding);
+            }
+            let hi = bytes[i + 1];
+            let lo = bytes[i + 2];
+            let hex = [hi, lo];
+            let hex_str =
+                std::str::from_utf8(&hex).map_err(|_| PercentDecodeError::InvalidEncoding)?;
+            let val =
+                u8::from_str_radix(hex_str, 16).map_err(|_| PercentDecodeError::InvalidEncoding)?;
+            out.push(val);
+            i += 3;
+            changed = true;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    if out.iter().any(|b| *b == 0) {
+        return Err(PercentDecodeError::NullByte);
+    }
+
+    let decoded = String::from_utf8(out).map_err(|_| PercentDecodeError::InvalidUtf8)?;
+    Ok(DecodeOutcome { decoded, changed })
+}
+
+fn contains_path_traversal_like(input: &str) -> bool {
+    input.split(['/', '\\']).any(|segment| segment == "..")
+}
+
+fn is_absolute_like(input: &str) -> bool {
+    let normalized = input.replace('\\', "/");
+    if normalized.starts_with('/') || normalized.starts_with("//") {
+        return true;
+    }
+    let bytes = normalized.as_bytes();
+    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
+}
+
+fn detect_encoded_path_violation(rel_path: &str) -> Option<String> {
+    if contains_path_traversal_like(rel_path) {
+        return Some("path traversal".to_string());
+    }
+    if is_absolute_like(rel_path) {
+        return Some("absolute path".to_string());
+    }
+
+    if !rel_path.contains('%') {
+        return None;
+    }
+
+    let mut current = rel_path.to_string();
+    for _ in 0..3 {
+        let outcome = match percent_decode_once(&current) {
+            Ok(o) => o,
+            Err(e) => return Some(e.to_string()),
+        };
+        if !outcome.changed {
+            break;
+        }
+        current = outcome.decoded;
+        if contains_path_traversal_like(&current) {
+            return Some("url-encoded path traversal".to_string());
+        }
+        if is_absolute_like(&current) {
+            return Some("url-encoded absolute path".to_string());
+        }
+        if !current.contains('%') {
+            break;
+        }
+    }
+
+    None
 }
 
 /// Check for secret leakage in site/
@@ -869,6 +984,38 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    fn assert_integrity_path_blocked(rel_path: &str) {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+
+        let mut files = BTreeMap::new();
+        files.insert(
+            rel_path.to_string(),
+            IntegrityEntry {
+                sha256: "deadbeef".repeat(8),
+                size: 100,
+            },
+        );
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
+        let manifest_json = serde_json::to_string(&manifest).unwrap();
+        fs::write(site_dir.join("integrity.json"), manifest_json).unwrap();
+
+        let result = check_integrity(site_dir, false);
+        assert!(!result.passed, "Path should be blocked: {rel_path}");
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|d| d.contains("security violation"))
+                .unwrap_or(false),
+            "Should mention security violation"
+        );
     }
 
     #[test]
@@ -1193,5 +1340,48 @@ mod tests {
                 .unwrap_or(false),
             "Should mention security violation"
         );
+    }
+
+    #[test]
+    fn test_integrity_url_encoded_traversal_blocked_single() {
+        assert_integrity_path_blocked("%2e%2e/%2e%2e/etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_url_encoded_traversal_blocked_double() {
+        assert_integrity_path_blocked("%252e%252e/%252e%252e/etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_url_encoded_traversal_blocked_mixed() {
+        assert_integrity_path_blocked("%2e./etc/passwd");
+        assert_integrity_path_blocked(".%2e/etc/passwd");
+        assert_integrity_path_blocked("..%2fetc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_url_encoded_traversal_blocked_uppercase() {
+        assert_integrity_path_blocked("%2E%2E/%2Fetc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_url_encoded_traversal_blocked_overlong_utf8() {
+        assert_integrity_path_blocked("%c0%ae%c0%ae/%c0%ae%c0%ae/etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_url_encoded_traversal_blocked_null_byte() {
+        assert_integrity_path_blocked("valid%00/../etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_url_encoded_traversal_blocked_backslash() {
+        assert_integrity_path_blocked("..\\..\\etc\\passwd");
+        assert_integrity_path_blocked("..%5c..%5cetc%5cpasswd");
+    }
+
+    #[test]
+    fn test_integrity_url_encoded_traversal_blocked_separator_confusion() {
+        assert_integrity_path_blocked(r"..\/..\/etc\/passwd");
     }
 }

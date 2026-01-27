@@ -9,81 +9,13 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
 
 mod util;
 use util::EnvGuard;
-use util::e2e_log::{E2eError, E2eLogger, E2eTestInfo};
+use util::e2e_log::{E2ePerformanceMetrics, PhaseTracker};
 
-fn e2e_logging_enabled() -> bool {
-    std::env::var("E2E_LOG").is_ok()
-}
-
-fn run_logged_test<F>(name: &str, suite: &str, file: &str, line: u32, test_fn: F)
-where
-    F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
-{
-    let logger = if e2e_logging_enabled() {
-        E2eLogger::new("rust").ok()
-    } else {
-        None
-    };
-
-    let test_info = E2eTestInfo::new(name, suite, file, line);
-    if let Some(ref lg) = logger {
-        let _ = lg.test_start(&test_info);
-    }
-
-    let start = Instant::now();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test_fn));
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    let (is_pass, error_msg, panic_type) = match &result {
-        Ok(Ok(())) => (true, None, None),
-        Ok(Err(e)) => (false, Some(e.to_string()), None),
-        Err(panic) => {
-            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "Unknown panic".to_string()
-            };
-            (false, Some(msg), Some("Panic"))
-        }
-    };
-
-    if let Some(ref lg) = logger {
-        if is_pass {
-            let _ = lg.test_pass(&test_info, duration_ms, None);
-        } else {
-            let _ = lg.test_fail(
-                &test_info,
-                duration_ms,
-                None,
-                E2eError {
-                    message: error_msg.unwrap_or_default(),
-                    error_type: panic_type.map(String::from),
-                    stack: None,
-                    context: None,
-                },
-            );
-        }
-        let _ = lg.flush();
-    }
-
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
-}
-
-macro_rules! logged_test {
-    ($name:expr, $suite:expr, $body:block) => {{
-        run_logged_test($name, $suite, file!(), line!(), || {
-            $body
-            Ok(())
-        })
-    }};
+fn tracker_for(test_name: &str) -> PhaseTracker {
+    PhaseTracker::new("e2e_filters", test_name)
 }
 
 /// Creates a Codex session with specific date and content.
@@ -121,72 +53,96 @@ fn make_claude_session_at(claude_home: &Path, project_name: &str, content: &str,
 /// Test: Agent filter correctly limits results to specified connector
 #[test]
 fn filter_by_agent_codex() {
-    logged_test!("filter_by_agent_codex", "e2e_filters", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = tmp.path();
-        let codex_home = home.join(".codex");
-        let claude_home = home.join(".claude");
-        let data_dir = home.join("cass_data");
-        fs::create_dir_all(&data_dir).unwrap();
+    let tracker = tracker_for("filter_by_agent_codex");
 
-        let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
-        let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let claude_home = home.join(".claude");
+    let data_dir = home.join("cass_data");
+    fs::create_dir_all(&data_dir).unwrap();
 
-        // Create sessions for both connectors with identifiable content
-        make_codex_session_at(
-            &codex_home,
-            "2024/11/20",
-            "rollout-1.jsonl",
-            "codex_specific agenttest",
-            1732118400000,
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+    let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
+
+    // Create sessions for both connectors with identifiable content
+    let ps = tracker.start("setup_fixtures", Some("Create codex and claude sessions"));
+    make_codex_session_at(
+        &codex_home,
+        "2024/11/20",
+        "rollout-1.jsonl",
+        "codex_specific agenttest",
+        1732118400000,
+    );
+    make_claude_session_at(
+        &claude_home,
+        "test-project",
+        "claude_specific agenttest",
+        "2024-11-20T10:00:00Z",
+    );
+    tracker.end(
+        "setup_fixtures",
+        Some("Create codex and claude sessions"),
+        ps,
+    );
+
+    // Index both
+    let ps = tracker.start("run_index", Some("Run full index"));
+    cargo_bin_cmd!("cass")
+        .args(["index", "--full", "--data-dir"])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .assert()
+        .success();
+    tracker.end("run_index", Some("Run full index"), ps);
+
+    // Search with agent filter for codex only
+    let ps = tracker.start("test_agent_filter", Some("Search with --agent codex"));
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "search",
+            "agenttest",
+            "--agent",
+            "codex",
+            "--robot",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("HOME", home)
+        .output()
+        .expect("search command");
+    let filter_duration = ps.elapsed().as_millis() as u64;
+    tracker.end("test_agent_filter", Some("Search with --agent codex"), ps);
+
+    let ps = tracker.start("verify_results", Some("Verify only codex hits returned"));
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let hits = json
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .expect("hits array");
+
+    // All hits should be from codex
+    for hit in hits {
+        assert_eq!(
+            hit["agent"], "codex",
+            "Expected only codex hits when filtering by agent=codex"
         );
-        make_claude_session_at(
-            &claude_home,
-            "test-project",
-            "claude_specific agenttest",
-            "2024-11-20T10:00:00Z",
-        );
+    }
+    assert!(!hits.is_empty(), "Should find at least one codex hit");
+    tracker.end(
+        "verify_results",
+        Some("Verify only codex hits returned"),
+        ps,
+    );
 
-        // Index both
-        cargo_bin_cmd!("cass")
-            .args(["index", "--full", "--data-dir"])
-            .arg(&data_dir)
-            .env("CODEX_HOME", &codex_home)
-            .env("HOME", home)
-            .assert()
-            .success();
-
-        // Search with agent filter for codex only
-        let output = cargo_bin_cmd!("cass")
-            .args([
-                "search",
-                "agenttest",
-                "--agent",
-                "codex",
-                "--robot",
-                "--data-dir",
-            ])
-            .arg(&data_dir)
-            .env("HOME", home)
-            .output()
-            .expect("search command");
-
-        assert!(output.status.success());
-        let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
-        let hits = json
-            .get("hits")
-            .and_then(|h| h.as_array())
-            .expect("hits array");
-
-        // All hits should be from codex
-        for hit in hits {
-            assert_eq!(
-                hit["agent"], "codex",
-                "Expected only codex hits when filtering by agent=codex"
-            );
-        }
-        assert!(!hits.is_empty(), "Should find at least one codex hit");
-    });
+    tracker.metrics(
+        "filter_query_agent",
+        &E2ePerformanceMetrics::new()
+            .with_duration(filter_duration)
+            .with_custom("result_count", serde_json::json!(hits.len())),
+    );
 }
 
 /// Test: Time filter --since correctly limits results

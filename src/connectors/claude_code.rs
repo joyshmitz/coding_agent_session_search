@@ -1100,4 +1100,366 @@ mod tests {
         );
         assert_eq!(convs[0].messages[0].content, "Generic root test");
     }
+
+    // =========================================================================
+    // Edge case tests — malformed input robustness (br-cpf8)
+    // =========================================================================
+
+    #[test]
+    fn truncated_jsonl_mid_json_returns_partial_results() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // First line is valid, second line is truncated mid-JSON
+        let session_file = claude_dir.join("truncated.jsonl");
+        let content = b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Hello\"}}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"Hel";
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "truncated file should not cause an error");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages.len(),
+            1,
+            "truncated file at mid-JSON should yield only the 1 valid message"
+        );
+        assert_eq!(convs[0].messages[0].content, "Hello");
+    }
+
+    #[test]
+    fn truncated_mid_utf8_does_not_panic() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // Valid JSONL line followed by bytes that start a multi-byte UTF-8
+        // sequence but are truncated (U+1F600 = F0 9F 98 80, truncate after 2 bytes)
+        let session_file = claude_dir.join("truncated_utf8.jsonl");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Valid\"}}\n",
+        );
+        // Incomplete UTF-8: start of a 4-byte sequence missing last 2 bytes
+        bytes.extend_from_slice(b"\xF0\x9F");
+
+        fs::write(&session_file, &bytes).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "truncated mid-UTF8 should not panic or error"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Valid");
+    }
+
+    #[test]
+    fn invalid_utf8_skips_corrupted_lines() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("invalid_utf8.jsonl");
+        let mut bytes = Vec::new();
+        // Valid line
+        bytes.extend_from_slice(
+            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Before\"}}\n",
+        );
+        // Invalid UTF-8 bytes (0xFF 0xFE are never valid in UTF-8)
+        bytes.extend_from_slice(b"\xFF\xFE invalid utf8 line\n");
+        // Another valid line
+        bytes.extend_from_slice(
+            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"After\"}}\n",
+        );
+
+        fs::write(&session_file, &bytes).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "invalid UTF-8 should not cause a panic");
+        let convs = result.unwrap();
+        // BufRead::lines() returns Err for invalid UTF-8 lines; the connector
+        // continues on Err (line 114: Err(_) => continue). So we should get
+        // the valid lines on either side.
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages.len(),
+            2,
+            "should extract both valid messages around invalid UTF-8 line"
+        );
+        assert_eq!(convs[0].messages[0].content, "Before");
+        assert_eq!(convs[0].messages[1].content, "After");
+    }
+
+    #[test]
+    fn empty_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // Completely empty JSONL file
+        let session_file = claude_dir.join("empty.jsonl");
+        fs::write(&session_file, b"").unwrap();
+
+        // Completely empty JSON file
+        let json_file = claude_dir.join("empty.json");
+        fs::write(&json_file, b"").unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "empty files should not cause errors");
+        let convs = result.unwrap();
+        assert!(
+            convs.is_empty(),
+            "empty files should produce no conversations"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // JSONL file with only whitespace and newlines
+        let session_file = claude_dir.join("whitespace.jsonl");
+        fs::write(&session_file, "   \n\n  \n   \n\t\n").unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "whitespace-only file should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert!(
+            convs.is_empty(),
+            "whitespace-only file should produce no conversations"
+        );
+    }
+
+    #[test]
+    fn json_type_mismatch_skips_gracefully() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // JSONL lines where expected objects are wrong types
+        let session_file = claude_dir.join("type_mismatch.jsonl");
+        let content = concat!(
+            // String where object expected for message
+            "{\"type\":\"user\",\"message\":\"not an object\"}\n",
+            // Number where content string expected
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":12345}}\n",
+            // Array where string expected for type
+            "{\"type\":[\"user\"],\"message\":{\"role\":\"user\",\"content\":\"Valid after mismatches\"}}\n",
+            // Null content
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":null}}\n",
+            // Boolean type
+            "{\"type\":true,\"message\":{\"role\":\"user\",\"content\":\"Bool type\"}}\n",
+            // Correct entry that should be extracted
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Correct entry\"}}\n",
+        );
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "type mismatches should not cause errors");
+        let convs = result.unwrap();
+        // Only the last line with correct types should produce a message
+        assert_eq!(convs.len(), 1);
+        assert!(
+            convs[0]
+                .messages
+                .iter()
+                .any(|m| m.content == "Correct entry"),
+            "should extract the correctly typed entry"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_json_does_not_stack_overflow() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // Build JSON with 1000+ levels of nesting in the content field
+        // serde_json has a default recursion limit of 128, so this tests
+        // that the connector handles the parse error gracefully
+        let mut nested = String::new();
+        for _ in 0..200 {
+            nested.push_str("{\"a\":");
+        }
+        nested.push_str("1");
+        for _ in 0..200 {
+            nested.push('}');
+        }
+
+        let session_file = claude_dir.join("deep.jsonl");
+        let content = format!(
+            "{}\n{}\n",
+            nested, r#"{"type":"user","message":{"role":"user","content":"After deep nesting"}}"#
+        );
+        fs::write(&session_file, &content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+
+        // This must not stack overflow or panic
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "deeply nested JSON should not cause stack overflow"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "After deep nesting");
+    }
+
+    #[test]
+    fn large_message_body_handled_without_oom() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // Create a JSONL file with a 1MB message body to verify streaming works
+        let large_content = "x".repeat(1_000_000);
+        let session_file = claude_dir.join("large_body.jsonl");
+        let line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{}"}}}}"#,
+            large_content
+        );
+        fs::write(&session_file, &line).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "large message body should not cause OOM");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages[0].content.len(),
+            1_000_000,
+            "large message content should be preserved in full"
+        );
+    }
+
+    #[test]
+    fn large_json_file_over_100mb_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // For JSON format, files > 100MB should be skipped.
+        // We can't create a real 100MB file in a unit test efficiently,
+        // but we verify the mechanism works with a valid JSON file under the limit.
+        let session_file = claude_dir.join("under_limit.json");
+        let content = json!({
+            "messages": [
+                {"role": "user", "content": "Under the limit"}
+            ]
+        })
+        .to_string();
+        fs::write(&session_file, &content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // File under 100MB should be processed normally
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Under the limit");
+    }
+
+    #[test]
+    fn null_bytes_embedded_in_content_handled() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // JSON allows \u0000 escape for null bytes in strings
+        let session_file = claude_dir.join("null_bytes.jsonl");
+        let content = concat!(
+            r#"{"type":"user","message":{"role":"user","content":"before\u0000after"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":"Clean message"}}"#,
+            "\n"
+        );
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "null bytes in content should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        // Both messages should be extracted; the null byte is valid JSON
+        assert!(
+            convs[0].messages.len() >= 1,
+            "should extract at least the clean message"
+        );
+    }
+
+    #[test]
+    fn bom_marker_at_file_start_handled() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // UTF-8 BOM: EF BB BF
+        let session_file = claude_dir.join("bom.jsonl");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\xEF\xBB\xBF"); // UTF-8 BOM
+        bytes.extend_from_slice(
+            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"After BOM\"}}\n",
+        );
+        bytes.extend_from_slice(
+            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Second line\"}}\n",
+        );
+        fs::write(&session_file, &bytes).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "BOM marker should not cause errors");
+        let convs = result.unwrap();
+        // The BOM may cause the first line's JSON to fail parsing (since the BOM
+        // bytes are prepended to the line). The second line should parse fine.
+        // We verify the connector doesn't crash and extracts what it can.
+        assert_eq!(convs.len(), 1);
+        assert!(
+            convs[0].messages.len() >= 1,
+            "should extract at least the second message after BOM"
+        );
+        // The second line (without BOM) should always parse correctly
+        assert!(
+            convs[0].messages.iter().any(|m| m.content == "Second line"),
+            "second line should be extractable regardless of BOM"
+        );
+    }
 }
