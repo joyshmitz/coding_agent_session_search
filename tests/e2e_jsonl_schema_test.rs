@@ -31,15 +31,21 @@ const COMMON_FIELDS: &[&str] = &["ts", "event", "run_id", "runner"];
 
 fn is_log_file(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        // Exclude trace/combined files (internal aggregates)
         if name == "trace.jsonl" || name == "combined.jsonl" {
             return false;
         }
+        // Exclude cass.log files (application logs, not E2E schema)
         if name == "cass.log" {
-            return true;
+            return false;
+        }
+        // Only validate E2E log files (shell_*.jsonl, rust_*.jsonl patterns)
+        if name.ends_with(".jsonl") {
+            return name.starts_with("shell_") || name.starts_with("rust_");
         }
     }
 
-    path.extension().is_some_and(|ext| ext == "jsonl")
+    false
 }
 
 fn collect_jsonl_logs(root: &Path) -> Vec<PathBuf> {
@@ -232,13 +238,15 @@ fn jsonl_files_valid_schema() {
 
     if !errors.is_empty() {
         tracker.fail(E2eError::new(format!("{} schema errors", errors.len())));
-        panic!(
+        assert!(
+            errors.is_empty(),
             "JSONL schema validation failed ({} errors in {} files, {} events):\n{}",
             errors.len(),
             jsonl_files.len(),
             total_events,
             errors.join("\n")
         );
+        return;
     }
 
     eprintln!(

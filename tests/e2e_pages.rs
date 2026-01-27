@@ -24,7 +24,7 @@ use coding_agent_search::pages::verify::verify_bundle;
 use coding_agent_search::storage::sqlite::SqliteStorage;
 use rusqlite::Connection;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -588,6 +588,747 @@ fn test_search_in_decrypted_archive() {
     tracker.flush();
     eprintln!(
         "{{\"test\":\"test_search_in_decrypted_archive\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        test_start.elapsed().as_millis()
+    );
+}
+
+// =============================================================================
+// Test: Wizard/Export Flows with Real Fixtures (br-1rvb)
+// =============================================================================
+
+/// Test summary generation with multi-agent fixtures.
+/// Verifies that SummaryGenerator correctly aggregates data from multiple agents.
+#[test]
+fn test_summary_generation_multi_agent_fixtures() {
+    use coding_agent_search::pages::summary::SummaryGenerator;
+
+    let tracker = tracker_for("test_summary_generation_multi_agent_fixtures");
+    let _trace_guard = tracker.trace_env_guard();
+    let test_start = Instant::now();
+    eprintln!("{{\"test\":\"test_summary_generation_multi_agent_fixtures\",\"status\":\"START\"}}");
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("data");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+
+    // Phase 1: Setup multi-agent database
+    let phase_start = tracker.start(
+        "setup_database",
+        Some("Create database with multiple agent types"),
+    );
+    let db_path = data_dir.join("agent_search.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open storage");
+
+    // Create multiple agents
+    let agents = [
+        ("claude_code", "Claude Code", AgentKind::Cli),
+        ("codex", "Codex", AgentKind::Cli),
+        ("gemini", "Gemini", AgentKind::Cli),
+        ("cline", "Cline", AgentKind::VsCode),
+    ];
+
+    for (slug, name, kind) in agents {
+        let agent = Agent {
+            id: None,
+            slug: slug.to_string(),
+            name: name.to_string(),
+            version: None,
+            kind,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        // Create workspace for each agent
+        let workspace_path = PathBuf::from(format!("/home/user/projects/{}", slug));
+        let workspace_id = storage
+            .ensure_workspace(&workspace_path, None)
+            .expect("ensure workspace");
+
+        // Create 3 conversations per agent
+        for i in 0..3 {
+            let conversation = ConversationFixtureBuilder::new(slug)
+                .title(format!("{} Session {}", name, i))
+                .workspace(&workspace_path)
+                .source_path(format!("/home/user/.{}/session-{}.jsonl", slug, i))
+                .messages(5)
+                .with_content(0, format!("User message for {} session {}", name, i))
+                .with_content(1, format!("Assistant response for {} session {}", name, i))
+                .build_conversation();
+
+            storage
+                .insert_conversation_tree(agent_id, Some(workspace_id), &conversation)
+                .expect("insert conversation");
+        }
+    }
+    tracker.end(
+        "setup_database",
+        Some("Create database with multiple agent types"),
+        phase_start,
+    );
+
+    // Phase 2: Generate summary
+    let phase_start = tracker.start(
+        "generate_summary",
+        Some("Generate summary from multi-agent database"),
+    );
+    let conn = rusqlite::Connection::open(&db_path).expect("open connection");
+    let generator = SummaryGenerator::new(&conn);
+    let summary = generator.generate(None).expect("generate summary");
+    tracker.end(
+        "generate_summary",
+        Some("Generate summary from multi-agent database"),
+        phase_start,
+    );
+
+    // Phase 3: Verify summary contents
+    let phase_start = tracker.start(
+        "verify_summary",
+        Some("Validate summary contains all agents and workspaces"),
+    );
+    assert_eq!(
+        summary.total_conversations, 12,
+        "Should have 12 conversations (4 agents * 3 each)"
+    );
+    assert_eq!(summary.agents.len(), 4, "Should have 4 agents");
+    assert_eq!(summary.workspaces.len(), 4, "Should have 4 workspaces");
+
+    // Verify each agent has 25% of conversations
+    for agent in &summary.agents {
+        assert_eq!(
+            agent.conversation_count, 3,
+            "Each agent should have 3 conversations"
+        );
+        assert!(
+            (agent.percentage - 25.0).abs() < 0.1,
+            "Each agent should be ~25% of total"
+        );
+    }
+    tracker.end(
+        "verify_summary",
+        Some("Validate summary contains all agents and workspaces"),
+        phase_start,
+    );
+
+    tracker.flush();
+    eprintln!(
+        "{{\"test\":\"test_summary_generation_multi_agent_fixtures\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        test_start.elapsed().as_millis()
+    );
+}
+
+/// Test summary with agent filter applied.
+/// Verifies that filtering to specific agents works correctly.
+#[test]
+fn test_summary_with_agent_filter() {
+    use coding_agent_search::pages::summary::{SummaryFilters, SummaryGenerator};
+
+    let tracker = tracker_for("test_summary_with_agent_filter");
+    let _trace_guard = tracker.trace_env_guard();
+    let test_start = Instant::now();
+    eprintln!("{{\"test\":\"test_summary_with_agent_filter\",\"status\":\"START\"}}");
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("data");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+
+    // Setup database with 2 agents
+    let db_path = data_dir.join("agent_search.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open storage");
+
+    let claude_agent = Agent {
+        id: None,
+        slug: "claude_code".to_string(),
+        name: "Claude Code".to_string(),
+        version: None,
+        kind: AgentKind::Cli,
+    };
+    let codex_agent = Agent {
+        id: None,
+        slug: "codex".to_string(),
+        name: "Codex".to_string(),
+        version: None,
+        kind: AgentKind::Cli,
+    };
+
+    let claude_id = storage.ensure_agent(&claude_agent).expect("ensure claude");
+    let codex_id = storage.ensure_agent(&codex_agent).expect("ensure codex");
+
+    let workspace_path = Path::new("/home/user/projects/shared");
+    let workspace_id = storage
+        .ensure_workspace(workspace_path, None)
+        .expect("ensure workspace");
+
+    // 5 Claude conversations
+    for i in 0..5 {
+        let conv = ConversationFixtureBuilder::new("claude_code")
+            .title(format!("Claude Session {}", i))
+            .workspace(workspace_path)
+            .source_path(format!("/home/user/.claude/session-{}.jsonl", i))
+            .messages(3)
+            .build_conversation();
+        storage
+            .insert_conversation_tree(claude_id, Some(workspace_id), &conv)
+            .expect("insert");
+    }
+
+    // 3 Codex conversations
+    for i in 0..3 {
+        let conv = ConversationFixtureBuilder::new("codex")
+            .title(format!("Codex Session {}", i))
+            .workspace(workspace_path)
+            .source_path(format!("/home/user/.codex/session-{}.jsonl", i))
+            .messages(3)
+            .build_conversation();
+        storage
+            .insert_conversation_tree(codex_id, Some(workspace_id), &conv)
+            .expect("insert");
+    }
+
+    // Test: Filter to Claude only
+    let phase_start = tracker.start(
+        "filter_claude",
+        Some("Generate summary filtered to Claude Code only"),
+    );
+    let conn = rusqlite::Connection::open(&db_path).expect("open connection");
+    let generator = SummaryGenerator::new(&conn);
+
+    let filters = SummaryFilters {
+        agents: Some(vec!["claude_code".to_string()]),
+        ..Default::default()
+    };
+    let summary = generator.generate(Some(&filters)).expect("generate");
+
+    assert_eq!(
+        summary.total_conversations, 5,
+        "Should have only 5 Claude conversations"
+    );
+    assert_eq!(summary.agents.len(), 1, "Should have only 1 agent");
+    assert_eq!(summary.agents[0].name, "claude_code");
+    tracker.end(
+        "filter_claude",
+        Some("Generate summary filtered to Claude Code only"),
+        phase_start,
+    );
+
+    tracker.flush();
+    eprintln!(
+        "{{\"test\":\"test_summary_with_agent_filter\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        test_start.elapsed().as_millis()
+    );
+}
+
+/// Test summary with workspace exclusions.
+/// Verifies that ExclusionSet correctly filters out workspaces.
+#[test]
+fn test_summary_with_workspace_exclusions() {
+    use coding_agent_search::pages::summary::{ExclusionSet, SummaryGenerator};
+
+    let tracker = tracker_for("test_summary_with_workspace_exclusions");
+    let _trace_guard = tracker.trace_env_guard();
+    let test_start = Instant::now();
+    eprintln!("{{\"test\":\"test_summary_with_workspace_exclusions\",\"status\":\"START\"}}");
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("data");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+
+    // Setup database with 2 workspaces
+    let phase_start = tracker.start("setup_database", Some("Create database with 2 workspaces"));
+    let db_path = data_dir.join("agent_search.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open storage");
+
+    let agent = Agent {
+        id: None,
+        slug: "claude_code".to_string(),
+        name: "Claude Code".to_string(),
+        version: None,
+        kind: AgentKind::Cli,
+    };
+    let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+    let public_ws_path = Path::new("/home/user/projects/public-app");
+    let private_ws_path = Path::new("/home/user/projects/private-secrets");
+
+    let public_ws_id = storage
+        .ensure_workspace(public_ws_path, None)
+        .expect("ensure public ws");
+    let private_ws_id = storage
+        .ensure_workspace(private_ws_path, None)
+        .expect("ensure private ws");
+
+    // 3 public conversations
+    for i in 0..3 {
+        let conv = ConversationFixtureBuilder::new("claude_code")
+            .title(format!("Public App Session {}", i))
+            .workspace(public_ws_path)
+            .source_path(format!("/home/user/.claude/public-{}.jsonl", i))
+            .messages(4)
+            .build_conversation();
+        storage
+            .insert_conversation_tree(agent_id, Some(public_ws_id), &conv)
+            .expect("insert");
+    }
+
+    // 2 private conversations (should be excluded)
+    for i in 0..2 {
+        let conv = ConversationFixtureBuilder::new("claude_code")
+            .title(format!("Private Secrets Session {}", i))
+            .workspace(private_ws_path)
+            .source_path(format!("/home/user/.claude/private-{}.jsonl", i))
+            .messages(4)
+            .build_conversation();
+        storage
+            .insert_conversation_tree(agent_id, Some(private_ws_id), &conv)
+            .expect("insert");
+    }
+    tracker.end(
+        "setup_database",
+        Some("Create database with 2 workspaces"),
+        phase_start,
+    );
+
+    // Test: Exclude private workspace
+    let phase_start = tracker.start(
+        "generate_with_exclusions",
+        Some("Generate summary with private workspace excluded"),
+    );
+    let conn = rusqlite::Connection::open(&db_path).expect("open connection");
+    let generator = SummaryGenerator::new(&conn);
+
+    let mut exclusions = ExclusionSet::new();
+    exclusions.exclude_workspace("/home/user/projects/private-secrets");
+
+    let summary = generator
+        .generate_with_exclusions(None, &exclusions)
+        .expect("generate with exclusions");
+
+    // Total should show all 5, but private-secrets marked as not included
+    let private_ws = summary
+        .workspaces
+        .iter()
+        .find(|w| w.path.contains("private-secrets"));
+    assert!(private_ws.is_some(), "Private workspace should appear");
+    assert!(
+        !private_ws.unwrap().included,
+        "Private workspace should be marked excluded"
+    );
+
+    let public_ws = summary
+        .workspaces
+        .iter()
+        .find(|w| w.path.contains("public-app"));
+    assert!(public_ws.is_some(), "Public workspace should appear");
+    assert!(
+        public_ws.unwrap().included,
+        "Public workspace should be included"
+    );
+
+    // Conversation count should reflect exclusions
+    assert_eq!(
+        summary.total_conversations, 3,
+        "Should only count 3 public conversations"
+    );
+    tracker.end(
+        "generate_with_exclusions",
+        Some("Generate summary with private workspace excluded"),
+        phase_start,
+    );
+
+    tracker.flush();
+    eprintln!(
+        "{{\"test\":\"test_summary_with_workspace_exclusions\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        test_start.elapsed().as_millis()
+    );
+}
+
+/// Test export filter with date range boundaries.
+/// Verifies that time-based filtering works correctly.
+#[test]
+fn test_export_filter_date_range() {
+    use coding_agent_search::pages::summary::{SummaryFilters, SummaryGenerator};
+
+    let tracker = tracker_for("test_export_filter_date_range");
+    let _trace_guard = tracker.trace_env_guard();
+    let test_start = Instant::now();
+    eprintln!("{{\"test\":\"test_export_filter_date_range\",\"status\":\"START\"}}");
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("data");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+
+    // Setup database with conversations across different time ranges
+    let phase_start = tracker.start(
+        "setup_database",
+        Some("Create database with conversations across time range"),
+    );
+    let db_path = data_dir.join("agent_search.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open storage");
+
+    let agent = Agent {
+        id: None,
+        slug: "claude_code".to_string(),
+        name: "Claude Code".to_string(),
+        version: None,
+        kind: AgentKind::Cli,
+    };
+    let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+    let workspace_path = Path::new("/home/user/projects/test");
+    let workspace_id = storage
+        .ensure_workspace(workspace_path, None)
+        .expect("ensure workspace");
+
+    // January 2024 conversations (2 total)
+    let jan_base_ts = 1704067200000i64; // 2024-01-01
+    for i in 0..2 {
+        let conv = ConversationFixtureBuilder::new("claude_code")
+            .title(format!("January Session {}", i))
+            .workspace(workspace_path)
+            .source_path(format!("/home/user/.claude/jan-{}.jsonl", i))
+            .base_ts(jan_base_ts + (i as i64 * 86400000))
+            .messages(3)
+            .build_conversation();
+        storage
+            .insert_conversation_tree(agent_id, Some(workspace_id), &conv)
+            .expect("insert");
+    }
+
+    // March 2024 conversations (3 total)
+    let mar_base_ts = 1709251200000i64; // 2024-03-01
+    for i in 0..3 {
+        let conv = ConversationFixtureBuilder::new("claude_code")
+            .title(format!("March Session {}", i))
+            .workspace(workspace_path)
+            .source_path(format!("/home/user/.claude/mar-{}.jsonl", i))
+            .base_ts(mar_base_ts + (i as i64 * 86400000))
+            .messages(3)
+            .build_conversation();
+        storage
+            .insert_conversation_tree(agent_id, Some(workspace_id), &conv)
+            .expect("insert");
+    }
+
+    // May 2024 conversations (4 total)
+    let may_base_ts = 1714521600000i64; // 2024-05-01
+    for i in 0..4 {
+        let conv = ConversationFixtureBuilder::new("claude_code")
+            .title(format!("May Session {}", i))
+            .workspace(workspace_path)
+            .source_path(format!("/home/user/.claude/may-{}.jsonl", i))
+            .base_ts(may_base_ts + (i as i64 * 86400000))
+            .messages(3)
+            .build_conversation();
+        storage
+            .insert_conversation_tree(agent_id, Some(workspace_id), &conv)
+            .expect("insert");
+    }
+    tracker.end(
+        "setup_database",
+        Some("Create database with conversations across time range"),
+        phase_start,
+    );
+
+    // Test: Filter to February-April range (should get only March conversations)
+    let phase_start = tracker.start(
+        "filter_date_range",
+        Some("Filter to February-April date range"),
+    );
+    let conn = rusqlite::Connection::open(&db_path).expect("open connection");
+    let generator = SummaryGenerator::new(&conn);
+
+    let feb_start = 1706745600000i64; // 2024-02-01
+    let apr_end = 1714435200000i64; // 2024-04-30
+
+    let filters = SummaryFilters {
+        since_ts: Some(feb_start),
+        until_ts: Some(apr_end),
+        ..Default::default()
+    };
+    let summary = generator.generate(Some(&filters)).expect("generate");
+
+    assert_eq!(
+        summary.total_conversations, 3,
+        "Should have only 3 March conversations in Feb-Apr range"
+    );
+    tracker.end(
+        "filter_date_range",
+        Some("Filter to February-April date range"),
+        phase_start,
+    );
+
+    tracker.flush();
+    eprintln!(
+        "{{\"test\":\"test_export_filter_date_range\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        test_start.elapsed().as_millis()
+    );
+}
+
+/// Test exclusion patterns match conversation titles.
+/// Verifies that regex-based exclusion works correctly.
+#[test]
+fn test_exclusion_pattern_matching() {
+    use coding_agent_search::pages::summary::ExclusionSet;
+
+    let tracker = tracker_for("test_exclusion_pattern_matching");
+    let _trace_guard = tracker.trace_env_guard();
+    let test_start = Instant::now();
+    eprintln!("{{\"test\":\"test_exclusion_pattern_matching\",\"status\":\"START\"}}");
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("data");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+
+    // Setup database with conversations having various titles
+    let phase_start = tracker.start(
+        "setup_database",
+        Some("Create database with varied conversation titles"),
+    );
+    let db_path = data_dir.join("agent_search.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open storage");
+
+    let agent = Agent {
+        id: None,
+        slug: "claude_code".to_string(),
+        name: "Claude Code".to_string(),
+        version: None,
+        kind: AgentKind::Cli,
+    };
+    let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+    let workspace_path = Path::new("/home/user/projects/test");
+    let workspace_id = storage
+        .ensure_workspace(workspace_path, None)
+        .expect("ensure workspace");
+
+    let titles = [
+        "Fix authentication bug",
+        "SECRET: API key rotation",
+        "Add user profile page",
+        "PRIVATE: Personal notes",
+        "Implement search feature",
+        "SECRET: Database credentials",
+    ];
+
+    for (i, title) in titles.iter().enumerate() {
+        let conv = ConversationFixtureBuilder::new("claude_code")
+            .title(*title)
+            .workspace(workspace_path)
+            .source_path(format!("/home/user/.claude/session-{}.jsonl", i))
+            .messages(3)
+            .build_conversation();
+        storage
+            .insert_conversation_tree(agent_id, Some(workspace_id), &conv)
+            .expect("insert");
+    }
+    tracker.end(
+        "setup_database",
+        Some("Create database with varied conversation titles"),
+        phase_start,
+    );
+
+    // Test: Pattern exclusion
+    let phase_start = tracker.start("pattern_exclusion", Some("Test regex pattern exclusions"));
+
+    let mut exclusions = ExclusionSet::new();
+    // Exclude titles starting with "SECRET:" or "PRIVATE:"
+    exclusions
+        .add_pattern("^SECRET:")
+        .expect("add SECRET pattern");
+    exclusions
+        .add_pattern("^PRIVATE:")
+        .expect("add PRIVATE pattern");
+
+    // Verify pattern matching works
+    assert!(exclusions.matches_pattern("SECRET: API key rotation"));
+    assert!(exclusions.matches_pattern("PRIVATE: Personal notes"));
+    assert!(!exclusions.matches_pattern("Fix authentication bug"));
+    assert!(!exclusions.matches_pattern("Implement search feature"));
+
+    // Verify should_exclude integrates patterns
+    assert!(exclusions.should_exclude(None, 1, "SECRET: Something"));
+    assert!(exclusions.should_exclude(None, 1, "PRIVATE: Something"));
+    assert!(!exclusions.should_exclude(None, 1, "Normal title"));
+    tracker.end(
+        "pattern_exclusion",
+        Some("Test regex pattern exclusions"),
+        phase_start,
+    );
+
+    tracker.flush();
+    eprintln!(
+        "{{\"test\":\"test_exclusion_pattern_matching\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        test_start.elapsed().as_millis()
+    );
+}
+
+/// Test that prepublish summary rendering includes all expected sections.
+/// Verifies the human-readable output format.
+#[test]
+fn test_prepublish_summary_render() {
+    use coding_agent_search::pages::summary::SummaryGenerator;
+
+    let tracker = tracker_for("test_prepublish_summary_render");
+    let _trace_guard = tracker.trace_env_guard();
+    let test_start = Instant::now();
+    eprintln!("{{\"test\":\"test_prepublish_summary_render\",\"status\":\"START\"}}");
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let data_dir = temp_dir.path().join("data");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+
+    // Setup database
+    let phase_start = tracker.start("setup_database", Some("Create test database"));
+    let db_path = data_dir.join("agent_search.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open storage");
+
+    let agent = Agent {
+        id: None,
+        slug: "claude_code".to_string(),
+        name: "Claude Code".to_string(),
+        version: None,
+        kind: AgentKind::Cli,
+    };
+    let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+    let workspace_path = Path::new("/home/user/projects/webapp");
+    let workspace_id = storage
+        .ensure_workspace(workspace_path, None)
+        .expect("ensure workspace");
+
+    for i in 0..5 {
+        let conv = ConversationFixtureBuilder::new("claude_code")
+            .title(format!("Web App Session {}", i))
+            .workspace(workspace_path)
+            .source_path(format!("/home/user/.claude/webapp-{}.jsonl", i))
+            .messages(10)
+            .with_content(
+                0,
+                format!("Working on feature {} for the web application", i),
+            )
+            .build_conversation();
+        storage
+            .insert_conversation_tree(agent_id, Some(workspace_id), &conv)
+            .expect("insert");
+    }
+    tracker.end("setup_database", Some("Create test database"), phase_start);
+
+    // Generate summary and verify render output
+    let phase_start = tracker.start(
+        "verify_render",
+        Some("Verify summary render contains all sections"),
+    );
+    let conn = rusqlite::Connection::open(&db_path).expect("open connection");
+    let generator = SummaryGenerator::new(&conn);
+    let summary = generator.generate(None).expect("generate");
+    let rendered = summary.render_overview();
+
+    // Verify all expected sections are present
+    assert!(
+        rendered.contains("CONTENT OVERVIEW"),
+        "Should have content overview section"
+    );
+    assert!(
+        rendered.contains("Conversations: 5"),
+        "Should show conversation count"
+    );
+    assert!(rendered.contains("Messages:"), "Should show message count");
+    assert!(
+        rendered.contains("Characters:"),
+        "Should show character count"
+    );
+    assert!(
+        rendered.contains("Archive Size:"),
+        "Should show estimated size"
+    );
+    assert!(
+        rendered.contains("DATE RANGE"),
+        "Should have date range section"
+    );
+    assert!(
+        rendered.contains("WORKSPACES"),
+        "Should have workspaces section"
+    );
+    assert!(rendered.contains("webapp"), "Should show workspace name");
+    assert!(rendered.contains("AGENTS"), "Should have agents section");
+    assert!(rendered.contains("claude_code"), "Should show agent name");
+    assert!(
+        rendered.contains("SECURITY"),
+        "Should have security section"
+    );
+    assert!(
+        rendered.contains("AES-256-GCM"),
+        "Should show encryption algorithm"
+    );
+    tracker.end(
+        "verify_render",
+        Some("Verify summary render contains all sections"),
+        phase_start,
+    );
+
+    tracker.flush();
+    eprintln!(
+        "{{\"test\":\"test_prepublish_summary_render\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+        test_start.elapsed().as_millis()
+    );
+}
+
+/// Test size estimation accuracy.
+/// Verifies that estimate_compressed_size produces reasonable values.
+#[test]
+fn test_size_estimation_accuracy() {
+    use coding_agent_search::pages::summary::{estimate_compressed_size, format_size};
+
+    let tracker = tracker_for("test_size_estimation_accuracy");
+    let _trace_guard = tracker.trace_env_guard();
+    let test_start = Instant::now();
+    eprintln!("{{\"test\":\"test_size_estimation_accuracy\",\"status\":\"START\"}}");
+
+    // Test various size ranges
+    let phase_start = tracker.start(
+        "size_estimation",
+        Some("Test size estimation for various inputs"),
+    );
+
+    // Small content (~1KB)
+    let small_estimate = estimate_compressed_size(1000);
+    assert!(small_estimate > 400, "Small estimate should be > 400 bytes");
+    assert!(small_estimate < 450, "Small estimate should be < 450 bytes");
+
+    // Medium content (~100KB)
+    let medium_estimate = estimate_compressed_size(100_000);
+    assert!(medium_estimate > 40_000, "Medium estimate should be > 40KB");
+    assert!(medium_estimate < 45_000, "Medium estimate should be < 45KB");
+
+    // Large content (~10MB)
+    let large_estimate = estimate_compressed_size(10_000_000);
+    assert!(large_estimate > 4_000_000, "Large estimate should be > 4MB");
+    assert!(
+        large_estimate < 4_500_000,
+        "Large estimate should be < 4.5MB"
+    );
+
+    tracker.end(
+        "size_estimation",
+        Some("Test size estimation for various inputs"),
+        phase_start,
+    );
+
+    // Test format_size output
+    let phase_start = tracker.start("format_size", Some("Test human-readable size formatting"));
+
+    assert_eq!(format_size(512), "512 bytes");
+    assert!(format_size(1536).contains("KB"));
+    assert!(format_size(1_500_000).contains("MB"));
+    assert!(format_size(2_000_000_000).contains("GB"));
+
+    tracker.end(
+        "format_size",
+        Some("Test human-readable size formatting"),
+        phase_start,
+    );
+
+    tracker.flush();
+    eprintln!(
+        "{{\"test\":\"test_size_estimation_accuracy\",\"duration_ms\":{},\"status\":\"PASS\"}}",
         test_start.elapsed().as_millis()
     );
 }
