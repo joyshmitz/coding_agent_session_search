@@ -211,7 +211,7 @@ impl GitHubDeployer {
     pub fn deploy<P: AsRef<Path>>(
         &self,
         bundle_dir: P,
-        progress: impl Fn(&str, &str),
+        mut progress: impl FnMut(&str, &str),
     ) -> Result<DeployResult> {
         let bundle_dir = bundle_dir.as_ref();
 

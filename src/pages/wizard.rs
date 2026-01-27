@@ -14,6 +14,7 @@ use crate::pages::confirmation::{
     UNENCRYPTED_ACK_PHRASE, unencrypted_warning_lines, validate_unencrypted_ack,
 };
 use crate::pages::deploy_cloudflare::{CloudflareConfig, CloudflareDeployer};
+use crate::pages::deploy_github::GitHubDeployer;
 use crate::pages::docs::{DocConfig, DocumentationGenerator};
 use crate::pages::encrypt::EncryptionEngine;
 use crate::pages::export::{ExportEngine, ExportFilter, PathMode};
@@ -1810,18 +1811,84 @@ impl PagesWizard {
             DeployTarget::GitHubPages => {
                 writeln!(term, "  {} GitHub Pages deployment...", style("→").cyan())?;
 
-                // TODO: Actually deploy using pages::deploy_github
-                writeln!(
-                    term,
-                    "  {} GitHub Pages deployment not yet implemented",
-                    style("⚠").yellow()
-                )?;
-                writeln!(term)?;
-                writeln!(
-                    term,
-                    "To deploy manually, push the {} directory to a gh-pages branch.",
-                    self.state.output_dir.display()
-                )?;
+                // Determine repository name
+                let repo_name = self
+                    .state
+                    .repo_name
+                    .clone()
+                    .unwrap_or_else(|| "cass-archive".to_string());
+
+                // Configure the deployer
+                let deployer = GitHubDeployer::new(repo_name.clone());
+
+                // Check prerequisites first
+                match deployer.check_prerequisites() {
+                    Ok(prereqs) if prereqs.is_ready() => {
+                        // Deploy with progress output
+                        match deployer.deploy(&self.state.output_dir, |_phase, msg| {
+                            let _ = writeln!(term, "    {} {}", style("•").dim(), msg);
+                        }) {
+                            Ok(result) => {
+                                writeln!(term)?;
+                                writeln!(
+                                    term,
+                                    "  {} Deployed to GitHub Pages!",
+                                    style("✓").green().bold()
+                                )?;
+                                writeln!(term)?;
+                                writeln!(term, "  Repository: {}", style(&result.repo_url).cyan())?;
+                                writeln!(
+                                    term,
+                                    "  Your archive is available at: {}",
+                                    style(&result.pages_url).cyan().bold()
+                                )?;
+                            }
+                            Err(e) => {
+                                writeln!(term)?;
+                                writeln!(term, "  {} Deployment failed: {}", style("✗").red(), e)?;
+                                writeln!(term)?;
+                                writeln!(
+                                    term,
+                                    "To deploy manually, push the {} directory to a gh-pages branch.",
+                                    self.state.output_dir.display()
+                                )?;
+                            }
+                        }
+                    }
+                    Ok(prereqs) => {
+                        let missing = prereqs.missing();
+                        writeln!(term)?;
+                        writeln!(term, "  {} Prerequisites not met:", style("⚠").yellow())?;
+                        for item in &missing {
+                            writeln!(term, "    {} {}", style("•").dim(), item)?;
+                        }
+                        writeln!(term)?;
+                        writeln!(
+                            term,
+                            "Please install/configure the missing tools and try again."
+                        )?;
+                        writeln!(
+                            term,
+                            "To deploy manually after fixing prerequisites, push the {} directory to a gh-pages branch.",
+                            self.state.output_dir.display()
+                        )?;
+                    }
+                    Err(e) => {
+                        writeln!(term)?;
+                        writeln!(
+                            term,
+                            "  {} Could not check prerequisites: {}",
+                            style("⚠").yellow(),
+                            e
+                        )?;
+                        writeln!(term)?;
+                        writeln!(
+                            term,
+                            "To deploy manually, push the {} directory to a gh-pages branch.",
+                            self.state.output_dir.display()
+                        )?;
+                    }
+                }
             }
             DeployTarget::CloudflarePages => {
                 writeln!(
