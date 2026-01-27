@@ -540,14 +540,14 @@ fn check_size_limits(site_dir: &Path) -> CheckResult {
                     "payload file not found for size check: {}",
                     unenc.payload.path
                 ));
-            } else if let Ok(meta) = payload_path.metadata() {
-                if meta.len() > MAX_CHUNK_SIZE {
-                    errors.push(format!(
-                        "{} exceeds 100MB limit ({} bytes)",
-                        unenc.payload.path,
-                        meta.len()
-                    ));
-                }
+            } else if let Ok(meta) = payload_path.metadata()
+                && meta.len() > MAX_CHUNK_SIZE
+            {
+                errors.push(format!(
+                    "{} exceeds 100MB limit ({} bytes)",
+                    unenc.payload.path,
+                    meta.len()
+                ));
             }
         }
     }
@@ -1048,6 +1048,32 @@ mod tests {
         let site_dir = temp.path();
         let payload_dir = site_dir.join("payload");
         fs::create_dir_all(&payload_dir).unwrap();
+
+        // Create config.json for encrypted archive (required by check_size_limits)
+        let config = r#"{
+          "version": 2,
+          "export_id": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "base_nonce": "AAAAAAAAAAAAAAAA",
+          "compression": "deflate",
+          "kdf_defaults": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 },
+          "payload": {
+            "chunk_size": 1024,
+            "chunk_count": 1,
+            "total_compressed_size": 14,
+            "total_plaintext_size": 100,
+            "files": ["payload/chunk-00000.bin"]
+          },
+          "key_slots": [{
+            "id": 0,
+            "slot_type": "password",
+            "kdf": "argon2id",
+            "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "wrapped_dek": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "nonce": "AAAAAAAAAAAAAAAA",
+            "argon2_params": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 }
+          }]
+        }"#;
+        fs::write(site_dir.join("config.json"), config).unwrap();
 
         // Create a small file (should pass)
         fs::write(payload_dir.join("chunk-00000.bin"), "small").unwrap();
