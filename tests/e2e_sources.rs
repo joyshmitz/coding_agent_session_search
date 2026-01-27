@@ -1247,14 +1247,16 @@ to = "/Users/me/projects"
 /// Test: sources mappings list --json outputs valid JSON.
 #[test]
 fn mappings_list_json() {
-    logged_test!("mappings_list_json", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_list_json");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with mapping for JSON test"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
@@ -1265,61 +1267,75 @@ paths = ["~/.claude/projects"]
 from = "/home/user/projects"
 to = "/Users/me/projects"
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with mapping for JSON test"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "mappings", "list", "laptop", "--json"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings list --json command");
+    let start = tracker.start("run_mappings_list_json", Some("Run mappings list --json"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "laptop", "--json"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings list --json command");
+    tracker.end("run_mappings_list_json", Some("Run mappings list --json"), start);
 
-        assert!(output.status.success());
-        let json: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("valid JSON output");
+    let start = tracker.start("verify_json", Some("Verify JSON contains mappings field"));
+    assert!(output.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid JSON output");
 
-        assert!(
-            json.get("mappings").is_some(),
-            "Expected 'mappings' field in JSON"
-        );
-    });
+    assert!(
+        json.get("mappings").is_some(),
+        "Expected 'mappings' field in JSON"
+    );
+    tracker.end("verify_json", Some("Verify JSON contains mappings field"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources mappings list for nonexistent source.
 #[test]
 fn mappings_list_nonexistent_source() {
-    logged_test!("mappings_list_nonexistent_source", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_list_nonexistent_source");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with laptop source"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with laptop source"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "mappings", "list", "nonexistent"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings list command");
+    let start = tracker.start("run_mappings_list", Some("List mappings for nonexistent source"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "nonexistent"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings list command");
+    tracker.end("run_mappings_list", Some("List mappings for nonexistent source"), start);
 
-        assert!(!output.status.success());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("not found") || stderr.contains("does not exist"),
-            "Expected not found error, got: {stderr}"
-        );
-    });
+    let start = tracker.start("verify_error", Some("Verify not found error"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("does not exist"),
+        "Expected not found error, got: {stderr}"
+    );
+    tracker.end("verify_error", Some("Verify not found error"), start);
+
+    tracker.complete();
 }
 
 // =============================================================================
