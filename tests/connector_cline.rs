@@ -18,13 +18,28 @@ fn cline_parses_fixture_task() {
         since_ts: None,
     };
     let convs = conn.scan(&ctx).expect("scan");
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation from fixture"
+    );
     let c = &convs[0];
-    assert_eq!(c.title.as_deref(), Some("Cline fixture task"));
+    assert_eq!(
+        c.title.as_deref(),
+        Some("Cline fixture task"),
+        "title should match fixture's task metadata"
+    );
     // We now prefer ui_messages.json (2 msgs) over api_conversation_history.json (1 msg)
     // to avoid duplicates and prefer user-facing content.
-    assert_eq!(c.messages.len(), 2);
-    assert!(c.messages.iter().any(|m| m.content.contains("Hello Cline")));
+    assert_eq!(
+        c.messages.len(),
+        2,
+        "expected 2 messages from ui_messages.json"
+    );
+    assert!(
+        c.messages.iter().any(|m| m.content.contains("Hello Cline")),
+        "should contain 'Hello Cline' message from fixture"
+    );
 }
 
 #[test]
@@ -69,7 +84,11 @@ fn cline_respects_since_ts_and_resequences_indices() {
     };
 
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation after since_ts filtering"
+    );
     let c = &convs[0];
 
     // Should keep only the newer message
@@ -80,8 +99,14 @@ fn cline_respects_since_ts_and_resequences_indices() {
     );
     let msg = &c.messages[0];
     assert_eq!(msg.idx, 0, "idx should be re-sequenced after filtering");
-    assert_eq!(msg.role, "assistant");
-    assert!(msg.content.contains("new msg"));
+    assert_eq!(
+        msg.role, "assistant",
+        "filtered message should be assistant role"
+    );
+    assert!(
+        msg.content.contains("new msg"),
+        "filtered message should contain 'new msg'"
+    );
 }
 
 // ============================================================================
@@ -122,8 +147,15 @@ fn cline_prefers_ui_messages() {
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert!(convs[0].messages[0].content.contains("UI message"));
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation when ui_messages.json exists"
+    );
+    assert!(
+        convs[0].messages[0].content.contains("UI message"),
+        "should prefer ui_messages.json content over api_conversation_history.json"
+    );
 }
 
 /// Test fallback to api_conversation_history.json when ui_messages.json is missing
@@ -149,8 +181,15 @@ fn cline_fallback_to_api_history() {
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert!(convs[0].messages[0].content.contains("API only message"));
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation from api_conversation_history fallback"
+    );
+    assert!(
+        convs[0].messages[0].content.contains("API only message"),
+        "should fallback to api_conversation_history.json when ui_messages.json is missing"
+    );
 }
 
 /// Test multiple task directories
@@ -173,7 +212,11 @@ fn cline_handles_multiple_tasks() {
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 3);
+    assert_eq!(
+        convs.len(),
+        3,
+        "expected 3 conversations from 3 task directories"
+    );
 }
 
 /// Test taskHistory.json is skipped
@@ -198,8 +241,15 @@ fn cline_skips_task_history_json() {
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert!(convs[0].messages[0].content.contains("Real task"));
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected 1 conversation - taskHistory.json dir should be skipped"
+    );
+    assert!(
+        convs[0].messages[0].content.contains("Real task"),
+        "should only contain real task, not taskHistory.json"
+    );
 }
 
 /// Test title extraction from metadata
@@ -221,8 +271,16 @@ fn cline_extracts_title_from_metadata() {
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].title, Some("Custom Task Title".to_string()));
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected 1 conversation for title metadata test"
+    );
+    assert_eq!(
+        convs[0].title,
+        Some("Custom Task Title".to_string()),
+        "title should be extracted from task_metadata.json"
+    );
 }
 
 /// Test title fallback to first message
@@ -244,8 +302,16 @@ fn cline_title_fallback_to_first_message() {
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].title, Some("First line for title".to_string()));
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected 1 conversation for title fallback test"
+    );
+    assert_eq!(
+        convs[0].title,
+        Some("First line for title".to_string()),
+        "title should fallback to first line of first user message"
+    );
 }
 
 /// Test workspace extraction from metadata (rootPath)
@@ -267,10 +333,15 @@ fn cline_extracts_workspace_from_rootpath() {
         since_ts: None,
     };
     let convs = conn.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected 1 conversation for rootPath workspace test"
+    );
     assert_eq!(
         convs[0].workspace,
-        Some(PathBuf::from("/home/user/project"))
+        Some(PathBuf::from("/home/user/project")),
+        "workspace should be extracted from rootPath in task_metadata.json"
     );
 }
 

@@ -29,10 +29,18 @@ fn claude_parses_project_fixture() {
     assert_eq!(convs.len(), 1);
 
     let c = &convs[0];
-    assert!(!c.title.as_deref().unwrap_or("").is_empty());
+    assert!(
+        !c.title.as_deref().unwrap_or("").is_empty(),
+        "conversation should have a non-empty title, got: {:?}",
+        c.title
+    );
     assert_eq!(c.messages.len(), 2);
     assert_eq!(c.messages[1].role, "assistant");
-    assert!(c.messages[1].content.contains("matrix completion"));
+    assert!(
+        c.messages[1].content.contains("matrix completion"),
+        "assistant message should contain 'matrix completion', got: {}",
+        &c.messages[1].content[..c.messages[1].content.len().min(200)]
+    );
 
     // Verify metadata extraction
     let meta = &c.metadata;
