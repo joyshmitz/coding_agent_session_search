@@ -2057,6 +2057,10 @@ impl SearchClient {
                 .reload_policy(ReloadPolicy::Manual)
                 .try_into()
                 .ok()?;
+            // Force initial reload to pick up any segments committed before we opened.
+            // With Manual policy, the reader starts with stale view; reload() ensures
+            // we see the latest committed state.
+            let _ = reader.reload();
             Some((reader, fields))
         });
 
@@ -4463,7 +4467,8 @@ mod tests {
                     role: "user".into(),
                     author: None,
                     created_at: Some(100 + i),
-                    content: "pagination needle".into(),
+                    // Use unique content for each doc to avoid deduplication
+                    content: format!("pagination needle document number {i}"),
                     extra: serde_json::json!({}),
                     snippets: vec![NormalizedSnippet {
                         file_path: None,
