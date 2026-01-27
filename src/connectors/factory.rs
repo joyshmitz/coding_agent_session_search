@@ -524,4 +524,532 @@ mod tests {
 
         assert_eq!(convs[0].metadata["model"], "claude-opus-4-5-20251101");
     }
+
+    // =========================================================================
+    // Edge case tests — malformed input robustness (br-27y8)
+    // =========================================================================
+
+    #[test]
+    fn edge_truncated_jsonl_mid_json_returns_partial_results() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        // First line valid, second truncated mid-JSON
+        let content = br#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Valid"}}
+{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assistant","con"#;
+        fs::write(session_dir.join("truncated.jsonl"), content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "truncated file should not cause an error");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages.len(),
+            1,
+            "should yield only the 1 valid message from truncated file"
+        );
+        assert_eq!(convs[0].messages[0].content, "Valid");
+    }
+
+    #[test]
+    fn edge_truncated_mid_utf8_does_not_panic() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            br#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"OK"}}"#,
+        );
+        bytes.push(b'\n');
+        // Incomplete 4-byte UTF-8 sequence (U+1F600 = F0 9F 98 80, only 2 bytes)
+        bytes.extend_from_slice(b"\xF0\x9F");
+
+        fs::write(session_dir.join("utf8trunc.jsonl"), &bytes).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "truncated mid-UTF8 should not panic");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "OK");
+    }
+
+    #[test]
+    fn edge_invalid_utf8_skips_corrupted_lines() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            br#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Before"}}"#,
+        );
+        bytes.push(b'\n');
+        bytes.extend_from_slice(b"\xFF\xFE invalid utf8 line\n");
+        bytes.extend_from_slice(
+            br#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"user","content":"After"}}"#,
+        );
+        bytes.push(b'\n');
+
+        fs::write(session_dir.join("badbytes.jsonl"), &bytes).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "invalid UTF-8 should not cause a panic");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages.len(),
+            2,
+            "should extract valid messages around invalid UTF-8"
+        );
+        assert_eq!(convs[0].messages[0].content, "Before");
+        assert_eq!(convs[0].messages[1].content, "After");
+    }
+
+    #[test]
+    fn edge_empty_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        fs::write(session_dir.join("empty.jsonl"), b"").unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "empty file should not cause errors");
+        let convs = result.unwrap();
+        assert!(
+            convs.is_empty(),
+            "empty file should produce no conversations"
+        );
+    }
+
+    #[test]
+    fn edge_whitespace_only_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        fs::write(session_dir.join("whitespace.jsonl"), "  \n\n  \t\n").unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "whitespace-only file should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert!(
+            convs.is_empty(),
+            "whitespace-only file should produce no conversations"
+        );
+    }
+
+    #[test]
+    fn edge_json_type_mismatch_skips_gracefully() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let content = concat!(
+            // message field is a string instead of object
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":"not an object"}"#,
+            "\n",
+            // type is a number
+            r#"{"type":123,"message":{"role":"user","content":"num type"}}"#,
+            "\n",
+            // content is a number
+            r#"{"type":"message","message":{"role":"user","content":99}}"#,
+            "\n",
+            // Correct entry
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Correct"}}"#,
+            "\n",
+        );
+        fs::write(session_dir.join("types.jsonl"), content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "type mismatches should not cause errors");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(
+            convs[0].messages.iter().any(|m| m.content == "Correct"),
+            "should extract the correctly typed entry"
+        );
+    }
+
+    #[test]
+    fn edge_deeply_nested_json_does_not_stack_overflow() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        // serde_json has a recursion limit of 128; 200 levels will trigger parse error
+        let mut nested = String::new();
+        for _ in 0..200 {
+            nested.push_str(r#"{"a":"#);
+        }
+        nested.push('1');
+        for _ in 0..200 {
+            nested.push('}');
+        }
+
+        let content = format!(
+            "{}\n{}\n",
+            nested,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"After nesting"}}"#
+        );
+        fs::write(session_dir.join("deep.jsonl"), &content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "deeply nested JSON should not cause stack overflow"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "After nesting");
+    }
+
+    #[test]
+    fn edge_large_message_body_handled_without_oom() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let large_content = "x".repeat(1_000_000);
+        let line = format!(
+            r#"{{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{{"role":"user","content":"{}"}}}}"#,
+            large_content
+        );
+        fs::write(session_dir.join("large.jsonl"), &line).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "large message body should not cause OOM");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content.len(), 1_000_000);
+    }
+
+    #[test]
+    fn edge_null_bytes_embedded_in_content_handled() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let content = concat!(
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"before\u0000after"}}"#,
+            "\n",
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"user","content":"Clean"}}"#,
+            "\n"
+        );
+        fs::write(session_dir.join("null.jsonl"), content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "null bytes in content should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(!convs[0].messages.is_empty());
+    }
+
+    #[test]
+    fn edge_bom_marker_at_file_start_handled() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\xEF\xBB\xBF"); // UTF-8 BOM
+        bytes.extend_from_slice(
+            br#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"BOM line"}}"#,
+        );
+        bytes.push(b'\n');
+        bytes.extend_from_slice(
+            br#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"user","content":"Second"}}"#,
+        );
+        bytes.push(b'\n');
+        fs::write(session_dir.join("bom.jsonl"), &bytes).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "BOM marker should not cause errors");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(
+            !convs[0].messages.is_empty(),
+            "should extract at least the second line after BOM"
+        );
+        assert!(
+            convs[0].messages.iter().any(|m| m.content == "Second"),
+            "second line should parse correctly regardless of BOM"
+        );
+    }
+
+    #[test]
+    fn edge_missing_message_field_skipped() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let content = concat!(
+            // message type without message field
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z"}"#,
+            "\n",
+            // session_start without required fields
+            r#"{"type":"session_start"}"#,
+            "\n",
+            // Valid message
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"user","content":"Has message"}}"#,
+            "\n",
+        );
+        fs::write(session_dir.join("nomsg.jsonl"), content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "missing message field should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Has message");
+    }
+
+    #[test]
+    fn edge_empty_content_messages_skipped() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let content = concat!(
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Has content"}}"#,
+            "\n",
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assistant","content":""}}"#,
+            "\n",
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:02Z","message":{"role":"assistant","content":"   "}}"#,
+            "\n",
+        );
+        fs::write(session_dir.join("empty-content.jsonl"), content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "empty content should not cause errors");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages.len(),
+            1,
+            "empty content messages should be skipped"
+        );
+        assert_eq!(convs[0].messages[0].content, "Has content");
+    }
+
+    #[test]
+    fn edge_unknown_entry_types_skipped() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let content = concat!(
+            r#"{"type":"todo_state","tasks":[]}"#,
+            "\n",
+            r#"{"type":"tool_result","name":"bash","output":"ok"}"#,
+            "\n",
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Real message"}}"#,
+            "\n",
+        );
+        fs::write(session_dir.join("unknown.jsonl"), content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "unknown entry types should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Real message");
+    }
+
+    #[test]
+    fn edge_timestamp_parsing_variations() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let content = concat!(
+            // ISO 8601 with milliseconds
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00.123Z","message":{"role":"user","content":"ms precision"}}"#,
+            "\n",
+            // ISO 8601 with timezone offset
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00+05:30","message":{"role":"user","content":"tz offset"}}"#,
+            "\n",
+            // Unix epoch milliseconds as number
+            r#"{"type":"message","timestamp":1700000000000,"message":{"role":"user","content":"epoch millis"}}"#,
+            "\n",
+            // No timestamp
+            r#"{"type":"message","message":{"role":"user","content":"no timestamp"}}"#,
+            "\n",
+            // Null timestamp
+            r#"{"type":"message","timestamp":null,"message":{"role":"user","content":"null ts"}}"#,
+            "\n",
+        );
+        fs::write(session_dir.join("timestamps.jsonl"), content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "varied timestamp formats should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages.len(),
+            5,
+            "all 5 messages should be extracted regardless of timestamp format"
+        );
+        // Messages with valid timestamps should have created_at set
+        assert!(convs[0].messages[0].created_at.is_some());
+        assert!(convs[0].messages[1].created_at.is_some());
+        assert!(convs[0].messages[2].created_at.is_some());
+    }
+
+    #[test]
+    fn edge_workspace_path_with_special_chars() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        // Workspace path with spaces and unicode
+        let content = concat!(
+            r#"{"type":"session_start","id":"sess-special","cwd":"/home/user/my project/src"}"#,
+            "\n",
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Spaces path"}}"#,
+            "\n",
+        );
+        fs::write(session_dir.join("special.jsonl"), content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].workspace,
+            Some(PathBuf::from("/home/user/my project/src"))
+        );
+    }
+
+    #[test]
+    fn edge_model_in_message_extracted_as_author() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let content = concat!(
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"assistant","content":"Response","model":"claude-opus-4-5"}}"#,
+            "\n",
+        );
+        fs::write(session_dir.join("model.jsonl"), content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages[0].author,
+            Some("claude-opus-4-5".to_string())
+        );
+    }
+
+    #[test]
+    fn edge_settings_file_malformed_ignored() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let lines = vec![
+            r#"{"type":"session_start","id":"sess-bad-settings","cwd":"/test"}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Hello"}}"#,
+        ];
+        write_session_file(&storage, "-test", "sess-bad-settings", &lines);
+
+        // Write malformed settings file
+        let settings_path = session_dir.join("sess-bad-settings.settings.json");
+        fs::write(&settings_path, "not valid json {{{").unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "malformed settings file should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(
+            convs[0].metadata["model"].is_null(),
+            "model should be null when settings file is malformed"
+        );
+    }
 }

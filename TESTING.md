@@ -353,9 +353,15 @@ All E2E test infrastructure emits structured JSONL logs following a unified sche
 
 | Runner | Implementation | Output |
 |--------|---------------|--------|
-| Rust E2E | `tests/util/e2e_log.rs` | `test-results/e2e/rust_*.jsonl` |
+| Rust E2E | `tests/util/e2e_log.rs` | `test-results/e2e/<suite>/<test>/cass.log` |
 | Shell scripts | `scripts/lib/e2e_log.sh` | `test-results/e2e/shell_*.jsonl` |
 | Playwright | `tests/e2e/reporters/jsonl-reporter.ts` | `test-results/e2e/playwright_*.jsonl` |
+
+**Per-test artifacts (Rust E2E):**
+`test-results/e2e/<suite>/<test>/` contains:
+- `stdout` / `stderr` - Captured command output
+- `cass.log` - Structured JSONL events (SCHEMA.md)
+- `trace.jsonl` - CLI trace spans (command, args, timestamps, exit_code, trace_id)
 
 ### Rust E2E Logger
 
@@ -406,8 +412,9 @@ The unified test runner executes all E2E suites and produces consolidated report
 ```
 
 **Outputs:**
-- `test-results/e2e/*.jsonl` - Per-suite JSONL logs
-- `test-results/e2e/combined.jsonl` - Aggregated JSONL from all suites
+- `test-results/e2e/<suite>/<test>/cass.log` - Per-test JSONL logs (Rust E2E)
+- `test-results/e2e/*.jsonl` - Per-suite JSONL logs (shell/playwright/orchestrator)
+- `test-results/e2e/combined.jsonl` - Aggregated JSONL (excludes trace.jsonl)
 - `test-results/e2e/summary.md` - Human-readable Markdown summary
 
 ### Parsing JSONL Logs
@@ -415,15 +422,18 @@ The unified test runner executes all E2E suites and produces consolidated report
 ```bash
 # Count failures across all suites
 jq -s '[.[] | select(.event == "test_end" and .result.status == "fail")] | length' \
-  test-results/e2e/*.jsonl
+  $(find test-results/e2e -type f \( -name "*.jsonl" -o -name "cass.log" \) \
+    ! -name "trace.jsonl" ! -name "combined.jsonl")
 
 # Get failed test names
 jq -r 'select(.event == "test_end" and .result.status == "fail") | .test.name' \
-  test-results/e2e/*.jsonl
+  $(find test-results/e2e -type f \( -name "*.jsonl" -o -name "cass.log" \) \
+    ! -name "trace.jsonl" ! -name "combined.jsonl")
 
 # Duration by runner
 jq -s 'group_by(.runner) | map({runner: .[0].runner, total_ms: [.[] | select(.event == "run_end") | .summary.duration_ms] | add})' \
-  test-results/e2e/*.jsonl
+  $(find test-results/e2e -type f \( -name "*.jsonl" -o -name "cass.log" \) \
+    ! -name "trace.jsonl" ! -name "combined.jsonl")
 ```
 
 ### JSONL Schema Validator
@@ -432,10 +442,10 @@ The `validate-e2e-jsonl.sh` script validates E2E log files conform to the expect
 
 ```bash
 # Validate all E2E JSONL logs
-./scripts/validate-e2e-jsonl.sh test-results/e2e/*.jsonl
+./scripts/validate-e2e-jsonl.sh test-results/e2e/*.jsonl test-results/e2e/**/cass.log
 
 # Validate a specific file
-./scripts/validate-e2e-jsonl.sh test-results/e2e/rust_20260127_044815.jsonl
+./scripts/validate-e2e-jsonl.sh test-results/e2e/e2e_cli_flows/search_basic_returns_valid_json/cass.log
 ```
 
 **Validation checks:**
@@ -468,6 +478,7 @@ Generated reports go in `test-results/`:
 | `no_mock_audit.md` | Mock pattern audit results |
 | `no_mock_allowlist.json` | Approved mock exceptions |
 | `e2e/SCHEMA.md` | E2E logging schema documentation |
+| `e2e/<suite>/<test>/` | Per-test artifacts (stdout/stderr/cass.log/trace.jsonl) |
 | `e2e/*.jsonl` | Per-suite JSONL logs |
 | `e2e/combined.jsonl` | Aggregated JSONL from all suites |
 | `e2e/summary.md` | Human-readable E2E summary |
