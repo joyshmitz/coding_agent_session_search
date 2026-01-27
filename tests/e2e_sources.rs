@@ -42,6 +42,7 @@ fn read_sources_config(config_dir: &Path) -> String {
 #[test]
 fn sources_list_empty() {
     let tracker = tracker_for("sources_list_empty");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create temp config directory"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -80,6 +81,7 @@ fn sources_list_empty() {
 #[test]
 fn sources_list_with_sources() {
     let tracker = tracker_for("sources_list_with_sources");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with one source"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -127,6 +129,7 @@ sync_schedule = "manual"
 #[test]
 fn sources_list_verbose() {
     let tracker = tracker_for("sources_list_verbose");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with verbose-testable source"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -189,6 +192,7 @@ sync_schedule = "daily"
 #[test]
 fn sources_list_json() {
     let tracker = tracker_for("sources_list_json");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config for JSON output test"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -247,6 +251,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn sources_add_no_test() {
     let tracker = tracker_for("sources_add_no_test");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create temp config directory"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -312,6 +317,7 @@ fn sources_add_no_test() {
 #[test]
 fn sources_add_explicit_paths() {
     let tracker = tracker_for("sources_add_explicit_paths");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create temp config directory"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -374,6 +380,7 @@ fn sources_add_explicit_paths() {
 #[test]
 fn sources_add_no_paths_error() {
     let tracker = tracker_for("sources_add_no_paths_error");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create temp config directory"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -417,6 +424,7 @@ fn sources_add_no_paths_error() {
 #[test]
 fn sources_add_duplicate_error() {
     let tracker = tracker_for("sources_add_duplicate_error");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with existing source"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -475,6 +483,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn sources_add_invalid_url() {
     let tracker = tracker_for("sources_add_invalid_url");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create temp config directory"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -521,6 +530,7 @@ fn sources_add_invalid_url() {
 #[test]
 fn sources_add_auto_name() {
     let tracker = tracker_for("sources_add_auto_name");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create temp config directory"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -572,6 +582,7 @@ fn sources_add_auto_name() {
 #[test]
 fn sources_remove_basic() {
     let tracker = tracker_for("sources_remove_basic");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with two sources"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -639,6 +650,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn sources_remove_nonexistent() {
     let tracker = tracker_for("sources_remove_nonexistent");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with one source"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -688,6 +700,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn sources_remove_with_purge() {
     let tracker = tracker_for("sources_remove_with_purge");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start(
         "setup",
@@ -769,6 +782,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn sources_doctor_no_sources() {
     let tracker = tracker_for("sources_doctor_no_sources");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create empty config directory"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -810,6 +824,7 @@ fn sources_doctor_no_sources() {
 #[test]
 fn sources_doctor_json() {
     let tracker = tracker_for("sources_doctor_json");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start(
         "setup",
@@ -881,6 +896,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn sources_doctor_single_source() {
     let tracker = tracker_for("sources_doctor_single_source");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with two sources"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -951,6 +967,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn sources_sync_no_sources() {
     let tracker = tracker_for("sources_sync_no_sources");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create empty config and data directories"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -996,6 +1013,7 @@ fn sources_sync_no_sources() {
 #[test]
 fn sources_sync_dry_run() {
     let tracker = tracker_for("sources_sync_dry_run");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with one source for dry-run"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1063,6 +1081,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn sources_sync_single_source() {
     let tracker = tracker_for("sources_sync_single_source");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start(
         "setup",
@@ -1142,6 +1161,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn sources_sync_json() {
     let tracker = tracker_for("sources_sync_json");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config for sync JSON test"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1207,6 +1227,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn sources_workflow_add_list_remove() {
     let tracker = tracker_for("sources_workflow_add_list_remove");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create temp config directory"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1286,6 +1307,7 @@ fn sources_workflow_add_list_remove() {
 #[test]
 fn sources_multiple_add_list() {
     let tracker = tracker_for("sources_multiple_add_list");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create temp config directory"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1364,6 +1386,7 @@ fn sources_multiple_add_list() {
 #[test]
 fn mappings_list_empty() {
     let tracker = tracker_for("mappings_list_empty");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with source but no mappings"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1420,6 +1443,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn mappings_list_with_mappings() {
     let tracker = tracker_for("mappings_list_with_mappings");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with source and path mapping"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1480,6 +1504,7 @@ to = "/Users/me/projects"
 #[test]
 fn mappings_list_json() {
     let tracker = tracker_for("mappings_list_json");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with mapping for JSON test"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1542,6 +1567,7 @@ to = "/Users/me/projects"
 #[test]
 fn mappings_list_nonexistent_source() {
     let tracker = tracker_for("mappings_list_nonexistent_source");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with laptop source"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1597,6 +1623,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn mappings_add_basic() {
     let tracker = tracker_for("mappings_add_basic");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with laptop source"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1660,6 +1687,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn mappings_add_with_agents() {
     let tracker = tracker_for("mappings_add_with_agents");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with laptop source"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1728,6 +1756,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn mappings_add_multiple() {
     let tracker = tracker_for("mappings_add_multiple");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with laptop source"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1808,6 +1837,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn mappings_add_nonexistent_source() {
     let tracker = tracker_for("mappings_add_nonexistent_source");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with laptop source"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1872,6 +1902,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn mappings_remove_by_index() {
     let tracker = tracker_for("mappings_remove_by_index");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with two path mappings"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1945,6 +1976,7 @@ to = "/Work"
 #[test]
 fn mappings_remove_invalid_index() {
     let tracker = tracker_for("mappings_remove_invalid_index");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with one path mapping"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2004,6 +2036,7 @@ to = "/Users/me"
 #[test]
 fn mappings_remove_from_empty() {
     let tracker = tracker_for("mappings_remove_from_empty");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with no mappings"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2059,6 +2092,7 @@ paths = ["~/.claude/projects"]
 #[test]
 fn mappings_test_match() {
     let tracker = tracker_for("mappings_test_match");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with path mapping"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2121,6 +2155,7 @@ to = "/Users/me/projects"
 #[test]
 fn mappings_test_no_match() {
     let tracker = tracker_for("mappings_test_no_match");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with path mapping"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2190,6 +2225,7 @@ to = "/Users/me/projects"
 #[test]
 fn mappings_test_with_agent() {
     let tracker = tracker_for("mappings_test_with_agent");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with agent-filtered mapping"));
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2270,6 +2306,7 @@ agents = ["claude_code"]
 #[test]
 fn mappings_workflow_complete() {
     let tracker = tracker_for("mappings_workflow_complete");
+    let _trace_guard = tracker.trace_env_guard();
 
     let start = tracker.start("setup", Some("Create config with laptop source"));
     let tmp = tempfile::TempDir::new().unwrap();

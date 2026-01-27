@@ -36,6 +36,7 @@ fn make_codex_fixture(root: &Path) {
 #[test]
 fn index_then_tui_once_headless() {
     let tracker = tracker_for("index_then_tui_once_headless");
+    let _trace_guard = tracker.trace_env_guard();
 
     // Phase: setup fixtures
     let setup_start = tracker.start("setup_fixtures", Some("Creating isolated test environment"));

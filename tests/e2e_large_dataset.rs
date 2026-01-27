@@ -129,6 +129,7 @@ fn count_conversations(db_path: &Path) -> i64 {
 #[test]
 fn index_large_single_session() {
     let tracker = tracker_for("index_large_single_session");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -226,6 +227,7 @@ fn index_large_single_session() {
 #[test]
 fn index_many_conversations() {
     let tracker = tracker_for("index_many_conversations");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -298,6 +300,7 @@ fn index_many_conversations() {
 #[test]
 fn search_large_result_set() {
     let tracker = tracker_for("search_large_result_set");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -409,6 +412,7 @@ fn search_large_result_set() {
 #[test]
 fn memory_bounded_during_index() {
     let tracker = tracker_for("memory_bounded_during_index");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -480,6 +484,7 @@ fn memory_bounded_during_index() {
 #[test]
 fn incremental_index_on_large_base() {
     let tracker = tracker_for("incremental_index_on_large_base");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");

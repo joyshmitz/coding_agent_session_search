@@ -134,6 +134,7 @@ fn truncate_file(path: &Path, keep_bytes: u64) -> anyhow::Result<()> {
 #[test]
 fn test_corrupted_database_detection() {
     let tracker = tracker_for("test_corrupted_database_detection");
+    let _trace_guard = tracker.trace_env_guard();
     let temp = TempDir::new().expect("create temp dir");
     let db_path = temp.path().join("test.db");
 
@@ -192,6 +193,7 @@ fn test_corrupted_database_detection() {
 #[test]
 fn test_corrupted_database_fresh_creation() {
     let tracker = tracker_for("test_corrupted_database_fresh_creation");
+    let _trace_guard = tracker.trace_env_guard();
     let temp = TempDir::new().expect("create temp dir");
     let db_path = temp.path().join("test.db");
 
@@ -244,6 +246,7 @@ fn test_corrupted_database_fresh_creation() {
 #[test]
 fn test_corrupted_index_triggers_rebuild() {
     let tracker = tracker_for("test_corrupted_index_triggers_rebuild");
+    let _trace_guard = tracker.trace_env_guard();
     let temp = TempDir::new().expect("create temp dir");
     let data_dir = temp.path().to_path_buf();
     let db_path = data_dir.join("agent_search.db");
@@ -327,6 +330,7 @@ fn test_corrupted_index_triggers_rebuild() {
 #[test]
 fn test_export_handles_missing_source() {
     let tracker = tracker_for("test_export_handles_missing_source");
+    let _trace_guard = tracker.trace_env_guard();
     let temp = TempDir::new().expect("create temp dir");
     let source_path = temp.path().join("nonexistent.db");
     let export_path = temp.path().join("export.db");
@@ -399,6 +403,7 @@ fn test_export_handles_missing_source() {
 #[test]
 fn test_export_no_partial_on_interrupt() {
     let tracker = tracker_for("test_export_no_partial_on_interrupt");
+    let _trace_guard = tracker.trace_env_guard();
     let temp = TempDir::new().expect("create temp dir");
     let source_path = temp.path().join("source.db");
     let export_path = temp.path().join("export.db");
@@ -459,6 +464,7 @@ fn test_export_no_partial_on_interrupt() {
 #[test]
 fn test_truncated_archive_detection() {
     let tracker = tracker_for("test_truncated_archive_detection");
+    let _trace_guard = tracker.trace_env_guard();
     let temp = TempDir::new().expect("create temp dir");
     let source_path = temp.path().join("source.db");
     let archive_dir = temp.path().join("archive");
@@ -540,6 +546,7 @@ fn test_truncated_archive_detection() {
 #[test]
 fn test_wrong_password_clear_error() {
     let tracker = tracker_for("test_wrong_password_clear_error");
+    let _trace_guard = tracker.trace_env_guard();
     let temp = TempDir::new().expect("create temp dir");
     let source_path = temp.path().join("source.db");
     let archive_dir = temp.path().join("archive");
@@ -613,6 +620,7 @@ fn test_permission_denied_export_directory() {
     use std::os::unix::fs::PermissionsExt;
 
     let tracker = tracker_for("test_permission_denied_export_directory");
+    let _trace_guard = tracker.trace_env_guard();
     let temp = TempDir::new().expect("create temp dir");
     let source_path = temp.path().join("source.db");
     let readonly_dir = temp.path().join("readonly");
@@ -698,6 +706,7 @@ fn test_permission_denied_export_directory() {
 #[test]
 fn test_database_lock_timeout() {
     let tracker = tracker_for("test_database_lock_timeout");
+    let _trace_guard = tracker.trace_env_guard();
     let temp = TempDir::new().expect("create temp dir");
     let db_path = temp.path().join("test.db");
 
@@ -745,6 +754,7 @@ fn test_database_lock_timeout() {
 #[test]
 fn test_wal_recovery() {
     let tracker = tracker_for("test_wal_recovery");
+    let _trace_guard = tracker.trace_env_guard();
     let temp = TempDir::new().expect("create temp dir");
     let db_path = temp.path().join("test.db");
 
@@ -823,6 +833,7 @@ mod unit_tests {
     #[test]
     fn test_phase_tracker_creation() {
         let tracker = tracker_for("test_phase_tracker_creation");
+        let _trace_guard = tracker.trace_env_guard();
         // Should not panic regardless of E2E_LOG setting
         let start = tracker.start("test", None);
         tracker.end("test", None, start);

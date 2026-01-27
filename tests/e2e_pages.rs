@@ -113,6 +113,7 @@ fn build_full_pipeline(
     include_recovery: bool,
 ) -> PipelineArtifacts {
     let tracker = tracker_for("build_full_pipeline");
+    let _trace_guard = tracker.trace_env_guard();
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let data_dir = temp_dir.path().join("data");
     fs::create_dir_all(&data_dir).expect("Failed to create data directory");
@@ -217,6 +218,7 @@ fn build_full_pipeline(
 #[test]
 fn test_full_export_pipeline_password_only() {
     let tracker = tracker_for("test_full_export_pipeline_password_only");
+    let _trace_guard = tracker.trace_env_guard();
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_full_export_pipeline_password_only\",\"status\":\"START\"}}");
 
@@ -315,6 +317,7 @@ fn test_full_export_pipeline_dual_auth() {
 #[test]
 fn test_integrity_decrypt_roundtrip_password() {
     let tracker = tracker_for("test_integrity_decrypt_roundtrip_password");
+    let _trace_guard = tracker.trace_env_guard();
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_integrity_decrypt_roundtrip_password\",\"status\":\"START\"}}");
 
@@ -358,6 +361,7 @@ fn test_integrity_decrypt_roundtrip_password() {
 #[test]
 fn test_integrity_decrypt_roundtrip_recovery() {
     let tracker = tracker_for("test_integrity_decrypt_roundtrip_recovery");
+    let _trace_guard = tracker.trace_env_guard();
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_integrity_decrypt_roundtrip_recovery\",\"status\":\"START\"}}");
 
@@ -414,6 +418,7 @@ fn test_integrity_decrypt_roundtrip_recovery() {
 #[test]
 fn test_tampering_fails_authentication() {
     let tracker = tracker_for("test_tampering_fails_authentication");
+    let _trace_guard = tracker.trace_env_guard();
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_tampering_fails_authentication\",\"status\":\"START\"}}");
 
@@ -487,6 +492,7 @@ fn test_cli_verify_command() {
     use assert_cmd::cargo::cargo_bin_cmd;
 
     let tracker = tracker_for("test_cli_verify_command");
+    let _trace_guard = tracker.trace_env_guard();
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_cli_verify_command\",\"status\":\"START\"}}");
 
@@ -524,6 +530,7 @@ fn test_cli_verify_command() {
 #[test]
 fn test_search_in_decrypted_archive() {
     let tracker = tracker_for("test_search_in_decrypted_archive");
+    let _trace_guard = tracker.trace_env_guard();
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_search_in_decrypted_archive\",\"status\":\"START\"}}");
 

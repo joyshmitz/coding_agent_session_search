@@ -39,6 +39,7 @@ fn fixture(name: &str) -> PathBuf {
 #[cfg_attr(not(target_os = "linux"), ignore)]
 fn install_easy_mode_end_to_end() {
     let tracker = tracker_for("install_easy_mode_end_to_end");
+    let _trace_guard = tracker.trace_env_guard();
 
     // Phase: Setup isolated test environment
     let phase_start = tracker.start("setup", Some("Create isolated test environment"));

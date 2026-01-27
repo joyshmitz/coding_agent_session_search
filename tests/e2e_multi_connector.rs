@@ -100,6 +100,7 @@ fn make_amp_fixture(root: &Path) {
 )]
 fn multi_connector_pipeline() {
     let tracker = tracker_for("multi_connector_pipeline");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let xdg_data = home.join("xdg_data");
@@ -435,6 +436,7 @@ fn make_claude_session(
 #[test]
 fn multi_connector_codex_and_claude() {
     let tracker = tracker_for("multi_connector_codex_and_claude");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -576,6 +578,7 @@ fn multi_connector_codex_and_claude() {
 #[test]
 fn multi_connector_agent_filter_isolation() {
     let tracker = tracker_for("multi_connector_agent_filter_isolation");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -790,6 +793,7 @@ fn multi_connector_agent_filter_isolation() {
 #[test]
 fn multi_connector_unique_content() {
     let tracker = tracker_for("multi_connector_unique_content");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -974,6 +978,7 @@ fn multi_connector_unique_content() {
 #[test]
 fn multi_connector_aggregation() {
     let tracker = tracker_for("multi_connector_aggregation");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -1148,6 +1153,7 @@ fn multi_connector_aggregation() {
 #[test]
 fn multi_connector_incremental_index() {
     let tracker = tracker_for("multi_connector_incremental_index");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -1371,6 +1377,7 @@ fn multi_connector_incremental_index() {
 #[test]
 fn multi_connector_multiple_agent_filter() {
     let tracker = tracker_for("multi_connector_multiple_agent_filter");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -1519,6 +1526,7 @@ fn multi_connector_multiple_agent_filter() {
 #[test]
 fn multi_connector_empty_connector() {
     let tracker = tracker_for("multi_connector_empty_connector");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");

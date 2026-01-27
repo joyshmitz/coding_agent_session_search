@@ -17,6 +17,7 @@
 //! let (dir, data_dir) = setup_connector_test("claude");
 //! ```
 
+use coding_agent_search::search::model_download::compute_sha256;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -27,6 +28,13 @@ pub const FIXTURE_PREFIX: &str = "fixture-";
 
 /// Legacy prefix that should be migrated away from.
 pub const LEGACY_PREFIX: &str = "mock-";
+
+/// Real embedding model fixture directory (quantized ONNX).
+pub const EMBEDDER_MODEL_FIXTURE_DIR: &str =
+    "tests/fixtures/models/xenova-paraphrase-minilm-l3-v2-int8";
+/// Real reranker model fixture directory (quantized ONNX).
+pub const RERANKER_MODEL_FIXTURE_DIR: &str =
+    "tests/fixtures/models/xenova-ms-marco-minilm-l6-v2-int8";
 
 /// Set up a temp directory structure for connector testing.
 ///
@@ -77,6 +85,72 @@ pub fn copy_fixture(fixture_path: &str, dest_path: &Path) -> std::io::Result<Pat
 pub fn load_fixture(fixture_path: &str) -> std::io::Result<String> {
     let path = PathBuf::from("tests/fixtures").join(fixture_path);
     fs::read_to_string(path)
+}
+
+/// Absolute path to the real embedding model fixture directory.
+pub fn embedder_fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(EMBEDDER_MODEL_FIXTURE_DIR)
+}
+
+/// Absolute path to the real reranker model fixture directory.
+pub fn reranker_fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(RERANKER_MODEL_FIXTURE_DIR)
+}
+
+/// Verify SHA256 checksums for the real model fixture bundle.
+pub fn verify_model_fixture_checksums() -> Result<(), String> {
+    verify_checksums_in_dir(&embedder_fixture_dir())?;
+    verify_checksums_in_dir(&reranker_fixture_dir())?;
+    Ok(())
+}
+
+fn verify_checksums_in_dir(fixture_dir: &Path) -> Result<(), String> {
+    let checksums_path = fixture_dir.join("checksums.sha256");
+    let content = fs::read_to_string(&checksums_path).map_err(|e| {
+        format!(
+            "failed to read checksums at {}: {e}",
+            checksums_path.display()
+        )
+    })?;
+
+    let mut checked = 0;
+    for (idx, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let mut parts = line.split_whitespace();
+        let expected = parts
+            .next()
+            .ok_or_else(|| format!("checksums line {} missing hash", idx + 1))?;
+        let filename = parts
+            .next()
+            .ok_or_else(|| format!("checksums line {} missing filename", idx + 1))?;
+        if parts.next().is_some() {
+            return Err(format!(
+                "checksums line {} has unexpected extra fields",
+                idx + 1
+            ));
+        }
+
+        let path = fixture_dir.join(filename);
+        let actual = compute_sha256(&path)
+            .map_err(|e| format!("checksum failed for {}: {e}", path.display()))?;
+        if actual != expected {
+            return Err(format!(
+                "checksum mismatch for {}: expected {}, got {}",
+                filename, expected, actual
+            ));
+        }
+        checked += 1;
+    }
+
+    if checked == 0 {
+        return Err("no checksums found to verify".to_string());
+    }
+
+    Ok(())
 }
 
 /// Create a project directory within a connector test setup.
@@ -140,5 +214,10 @@ mod tests {
         assert!(project.exists());
         assert!(project.ends_with("projects/my-app"));
         drop(dir);
+    }
+
+    #[test]
+    fn test_model_fixture_checksums() {
+        verify_model_fixture_checksums().expect("model fixture checksums should match");
     }
 }
