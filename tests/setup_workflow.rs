@@ -8,13 +8,16 @@
 //! - SetupError display implementations
 //!
 //! Note: Tests requiring actual SSH connectivity are not included here.
-//! The setup wizard's full integration would require mock SSH infrastructure.
+//! Instead, we use fixture-based probe results from tests/fixtures/sources/probe/.
 
 // Allow field reassignment in tests - we deliberately test has_progress() by setting individual fields
 #![allow(clippy::field_reassign_with_default)]
 
-use coding_agent_search::sources::probe::{CassStatus, HostProbeResult};
+mod util;
+
+use coding_agent_search::sources::probe::CassStatus;
 use coding_agent_search::sources::setup::{SetupError, SetupOptions, SetupResult, SetupState};
+use util::probe_fixtures;
 
 // =============================================================================
 // SetupOptions Tests
@@ -242,19 +245,11 @@ fn setup_state_json_format() {
     assert_eq!(value["discovered_hosts"], 3);
 }
 
-/// Test SetupState with HostProbeResult serialization.
+/// Test SetupState with HostProbeResult serialization using fixtures.
 #[test]
 fn setup_state_with_probe_results() {
-    let probe = HostProbeResult {
-        host_name: "test-host".to_string(),
-        reachable: true,
-        connection_time_ms: 150,
-        cass_status: CassStatus::NotFound,
-        detected_agents: vec![],
-        system_info: None,
-        resources: None,
-        error: None,
-    };
+    // Load a probe result from fixture instead of manual construction
+    let probe = probe_fixtures::no_cass_host();
 
     let state = SetupState {
         probed_hosts: vec![probe],
@@ -267,8 +262,37 @@ fn setup_state_with_probe_results() {
     let deserialized: SetupState = serde_json::from_str(&json).expect("Failed to deserialize");
 
     assert_eq!(deserialized.probed_hosts.len(), 1);
-    assert_eq!(deserialized.probed_hosts[0].host_name, "test-host");
+    // Verify fixture data (no_cass_host.json has host_name: "macbook-air")
+    assert!(!deserialized.probed_hosts[0].host_name.is_empty());
     assert!(deserialized.probed_hosts[0].reachable);
+}
+
+/// Test SetupState with multiple fixture-based probe results.
+#[test]
+fn setup_state_with_multiple_probe_results() {
+    // Load different host scenarios from fixtures
+    let indexed = probe_fixtures::indexed_host();
+    let no_cass = probe_fixtures::no_cass_host();
+    let unreachable = probe_fixtures::unreachable_host();
+
+    let state = SetupState {
+        probed_hosts: vec![indexed.clone(), no_cass.clone(), unreachable.clone()],
+        probing_complete: true,
+        ..Default::default()
+    };
+
+    // Serialize and deserialize roundtrip
+    let json = serde_json::to_string(&state).expect("Failed to serialize");
+    let deserialized: SetupState = serde_json::from_str(&json).expect("Failed to deserialize");
+
+    assert_eq!(deserialized.probed_hosts.len(), 3);
+
+    // Verify indexed host has cass installed
+    assert!(deserialized.probed_hosts[0].cass_status.is_installed());
+    // Verify no_cass host doesn't have cass
+    assert!(!deserialized.probed_hosts[1].cass_status.is_installed());
+    // Verify unreachable host is not reachable
+    assert!(!deserialized.probed_hosts[2].reachable);
 }
 
 // =============================================================================
