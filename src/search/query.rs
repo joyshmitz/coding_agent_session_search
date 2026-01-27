@@ -7211,7 +7211,8 @@ mod tests {
         assert_eq!(exp.estimated_cost, QueryCost::Low);
         assert!(exp.parsed.terms.len() == 1);
         assert_eq!(exp.parsed.terms[0].text, "hello");
-        assert_eq!(exp.parsed.terms[0].pattern, "exact");
+        assert!(!exp.parsed.terms[0].subterms.is_empty());
+        assert_eq!(exp.parsed.terms[0].subterms[0].pattern, "exact");
     }
 
     #[test]
@@ -7220,7 +7221,8 @@ mod tests {
         assert_eq!(exp.query_type, QueryType::Wildcard);
         assert_eq!(exp.index_strategy, IndexStrategy::RegexScan);
         assert_eq!(exp.estimated_cost, QueryCost::High);
-        assert!(exp.parsed.terms[0].pattern.contains("substring"));
+        assert!(!exp.parsed.terms[0].subterms.is_empty());
+        assert!(exp.parsed.terms[0].subterms[0].pattern.contains("substring"));
         assert!(exp.warnings.iter().any(|w| w.contains("regex scan")));
     }
 
