@@ -6,12 +6,20 @@
  */
 
 import { createStrengthMeter } from './password-strength.js';
+import { StorageMode, StorageKeys, isOpfsEnabled } from './storage.js';
+import { SESSION_CONFIG } from './session.js';
 
 // State
 let config = null;
 let worker = null;
 let qrScanner = null;
 let strengthMeter = null;
+
+const SESSION_KEYS = {
+    DEK: 'cass_session_dek',
+    EXPIRY: 'cass_session_expiry',
+    UNLOCKED: 'cass_unlocked',
+};
 
 // DOM Elements
 const elements = {
@@ -547,13 +555,8 @@ function handleUnlockSuccess(data) {
         config: config,
     };
 
-    // Optionally store in sessionStorage for page refresh persistence
-    // (Less secure, but better UX)
-    try {
-        sessionStorage.setItem('cass_unlocked', 'true');
-    } catch (e) {
-        // SessionStorage may be disabled
-    }
+    // Persist session based on selected storage mode
+    persistSession(data.dek);
 
     // Transition to app
     transitionToApp();
@@ -611,6 +614,7 @@ function transitionToApp() {
         type: 'DECRYPT_DATABASE',
         dek: window.cassSession.dek,
         config: config,
+        opfsEnabled: isOpfsEnabled(),
     });
 
     // Load viewer module
@@ -623,8 +627,9 @@ function transitionToApp() {
 function lockArchive() {
     // Clear session
     window.cassSession = null;
+    clearStoredSession();
     try {
-        sessionStorage.removeItem('cass_unlocked');
+        sessionStorage.removeItem(SESSION_KEYS.UNLOCKED);
     } catch (e) {
         // Ignore
     }
@@ -647,13 +652,103 @@ function lockArchive() {
  * Check for existing session on page load
  */
 function checkExistingSession() {
+    const restored = restoreSession();
+    if (restored) {
+        transitionToApp();
+    }
+}
+
+function getPreferredSessionMode() {
     try {
-        const unlocked = sessionStorage.getItem('cass_unlocked');
-        if (unlocked === 'true' && window.cassSession?.dek) {
-            transitionToApp();
+        const savedMode = localStorage.getItem(StorageKeys.MODE);
+        if (
+            savedMode === StorageMode.MEMORY
+            || savedMode === StorageMode.SESSION
+            || savedMode === StorageMode.LOCAL
+        ) {
+            return savedMode;
         }
     } catch (e) {
-        // SessionStorage may be disabled
+        // Ignore
+    }
+    return StorageMode.MEMORY;
+}
+
+function getSessionStorage(mode) {
+    try {
+        if (mode === StorageMode.SESSION) {
+            return sessionStorage;
+        }
+        if (mode === StorageMode.LOCAL) {
+            return localStorage;
+        }
+    } catch (e) {
+        // Ignore
+    }
+    return null;
+}
+
+function persistSession(dekBase64) {
+    const mode = getPreferredSessionMode();
+    const storage = getSessionStorage(mode);
+    if (!storage) {
+        return;
+    }
+
+    const expiry = Date.now() + SESSION_CONFIG.DEFAULT_DURATION_MS;
+    try {
+        storage.setItem(SESSION_KEYS.DEK, dekBase64);
+        storage.setItem(SESSION_KEYS.EXPIRY, expiry.toString());
+        storage.setItem(SESSION_KEYS.UNLOCKED, 'true');
+    } catch (e) {
+        // Ignore write failures
+    }
+}
+
+function restoreSession() {
+    const mode = getPreferredSessionMode();
+    const storage = getSessionStorage(mode);
+    if (!storage || !config) {
+        clearStoredSession();
+        return false;
+    }
+
+    try {
+        const unlocked = storage.getItem(SESSION_KEYS.UNLOCKED);
+        const dekStored = storage.getItem(SESSION_KEYS.DEK);
+        const expiry = parseInt(storage.getItem(SESSION_KEYS.EXPIRY) || '0', 10);
+
+        if (unlocked !== 'true' || !dekStored) {
+            clearStoredSession();
+            return false;
+        }
+
+        if (Date.now() > expiry) {
+            clearStoredSession();
+            return false;
+        }
+
+        window.cassSession = {
+            dek: dekStored,
+            config: config,
+        };
+        return true;
+    } catch (e) {
+        clearStoredSession();
+        return false;
+    }
+}
+
+function clearStoredSession() {
+    const storages = [sessionStorage, localStorage];
+    for (const storage of storages) {
+        try {
+            storage.removeItem(SESSION_KEYS.DEK);
+            storage.removeItem(SESSION_KEYS.EXPIRY);
+            storage.removeItem(SESSION_KEYS.UNLOCKED);
+        } catch (e) {
+            // Ignore
+        }
     }
 }
 
