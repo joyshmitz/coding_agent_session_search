@@ -1193,6 +1193,14 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         "explain",
         "aggregate",
         "display",
+        // Subcommand-specific flags
+        "line",
+        "context",
+        "output",
+        "format",
+        "encrypt",
+        "password",
+        "theme",
     ];
 
     // Subcommand aliases for common mistakes
@@ -7877,15 +7885,8 @@ fn run_config_based_export(
     let running = Arc::new(AtomicBool::new(true));
     let stats = export_engine.execute(|_current, _total| {}, Some(running))?;
 
-    // Unencrypted bundles are not supported yet (viewer requires encrypted config)
-    if wizard_state.no_encryption {
-        anyhow::bail!(
-            "Unencrypted pages bundles are not supported yet. Use --export-only for raw DB exports."
-        );
-    }
-
     let mut recovery_secret: Option<Vec<u8>> = None;
-    let encryption_enabled = true;
+    let encryption_enabled = !wizard_state.no_encryption;
 
     if encryption_enabled {
         let password = wizard_state
@@ -7910,6 +7911,36 @@ fn run_config_based_export(
         // Write config.json
         let config_path = encrypted_dir.join("config.json");
         std::fs::write(&config_path, serde_json::to_string_pretty(&enc_config)?)?;
+    } else {
+        if !wizard_state.unencrypted_confirmed {
+            anyhow::bail!(
+                "Unencrypted export not confirmed. Set encryption.i_understand_risks: true."
+            );
+        }
+
+        let payload_dir = encrypted_dir.join("payload");
+        std::fs::create_dir_all(&payload_dir)?;
+        let dest_db = payload_dir.join("data.db");
+        std::fs::copy(&export_db_path, &dest_db)?;
+
+        let db_size = std::fs::metadata(&dest_db).map(|m| m.len()).unwrap_or(0);
+
+        let unencrypted_config = crate::pages::archive_config::UnencryptedConfig {
+            encrypted: false,
+            version: "1.0.0".to_string(),
+            payload: crate::pages::archive_config::UnencryptedPayload {
+                path: "payload/data.db".to_string(),
+                format: "sqlite".to_string(),
+                size_bytes: Some(db_size),
+            },
+            warning: Some("UNENCRYPTED - All content is publicly readable".to_string()),
+        };
+
+        let config_path = encrypted_dir.join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&unencrypted_config)?,
+        )?;
     }
 
     // Build bundle
@@ -7978,8 +8009,8 @@ fn run_config_based_export(
             },
             "encryption": {
                 "enabled": encryption_enabled,
-                "generate_recovery": wizard_state.generate_recovery,
-                "generate_qr": wizard_state.generate_qr,
+                "generate_recovery": wizard_state.generate_recovery && encryption_enabled,
+                "generate_qr": wizard_state.generate_qr && encryption_enabled,
             },
             "bundle": {
                 "total_files": bundle_result.total_files,

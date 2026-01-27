@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod archive_config;
 pub mod attachments;
 pub mod bundle;
 pub mod config_input;

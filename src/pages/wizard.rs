@@ -170,10 +170,6 @@ impl PagesWizard {
                 writeln!(term, "{}", style("Export cancelled.").yellow())?;
                 return Ok(());
             }
-
-            bail!(
-                "Unencrypted pages bundles are not supported yet. Use --export-only for raw DB exports."
-            );
         }
 
         // Step 1: Content Selection
@@ -183,7 +179,12 @@ impl PagesWizard {
         self.step_secret_scan(&mut term, &theme)?;
 
         // Step 3: Security Configuration
-        self.step_security_config(&mut term, &theme)?;
+        if !self.no_encryption_mode {
+            self.step_security_config(&mut term, &theme)?;
+        } else {
+            self.state.generate_recovery = false;
+            self.state.generate_qr = false;
+        }
 
         // Step 4: Site Configuration
         self.step_site_config(&mut term, &theme)?;
@@ -198,9 +199,11 @@ impl PagesWizard {
         }
 
         // Step 7: Safety Confirmation
-        if !self.step_confirmation(&mut term, &theme)? {
-            writeln!(term, "{}", style("Export cancelled.").yellow())?;
-            return Ok(());
+        if !self.no_encryption_mode {
+            if !self.step_confirmation(&mut term, &theme)? {
+                writeln!(term, "{}", style("Export cancelled.").yellow())?;
+                return Ok(());
+            }
         }
 
         // Step 8: Export Progress
@@ -1583,9 +1586,15 @@ impl PagesWizard {
             std::fs::copy(&export_db_path, &dest_db)?;
 
             // Write minimal config.json for unencrypted bundle
+            let db_size = std::fs::metadata(&dest_db).map(|m| m.len()).unwrap_or(0);
             let config = serde_json::json!({
                 "encrypted": false,
                 "version": "1.0.0",
+                "payload": {
+                    "path": "payload/data.db",
+                    "format": "sqlite",
+                    "size_bytes": db_size
+                },
                 "warning": "UNENCRYPTED - All content is publicly readable"
             });
             let config_path = self.state.output_dir.join("config.json");
@@ -1641,12 +1650,10 @@ impl PagesWizard {
         // Generate documentation
         let generated_docs = if let Some(ref summary) = self.state.last_summary {
             // Determine target URL based on deployment target
+            // Note: GitHub Pages URL requires the username which isn't known until deployment,
+            // so we omit the URL for that target. The actual URL will be shown after deployment.
             let target_url = match self.state.target {
-                DeployTarget::GitHubPages => self
-                    .state
-                    .repo_name
-                    .as_ref()
-                    .map(|name| format!("https://{}.github.io/{}", "YOUR_USERNAME", name)),
+                DeployTarget::GitHubPages => None, // Username unknown at this stage
                 DeployTarget::CloudflarePages => self
                     .state
                     .repo_name

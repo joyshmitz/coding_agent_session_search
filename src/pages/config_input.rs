@@ -374,13 +374,6 @@ impl PagesConfig {
                     .to_string(),
             );
         }
-        if self.encryption.no_encryption {
-            errors.push(
-                "Unencrypted pages bundles are not supported yet. Use `cass pages --export-only` \
-                 for raw DB exports without encryption."
-                    .to_string(),
-            );
-        }
 
         // Validate path_mode if specified
         if let Some(ref mode) = self.filters.path_mode {
@@ -452,6 +445,12 @@ impl PagesConfig {
         if self.bundle.include_attachments {
             warnings.push(
                 "include_attachments is enabled. This may significantly increase export size."
+                    .to_string(),
+            );
+        }
+        if self.encryption.no_encryption {
+            warnings.push(
+                "no_encryption is enabled. Content will be publicly readable without a password."
                     .to_string(),
             );
         }
@@ -684,8 +683,7 @@ mod tests {
         config.encryption.no_encryption = true;
         config.encryption.i_understand_risks = true;
         let result = config.validate();
-        assert!(!result.valid);
-        assert!(result.errors.iter().any(|e| e.contains("not supported")));
+        assert!(result.valid);
     }
 
     #[test]
