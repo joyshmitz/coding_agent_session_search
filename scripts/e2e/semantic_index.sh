@@ -18,6 +18,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# Source standard E2E logging library (emits to test-results/e2e/)
+source "${PROJECT_ROOT}/scripts/lib/e2e_log.sh"
+e2e_init "shell" "semantic_index"
+
 RUN_ID="$(date +"%Y%m%d_%H%M%S")_${RANDOM}"
 LOG_ROOT="${PROJECT_ROOT}/target/e2e-semantic"
 RUN_DIR="${LOG_ROOT}/run_${RUN_ID}"
@@ -73,6 +77,8 @@ done
 
 mkdir -p "${RUN_DIR}" "${STDOUT_DIR}" "${STDERR_DIR}" "${SANDBOX_DIR}" "${DATA_DIR}" "${CODEX_HOME}" "${HOME_DIR}"
 
+e2e_run_start
+
 log() {
     local level=$1
     shift
@@ -105,6 +111,12 @@ run_step() {
     local stdout_file="${STDOUT_DIR}/${name}.out"
     local stderr_file="${STDERR_DIR}/${name}.err"
     local exit_code
+    local step_start_ms
+    local step_end_ms
+    local step_duration_ms
+
+    step_start_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+    e2e_test_start "$name" "semantic_index"
 
     log "STEP" "${name}: $*"
 
@@ -113,10 +125,15 @@ run_step() {
     exit_code=$?
     set -e
 
+    step_end_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+    step_duration_ms=$((step_end_ms - step_start_ms))
+
     if [[ $exit_code -eq 0 ]]; then
         log "OK" "${name}"
+        e2e_test_pass "$name" "semantic_index" "$step_duration_ms"
     else
         log "FAIL" "${name} (exit ${exit_code})"
+        e2e_test_fail "$name" "semantic_index" "$step_duration_ms" 0 "exit code ${exit_code}" "CommandFailed"
         FAILED_STEPS+=("${name}")
     fi
 
@@ -149,6 +166,12 @@ run_step_optional() {
     local stdout_file="${STDOUT_DIR}/${name}.out"
     local stderr_file="${STDERR_DIR}/${name}.err"
     local exit_code
+    local step_start_ms
+    local step_end_ms
+    local step_duration_ms
+
+    step_start_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+    e2e_test_start "$name" "semantic_index"
 
     log "STEP" "${name}: $*"
 
@@ -157,10 +180,15 @@ run_step_optional() {
     exit_code=$?
     set -e
 
+    step_end_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+    step_duration_ms=$((step_end_ms - step_start_ms))
+
     if [[ $exit_code -eq 0 ]]; then
         log "OK" "${name}"
+        e2e_test_pass "$name" "semantic_index" "$step_duration_ms"
     else
         log "WARN" "${name} (exit ${exit_code})"
+        e2e_test_skip "$name" "semantic_index"
     fi
 
     local cmd_str
@@ -222,6 +250,14 @@ write_summary() {
     if [[ ${#FAILED_STEPS[@]} -gt 0 ]]; then
         status="fail"
     fi
+
+    # Emit standard E2E run_end event
+    local _total=${#STEP_JSONS[@]}
+    local _failed=${#FAILED_STEPS[@]}
+    local _passed=$((_total - _failed))
+    local _duration
+    _duration=$(e2e_duration_since_start)
+    e2e_run_end "$_total" "$_passed" "$_failed" 0 "$_duration"
 
     {
         echo "{"
