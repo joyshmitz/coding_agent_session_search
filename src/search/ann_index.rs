@@ -34,8 +34,9 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use hnsw_rs::hnsw::{Hnsw, Neighbour};
-use hnsw_rs::prelude::*;
+use hnsw_rs::hnsw::Hnsw;
+use hnsw_rs::hnswio::{HnswIo, ReloadOptions};
+use hnsw_rs::prelude::{DistDot, Neighbour};
 
 use crate::search::vector_index::{VECTOR_INDEX_DIR, VectorIndex};
 
@@ -109,26 +110,19 @@ impl HnswIndex {
             Hnsw::new(m, count, DEFAULT_MAX_LAYER, ef_construction, DistDot);
 
         // Insert all vectors with their row index as ID.
-        // We collect vectors first to enable parallel insertion.
-        let vectors_with_ids: Vec<(&[f32], usize)> = vector_index
-            .rows()
+        // Collect vectors first so they stay alive during parallel insertion.
+        let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(count);
+        for row in vector_index.rows() {
+            vectors.push(vector_index.vector_at_f32(row)?);
+        }
+        let vectors_with_ids: Vec<(&Vec<f32>, usize)> = vectors
             .iter()
             .enumerate()
-            .map(|(idx, row)| {
-                // Get the vector as f32 slice from the index.
-                // Note: This requires the vector data to be accessible.
-                let vec = vector_index
-                    .vector_at_f32(row)
-                    .expect("failed to read vector");
-                // Leak the vector to get a static lifetime (we own all data).
-                let vec_static: &'static [f32] = Box::leak(vec.into_boxed_slice());
-                (vec_static, idx)
-            })
+            .map(|(idx, vec)| (vec, idx))
             .collect();
 
-        // Use parallel insertion for better performance.
-        // The hnsw_rs API expects a single Vec of (data, id) tuples.
-        hnsw.parallel_insert_slice(&vectors_with_ids);
+        // Parallel insertion (HNSW clones vector data internally).
+        hnsw.parallel_insert(&vectors_with_ids);
 
         tracing::info!(count, "HNSW index built successfully");
 
@@ -242,12 +236,14 @@ impl HnswIndex {
         let data_file = temp_dir.join(format!("{basename}.hnsw.data"));
 
         // Read graph file.
-        let graph_data = std::fs::read(&graph_file).unwrap_or_default();
+        let graph_data =
+            std::fs::read(&graph_file).with_context(|| format!("read HNSW graph {graph_file:?}"))?;
         writer.write_all(&(graph_data.len() as u64).to_le_bytes())?;
         writer.write_all(&graph_data)?;
 
         // Read data file.
-        let data_data = std::fs::read(&data_file).unwrap_or_default();
+        let data_data =
+            std::fs::read(&data_file).with_context(|| format!("read HNSW data {data_file:?}"))?;
         writer.write_all(&(data_data.len() as u64).to_le_bytes())?;
         writer.write_all(&data_data)?;
 
@@ -313,25 +309,32 @@ impl HnswIndex {
         reader.read_exact(&mut graph_data)?;
 
         let temp_dir = tempfile::tempdir()?;
-        let graph_path = temp_dir.path().join("hnsw.graph");
+        let basename = "hnsw_graph";
+        let graph_path = temp_dir
+            .path()
+            .join(format!("{basename}.hnsw.graph"));
+        let data_path = temp_dir.path().join(format!("{basename}.hnsw.data"));
         std::fs::write(&graph_path, &graph_data)?;
 
-        // Load HNSW from temp file.
-        // Note: hnsw_rs load requires description file, which we need to handle.
-        // For now, we'll need to store the graph differently or use a different approach.
-        // TODO: Implement proper HNSW serialization using hnsw_rs API.
+        // Read data length.
+        let mut data_len_bytes = [0u8; 8];
+        reader.read_exact(&mut data_len_bytes)?;
+        let data_len = u64::from_le_bytes(data_len_bytes) as usize;
+        let mut data_data = vec![0u8; data_len];
+        reader.read_exact(&mut data_data)?;
+        std::fs::write(&data_path, &data_data)?;
 
-        // Placeholder: Create empty HNSW and log warning.
-        // This is a limitation of the current implementation.
-        tracing::warn!("HNSW load not fully implemented - rebuild index with --build-hnsw");
-
-        let hnsw: Hnsw<f32, DistDot> = Hnsw::new(
-            DEFAULT_M,
-            count.max(1),
-            DEFAULT_MAX_LAYER,
-            DEFAULT_EF_CONSTRUCTION,
-            DistDot,
-        );
+        // Load HNSW from the temporary dump files using hnsw_rs loader.
+        let mut reloader = HnswIo::new(temp_dir.path(), basename);
+        reloader.set_options(ReloadOptions::default().set_mmap(false));
+        let hnsw_loaded = reloader.load_hnsw::<f32, DistDot>()?;
+        // Safety: ReloadOptions disables mmap, so point data is owned by the HNSW structure.
+        // The lifetime is tied to HnswIo by API design, but no data is borrowed from it.
+        let hnsw: Hnsw<'static, f32, DistDot> = unsafe {
+            std::mem::transmute::<Hnsw<'_, f32, DistDot>, Hnsw<'static, f32, DistDot>>(
+                hnsw_loaded,
+            )
+        };
 
         Ok(Self {
             hnsw,

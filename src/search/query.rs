@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 
 use rusqlite::Connection;
 
+use crate::search::ann_index::{HnswIndex, DEFAULT_EF_SEARCH};
 use crate::search::canonicalize::canonicalize_for_embedding;
 use crate::search::embedder::Embedder;
 use crate::search::tantivy::fields_from_schema;
@@ -181,6 +182,7 @@ impl SearchMode {
 
 const RRF_K: f32 = 60.0;
 const HYBRID_CANDIDATE_MULTIPLIER: usize = 3;
+const ANN_CANDIDATE_MULTIPLIER: usize = 4;
 
 // ============================================================================
 // Query Explanation types (--explain flag support)
@@ -1126,6 +1128,8 @@ impl QueryCache {
 struct SemanticSearchState {
     embedder: Arc<dyn Embedder>,
     index: VectorIndex,
+    ann_index: Option<HnswIndex>,
+    ann_path: Option<PathBuf>,
     filter_maps: SemanticFilterMaps,
     roles: Option<HashSet<u8>>,
     query_cache: QueryCache,
@@ -2312,6 +2316,7 @@ impl SearchClient {
         index: VectorIndex,
         filter_maps: SemanticFilterMaps,
         roles: Option<HashSet<u8>>,
+        ann_path: Option<PathBuf>,
     ) -> Result<()> {
         let header = index.header();
         let embedder_id = header.embedder_id.clone();
@@ -2339,6 +2344,8 @@ impl SearchClient {
         *state_guard = Some(SemanticSearchState {
             embedder,
             index,
+            ann_index: None,
+            ann_path,
             filter_maps,
             roles,
             query_cache: QueryCache::new(embedder_id.as_str(), capacity),
@@ -2362,6 +2369,7 @@ impl SearchClient {
         limit: usize,
         offset: usize,
         field_mask: FieldMask,
+        approximate: bool,
     ) -> Result<Vec<SearchHit>> {
         let field_mask = effective_field_mask(field_mask);
         let canonical = canonicalize_for_embedding(query);
@@ -2390,10 +2398,88 @@ impl SearchClient {
             return Ok(Vec::new());
         }
 
-        let mut results =
+        let mut results = if approximate {
+            if state.ann_index.is_none() {
+                let ann_path = state.ann_path.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "approximate search unavailable: HNSW index missing (run 'cass index --semantic --build-hnsw')"
+                    )
+                })?;
+                if !ann_path.is_file() {
+                    bail!(
+                        "approximate search unavailable: HNSW index not found at {}",
+                        ann_path.display()
+                    );
+                }
+                let ann = HnswIndex::load(ann_path)?;
+                let header = state.index.header();
+                if ann.embedder_id() != header.embedder_id {
+                    bail!(
+                        "HNSW index embedder mismatch: expected {}, got {}",
+                        header.embedder_id,
+                        ann.embedder_id()
+                    );
+                }
+                if ann.dimension() != header.dimension as usize {
+                    bail!(
+                        "HNSW index dimension mismatch: expected {}, got {}",
+                        header.dimension,
+                        ann.dimension()
+                    );
+                }
+                state.ann_index = Some(ann);
+            }
+
+            let ann = state
+                .ann_index
+                .as_ref()
+                .ok_or_else(|| anyhow!("HNSW index failed to initialize"))?;
+            let candidate = fetch
+                .saturating_mul(ANN_CANDIDATE_MULTIPLIER)
+                .max(fetch);
+            let ef = DEFAULT_EF_SEARCH.max(candidate);
+            let ann_results = ann.search(&embedding, candidate, ef)?;
+
+            let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
+            for ann_hit in ann_results {
+                let row = match state.index.rows().get(ann_hit.row_idx) {
+                    Some(row) => row,
+                    None => continue,
+                };
+                if !semantic_filter.matches(row) {
+                    continue;
+                }
+                let score = state.index.dot_product_row(row, &embedding)?;
+                best_by_message
+                    .entry(row.message_id)
+                    .and_modify(|entry| {
+                        if score > entry.score {
+                            entry.score = score;
+                            entry.chunk_idx = row.chunk_idx;
+                        }
+                    })
+                    .or_insert(VectorSearchResult {
+                        message_id: row.message_id,
+                        chunk_idx: row.chunk_idx,
+                        score,
+                    });
+            }
+
+            let mut ann_hits: Vec<VectorSearchResult> = best_by_message.into_values().collect();
+            ann_hits.sort_by(|a, b| {
+                b.score
+                    .total_cmp(&a.score)
+                    .then_with(|| a.message_id.cmp(&b.message_id))
+            });
+            if ann_hits.len() > fetch {
+                ann_hits.truncate(fetch);
+            }
+            ann_hits
+        } else {
             state
                 .index
-                .search_top_k_collapsed(&embedding, fetch, Some(&semantic_filter))?;
+                .search_top_k_collapsed(&embedding, fetch, Some(&semantic_filter))?
+        };
         if offset > 0 {
             results = results.into_iter().skip(offset).collect();
         }
@@ -2631,6 +2717,7 @@ impl SearchClient {
         offset: usize,
         sparse_threshold: usize,
         field_mask: FieldMask,
+        approximate: bool,
     ) -> Result<SearchResult> {
         let fetch = limit.saturating_add(offset);
         if fetch == 0 {
@@ -2662,7 +2749,14 @@ impl SearchClient {
             sparse_threshold,
             field_mask,
         )?;
-        let semantic = self.search_semantic(semantic_query, filters, candidate, 0, field_mask)?;
+        let semantic = self.search_semantic(
+            semantic_query,
+            filters,
+            candidate,
+            0,
+            field_mask,
+            approximate,
+        )?;
         let fused = rrf_fuse_hits(&lexical.hits, &semantic, limit, offset);
         let suggestions = if fused.is_empty() {
             lexical.suggestions.clone()

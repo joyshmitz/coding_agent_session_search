@@ -1985,11 +1985,16 @@ fn initialize_semantic_context(
     let mut availability = setup.availability;
 
     if let Some(context) = setup.context {
+        let ann_path = Some(crate::search::ann_index::hnsw_index_path(
+            data_dir,
+            context.embedder.id(),
+        ));
         if let Err(err) = client.set_semantic_context(
             context.embedder,
             context.index,
             context.filter_maps,
             context.roles,
+            ann_path,
         ) {
             availability = SemanticAvailability::LoadFailed {
                 context: format!("set context: {err}"),
@@ -5043,11 +5048,16 @@ pub fn run_tui(
                             let setup = load_hash_semantic_context(&data_dir, &db_path);
                             let mut availability = setup.availability;
                             if let Some(context) = setup.context {
+                                let ann_path = Some(crate::search::ann_index::hnsw_index_path(
+                                    &data_dir,
+                                    context.embedder.id(),
+                                ));
                                 if let Err(err) = client.set_semantic_context(
                                     context.embedder,
                                     context.index,
                                     context.filter_maps,
                                     context.roles,
+                                    ann_path,
                                 ) {
                                     availability = SemanticAvailability::LoadFailed {
                                         context: format!("hash context: {err}"),
@@ -7470,6 +7480,7 @@ pub fn run_tui(
                                 page * page_size,
                                 SPARSE_THRESHOLD,
                                 crate::search::query::FieldMask::FULL,
+                                false,
                             ) {
                                 Ok(result) => {
                                     effective_search_mode = SearchMode::Hybrid;
@@ -7502,6 +7513,7 @@ pub fn run_tui(
                                 page_size,
                                 page * page_size,
                                 crate::search::query::FieldMask::FULL,
+                                false,
                             ) {
                                 Ok(hits) => {
                                     effective_search_mode = SearchMode::Semantic;

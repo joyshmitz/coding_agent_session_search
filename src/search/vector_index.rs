@@ -1055,6 +1055,10 @@ impl VectorIndex {
         &self.rows
     }
 
+    pub fn dot_product_row(&self, row: &VectorRow, query: &[f32]) -> Result<f32> {
+        self.dot_product_at(row.vec_offset, query)
+    }
+
     fn validate(&self) -> Result<()> {
         self.header.validate()?;
         if self.rows.len() != self.header.count as usize {

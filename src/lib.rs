@@ -2247,20 +2247,13 @@ async fn execute_cli(
                         );
                     }
 
-                    // Warn about approximate mode (ANN) - HNSW index support is experimental
-                    if approximate {
-                        eprintln!(
-                            "Warning: --approximate flag is experimental. Build HNSW index with 'cass index --semantic --build-hnsw' first."
-                        );
-                        // TODO (coding_agent_session_search-06kc): Wire up HNSW search when index is available
-                    }
-
                     // Build semantic options from new flags
                     let semantic_opts = SemanticSearchOptions {
                         model: model.clone(),
                         rerank,
                         reranker: reranker.clone(),
                         use_daemon: daemon && !no_daemon,
+                        approximate,
                     };
 
                     run_cli_search(
@@ -3660,6 +3653,8 @@ pub struct SemanticSearchOptions {
     pub reranker: Option<String>,
     /// Use daemon for warm model inference
     pub use_daemon: bool,
+    /// Use approximate nearest neighbor search when available
+    pub approximate: bool,
 }
 
 impl TimeFilter {
@@ -3844,6 +3839,7 @@ fn run_cli_search(
     mode: Option<crate::search::query::SearchMode>,
     semantic_opts: SemanticSearchOptions,
 ) -> CliResult<()> {
+    use crate::search::ann_index::hnsw_index_path;
     use crate::search::model_manager::{load_hash_semantic_context, load_semantic_context};
     use crate::search::query::{
         QueryExplanation, SearchClient, SearchClientOptions, SearchFilters, SearchMode,
@@ -3894,6 +3890,13 @@ fn run_cli_search(
 
     // Determine effective search mode (default to Lexical)
     let effective_mode = mode.unwrap_or(SearchMode::Lexical);
+    let approximate = if semantic_opts.approximate && matches!(effective_mode, SearchMode::Lexical)
+    {
+        eprintln!("Warning: --approximate has no effect in lexical mode.");
+        false
+    } else {
+        semantic_opts.approximate
+    };
 
     if matches!(effective_mode, SearchMode::Semantic | SearchMode::Hybrid) {
         use crate::search::embedder_registry::{EmbedderRegistry, HASH_EMBEDDER};
@@ -3946,7 +3949,10 @@ fn run_cli_search(
                 embedder
             };
 
-            if let Err(err) = client.set_semantic_context(embedder, index, filter_maps, roles) {
+            let ann_path = Some(hnsw_index_path(&data_dir, embedder.id()));
+            if let Err(err) =
+                client.set_semantic_context(embedder, index, filter_maps, roles, ann_path)
+            {
                 let hint = if prefer_hash {
                     "Run 'cass index --semantic --embedder hash' to rebuild the hash vector index, or use --mode lexical"
                         .to_string()
@@ -4117,12 +4123,14 @@ fn run_cli_search(
         || semantic_opts.rerank
         || semantic_opts.reranker.is_some()
         || semantic_opts.use_daemon
+        || semantic_opts.approximate
     {
         tracing::debug!(
             model = ?semantic_opts.model,
             rerank = semantic_opts.rerank,
             reranker = ?semantic_opts.reranker,
             use_daemon = semantic_opts.use_daemon,
+            approximate = semantic_opts.approximate,
             "Semantic search options configured"
         );
 
@@ -4151,10 +4159,28 @@ fn run_cli_search(
             })?,
         SearchMode::Semantic => {
             let hits = client
-                .search_semantic(query, filters.clone(), search_limit, search_offset, field_mask)
+                .search_semantic(
+                    query,
+                    filters.clone(),
+                    search_limit,
+                    search_offset,
+                    field_mask,
+                    approximate,
+                )
                 .map_err(|e| {
                     let err_str = e.to_string();
-                    if err_str.contains("unavailable") || err_str.contains("no embedder") {
+                    if err_str.contains("HNSW index") {
+                        CliError {
+                            code: 15,
+                            kind: "semantic-unavailable",
+                            message: "Approximate search unavailable (HNSW index missing)".to_string(),
+                            hint: Some(
+                                "Run 'cass index --semantic --build-hnsw' to build the ANN index, or omit --approximate"
+                                    .to_string(),
+                            ),
+                            retryable: false,
+                        }
+                    } else if err_str.contains("unavailable") || err_str.contains("no embedder") {
                         CliError {
                             code: 15,
                             kind: "semantic-unavailable",
@@ -4191,6 +4217,7 @@ fn run_cli_search(
                 search_offset,
                 sparse_threshold,
                 field_mask,
+                approximate,
             )
             .map_err(|e| {
                 let err_str = e.to_string();
@@ -9019,6 +9046,7 @@ fn run_index_with_data(
         force_rebuild.hash(&mut hasher);
         watch.hash(&mut hasher);
         semantic.hash(&mut hasher);
+        build_hnsw.hash(&mut hasher);
         embedder.hash(&mut hasher);
         format!("{}", data_dir.display()).hash(&mut hasher);
         hasher.finish()
