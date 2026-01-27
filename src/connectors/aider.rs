@@ -45,7 +45,7 @@ impl AiderConnector {
         let mut msg_idx = 0;
 
         for line in content.lines() {
-            if line.trim().starts_with("> ") {
+            if line.trim().starts_with('>') {
                 // Only push previous content if switching from non-user role
                 if current_role != "user" && !current_content.trim().is_empty() {
                     messages.push(NormalizedMessage {
@@ -61,7 +61,18 @@ impl AiderConnector {
                     current_content.clear();
                 }
                 current_role = "user";
-                current_content.push_str(line.trim_start_matches("> ").trim());
+
+                // Only strip the prefix "> " (or ">") but preserve other whitespace
+                // to maintain indentation (e.g. for code blocks in prompts).
+                let trimmed_start = line.trim_start();
+                let content = if trimmed_start.starts_with("> ") {
+                    &trimmed_start[2..]
+                } else if trimmed_start.starts_with('>') {
+                    &trimmed_start[1..]
+                } else {
+                    trimmed_start
+                };
+                current_content.push_str(content.trim_end());
                 current_content.push('\n');
             } else {
                 if current_role == "user" && !line.trim().is_empty() && !line.starts_with('>') {

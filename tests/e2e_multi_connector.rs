@@ -9,81 +9,13 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
 
 mod util;
 use util::EnvGuard;
-use util::e2e_log::{E2eError, E2eLogger, E2eTestInfo};
+use util::e2e_log::{E2ePerformanceMetrics, PhaseTracker};
 
-fn e2e_logging_enabled() -> bool {
-    std::env::var("E2E_LOG").is_ok()
-}
-
-fn run_logged_test<F>(name: &str, suite: &str, file: &str, line: u32, test_fn: F)
-where
-    F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
-{
-    let logger = if e2e_logging_enabled() {
-        E2eLogger::new("rust").ok()
-    } else {
-        None
-    };
-
-    let test_info = E2eTestInfo::new(name, suite, file, line);
-    if let Some(ref lg) = logger {
-        let _ = lg.test_start(&test_info);
-    }
-
-    let start = Instant::now();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test_fn));
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    let (is_pass, error_msg, panic_type) = match &result {
-        Ok(Ok(())) => (true, None, None),
-        Ok(Err(e)) => (false, Some(e.to_string()), None),
-        Err(panic) => {
-            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "Unknown panic".to_string()
-            };
-            (false, Some(msg), Some("Panic"))
-        }
-    };
-
-    if let Some(ref lg) = logger {
-        if is_pass {
-            let _ = lg.test_pass(&test_info, duration_ms, None);
-        } else {
-            let _ = lg.test_fail(
-                &test_info,
-                duration_ms,
-                None,
-                E2eError {
-                    message: error_msg.unwrap_or_default(),
-                    error_type: panic_type.map(String::from),
-                    stack: None,
-                    context: None,
-                },
-            );
-        }
-        let _ = lg.flush();
-    }
-
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
-}
-
-macro_rules! logged_test {
-    ($name:expr, $suite:expr, $body:block) => {{
-        run_logged_test($name, $suite, file!(), line!(), || {
-            $body
-            Ok(())
-        })
-    }};
+fn tracker_for(test_name: &str) -> PhaseTracker {
+    PhaseTracker::new("e2e_multi_connector", test_name)
 }
 
 fn make_codex_fixture(root: &Path) {
@@ -154,182 +86,178 @@ fn make_amp_fixture(root: &Path) {
     ignore = "Linux-specific test (XDG_DATA_HOME paths)"
 )]
 fn multi_connector_pipeline() {
-    logged_test!("multi_connector_pipeline", "e2e_multi_connector", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = tmp.path();
-        let xdg_data = home.join("xdg_data");
-        let _config_home = home.join(".config"); // For Cline on Linux usually, but our fixture path was mostly hardcoded in the connector? 
-        // ClineConnector uses:
-        // dirs::home_dir().join(".config/Code/User/globalStorage/saoudrizwan.claude-dev")
-        // So we just need HOME set correctly.
+    let tracker = tracker_for("multi_connector_pipeline");
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    let xdg_data = home.join("xdg_data");
 
-        fs::create_dir_all(&xdg_data).unwrap();
+    fs::create_dir_all(&xdg_data).unwrap();
 
-        // Override env vars
-        let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
-        let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg_data.to_string_lossy());
+    // Override env vars
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+    let _guard_xdg = EnvGuard::set("XDG_DATA_HOME", xdg_data.to_string_lossy());
 
-        // Setup fixture roots
-        let dot_codex = home.join(".codex");
-        let dot_claude = home.join(".claude");
-        let dot_gemini = home.join(".gemini");
-        let dot_config = home.join(".config"); // for cline
-        // Amp uses XDG_DATA_HOME/amp which is xdg_data/amp
+    // Setup fixture roots
+    let dot_codex = home.join(".codex");
+    let dot_claude = home.join(".claude");
+    let dot_gemini = home.join(".gemini");
+    let dot_config = home.join(".config");
 
-        // Specific env overrides for connectors that support it
-        let _guard_codex = EnvGuard::set("CODEX_HOME", dot_codex.to_string_lossy());
-        let _guard_gemini = EnvGuard::set("GEMINI_HOME", dot_gemini.to_string_lossy());
+    let _guard_codex = EnvGuard::set("CODEX_HOME", dot_codex.to_string_lossy());
+    let _guard_gemini = EnvGuard::set("GEMINI_HOME", dot_gemini.to_string_lossy());
 
-        // Create fixtures
-        make_codex_fixture(&dot_codex);
-        make_claude_fixture(&dot_claude);
-        make_gemini_fixture(&dot_gemini);
-        make_cline_fixture(&dot_config); // Will be under .config/Code/... which matches Linux path relative to HOME
-        make_amp_fixture(&xdg_data);
+    // Phase: Create fixtures for all connectors
+    let phase_start = tracker.start("setup_fixtures", Some("Create fixtures for 5 connectors"));
+    make_codex_fixture(&dot_codex);
+    make_claude_fixture(&dot_claude);
+    make_gemini_fixture(&dot_gemini);
+    make_cline_fixture(&dot_config);
+    make_amp_fixture(&xdg_data);
+    let data_dir = home.join("cass_data");
+    fs::create_dir_all(&data_dir).unwrap();
+    tracker.end("setup_fixtures", Some("Create fixtures for 5 connectors"), phase_start);
 
-        let data_dir = home.join("cass_data");
-        fs::create_dir_all(&data_dir).unwrap();
+    // Phase: Full index
+    let phase_start = tracker.start("run_index_full", Some("Run full index across all connectors"));
+    cargo_bin_cmd!("cass")
+        .arg("index")
+        .arg("--full")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .env("HOME", home.to_string_lossy().as_ref())
+        .env("XDG_DATA_HOME", xdg_data.to_string_lossy().as_ref())
+        .env("CODEX_HOME", dot_codex.to_string_lossy().as_ref())
+        .env("GEMINI_HOME", dot_gemini.to_string_lossy().as_ref())
+        .assert()
+        .success();
+    tracker.end("run_index_full", Some("Run full index across all connectors"), phase_start);
 
-        // 1. INDEX
-        cargo_bin_cmd!("cass")
-            .arg("index")
-            .arg("--full")
-            .arg("--data-dir")
-            .arg(&data_dir)
-            .env("HOME", home.to_string_lossy().as_ref())
-            .env("XDG_DATA_HOME", xdg_data.to_string_lossy().as_ref())
-            .env("CODEX_HOME", dot_codex.to_string_lossy().as_ref())
-            .env("GEMINI_HOME", dot_gemini.to_string_lossy().as_ref())
-            .assert()
-            .success();
+    // Phase: Search all connectors
+    let phase_start = tracker.start("search_all_connectors", Some("Search and verify all 5 connector results"));
+    let search_start = std::time::Instant::now();
+    let output = cargo_bin_cmd!("cass")
+        .arg("search")
+        .arg("user")
+        .arg("--robot")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .env("HOME", home.to_string_lossy().as_ref())
+        .env("XDG_DATA_HOME", xdg_data.to_string_lossy().as_ref())
+        .output()
+        .expect("failed to execute search");
+    let search_duration = search_start.elapsed().as_millis() as u64;
 
-        // 2. SEARCH (Robot mode)
-        // Search for "user" - should find hits from all 5 agents
-        let output = cargo_bin_cmd!("cass")
-            .arg("search")
-            .arg("user")
-            .arg("--robot")
-            .arg("--data-dir")
-            .arg(&data_dir)
-            .env("HOME", home.to_string_lossy().as_ref())
-            .env("XDG_DATA_HOME", xdg_data.to_string_lossy().as_ref())
-            .output()
-            .expect("failed to execute search");
+    assert!(output.status.success());
+    let json_out: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid json");
+    let hits = json_out
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .expect("hits array");
 
-        assert!(output.status.success());
-        let json_out: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("valid json");
+    let found_agents: std::collections::HashSet<&str> = hits
+        .iter()
+        .filter_map(|h| h.get("agent").and_then(|s| s.as_str()))
+        .collect();
 
-        // Check results
-        let hits = json_out
-            .get("hits")
-            .and_then(|h| h.as_array())
-            .expect("hits array");
+    assert!(found_agents.contains("codex"), "Missing codex hit. Found: {found_agents:?}");
+    assert!(found_agents.contains("claude_code"), "Missing claude hit. Found: {found_agents:?}");
+    assert!(found_agents.contains("gemini"), "Missing gemini hit. Found: {found_agents:?}");
+    assert!(found_agents.contains("cline"), "Missing cline hit. Found: {found_agents:?}");
+    assert!(found_agents.contains("amp"), "Missing amp hit. Found: {found_agents:?}");
+    tracker.end("search_all_connectors", Some("Search and verify all 5 connector results"), phase_start);
 
-        let found_agents: std::collections::HashSet<&str> = hits
-            .iter()
-            .filter_map(|h| h.get("agent").and_then(|s| s.as_str()))
-            .collect();
+    tracker.metrics(
+        "search_all_connectors",
+        &E2ePerformanceMetrics::new()
+            .with_duration(search_duration)
+            .with_custom("hit_count", serde_json::json!(hits.len()))
+            .with_custom("agent_count", serde_json::json!(found_agents.len())),
+    );
 
-        assert!(
-            found_agents.contains("codex"),
-            "Missing codex hit. Found: {found_agents:?}"
-        );
-        assert!(
-            found_agents.contains("claude_code"),
-            "Missing claude hit. Found: {found_agents:?}"
-        );
-        assert!(
-            found_agents.contains("gemini"),
-            "Missing gemini hit. Found: {found_agents:?}"
-        );
-        assert!(
-            found_agents.contains("cline"),
-            "Missing cline hit. Found: {found_agents:?}"
-        );
-        assert!(
-            found_agents.contains("amp"),
-            "Missing amp hit. Found: {found_agents:?}"
-        );
+    // Phase: Incremental index test
+    let phase_start = tracker.start("incremental_index", Some("Add new file and verify incremental index"));
+    std::thread::sleep(std::time::Duration::from_secs(2));
 
-        // 3. INCREMENTAL TEST
-        // Ensure mtime is strictly greater than last scan
-        std::thread::sleep(std::time::Duration::from_secs(2));
+    let sessions = dot_codex.join("sessions/2025/11/22");
+    fs::create_dir_all(&sessions).unwrap();
 
-        // Add a new file to Codex with CURRENT timestamp so message isn't filtered out
-        let sessions = dot_codex.join("sessions/2025/11/22");
-        fs::create_dir_all(&sessions).unwrap();
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
 
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+    let content = format!(
+        r#"{{"type": "event_msg", "timestamp": {now_ts}, "payload": {{"type": "user_message", "message": "codex_new"}}}}"#
+    );
+    fs::write(sessions.join("rollout-2.jsonl"), content).unwrap();
 
-        // Use modern envelope format
-        let content = format!(
-            r#"{{"type": "event_msg", "timestamp": {now_ts}, "payload": {{"type": "user_message", "message": "codex_new"}}}}"#
-        );
-        fs::write(sessions.join("rollout-2.jsonl"), content).unwrap();
+    cargo_bin_cmd!("cass")
+        .arg("index")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .env("HOME", home.to_string_lossy().as_ref())
+        .env("XDG_DATA_HOME", xdg_data.to_string_lossy().as_ref())
+        .env("CODEX_HOME", dot_codex.to_string_lossy().as_ref())
+        .env("GEMINI_HOME", dot_gemini.to_string_lossy().as_ref())
+        .assert()
+        .success();
 
-        // Index again (incremental) - must pass same env vars as full index
-        cargo_bin_cmd!("cass")
-            .arg("index")
-            .arg("--data-dir")
-            .arg(&data_dir)
-            .env("HOME", home.to_string_lossy().as_ref())
-            .env("XDG_DATA_HOME", xdg_data.to_string_lossy().as_ref())
-            .env("CODEX_HOME", dot_codex.to_string_lossy().as_ref())
-            .env("GEMINI_HOME", dot_gemini.to_string_lossy().as_ref())
-            .assert()
-            .success();
+    let output_inc = cargo_bin_cmd!("cass")
+        .arg("search")
+        .arg("codex_new")
+        .arg("--robot")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .output()
+        .expect("failed to execute search");
 
-        // Search for "codex_new"
-        let output_inc = cargo_bin_cmd!("cass")
-            .arg("search")
-            .arg("codex_new")
-            .arg("--robot")
-            .arg("--data-dir")
-            .arg(&data_dir)
-            .output()
-            .expect("failed to execute search");
+    let json_inc: serde_json::Value =
+        serde_json::from_slice(&output_inc.stdout).expect("valid json");
+    let hits_inc = json_inc
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .expect("hits array");
+    assert!(!hits_inc.is_empty(), "Incremental index failed to pick up new file");
+    assert_eq!(hits_inc[0]["content"], "codex_new");
+    tracker.end("incremental_index", Some("Add new file and verify incremental index"), phase_start);
 
-        let json_inc: serde_json::Value =
-            serde_json::from_slice(&output_inc.stdout).expect("valid json");
-        let hits_inc = json_inc
-            .get("hits")
-            .and_then(|h| h.as_array())
-            .expect("hits array");
-        assert!(
-            !hits_inc.is_empty(),
-            "Incremental index failed to pick up new file"
-        );
-        assert_eq!(hits_inc[0]["content"], "codex_new");
+    // Phase: Agent filter test
+    let phase_start = tracker.start("test_agent_filter", Some("Verify agent filter isolates results"));
+    let filter_start = std::time::Instant::now();
+    let output_filter = cargo_bin_cmd!("cass")
+        .arg("search")
+        .arg("user")
+        .arg("--agent")
+        .arg("claude_code")
+        .arg("--robot")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .output()
+        .expect("failed to execute search");
+    let filter_duration = filter_start.elapsed().as_millis() as u64;
 
-        // 4. FILTER TEST
-        // Filter by agent=claude_code
-        let output_filter = cargo_bin_cmd!("cass")
-            .arg("search")
-            .arg("user")
-            .arg("--agent")
-            .arg("claude_code")
-            .arg("--robot")
-            .arg("--data-dir")
-            .arg(&data_dir)
-            .output()
-            .expect("failed to execute search");
+    let json_filter: serde_json::Value =
+        serde_json::from_slice(&output_filter.stdout).expect("valid json");
+    let hits_filter = json_filter
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .expect("hits array");
 
-        let json_filter: serde_json::Value =
-            serde_json::from_slice(&output_filter.stdout).expect("valid json");
-        let hits_filter = json_filter
-            .get("hits")
-            .and_then(|h| h.as_array())
-            .expect("hits array");
+    for hit in hits_filter {
+        assert_eq!(hit["agent"], "claude_code");
+    }
+    assert!(!hits_filter.is_empty());
+    tracker.end("test_agent_filter", Some("Verify agent filter isolates results"), phase_start);
 
-        for hit in hits_filter {
-            assert_eq!(hit["agent"], "claude_code");
-        }
-        assert!(!hits_filter.is_empty());
-    });
+    tracker.metrics(
+        "agent_filter_query",
+        &E2ePerformanceMetrics::new()
+            .with_duration(filter_duration)
+            .with_custom("filtered_hit_count", serde_json::json!(hits_filter.len())),
+    );
+
+    tracker.complete();
 }
 
 // ============================================================================
