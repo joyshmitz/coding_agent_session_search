@@ -461,4 +461,146 @@ mod tests {
             PathBuf::from("/data/vector_index/hnsw-fastembed.chsw")
         );
     }
+
+    #[test]
+    fn test_hnsw_path_with_embedder_id() {
+        // Test different embedder IDs
+        let path1 = hnsw_index_path(Path::new("/test"), "bge-small");
+        assert_eq!(
+            path1,
+            PathBuf::from("/test/vector_index/hnsw-bge-small.chsw")
+        );
+
+        let path2 = hnsw_index_path(Path::new("."), "openai-ada-002");
+        assert_eq!(
+            path2,
+            PathBuf::from("./vector_index/hnsw-openai-ada-002.chsw")
+        );
+    }
+
+    #[test]
+    fn test_estimate_recall_k_zero() {
+        // When k=0, recall should be 1.0 (no vectors needed, trivially satisfied)
+        assert_eq!(estimate_recall(100, 0), 1.0);
+        assert_eq!(estimate_recall(0, 0), 1.0);
+    }
+
+    #[test]
+    fn test_estimate_recall_ef_less_than_k() {
+        // When ef < k, recall is low
+        let recall = estimate_recall(5, 10);
+        assert!(recall < 0.85, "recall should be < 0.85 when ef < k, got {recall}");
+        assert!(recall > 0.5, "recall should be > 0.5, got {recall}");
+    }
+
+    #[test]
+    fn test_estimate_recall_ef_equals_k() {
+        // ef = k gives approximately 85% recall
+        let recall = estimate_recall(10, 10);
+        assert!(
+            (recall - 0.85).abs() < 0.01,
+            "recall should be ~0.85 when ef=k, got {recall}"
+        );
+    }
+
+    #[test]
+    fn test_estimate_recall_ef_double_k() {
+        // ef = 2k gives approximately 90% recall
+        let recall = estimate_recall(20, 10);
+        assert!(
+            recall >= 0.88 && recall <= 0.92,
+            "recall should be ~0.90 when ef=2k, got {recall}"
+        );
+    }
+
+    #[test]
+    fn test_estimate_recall_ef_quadruple_k() {
+        // ef = 4k gives approximately 95% recall
+        let recall = estimate_recall(40, 10);
+        assert!(
+            recall >= 0.93 && recall <= 0.97,
+            "recall should be ~0.95 when ef=4k, got {recall}"
+        );
+    }
+
+    #[test]
+    fn test_estimate_recall_high_ef() {
+        // High ef/k ratio should approach 1.0 but never exceed it
+        let recall = estimate_recall(1000, 10);
+        assert!(recall <= 1.0, "recall should not exceed 1.0, got {recall}");
+        assert!(recall >= 0.98, "recall should be >= 0.98 with high ef, got {recall}");
+    }
+
+    #[test]
+    fn test_estimate_recall_default_params() {
+        // With default params: ef=100, typical k=10
+        let recall = estimate_recall(DEFAULT_EF_SEARCH, 10);
+        assert!(
+            recall >= 0.95,
+            "default params should give >= 95% recall, got {recall}"
+        );
+    }
+
+    #[test]
+    fn test_ann_search_stats_default() {
+        let stats = AnnSearchStats::default();
+        assert_eq!(stats.index_size, 0);
+        assert_eq!(stats.dimension, 0);
+        assert_eq!(stats.ef_search, 0);
+        assert_eq!(stats.k_requested, 0);
+        assert_eq!(stats.k_returned, 0);
+        assert_eq!(stats.search_time_us, 0);
+        assert!(!stats.is_approximate);
+    }
+
+    #[test]
+    fn test_ann_search_stats_serialization() {
+        let stats = AnnSearchStats {
+            index_size: 1000,
+            dimension: 384,
+            ef_search: 100,
+            k_requested: 10,
+            k_returned: 10,
+            search_time_us: 1234,
+            estimated_recall: 0.95,
+            is_approximate: true,
+        };
+
+        let json = serde_json::to_string(&stats).expect("serialize stats");
+        assert!(json.contains("\"index_size\":1000"));
+        assert!(json.contains("\"dimension\":384"));
+        assert!(json.contains("\"ef_search\":100"));
+        assert!(json.contains("\"estimated_recall\":0.95"));
+        assert!(json.contains("\"is_approximate\":true"));
+    }
+
+    #[test]
+    fn test_ann_search_result_fields() {
+        let result = AnnSearchResult {
+            row_idx: 42,
+            distance: 0.123,
+        };
+        assert_eq!(result.row_idx, 42);
+        assert!((result.distance - 0.123).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_hnsw_magic_and_version() {
+        assert_eq!(&HNSW_MAGIC, b"CHSW");
+        assert_eq!(HNSW_VERSION, 1);
+    }
+
+    #[test]
+    fn test_default_parameters() {
+        assert_eq!(DEFAULT_M, 16);
+        assert_eq!(DEFAULT_EF_CONSTRUCTION, 200);
+        assert_eq!(DEFAULT_EF_SEARCH, 100);
+        assert_eq!(DEFAULT_MAX_LAYER, 16);
+    }
+
+    #[test]
+    fn test_hnsw_index_exists_returns_false_for_nonexistent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        assert!(!HnswIndex::exists(temp_dir.path(), "nonexistent"));
+    }
 }

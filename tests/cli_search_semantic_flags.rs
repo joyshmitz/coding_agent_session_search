@@ -143,3 +143,68 @@ fn search_combines_rerank_and_daemon_flags() {
 
 // Note: The mutual exclusivity of --daemon and --no-daemon is enforced at runtime,
 // not at parse time, so we test that separately via integration tests.
+
+#[test]
+fn search_parses_approximate_flag() {
+    let cli = Cli::try_parse_from(["cass", "search", "query", "--approximate"])
+        .expect("parse search flags");
+
+    match cli.command {
+        Some(Commands::Search { approximate, .. }) => {
+            assert!(approximate, "approximate flag should be true");
+        }
+        other => panic!("expected search command, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_approximate_default_is_false() {
+    let cli = Cli::try_parse_from(["cass", "search", "query"]).expect("parse search flags");
+
+    match cli.command {
+        Some(Commands::Search { approximate, .. }) => {
+            assert!(!approximate, "approximate should be false by default");
+        }
+        other => panic!("expected search command, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_combines_mode_semantic_and_approximate() {
+    let cli = Cli::try_parse_from([
+        "cass",
+        "search",
+        "query",
+        "--mode",
+        "semantic",
+        "--approximate",
+    ])
+    .expect("parse search flags");
+
+    match cli.command {
+        Some(Commands::Search {
+            mode, approximate, ..
+        }) => {
+            assert!(mode.is_some());
+            assert!(approximate, "approximate should be true");
+        }
+        other => panic!("expected search command, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_combines_mode_hybrid_and_approximate() {
+    let cli =
+        Cli::try_parse_from(["cass", "search", "query", "--mode", "hybrid", "--approximate"])
+            .expect("parse search flags");
+
+    match cli.command {
+        Some(Commands::Search {
+            mode, approximate, ..
+        }) => {
+            assert!(mode.is_some());
+            assert!(approximate, "approximate should be true");
+        }
+        other => panic!("expected search command, got {other:?}"),
+    }
+}

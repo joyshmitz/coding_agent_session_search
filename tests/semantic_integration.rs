@@ -1042,6 +1042,251 @@ fn test_models_install_from_file_missing_file() {
 // Introspect Tests
 // =============================================================================
 
+// =============================================================================
+// Approximate (ANN/HNSW) Search Tests
+// =============================================================================
+
+/// Test: --approximate flag is accepted in semantic mode
+/// (May fail if HNSW index not built, but should parse correctly)
+#[test]
+fn test_approximate_flag_semantic_mode() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let data_dir = home.join("cass_data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+    let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
+
+    // Create fixture
+    make_codex_session(
+        &codex_home,
+        "2024/11/20",
+        "rollout-approximate.jsonl",
+        "approximate_test_content",
+        1732118400000,
+    );
+
+    // Index first (without --build-hnsw, so HNSW won't be available)
+    cargo_bin_cmd!("cass")
+        .args(["index", "--full", "--data-dir"])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .assert()
+        .success();
+
+    // Search with --approximate in semantic mode
+    // Should fail gracefully if HNSW not available or model not installed
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "search",
+            "approximate_test_content",
+            "--mode",
+            "semantic",
+            "--approximate",
+            "--robot",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("HOME", home)
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .output()
+        .expect("search with --approximate");
+
+    // Either succeeds or fails with appropriate error message
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Should fail due to missing HNSW index or semantic unavailable
+        assert!(
+            stderr.contains("HNSW")
+                || stderr.contains("approximate")
+                || stderr.contains("semantic-unavailable")
+                || stderr.contains("Semantic search not available"),
+            "Error should mention HNSW or approximate search. Got: {}",
+            stderr
+        );
+    }
+}
+
+/// Test: --approximate flag in lexical mode produces warning
+#[test]
+fn test_approximate_flag_lexical_mode_warning() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let data_dir = home.join("cass_data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+    let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
+
+    // Create fixture
+    make_codex_session(
+        &codex_home,
+        "2024/11/20",
+        "rollout-approx-lexical.jsonl",
+        "approx_lexical_test_content",
+        1732118400000,
+    );
+
+    // Index first
+    cargo_bin_cmd!("cass")
+        .args(["index", "--full", "--data-dir"])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .assert()
+        .success();
+
+    // Search with --approximate in lexical mode
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "search",
+            "approx_lexical_test_content",
+            "--mode",
+            "lexical",
+            "--approximate",
+            "--robot",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("HOME", home)
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .output()
+        .expect("search with --approximate in lexical mode");
+
+    // Should succeed (lexical search works) but may warn about --approximate
+    assert!(
+        output.status.success(),
+        "Lexical search should succeed even with --approximate"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Should produce warning about --approximate having no effect in lexical mode
+    assert!(
+        stderr.contains("no effect") || stderr.contains("lexical") || stderr.is_empty(),
+        "Should warn about --approximate having no effect in lexical mode or be empty. Got: {}",
+        stderr
+    );
+}
+
+/// Test: --approximate flag in hybrid mode is accepted
+#[test]
+fn test_approximate_flag_hybrid_mode() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let data_dir = home.join("cass_data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+    let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
+
+    // Create fixture
+    make_codex_session(
+        &codex_home,
+        "2024/11/20",
+        "rollout-approx-hybrid.jsonl",
+        "approx_hybrid_test_content",
+        1732118400000,
+    );
+
+    // Index first
+    cargo_bin_cmd!("cass")
+        .args(["index", "--full", "--data-dir"])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .assert()
+        .success();
+
+    // Search with --approximate in hybrid mode
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "search",
+            "approx_hybrid_test_content",
+            "--mode",
+            "hybrid",
+            "--approximate",
+            "--robot",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("HOME", home)
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .output()
+        .expect("search with --approximate in hybrid mode");
+
+    // Either succeeds or fails with appropriate error message (HNSW not built)
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("HNSW")
+                || stderr.contains("approximate")
+                || stderr.contains("semantic-unavailable")
+                || stderr.contains("Hybrid search not available"),
+            "Error should mention HNSW or semantic unavailability. Got: {}",
+            stderr
+        );
+    }
+}
+
+/// Test: index --build-hnsw flag is accepted
+#[test]
+fn test_index_build_hnsw_flag() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let data_dir = home.join("cass_data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+    let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
+
+    // Create fixture
+    make_codex_session(
+        &codex_home,
+        "2024/11/20",
+        "rollout-build-hnsw.jsonl",
+        "build_hnsw_test_content",
+        1732118400000,
+    );
+
+    // Index with --build-hnsw (requires --semantic to be meaningful)
+    // This tests that the flag is parsed correctly
+    let output = cargo_bin_cmd!("cass")
+        .args(["index", "--full", "--semantic", "--build-hnsw", "--data-dir"])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .output()
+        .expect("index with --build-hnsw");
+
+    // May fail if semantic model not installed, but should parse the flag
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Should fail due to model not installed, not due to flag parsing
+        assert!(
+            stderr.contains("model")
+                || stderr.contains("semantic")
+                || stderr.contains("embedder")
+                || stderr.contains("install"),
+            "If indexing fails, should be due to model unavailability, not flag parsing. Got: {}",
+            stderr
+        );
+    }
+}
+
+// =============================================================================
+// Introspect Tests
+// =============================================================================
+
 /// Test: introspect includes models command in schema
 #[test]
 fn test_introspect_includes_models_command() {
