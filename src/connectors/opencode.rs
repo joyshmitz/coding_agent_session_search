@@ -6,7 +6,6 @@
 //!   - message/{sessionID}/{messageID}.json  - Message metadata
 //!   - part/{messageID}/{partID}.json        - Actual message content
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -368,26 +367,6 @@ fn load_messages(session_msg_dir: &PathBuf, part_dir: &PathBuf) -> Result<Vec<No
         .map(|e| e.path().to_path_buf())
         .collect();
 
-    // Build a map of message_id -> parts
-    let mut parts_by_msg: HashMap<String, Vec<PartInfo>> = HashMap::new();
-
-    // Scan part directory for all parts
-    if part_dir.exists() {
-        for entry in WalkDir::new(part_dir).into_iter().flatten() {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().map(|e| e == "json").unwrap_or(false)
-                && let Ok(content) = fs::read_to_string(path)
-                && let Ok(part) = serde_json::from_str::<PartInfo>(&content)
-                && let Some(msg_id) = &part.message_id
-            {
-                parts_by_msg.entry(msg_id.clone()).or_default().push(part);
-            }
-        }
-    }
-
     for msg_file in msg_files {
         let content = match fs::read_to_string(&msg_file) {
             Ok(c) => c,
@@ -399,8 +378,28 @@ fn load_messages(session_msg_dir: &PathBuf, part_dir: &PathBuf) -> Result<Vec<No
             Err(_) => continue,
         };
 
-        // Get parts for this message
-        let mut parts = parts_by_msg.get(&msg_info.id).cloned().unwrap_or_default();
+        // Load parts for this specific message
+        let mut parts = Vec::new();
+        let msg_part_dir = part_dir.join(&msg_info.id);
+
+        if msg_part_dir.exists() {
+            for entry in WalkDir::new(&msg_part_dir)
+                .max_depth(1)
+                .into_iter()
+                .flatten()
+            {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false)
+                    && let Ok(content) = fs::read_to_string(path)
+                    && let Ok(part) = serde_json::from_str::<PartInfo>(&content)
+                {
+                    parts.push(part);
+                }
+            }
+        }
         sort_parts_for_message(&mut parts);
 
         // Assemble message content from parts
