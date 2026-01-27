@@ -282,7 +282,25 @@ main() {
 
     # Rust E2E tests
     if [[ "$RUN_RUST" -eq 1 ]]; then
-        mapfile -t rust_tests < <(git ls-files 'tests/e2e_*.rs' | sed 's#^tests/##; s#\\.rs$##')
+        rust_tests=()
+        if command -v git >/dev/null 2>&1; then
+            while IFS= read -r t; do
+                [[ -z "$t" ]] && continue
+                t="${t#./}"
+                t="${t#tests/}"
+                t="${t%.rs}"
+                rust_tests+=("$t")
+            done < <(git ls-files 'tests/e2e_*.rs')
+        fi
+        if [[ "${#rust_tests[@]}" -eq 0 ]] && [[ -d "${PROJECT_ROOT}/tests" ]]; then
+            while IFS= read -r t; do
+                [[ -z "$t" ]] && continue
+                t="${t#./}"
+                t="${t#tests/}"
+                t="${t%.rs}"
+                rust_tests+=("$t")
+            done < <(find "${PROJECT_ROOT}/tests" -maxdepth 1 -name 'e2e_*.rs' -print)
+        fi
         if [[ "${#rust_tests[@]}" -eq 0 ]]; then
             echo -e "${YELLOW}No Rust e2e_* tests found, skipping${NC}"
             skip_suite "rust_e2e"
