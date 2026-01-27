@@ -14,7 +14,7 @@ test.describe('Mobile Performance', () => {
     console.log(`[device-context] viewport: ${viewport?.width}x${viewport?.height}, mobile: ${isMobile}`);
   });
 
-  test('page loads within acceptable time', async ({ page, exportPath }) => {
+  test('page loads within acceptable time', async ({ page, exportPath }, testInfo) => {
     test.skip(!exportPath, 'Export path not available');
 
     const startTime = Date.now();
@@ -26,6 +26,15 @@ test.describe('Mobile Performance', () => {
 
     // Log performance metrics
     console.log(`[perf] Page load time: ${loadTime}ms`);
+
+    // Report metrics via attachment for JSONL reporter
+    await testInfo.attach('metrics', {
+      body: Buffer.from(JSON.stringify({
+        name: 'page_load_mobile',
+        duration_ms: loadTime,
+      })),
+      contentType: 'application/json',
+    });
 
     // Should load within 5 seconds even on mobile
     expect(loadTime).toBeLessThan(5000);
@@ -80,7 +89,7 @@ test.describe('Mobile Performance', () => {
     expect(scrollMetrics.avg).toBeLessThan(50);
   });
 
-  test('memory usage stays reasonable', async ({ page, exportPath }) => {
+  test('memory usage stays reasonable', async ({ page, exportPath }, testInfo) => {
     test.skip(!exportPath, 'Export path not available');
 
     await gotoFile(page, exportPath);
@@ -113,6 +122,17 @@ test.describe('Mobile Performance', () => {
       const growthMB = memoryGrowth / (1024 * 1024);
 
       console.log(`[perf] Memory growth: ${growthMB.toFixed(2)}MB`);
+
+      // Report metrics via attachment for JSONL reporter
+      await testInfo.attach('metrics', {
+        body: Buffer.from(JSON.stringify({
+          name: 'memory_usage_mobile',
+          memory_bytes: memoryGrowth,
+          initial_memory_bytes: initialMemory,
+          final_memory_bytes: finalMemory,
+        })),
+        contentType: 'application/json',
+      });
 
       // Should not grow more than 50MB during normal use
       expect(growthMB).toBeLessThan(50);
@@ -169,7 +189,7 @@ test.describe('Mobile Performance', () => {
 });
 
 test.describe('Decryption Performance', () => {
-  test('encrypted page decrypts within acceptable time', async ({ page, encryptedExportPath, password }) => {
+  test('encrypted page decrypts within acceptable time', async ({ page, encryptedExportPath, password }, testInfo) => {
     test.skip(!encryptedExportPath, 'Encrypted export path not available');
 
     await gotoFile(page, encryptedExportPath);
@@ -193,6 +213,15 @@ test.describe('Decryption Performance', () => {
     const decryptTime = Date.now() - startDecrypt;
 
     console.log(`[perf] Decryption time: ${decryptTime}ms`);
+
+    // Report metrics via attachment for JSONL reporter
+    await testInfo.attach('metrics', {
+      body: Buffer.from(JSON.stringify({
+        name: 'decryption_mobile',
+        duration_ms: decryptTime,
+      })),
+      contentType: 'application/json',
+    });
 
     // Decryption should complete within 10 seconds on mobile
     expect(decryptTime).toBeLessThan(10000);
@@ -266,7 +295,7 @@ test.describe('Decryption Performance', () => {
 });
 
 test.describe('CPU Throttled Performance', () => {
-  test('page functions with 4x CPU slowdown', async ({ page, exportPath }) => {
+  test('page functions with 4x CPU slowdown', async ({ page, exportPath }, testInfo) => {
     test.skip(!exportPath, 'Export path not available');
 
     // Enable CPU throttling via CDP (Chrome DevTools Protocol)
@@ -281,6 +310,16 @@ test.describe('CPU Throttled Performance', () => {
 
       const loadTime = Date.now() - startTime;
       console.log(`[perf] Load time with 4x CPU throttling: ${loadTime}ms`);
+
+      // Report metrics via attachment for JSONL reporter
+      await testInfo.attach('metrics', {
+        body: Buffer.from(JSON.stringify({
+          name: 'page_load_throttled_4x',
+          duration_ms: loadTime,
+          cpu_throttle_rate: 4,
+        })),
+        contentType: 'application/json',
+      });
 
       // Should still load within 15 seconds
       expect(loadTime).toBeLessThan(15000);

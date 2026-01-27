@@ -59,6 +59,13 @@ interface E2eError {
   stack?: string;
 }
 
+interface E2eMetrics {
+  duration_ms?: number;
+  memory_bytes?: number;
+  throughput_per_sec?: number;
+  [key: string]: number | string | boolean | undefined;
+}
+
 interface E2eRunSummary {
   total: number;
   passed: number;
@@ -74,6 +81,7 @@ type E2eEvent =
   | { event: 'test_end'; test: E2eTestInfo; result: E2eTestResult; error?: E2eError }
   | { event: 'phase_start'; test: E2eTestInfo; phase: E2ePhase }
   | { event: 'phase_end'; test: E2eTestInfo; phase: E2ePhase; duration_ms: number }
+  | { event: 'metrics'; test: E2eTestInfo; name: string; metrics: E2eMetrics }
   | { event: 'run_end'; summary: E2eRunSummary; exit_code: number };
 
 function nowIso(): string {
@@ -255,6 +263,58 @@ class JsonlReporter implements Reporter {
       result: testResult,
       ...(error && { error }),
     });
+
+    // Emit metrics events from attachments
+    this.emitMetricsFromAttachments(test, result);
+  }
+
+  private emitMetricsFromAttachments(test: TestCase, result: TestResult): void {
+    for (const attachment of result.attachments) {
+      if (attachment.name !== 'metrics' || !attachment.body) {
+        continue;
+      }
+
+      let raw: string | null = null;
+      if (typeof attachment.body === 'string') {
+        raw = attachment.body;
+      } else if (Buffer.isBuffer(attachment.body)) {
+        raw = attachment.body.toString('utf-8');
+      }
+
+      if (!raw) {
+        continue;
+      }
+
+      try {
+        const metricsData = JSON.parse(raw) as Record<string, unknown>;
+        const metricName =
+          typeof metricsData.name === 'string' && metricsData.name.length > 0
+            ? metricsData.name
+            : test.title;
+
+        let metrics: E2eMetrics = {};
+        if (
+          metricsData.metrics &&
+          typeof metricsData.metrics === 'object' &&
+          !Array.isArray(metricsData.metrics) &&
+          metricsData.metrics !== null
+        ) {
+          metrics = metricsData.metrics as E2eMetrics;
+        } else {
+          const { name, metrics: _metrics, ...rest } = metricsData;
+          metrics = rest as E2eMetrics;
+        }
+
+        this.writeEvent({
+          event: 'metrics',
+          test: this.getTestInfo(test),
+          name: metricName,
+          metrics,
+        });
+      } catch {
+        // Silently ignore malformed metrics attachments
+      }
+    }
   }
 
   onStepBegin(test: TestCase, _result: TestResult, step: TestStep): void {
