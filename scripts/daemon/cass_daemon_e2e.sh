@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # scripts/daemon/cass_daemon_e2e.sh
-# End-to-end daemon fallback flow with structured logs and JSON report.
+# End-to-end daemon fallback flow with structured JSONL logs and JSON report.
+#
+# This script tests the daemon warm embedder/reranker fallback behavior:
+# - Validates fallback to local embedder/reranker paths when daemon unavailable
+# - Emits structured JSONL logs with phase markers per E2E logging schema
+# - Exercises daemon unavailable scenario (no daemon server running)
+#
+# Output files:
+# - target/e2e-daemon/run_<id>/daemon_e2e.jsonl  (JSONL events)
+# - target/e2e-daemon/run_<id>/report.json       (Final report)
+# - target/e2e-daemon/run_<id>/run.log           (Human-readable log)
 
 set -euo pipefail
 
@@ -11,6 +21,7 @@ RUN_ID="$(date +"%Y%m%d_%H%M%S")_${RANDOM}"
 LOG_ROOT="${PROJECT_ROOT}/target/e2e-daemon"
 RUN_DIR="${LOG_ROOT}/run_${RUN_ID}"
 LOG_FILE="${RUN_DIR}/run.log"
+JSONL_FILE="${RUN_DIR}/daemon_e2e.jsonl"
 REPORT_JSON="${RUN_DIR}/report.json"
 STDOUT_DIR="${RUN_DIR}/stdout"
 STDERR_DIR="${RUN_DIR}/stderr"
@@ -24,6 +35,7 @@ HOME_DIR="${SANDBOX_DIR}/home"
 NO_BUILD=0
 EMBEDDER="hash"
 QUERY="binary search"
+HEALTH_CHECK=1
 
 DAEMON_RETRY_MAX="${CASS_DAEMON_RETRY_MAX:-2}"
 DAEMON_BACKOFF_BASE_MS="${CASS_DAEMON_BACKOFF_BASE_MS:-200}"
@@ -50,8 +62,18 @@ while [[ $# -gt 0 ]]; do
                 shift
             fi
             ;;
+        --skip-health-check)
+            HEALTH_CHECK=0
+            shift
+            ;;
         --help|-h)
-            echo "Usage: $0 [--no-build] [--embedder hash|fastembed] [--query \"text\"]"
+            echo "Usage: $0 [--no-build] [--embedder hash|fastembed] [--query \"text\"] [--skip-health-check]"
+            echo ""
+            echo "Options:"
+            echo "  --no-build           Skip cargo build step"
+            echo "  --embedder MODEL     Use 'hash' or 'fastembed' embedder (default: hash)"
+            echo "  --query TEXT         Search query to test (default: 'binary search')"
+            echo "  --skip-health-check  Skip health/status validation"
             exit 0
             ;;
         *)
@@ -72,6 +94,13 @@ else
 fi
 
 mkdir -p "${RUN_DIR}" "${STDOUT_DIR}" "${STDERR_DIR}" "${SANDBOX_DIR}" "${DATA_DIR}" "${CODEX_HOME}" "${HOME_DIR}"
+
+# Track test results for summary
+TESTS_TOTAL=0
+TESTS_PASSED=0
+TESTS_FAILED=0
+RUN_START_MS=0
+declare -A PHASE_STARTS
 
 log() {
     local level=$1
@@ -107,6 +136,94 @@ PY
     echo "$(( $(date +%s) * 1000 ))"
 }
 
+iso_timestamp() {
+    date -u +"%Y-%m-%dT%H:%M:%S.000Z"
+}
+
+# =============================================================================
+# JSONL Event Emission Functions (E2E logging schema)
+# =============================================================================
+
+emit_jsonl() {
+    echo "$1" >> "${JSONL_FILE}"
+}
+
+emit_run_start() {
+    RUN_START_MS=$(now_ms)
+    local git_sha git_branch os arch cass_version ci
+    git_sha=$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    git_branch=$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    arch=$(uname -m)
+    cass_version="${CASS_VERSION:-0.1.61}"
+    ci="${CI:-false}"
+
+    emit_jsonl "{\"ts\":\"$(iso_timestamp)\",\"event\":\"run_start\",\"run_id\":\"${RUN_ID}\",\"runner\":\"bash\",\"env\":{\"git_sha\":\"${git_sha}\",\"git_branch\":\"${git_branch}\",\"os\":\"${os}\",\"arch\":\"${arch}\",\"cass_version\":\"${cass_version}\",\"ci\":${ci}}}"
+}
+
+emit_phase_start() {
+    local phase_name=$1
+    local description=${2:-""}
+    PHASE_STARTS["${phase_name}"]=$(now_ms)
+    emit_jsonl "{\"ts\":\"$(iso_timestamp)\",\"event\":\"phase_start\",\"run_id\":\"${RUN_ID}\",\"runner\":\"bash\",\"phase\":{\"name\":\"${phase_name}\",\"description\":\"$(json_escape "$description")\"}}"
+}
+
+emit_phase_end() {
+    local phase_name=$1
+    local start_ms=${PHASE_STARTS["${phase_name}"]:-$(now_ms)}
+    local end_ms=$(now_ms)
+    local duration_ms=$((end_ms - start_ms))
+    emit_jsonl "{\"ts\":\"$(iso_timestamp)\",\"event\":\"phase_end\",\"run_id\":\"${RUN_ID}\",\"runner\":\"bash\",\"phase\":{\"name\":\"${phase_name}\"},\"duration_ms\":${duration_ms}}"
+}
+
+emit_test_start() {
+    local test_name=$1
+    local suite=${2:-"daemon"}
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    emit_jsonl "{\"ts\":\"$(iso_timestamp)\",\"event\":\"test_start\",\"run_id\":\"${RUN_ID}\",\"runner\":\"bash\",\"test\":{\"name\":\"${test_name}\",\"suite\":\"${suite}\",\"file\":\"scripts/daemon/cass_daemon_e2e.sh\"}}"
+}
+
+emit_test_end() {
+    local test_name=$1
+    local status=$2
+    local duration_ms=$3
+    local error=${4:-""}
+
+    if [[ "${status}" == "pass" ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        emit_jsonl "{\"ts\":\"$(iso_timestamp)\",\"event\":\"test_end\",\"run_id\":\"${RUN_ID}\",\"runner\":\"bash\",\"test\":{\"name\":\"${test_name}\"},\"result\":{\"status\":\"pass\",\"duration_ms\":${duration_ms}}}"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        emit_jsonl "{\"ts\":\"$(iso_timestamp)\",\"event\":\"test_end\",\"run_id\":\"${RUN_ID}\",\"runner\":\"bash\",\"test\":{\"name\":\"${test_name}\"},\"result\":{\"status\":\"fail\",\"duration_ms\":${duration_ms},\"error\":\"$(json_escape "$error")\"}}"
+    fi
+}
+
+emit_metrics() {
+    local name=$1
+    shift
+    # Remaining args are key=value pairs
+    local metrics="{"
+    local first=1
+    for kv in "$@"; do
+        local key="${kv%%=*}"
+        local value="${kv#*=}"
+        if [[ $first -eq 0 ]]; then
+            metrics+=","
+        fi
+        metrics+="\"${key}\":${value}"
+        first=0
+    done
+    metrics+="}"
+    emit_jsonl "{\"ts\":\"$(iso_timestamp)\",\"event\":\"metrics\",\"run_id\":\"${RUN_ID}\",\"runner\":\"bash\",\"name\":\"${name}\",\"metrics\":${metrics}}"
+}
+
+emit_run_end() {
+    local exit_code=$1
+    local end_ms=$(now_ms)
+    local duration_ms=$((end_ms - RUN_START_MS))
+    emit_jsonl "{\"ts\":\"$(iso_timestamp)\",\"event\":\"run_end\",\"run_id\":\"${RUN_ID}\",\"runner\":\"bash\",\"summary\":{\"total\":${TESTS_TOTAL},\"passed\":${TESTS_PASSED},\"failed\":${TESTS_FAILED},\"skipped\":0,\"duration_ms\":${duration_ms}},\"exit_code\":${exit_code}}"
+}
+
 run_step() {
     local name=$1
     shift
@@ -128,10 +245,24 @@ run_step() {
     return "$exit_code"
 }
 
-log "INFO" "Run directory: ${RUN_DIR}"
+# =============================================================================
+# Main E2E Flow
+# =============================================================================
 
+log "INFO" "Run directory: ${RUN_DIR}"
+log "INFO" "JSONL output: ${JSONL_FILE}"
+
+# Initialize JSONL file
+: > "${JSONL_FILE}"
+
+# Emit run_start event
+emit_run_start
+
+# Phase: Build (if enabled)
 if [[ $NO_BUILD -eq 0 ]]; then
+    emit_phase_start "build" "Compile cass binary"
     run_step "build" bash -c "cd \"$PROJECT_ROOT\" && CARGO_TARGET_DIR=\"$BUILD_TARGET_DIR\" cargo build"
+    emit_phase_end "build"
 fi
 
 if [[ -z "${CASS_BIN:-}" ]]; then
@@ -144,11 +275,14 @@ fi
 
 if [[ ! -x "$CASS_BIN" ]]; then
     log "FAIL" "cass binary not found or not executable at ${CASS_BIN}"
+    emit_run_end 1
     exit 1
 fi
 
 run_step "version" "$CASS_BIN" --version
 
+# Phase: Setup sandbox data
+emit_phase_start "setup_sandbox" "Prepare test fixtures"
 log "INFO" "Preparing sandbox data"
 mkdir -p "${CODEX_HOME}/sessions/2024/11/20"
 cat > "${CODEX_HOME}/sessions/2024/11/20/daemon-e2e.jsonl" <<'JSONL'
@@ -157,6 +291,7 @@ cat > "${CODEX_HOME}/sessions/2024/11/20/daemon-e2e.jsonl" <<'JSONL'
 {"type":"event_msg","timestamp":1732118402000,"payload":{"type":"user_message","message":"Add retry logic with jittered backoff"}}
 {"type":"response_item","timestamp":1732118403000,"payload":{"role":"assistant","content":"Retries should include randomized jitter to avoid thundering herd."}}
 JSONL
+emit_phase_end "setup_sandbox"
 
 export CASS_DATA_DIR="${DATA_DIR}"
 export CODEX_HOME="${CODEX_HOME}"
@@ -165,8 +300,45 @@ export CODING_AGENT_SEARCH_NO_UPDATE_PROMPT=1
 
 pushd "${SANDBOX_DIR}" >/dev/null
 
+# Phase: Indexing
+emit_phase_start "indexing" "Build full-text and semantic indexes"
 run_step "index_full" "$CASS_BIN" index --full --data-dir "${DATA_DIR}"
 run_step "index_semantic" "$CASS_BIN" index --semantic --embedder "${EMBEDDER}" --data-dir "${DATA_DIR}"
+emit_phase_end "indexing"
+
+# =============================================================================
+# Test: Health/Status Check
+# =============================================================================
+if [[ $HEALTH_CHECK -eq 1 ]]; then
+    emit_phase_start "health_check" "Validate cass status command"
+    emit_test_start "test_status_command"
+    TEST_START_MS=$(now_ms)
+
+    STATUS_STDOUT="${STDOUT_DIR}/status.out"
+    STATUS_STDERR="${STDERR_DIR}/status.err"
+    set +e
+    "$CASS_BIN" status --json --data-dir "${DATA_DIR}" >"${STATUS_STDOUT}" 2>"${STATUS_STDERR}"
+    STATUS_EXIT=$?
+    set -e
+
+    TEST_END_MS=$(now_ms)
+    TEST_DURATION_MS=$((TEST_END_MS - TEST_START_MS))
+
+    if [[ $STATUS_EXIT -eq 0 ]]; then
+        log "OK" "status command"
+        emit_test_end "test_status_command" "pass" "$TEST_DURATION_MS"
+    else
+        log "FAIL" "status command (exit ${STATUS_EXIT})"
+        emit_test_end "test_status_command" "fail" "$TEST_DURATION_MS" "status command returned exit code ${STATUS_EXIT}"
+    fi
+    emit_phase_end "health_check"
+fi
+
+# =============================================================================
+# Test: Daemon Fallback (unavailable scenario)
+# =============================================================================
+emit_phase_start "daemon_fallback_test" "Test daemon fallback when unavailable"
+emit_test_start "test_daemon_fallback_unavailable"
 
 SEARCH_MODEL_FLAGS=()
 if [[ "${EMBEDDER}" == "hash" ]]; then
@@ -191,10 +363,13 @@ SEARCH_LATENCY_MS=$((SEARCH_END_MS - SEARCH_START_MS))
 
 if [[ $SEARCH_EXIT -eq 0 ]]; then
     log "OK" "search"
+    emit_test_end "test_daemon_fallback_unavailable" "pass" "$SEARCH_LATENCY_MS"
 else
     log "FAIL" "search (exit ${SEARCH_EXIT})"
+    emit_test_end "test_daemon_fallback_unavailable" "fail" "$SEARCH_LATENCY_MS" "search with daemon flag returned exit code ${SEARCH_EXIT}"
 fi
 
+# Parse fallback metrics from stderr
 ATTEMPT_EMBED=$(grep -c "Attempting daemon embed$" "${SEARCH_STDERR}" || true)
 ATTEMPT_RERANK=$(grep -c "Attempting daemon rerank$" "${SEARCH_STDERR}" || true)
 FALLBACK_EMBED=$(grep -c "Daemon embed failed; using local embedder" "${SEARCH_STDERR}" || true)
@@ -233,10 +408,31 @@ log "INFO" "Fallback reasons - unavailable=${FALLBACK_UNAVAILABLE} timeout=${FAL
 log "INFO" "Backoff samples: ${BACKOFF_COUNT} (min=${BACKOFF_MIN}ms max=${BACKOFF_MAX}ms avg=${BACKOFF_AVG}ms)"
 log "INFO" "Search latency: ${SEARCH_LATENCY_MS}ms"
 
+# Emit metrics event for daemon fallback
+emit_metrics "daemon_fallback" \
+    "latency_ms=${SEARCH_LATENCY_MS}" \
+    "embed_attempts=${ATTEMPT_EMBED}" \
+    "rerank_attempts=${ATTEMPT_RERANK}" \
+    "embed_fallbacks=${FALLBACK_EMBED}" \
+    "rerank_fallbacks=${FALLBACK_RERANK}" \
+    "fallback_unavailable=${FALLBACK_UNAVAILABLE}" \
+    "fallback_timeout=${FALLBACK_TIMEOUT}" \
+    "fallback_overloaded=${FALLBACK_OVERLOADED}" \
+    "fallback_error=${FALLBACK_ERROR}" \
+    "backoff_count=${BACKOFF_COUNT}"
+
+emit_phase_end "daemon_fallback_test"
+
 cat > "${REPORT_JSON}" <<EOF
 {
   "run_id": "$(json_escape "$RUN_ID")",
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "runner": "bash",
+  "test_summary": {
+    "total": ${TESTS_TOTAL},
+    "passed": ${TESTS_PASSED},
+    "failed": ${TESTS_FAILED}
+  },
   "query": "$(json_escape "$QUERY")",
   "embedder": "$(json_escape "$EMBEDDER")",
   "daemon_enabled": true,
@@ -271,6 +467,7 @@ cat > "${REPORT_JSON}" <<EOF
     "avg": ${BACKOFF_AVG}
   },
   "artifacts": {
+    "jsonl": "$(json_escape "$JSONL_FILE")",
     "stdout": "$(json_escape "$SEARCH_STDOUT")",
     "stderr": "$(json_escape "$SEARCH_STDERR")",
     "log": "$(json_escape "$LOG_FILE")"
@@ -280,10 +477,23 @@ EOF
 
 popd >/dev/null
 
-if [[ $SEARCH_EXIT -ne 0 ]]; then
-    log "FAIL" "Daemon E2E run failed. Report: ${REPORT_JSON}"
-    exit "$SEARCH_EXIT"
+# Determine final exit code
+FINAL_EXIT=0
+if [[ $TESTS_FAILED -gt 0 ]]; then
+    FINAL_EXIT=1
 fi
 
-log "OK" "Daemon E2E run completed. Report: ${REPORT_JSON}"
+# Emit run_end event
+emit_run_end "$FINAL_EXIT"
+
+if [[ $FINAL_EXIT -ne 0 ]]; then
+    log "FAIL" "Daemon E2E run failed (${TESTS_FAILED}/${TESTS_TOTAL} tests failed)"
+    log "INFO" "JSONL log: ${JSONL_FILE}"
+    log "INFO" "Report: ${REPORT_JSON}"
+    exit "$FINAL_EXIT"
+fi
+
+log "OK" "Daemon E2E run completed (${TESTS_PASSED}/${TESTS_TOTAL} tests passed)"
+log "INFO" "JSONL log: ${JSONL_FILE}"
+log "INFO" "Report: ${REPORT_JSON}"
 exit 0
