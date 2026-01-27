@@ -128,6 +128,7 @@ impl Default for WizardState {
             no_encryption: false,
             unencrypted_confirmed: false,
             include_attachments: false,
+            final_site_dir: None,
         }
     }
 }
