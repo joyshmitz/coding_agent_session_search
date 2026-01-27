@@ -18,6 +18,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# Source standard E2E logging library (emits to test-results/e2e/)
+source "${PROJECT_ROOT}/scripts/lib/e2e_log.sh"
+e2e_init "shell" "cli_flow"
+
 RUN_ID="$(date +"%Y%m%d_%H%M%S")_${RANDOM}"
 LOG_ROOT="${PROJECT_ROOT}/target/e2e-cli"
 RUN_DIR="${LOG_ROOT}/run_${RUN_ID}"
@@ -57,6 +61,8 @@ for arg in "$@"; do
 done
 
 mkdir -p "${RUN_DIR}" "${STDOUT_DIR}" "${STDERR_DIR}"
+
+e2e_run_start
 
 # Colors (only when stdout is a terminal)
 if [[ -t 1 ]]; then
@@ -149,6 +155,7 @@ run_step() {
     local exit_code
 
     start_ms=$(now_ms)
+    e2e_test_start "$name" "cli_flow"
 
     log PHASE "STEP: ${name}"
     log INFO "Command: $*"
@@ -163,8 +170,10 @@ run_step() {
 
     if [[ $exit_code -eq 0 ]]; then
         log INFO "${name}: OK (${duration_ms}ms)"
+        e2e_test_pass "$name" "cli_flow" "$duration_ms"
     else
         log ERROR "${name}: FAIL (${exit_code}) in ${duration_ms}ms"
+        e2e_test_fail "$name" "cli_flow" "$duration_ms" 0 "exit code ${exit_code}" "CommandFailed"
         FAILED_STEPS+=("${name}")
         if [[ $FAIL_FAST -eq 1 ]]; then
             log ERROR "Fail-fast enabled; aborting after ${name}."
@@ -281,6 +290,12 @@ write_summary() {
     end_ms=$(now_ms)
     end_iso=$(now_iso)
     duration_ms=$((end_ms - START_MS))
+
+    # Emit standard E2E run_end event
+    local _total=${#STEP_JSONS[@]}
+    local _failed=${#FAILED_STEPS[@]}
+    local _passed=$((_total - _failed))
+    e2e_run_end "$_total" "$_passed" "$_failed" 0 "$duration_ms"
 
     if [[ ${#FAILED_STEPS[@]} -eq 0 ]]; then
         status="ok"

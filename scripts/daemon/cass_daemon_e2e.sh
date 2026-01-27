@@ -17,6 +17,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# Source standard E2E logging library (emits to test-results/e2e/)
+source "${PROJECT_ROOT}/scripts/lib/e2e_log.sh"
+e2e_init "shell" "daemon_fallback"
+
 RUN_ID="$(date +"%Y%m%d_%H%M%S")_${RANDOM}"
 LOG_ROOT="${PROJECT_ROOT}/target/e2e-daemon"
 RUN_DIR="${LOG_ROOT}/run_${RUN_ID}"
@@ -257,12 +261,15 @@ log "INFO" "JSONL output: ${JSONL_FILE}"
 
 # Emit run_start event
 emit_run_start
+e2e_run_start
 
 # Phase: Build (if enabled)
 if [[ $NO_BUILD -eq 0 ]]; then
     emit_phase_start "build" "Compile cass binary"
+    e2e_phase_start "build" "Compile cass binary"
     run_step "build" bash -c "cd \"$PROJECT_ROOT\" && CARGO_TARGET_DIR=\"$BUILD_TARGET_DIR\" cargo build"
     emit_phase_end "build"
+    e2e_phase_end "build" 0
 fi
 
 if [[ -z "${CASS_BIN:-}" ]]; then
@@ -276,6 +283,7 @@ fi
 if [[ ! -x "$CASS_BIN" ]]; then
     log "FAIL" "cass binary not found or not executable at ${CASS_BIN}"
     emit_run_end 1
+    e2e_run_end 0 0 0 0 "$(e2e_duration_since_start)"
     exit 1
 fi
 
@@ -283,6 +291,7 @@ run_step "version" "$CASS_BIN" --version
 
 # Phase: Setup sandbox data
 emit_phase_start "setup_sandbox" "Prepare test fixtures"
+e2e_phase_start "setup_sandbox" "Prepare test fixtures"
 log "INFO" "Preparing sandbox data"
 mkdir -p "${CODEX_HOME}/sessions/2024/11/20"
 cat > "${CODEX_HOME}/sessions/2024/11/20/rollout-daemon-e2e.jsonl" <<'JSONL'
@@ -292,6 +301,7 @@ cat > "${CODEX_HOME}/sessions/2024/11/20/rollout-daemon-e2e.jsonl" <<'JSONL'
 {"type":"response_item","timestamp":1732118403000,"payload":{"role":"assistant","content":"Retries should include randomized jitter to avoid thundering herd."}}
 JSONL
 emit_phase_end "setup_sandbox"
+e2e_phase_end "setup_sandbox" 0
 
 export CASS_DATA_DIR="${DATA_DIR}"
 export CODEX_HOME="${CODEX_HOME}"
@@ -302,16 +312,20 @@ pushd "${SANDBOX_DIR}" >/dev/null
 
 # Phase: Indexing
 emit_phase_start "indexing" "Build full-text and semantic indexes"
+e2e_phase_start "indexing" "Build full-text and semantic indexes"
 run_step "index_full" "$CASS_BIN" index --full --data-dir "${DATA_DIR}"
 run_step "index_semantic" "$CASS_BIN" index --semantic --full --embedder "${EMBEDDER}" --data-dir "${DATA_DIR}"
 emit_phase_end "indexing"
+e2e_phase_end "indexing" 0
 
 # =============================================================================
 # Test: Health/Status Check
 # =============================================================================
 if [[ $HEALTH_CHECK -eq 1 ]]; then
     emit_phase_start "health_check" "Validate cass status command"
+    e2e_phase_start "health_check" "Validate cass status command"
     emit_test_start "test_status_command"
+    e2e_test_start "test_status_command" "daemon"
     TEST_START_MS=$(now_ms)
 
     STATUS_STDOUT="${STDOUT_DIR}/status.out"
@@ -327,18 +341,23 @@ if [[ $HEALTH_CHECK -eq 1 ]]; then
     if [[ $STATUS_EXIT -eq 0 ]]; then
         log "OK" "status command"
         emit_test_end "test_status_command" "pass" "$TEST_DURATION_MS"
+        e2e_test_pass "test_status_command" "daemon" "$TEST_DURATION_MS"
     else
         log "FAIL" "status command (exit ${STATUS_EXIT})"
         emit_test_end "test_status_command" "fail" "$TEST_DURATION_MS" "status command returned exit code ${STATUS_EXIT}"
+        e2e_test_fail "test_status_command" "daemon" "$TEST_DURATION_MS" 0 "exit code ${STATUS_EXIT}" "CommandFailed"
     fi
     emit_phase_end "health_check"
+    e2e_phase_end "health_check" "$TEST_DURATION_MS"
 fi
 
 # =============================================================================
 # Test: Daemon Fallback (unavailable scenario)
 # =============================================================================
 emit_phase_start "daemon_fallback_test" "Test daemon fallback when unavailable"
+e2e_phase_start "daemon_fallback_test" "Test daemon fallback when unavailable"
 emit_test_start "test_daemon_fallback_unavailable"
+e2e_test_start "test_daemon_fallback_unavailable" "daemon"
 
 SEARCH_MODEL_FLAGS=()
 if [[ "${EMBEDDER}" == "hash" ]]; then
@@ -364,9 +383,11 @@ SEARCH_LATENCY_MS=$((SEARCH_END_MS - SEARCH_START_MS))
 if [[ $SEARCH_EXIT -eq 0 ]]; then
     log "OK" "search"
     emit_test_end "test_daemon_fallback_unavailable" "pass" "$SEARCH_LATENCY_MS"
+    e2e_test_pass "test_daemon_fallback_unavailable" "daemon" "$SEARCH_LATENCY_MS"
 else
     log "FAIL" "search (exit ${SEARCH_EXIT})"
     emit_test_end "test_daemon_fallback_unavailable" "fail" "$SEARCH_LATENCY_MS" "search with daemon flag returned exit code ${SEARCH_EXIT}"
+    e2e_test_fail "test_daemon_fallback_unavailable" "daemon" "$SEARCH_LATENCY_MS" 0 "exit code ${SEARCH_EXIT}" "CommandFailed"
 fi
 
 # Parse fallback metrics from stderr
@@ -422,6 +443,7 @@ emit_metrics "daemon_fallback" \
     "backoff_count=${BACKOFF_COUNT}"
 
 emit_phase_end "daemon_fallback_test"
+e2e_phase_end "daemon_fallback_test" "$SEARCH_LATENCY_MS"
 
 cat > "${REPORT_JSON}" <<EOF
 {
@@ -485,6 +507,8 @@ fi
 
 # Emit run_end event
 emit_run_end "$FINAL_EXIT"
+E2E_TOTAL_DURATION=$(e2e_duration_since_start)
+e2e_run_end "$TESTS_TOTAL" "$TESTS_PASSED" "$TESTS_FAILED" 0 "$E2E_TOTAL_DURATION"
 
 if [[ $FINAL_EXIT -ne 0 ]]; then
     log "FAIL" "Daemon E2E run failed (${TESTS_FAILED}/${TESTS_TOTAL} tests failed)"

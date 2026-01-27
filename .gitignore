@@ -66,5 +66,3 @@ __pycache__/
 # Performance optimization artifacts
 perf/
 
-# Incomplete/stub scripts
-scripts/e2e/sources_sync.sh
