@@ -30,6 +30,14 @@ const KEYS = {
     LAST_UNLOCK: `${STORAGE_PREFIX}last-unlock`,
     DB_CACHED: `${STORAGE_PREFIX}db-cached`,
 };
+const OPFS_DB_FILES = [
+    'cass-archive.sqlite3',
+    'cass-archive.sqlite3-wal',
+    'cass-archive.sqlite3-shm',
+    'cass-archive.db',
+    'cass-archive.db-wal',
+    'cass-archive.db-shm',
+];
 
 // In-memory storage (fallback and default)
 const memoryStore = new Map();
@@ -47,17 +55,12 @@ let opfsRoot = null;
 export async function initStorage() {
     console.log('[Storage] Initializing...');
 
-    // Try to load saved storage mode from localStorage (meta-preference)
-    try {
-        const savedMode = localStorage.getItem(KEYS.MODE);
-        if (savedMode && Object.values(StorageMode).includes(savedMode)) {
-            currentMode = savedMode;
-            console.log('[Storage] Restored mode:', currentMode);
-        }
-    } catch (e) {
-        // localStorage not available, stay in memory mode
-        console.log('[Storage] localStorage not available, using memory mode');
+    const savedMode = getStoredMode();
+    currentMode = savedMode;
+    if (currentMode === StorageMode.OPFS && !isOpfsEnabled()) {
+        currentMode = StorageMode.MEMORY;
     }
+    console.log('[Storage] Restored mode:', currentMode);
 
     // Initialize OPFS if enabled
     if (currentMode === StorageMode.OPFS) {
@@ -77,6 +80,48 @@ export async function initStorage() {
  */
 export function getStorageMode() {
     return currentMode;
+}
+
+/**
+ * Get the stored storage mode preference
+ */
+export function getStoredMode() {
+    try {
+        const savedMode = localStorage.getItem(KEYS.MODE);
+        if (savedMode && Object.values(StorageMode).includes(savedMode)) {
+            return savedMode;
+        }
+    } catch (e) {
+        // Ignore
+    }
+    return StorageMode.MEMORY;
+}
+
+/**
+ * Check if OPFS persistence is enabled by user
+ */
+export function isOpfsEnabled() {
+    try {
+        return localStorage.getItem(KEYS.OPFS_ENABLED) === 'true';
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
+ * Persist OPFS opt-in preference
+ */
+export function setOpfsEnabled(enabled) {
+    try {
+        if (enabled) {
+            localStorage.setItem(KEYS.OPFS_ENABLED, 'true');
+        } else {
+            localStorage.removeItem(KEYS.OPFS_ENABLED);
+        }
+    } catch (e) {
+        // Ignore
+    }
+    return enabled;
 }
 
 /**
@@ -107,6 +152,9 @@ export async function setStorageMode(mode, migrate = false) {
 
     // Initialize OPFS if switching to it
     if (mode === StorageMode.OPFS) {
+        if (!isOpfsEnabled()) {
+            setOpfsEnabled(true);
+        }
         await initOPFS();
     }
 
@@ -488,7 +536,7 @@ export async function clearOPFS() {
         // Iterate and delete all entries
         const entries = [];
         for await (const entry of root.keys()) {
-            if (entry.startsWith(STORAGE_PREFIX)) {
+            if (entry.startsWith(STORAGE_PREFIX) || OPFS_DB_FILES.includes(entry)) {
                 entries.push(entry);
             }
         }
@@ -619,6 +667,8 @@ export async function getStorageStats() {
         opfs: {
             items: 0,
             bytes: 0,
+            dbBytes: 0,
+            dbFiles: [],
             available: isOPFSAvailable(),
         },
         quota: null,
@@ -665,12 +715,16 @@ export async function getStorageStats() {
         try {
             const root = await navigator.storage.getDirectory();
             for await (const name of root.keys()) {
-                if (name.startsWith(STORAGE_PREFIX)) {
+                if (name.startsWith(STORAGE_PREFIX) || OPFS_DB_FILES.includes(name)) {
                     stats.opfs.items++;
                     try {
                         const handle = await root.getFileHandle(name);
                         const file = await handle.getFile();
                         stats.opfs.bytes += file.size;
+                        if (OPFS_DB_FILES.includes(name)) {
+                            stats.opfs.dbBytes += file.size;
+                            stats.opfs.dbFiles.push(name);
+                        }
                     } catch (e) {
                         // Ignore individual file errors
                     }
@@ -697,14 +751,17 @@ export async function getStorageStats() {
  * Check if database is cached in OPFS
  */
 export async function isDatabaseCached() {
-    if (currentMode !== StorageMode.OPFS) {
-        return false;
-    }
-
     try {
         const root = await getOPFSRoot();
-        await root.getFileHandle(STORAGE_PREFIX + 'database');
-        return true;
+        for (const name of OPFS_DB_FILES) {
+            try {
+                await root.getFileHandle(name);
+                return true;
+            } catch (e) {
+                // Try next name
+            }
+        }
+        return false;
     } catch (e) {
         return false;
     }
@@ -730,9 +787,12 @@ export default {
     StorageMode,
     StorageKeys: KEYS,
     initStorage,
+    getStoredMode,
     getStorageMode,
     setStorageMode,
     isOPFSAvailable,
+    isOpfsEnabled,
+    setOpfsEnabled,
     getOPFSRoot,
     setItem,
     getItem,
