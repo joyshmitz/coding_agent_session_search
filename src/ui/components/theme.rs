@@ -720,11 +720,10 @@ pub fn ensure_contrast(fg: Color, bg: Color, min_level: ContrastLevel) -> Color 
     // Try lightening or darkening the foreground
     let bg_lum = relative_luminance(bg);
     if bg_lum > 0.5 {
-        // Dark background, use a darker foreground wouldn't help
-        // Return pure black for maximum contrast
+        // Light background, use black for maximum contrast
         Color::Rgb(0, 0, 0)
     } else {
-        // Light background, lighten the foreground
+        // Dark background, use white for maximum contrast
         Color::Rgb(255, 255, 255)
     }
 }
@@ -898,5 +897,416 @@ impl ThemePalette {
             stripe_even: Color::Rgb(0, 0, 0), // Pure black
             stripe_odd: Color::Rgb(24, 24, 24), // Very dark gray
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== TerminalWidth tests ====================
+
+    #[test]
+    fn test_terminal_width_from_cols_narrow() {
+        assert_eq!(TerminalWidth::from_cols(40), TerminalWidth::Narrow);
+        assert_eq!(TerminalWidth::from_cols(79), TerminalWidth::Narrow);
+    }
+
+    #[test]
+    fn test_terminal_width_from_cols_normal() {
+        assert_eq!(TerminalWidth::from_cols(80), TerminalWidth::Normal);
+        assert_eq!(TerminalWidth::from_cols(100), TerminalWidth::Normal);
+        assert_eq!(TerminalWidth::from_cols(120), TerminalWidth::Normal);
+    }
+
+    #[test]
+    fn test_terminal_width_from_cols_wide() {
+        assert_eq!(TerminalWidth::from_cols(121), TerminalWidth::Wide);
+        assert_eq!(TerminalWidth::from_cols(200), TerminalWidth::Wide);
+    }
+
+    #[test]
+    fn test_terminal_width_border_color() {
+        assert_eq!(TerminalWidth::Narrow.border_color(), colors::BORDER_MINIMAL);
+        assert_eq!(
+            TerminalWidth::Normal.border_color(),
+            colors::BORDER_STANDARD
+        );
+        assert_eq!(
+            TerminalWidth::Wide.border_color(),
+            colors::BORDER_EMPHASIZED
+        );
+    }
+
+    #[test]
+    fn test_terminal_width_show_decorations() {
+        assert!(!TerminalWidth::Narrow.show_decorations());
+        assert!(TerminalWidth::Normal.show_decorations());
+        assert!(TerminalWidth::Wide.show_decorations());
+    }
+
+    #[test]
+    fn test_terminal_width_show_extended_info() {
+        assert!(!TerminalWidth::Narrow.show_extended_info());
+        assert!(!TerminalWidth::Normal.show_extended_info());
+        assert!(TerminalWidth::Wide.show_extended_info());
+    }
+
+    // ==================== GradientShades tests ====================
+
+    #[test]
+    fn test_gradient_shades_header() {
+        let shades = GradientShades::header();
+        assert_eq!(shades.dark, colors::GRADIENT_HEADER_TOP);
+        assert_eq!(shades.mid, colors::GRADIENT_HEADER_MID);
+        assert_eq!(shades.light, colors::GRADIENT_HEADER_BOT);
+    }
+
+    #[test]
+    fn test_gradient_shades_pill() {
+        let shades = GradientShades::pill();
+        assert_eq!(shades.dark, colors::GRADIENT_PILL_LEFT);
+        assert_eq!(shades.mid, colors::GRADIENT_PILL_CENTER);
+        assert_eq!(shades.light, colors::GRADIENT_PILL_RIGHT);
+    }
+
+    #[test]
+    fn test_gradient_shades_styles() {
+        let shades = GradientShades::header();
+        let (dark, mid, light) = shades.styles();
+        assert_eq!(dark.bg, Some(shades.dark));
+        assert_eq!(mid.bg, Some(shades.mid));
+        assert_eq!(light.bg, Some(shades.light));
+    }
+
+    // ==================== AdaptiveBorders tests ====================
+
+    #[test]
+    fn test_adaptive_borders_for_width_narrow() {
+        let borders = AdaptiveBorders::for_width(60);
+        assert_eq!(borders.width_class, TerminalWidth::Narrow);
+        assert!(!borders.use_double);
+        assert!(!borders.show_corners);
+    }
+
+    #[test]
+    fn test_adaptive_borders_for_width_normal() {
+        let borders = AdaptiveBorders::for_width(100);
+        assert_eq!(borders.width_class, TerminalWidth::Normal);
+        assert!(!borders.use_double);
+        assert!(borders.show_corners);
+    }
+
+    #[test]
+    fn test_adaptive_borders_for_width_wide() {
+        let borders = AdaptiveBorders::for_width(150);
+        assert_eq!(borders.width_class, TerminalWidth::Wide);
+        assert!(borders.use_double);
+        assert!(borders.show_corners);
+    }
+
+    #[test]
+    fn test_adaptive_borders_focused() {
+        let borders = AdaptiveBorders::focused(100);
+        assert_eq!(borders.color, colors::BORDER_FOCUS);
+    }
+
+    // ==================== ThemePalette tests ====================
+
+    #[test]
+    fn test_theme_palette_light() {
+        let palette = ThemePalette::light();
+        // Light theme should have a light background
+        assert_eq!(palette.bg, Color::Rgb(250, 250, 252));
+        // And dark foreground
+        assert_eq!(palette.fg, Color::Rgb(36, 41, 46));
+    }
+
+    #[test]
+    fn test_theme_palette_dark() {
+        let palette = ThemePalette::dark();
+        // Dark theme should have a dark background
+        assert_eq!(palette.bg, colors::BG_DEEP);
+        // And light foreground
+        assert_eq!(palette.fg, colors::TEXT_PRIMARY);
+    }
+
+    #[test]
+    fn test_theme_palette_catppuccin() {
+        let palette = ThemePalette::catppuccin();
+        // Check specific Catppuccin colors
+        assert_eq!(palette.bg, Color::Rgb(30, 30, 46));
+    }
+
+    #[test]
+    fn test_theme_palette_dracula() {
+        let palette = ThemePalette::dracula();
+        assert_eq!(palette.bg, Color::Rgb(40, 42, 54));
+    }
+
+    #[test]
+    fn test_theme_palette_nord() {
+        let palette = ThemePalette::nord();
+        assert_eq!(palette.bg, Color::Rgb(46, 52, 64));
+    }
+
+    #[test]
+    fn test_theme_palette_high_contrast() {
+        let palette = ThemePalette::high_contrast();
+        // High contrast should use pure black and white
+        assert_eq!(palette.bg, Color::Rgb(0, 0, 0));
+        assert_eq!(palette.fg, Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn test_theme_palette_agent_pane_known_agents() {
+        // Test known agent color mappings
+        let claude = ThemePalette::agent_pane("claude_code");
+        assert_eq!(claude.bg, colors::AGENT_CLAUDE_BG);
+
+        let codex = ThemePalette::agent_pane("codex");
+        assert_eq!(codex.bg, colors::AGENT_CODEX_BG);
+
+        let gemini = ThemePalette::agent_pane("gemini_cli");
+        assert_eq!(gemini.bg, colors::AGENT_GEMINI_BG);
+
+        let chatgpt = ThemePalette::agent_pane("chatgpt");
+        assert_eq!(chatgpt.bg, colors::AGENT_CHATGPT_BG);
+    }
+
+    #[test]
+    fn test_theme_palette_agent_pane_unknown_agent() {
+        let unknown = ThemePalette::agent_pane("unknown_agent");
+        assert_eq!(unknown.bg, colors::BG_DEEP);
+    }
+
+    #[test]
+    fn test_theme_palette_agent_icon() {
+        assert_eq!(ThemePalette::agent_icon("codex"), "🔹");
+        assert_eq!(ThemePalette::agent_icon("claude_code"), "🤖");
+        assert_eq!(ThemePalette::agent_icon("gemini"), "💎");
+        assert_eq!(ThemePalette::agent_icon("chatgpt"), "💬");
+        assert_eq!(ThemePalette::agent_icon("unknown"), "✨");
+    }
+
+    #[test]
+    fn test_theme_palette_role_theme() {
+        let palette = ThemePalette::dark();
+
+        let user_theme = palette.role_theme("user");
+        assert_eq!(user_theme.fg, palette.user);
+
+        let agent_theme = palette.role_theme("assistant");
+        assert_eq!(agent_theme.fg, palette.agent);
+
+        let tool_theme = palette.role_theme("tool");
+        assert_eq!(tool_theme.fg, palette.tool);
+
+        let system_theme = palette.role_theme("system");
+        assert_eq!(system_theme.fg, palette.system);
+    }
+
+    // ==================== ContrastLevel tests ====================
+
+    #[test]
+    fn test_contrast_level_from_ratio() {
+        assert_eq!(ContrastLevel::from_ratio(2.0), ContrastLevel::Fail);
+        assert_eq!(ContrastLevel::from_ratio(3.5), ContrastLevel::AALarge);
+        assert_eq!(ContrastLevel::from_ratio(5.0), ContrastLevel::AA);
+        assert_eq!(ContrastLevel::from_ratio(8.0), ContrastLevel::AAA);
+    }
+
+    #[test]
+    fn test_contrast_level_meets() {
+        assert!(ContrastLevel::AAA.meets(ContrastLevel::AA));
+        assert!(ContrastLevel::AA.meets(ContrastLevel::AALarge));
+        assert!(!ContrastLevel::Fail.meets(ContrastLevel::AA));
+    }
+
+    #[test]
+    fn test_contrast_level_name() {
+        assert_eq!(ContrastLevel::AAA.name(), "AAA");
+        assert_eq!(ContrastLevel::AA.name(), "AA");
+        assert_eq!(ContrastLevel::Fail.name(), "Fail");
+    }
+
+    // ==================== Luminance/Contrast tests ====================
+
+    #[test]
+    fn test_relative_luminance_black() {
+        let lum = relative_luminance(Color::Rgb(0, 0, 0));
+        assert!((lum - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_relative_luminance_white() {
+        let lum = relative_luminance(Color::Rgb(255, 255, 255));
+        assert!((lum - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_relative_luminance_named_colors() {
+        // Black should have low luminance
+        let black_lum = relative_luminance(Color::Black);
+        assert!(black_lum < 0.01);
+
+        // White should have high luminance
+        let white_lum = relative_luminance(Color::White);
+        assert!(white_lum > 0.99);
+    }
+
+    #[test]
+    fn test_contrast_ratio_black_white() {
+        let ratio = contrast_ratio(Color::Rgb(255, 255, 255), Color::Rgb(0, 0, 0));
+        // Maximum contrast is 21:1
+        assert!(ratio > 20.0);
+    }
+
+    #[test]
+    fn test_contrast_ratio_same_color() {
+        let ratio = contrast_ratio(Color::Rgb(128, 128, 128), Color::Rgb(128, 128, 128));
+        // Same color = 1:1 contrast
+        assert!((ratio - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_check_contrast() {
+        // High contrast pair
+        let level = check_contrast(Color::Rgb(255, 255, 255), Color::Rgb(0, 0, 0));
+        assert_eq!(level, ContrastLevel::AAA);
+
+        // Low contrast pair (similar grays)
+        let level = check_contrast(Color::Rgb(100, 100, 100), Color::Rgb(120, 120, 120));
+        assert_eq!(level, ContrastLevel::Fail);
+    }
+
+    #[test]
+    fn test_ensure_contrast_already_sufficient() {
+        let bg = Color::Rgb(0, 0, 0);
+        let fg = Color::Rgb(255, 255, 255);
+        let result = ensure_contrast(fg, bg, ContrastLevel::AA);
+        // Should return original since contrast is already good
+        assert_eq!(result, fg);
+    }
+
+    // ==================== ThemePreset tests ====================
+
+    #[test]
+    fn test_theme_preset_default() {
+        let preset = ThemePreset::default();
+        assert_eq!(preset, ThemePreset::Dark);
+    }
+
+    #[test]
+    fn test_theme_preset_name() {
+        assert_eq!(ThemePreset::Dark.name(), "Dark");
+        assert_eq!(ThemePreset::Light.name(), "Light");
+        assert_eq!(ThemePreset::Catppuccin.name(), "Catppuccin");
+        assert_eq!(ThemePreset::Dracula.name(), "Dracula");
+        assert_eq!(ThemePreset::Nord.name(), "Nord");
+        assert_eq!(ThemePreset::HighContrast.name(), "High Contrast");
+    }
+
+    #[test]
+    fn test_theme_preset_next_cycles() {
+        let mut preset = ThemePreset::Dark;
+        preset = preset.next(); // Light
+        assert_eq!(preset, ThemePreset::Light);
+        preset = preset.next(); // Catppuccin
+        assert_eq!(preset, ThemePreset::Catppuccin);
+        preset = preset.next(); // Dracula
+        assert_eq!(preset, ThemePreset::Dracula);
+        preset = preset.next(); // Nord
+        assert_eq!(preset, ThemePreset::Nord);
+        preset = preset.next(); // HighContrast
+        assert_eq!(preset, ThemePreset::HighContrast);
+        preset = preset.next(); // Back to Dark
+        assert_eq!(preset, ThemePreset::Dark);
+    }
+
+    #[test]
+    fn test_theme_preset_prev_cycles() {
+        let mut preset = ThemePreset::Dark;
+        preset = preset.prev(); // HighContrast
+        assert_eq!(preset, ThemePreset::HighContrast);
+        preset = preset.prev(); // Nord
+        assert_eq!(preset, ThemePreset::Nord);
+    }
+
+    #[test]
+    fn test_theme_preset_to_palette() {
+        let palette = ThemePreset::Dark.to_palette();
+        assert_eq!(palette.bg, ThemePalette::dark().bg);
+
+        let palette = ThemePreset::Light.to_palette();
+        assert_eq!(palette.bg, ThemePalette::light().bg);
+    }
+
+    #[test]
+    fn test_theme_preset_all() {
+        let all = ThemePreset::all();
+        assert_eq!(all.len(), 6);
+        assert!(all.contains(&ThemePreset::Dark));
+        assert!(all.contains(&ThemePreset::Light));
+    }
+
+    // ==================== Style helper tests ====================
+
+    #[test]
+    fn test_chip_style() {
+        let palette = ThemePalette::dark();
+        let style = chip_style(palette);
+        assert_eq!(style.fg, Some(palette.accent_alt));
+    }
+
+    #[test]
+    fn test_kbd_style() {
+        let palette = ThemePalette::dark();
+        let style = kbd_style(palette);
+        assert_eq!(style.fg, Some(palette.accent));
+    }
+
+    #[test]
+    fn test_score_style_high() {
+        let palette = ThemePalette::dark();
+        let style = score_style(9.0, palette);
+        assert_eq!(style.fg, Some(colors::STATUS_SUCCESS));
+    }
+
+    #[test]
+    fn test_score_style_medium() {
+        let palette = ThemePalette::dark();
+        let style = score_style(6.0, palette);
+        assert_eq!(style.fg, Some(palette.accent));
+    }
+
+    #[test]
+    fn test_score_style_low() {
+        let palette = ThemePalette::dark();
+        let style = score_style(3.0, palette);
+        assert_eq!(style.fg, Some(palette.hint));
+    }
+
+    // ==================== RoleTheme tests ====================
+
+    #[test]
+    fn test_role_theme_has_all_fields() {
+        let palette = ThemePalette::dark();
+        let theme = palette.role_theme("user");
+        // Verify all fields are set
+        assert_ne!(theme.fg, Color::Reset);
+        assert_ne!(theme.bg, Color::Reset);
+        assert_ne!(theme.border, Color::Reset);
+        assert_ne!(theme.badge, Color::Reset);
+    }
+
+    // ==================== PaneTheme tests ====================
+
+    #[test]
+    fn test_pane_theme_has_all_fields() {
+        let pane = ThemePalette::agent_pane("claude");
+        assert_ne!(pane.fg, Color::Reset);
+        assert_ne!(pane.bg, Color::Reset);
+        assert_ne!(pane.accent, Color::Reset);
     }
 }

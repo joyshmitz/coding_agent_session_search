@@ -33,6 +33,64 @@ pub fn parse_time_input(input: &str) -> Option<i64> {
         }
     }
 
+    // Relative: 7d, 24h, 1w, 30m (no leading '-')
+    {
+        let val_str: String = input.chars().take_while(|c| c.is_numeric()).collect();
+        if !val_str.is_empty() {
+            let unit = input.trim_start_matches(&val_str).trim();
+            if !unit.is_empty()
+                && let Ok(val) = val_str.parse::<i64>()
+            {
+                let duration = match unit {
+                    "d" | "day" | "days" => Some(Duration::days(val)),
+                    "h" | "hr" | "hrs" | "hour" | "hours" => Some(Duration::hours(val)),
+                    "m" | "min" | "mins" | "minute" | "minutes" => Some(Duration::minutes(val)),
+                    "w" | "wk" | "wks" | "week" | "weeks" => Some(Duration::weeks(val)),
+                    _ => None,
+                };
+                if let Some(duration) = duration {
+                    return Some((now_utc - duration).timestamp_millis());
+                }
+            }
+        }
+    }
+
+    // Relative: "30 days ago", "2 weeks ago", "1 hour ago"
+    {
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        if parts.len() == 3
+            && parts[2] == "ago"
+            && let Ok(val) = parts[0].parse::<i64>()
+        {
+            let duration = match parts[1] {
+                "d" | "day" | "days" => Some(Duration::days(val)),
+                "h" | "hr" | "hrs" | "hour" | "hours" => Some(Duration::hours(val)),
+                "m" | "min" | "mins" | "minute" | "minutes" => Some(Duration::minutes(val)),
+                "w" | "wk" | "wks" | "week" | "weeks" => Some(Duration::weeks(val)),
+                _ => None,
+            };
+            if let Some(duration) = duration {
+                return Some((now_utc - duration).timestamp_millis());
+            }
+        }
+        if parts.len() == 2 && parts[1] == "ago" {
+            let val_str: String = parts[0].chars().take_while(|c| c.is_numeric()).collect();
+            if let Ok(val) = val_str.parse::<i64>() {
+                let unit = parts[0].trim_start_matches(&val_str);
+                let duration = match unit {
+                    "d" | "day" | "days" => Some(Duration::days(val)),
+                    "h" | "hr" | "hrs" | "hour" | "hours" => Some(Duration::hours(val)),
+                    "m" | "min" | "mins" | "minute" | "minutes" => Some(Duration::minutes(val)),
+                    "w" | "wk" | "wks" | "week" | "weeks" => Some(Duration::weeks(val)),
+                    _ => None,
+                };
+                if let Some(duration) = duration {
+                    return Some((now_utc - duration).timestamp_millis());
+                }
+            }
+        }
+    }
+
     // Keywords
     match input.as_str() {
         "now" => return Some(now_ms),
@@ -108,6 +166,21 @@ mod tests {
         let t2 = parse_time_input("-1d").unwrap();
         let diff = now - t2;
         assert!((diff - 86400 * 1000).abs() < tolerance);
+
+        // 7d (no leading '-')
+        let t3 = parse_time_input("7d").unwrap();
+        let diff = now - t3;
+        assert!((diff - 7 * 86400 * 1000).abs() < tolerance);
+
+        // 30 days ago
+        let t4 = parse_time_input("30 days ago").unwrap();
+        let diff = now - t4;
+        assert!((diff - 30 * 86400 * 1000).abs() < tolerance);
+
+        // 2 weeks ago
+        let t5 = parse_time_input("2 weeks ago").unwrap();
+        let diff = now - t5;
+        assert!((diff - 14 * 86400 * 1000).abs() < tolerance);
     }
 
     #[test]

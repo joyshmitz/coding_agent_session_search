@@ -386,7 +386,8 @@ impl SyncEngine {
         }
 
         // Convert remote path to safe local directory name
-        let safe_name = path_to_safe_dirname(&expanded_path);
+        // Use raw remote_path for stability (independent of home expansion success)
+        let safe_name = path_to_safe_dirname(remote_path);
         let local_path = dest_dir.join(&safe_name);
 
         // Create local directory
@@ -528,7 +529,8 @@ impl SyncEngine {
     ) -> PathSyncResult {
         let start = Instant::now();
         let expanded_path = Self::expand_tilde_with_home(remote_path, remote_home);
-        let local_path = dest_dir.join(path_to_safe_dirname(&expanded_path));
+        // Use raw remote_path for stability (independent of home expansion success)
+        let local_path = dest_dir.join(path_to_safe_dirname(remote_path));
 
         // Create local directory
         if let Err(e) = std::fs::create_dir_all(&local_path) {

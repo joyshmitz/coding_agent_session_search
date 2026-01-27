@@ -144,6 +144,11 @@ struct GitHubRelease {
 /// - Parse error
 /// - Already on latest
 pub async fn check_for_updates(current_version: &str) -> Option<UpdateInfo> {
+    // Escape hatch for CI/CD or restricted environments
+    if std::env::var("CASS_SKIP_UPDATE").is_ok() {
+        return None;
+    }
+
     let mut state = UpdateState::load_async().await;
 
     // Respect check interval

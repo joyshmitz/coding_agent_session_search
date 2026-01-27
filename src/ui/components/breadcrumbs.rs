@@ -159,3 +159,105 @@ pub fn render_breadcrumbs(
 
     rects
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== BreadcrumbKind tests ====================
+
+    #[test]
+    fn test_breadcrumb_kind_equality() {
+        assert_eq!(BreadcrumbKind::Agent, BreadcrumbKind::Agent);
+        assert_eq!(BreadcrumbKind::Workspace, BreadcrumbKind::Workspace);
+        assert_eq!(BreadcrumbKind::Date, BreadcrumbKind::Date);
+        assert_eq!(BreadcrumbKind::Ranking, BreadcrumbKind::Ranking);
+        assert_eq!(BreadcrumbKind::None, BreadcrumbKind::None);
+    }
+
+    #[test]
+    fn test_breadcrumb_kind_inequality() {
+        assert_ne!(BreadcrumbKind::Agent, BreadcrumbKind::Workspace);
+        assert_ne!(BreadcrumbKind::Date, BreadcrumbKind::Ranking);
+        assert_ne!(BreadcrumbKind::None, BreadcrumbKind::Agent);
+    }
+
+    #[test]
+    fn test_breadcrumb_kind_clone() {
+        let kind = BreadcrumbKind::Agent;
+        let cloned = kind;
+        assert_eq!(kind, cloned);
+    }
+
+    #[test]
+    fn test_breadcrumb_kind_copy() {
+        let kind = BreadcrumbKind::Workspace;
+        let copied: BreadcrumbKind = kind;
+        assert_eq!(copied, BreadcrumbKind::Workspace);
+    }
+
+    #[test]
+    fn test_breadcrumb_kind_debug() {
+        let debug_str = format!("{:?}", BreadcrumbKind::Agent);
+        assert!(debug_str.contains("Agent"));
+
+        let debug_str = format!("{:?}", BreadcrumbKind::None);
+        assert!(debug_str.contains("None"));
+    }
+
+    // ==================== ranking_label tests ====================
+
+    #[test]
+    fn test_ranking_label_recent_heavy() {
+        assert_eq!(ranking_label(tui::RankingMode::RecentHeavy), "Recent");
+    }
+
+    #[test]
+    fn test_ranking_label_balanced() {
+        assert_eq!(ranking_label(tui::RankingMode::Balanced), "Balanced");
+    }
+
+    #[test]
+    fn test_ranking_label_relevance_heavy() {
+        assert_eq!(ranking_label(tui::RankingMode::RelevanceHeavy), "Relevance");
+    }
+
+    #[test]
+    fn test_ranking_label_match_quality_heavy() {
+        assert_eq!(
+            ranking_label(tui::RankingMode::MatchQualityHeavy),
+            "Quality"
+        );
+    }
+
+    #[test]
+    fn test_ranking_label_date_newest() {
+        assert_eq!(ranking_label(tui::RankingMode::DateNewest), "Newest");
+    }
+
+    #[test]
+    fn test_ranking_label_date_oldest() {
+        assert_eq!(ranking_label(tui::RankingMode::DateOldest), "Oldest");
+    }
+
+    #[test]
+    fn test_ranking_label_all_modes_non_empty() {
+        let modes = [
+            tui::RankingMode::RecentHeavy,
+            tui::RankingMode::Balanced,
+            tui::RankingMode::RelevanceHeavy,
+            tui::RankingMode::MatchQualityHeavy,
+            tui::RankingMode::DateNewest,
+            tui::RankingMode::DateOldest,
+        ];
+
+        for mode in modes {
+            let label = ranking_label(mode);
+            assert!(
+                !label.is_empty(),
+                "Label for {:?} should not be empty",
+                mode
+            );
+        }
+    }
+}

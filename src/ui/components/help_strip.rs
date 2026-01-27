@@ -51,3 +51,65 @@ pub fn help_strip_area(area: Rect) -> Rect {
         .split(area);
     chunks[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== help_strip_area tests ====================
+
+    #[test]
+    fn test_help_strip_area_returns_bottom_row() {
+        let area = Rect::new(0, 0, 80, 24);
+        let strip = help_strip_area(area);
+
+        // Strip should be at the bottom
+        assert_eq!(strip.y, 23);
+        // Strip should be full width
+        assert_eq!(strip.width, 80);
+        // Strip should be 1 row high
+        assert_eq!(strip.height, 1);
+    }
+
+    #[test]
+    fn test_help_strip_area_small_area() {
+        let area = Rect::new(0, 0, 40, 10);
+        let strip = help_strip_area(area);
+
+        assert_eq!(strip.y, 9);
+        assert_eq!(strip.width, 40);
+        assert_eq!(strip.height, 1);
+    }
+
+    #[test]
+    fn test_help_strip_area_with_offset() {
+        let area = Rect::new(10, 5, 60, 15);
+        let strip = help_strip_area(area);
+
+        // X should be preserved
+        assert_eq!(strip.x, 10);
+        // Y should be at bottom of area (5 + 15 - 1 = 19)
+        assert_eq!(strip.y, 19);
+        assert_eq!(strip.width, 60);
+        assert_eq!(strip.height, 1);
+    }
+
+    #[test]
+    fn test_help_strip_area_minimum_height() {
+        // Even with height of 2, should work
+        let area = Rect::new(0, 0, 80, 2);
+        let strip = help_strip_area(area);
+
+        assert_eq!(strip.height, 1);
+        assert_eq!(strip.y, 1);
+    }
+
+    #[test]
+    fn test_help_strip_area_preserves_width() {
+        for width in [40, 80, 120, 200] {
+            let area = Rect::new(0, 0, width, 24);
+            let strip = help_strip_area(area);
+            assert_eq!(strip.width, width);
+        }
+    }
+}

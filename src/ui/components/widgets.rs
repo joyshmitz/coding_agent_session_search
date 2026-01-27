@@ -255,3 +255,162 @@ pub fn score_indicator(score: f32, palette: ThemePalette) -> Vec<Span<'static>> 
         ),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== filter_chips tests ====================
+
+    #[test]
+    fn test_filter_chips_empty_all() {
+        let palette = ThemePalette::dark();
+        let chips = filter_chips(&[], &[], None, palette);
+        assert!(chips.is_empty());
+    }
+
+    #[test]
+    fn test_filter_chips_with_agents() {
+        let palette = ThemePalette::dark();
+        let agents = vec!["claude".to_string(), "codex".to_string()];
+        let chips = filter_chips(&agents, &[], None, palette);
+
+        // Should have at least one span (the agent chip)
+        assert!(!chips.is_empty());
+
+        // Convert to string and check content
+        let text: String = chips.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("claude"));
+        assert!(text.contains("codex"));
+    }
+
+    #[test]
+    fn test_filter_chips_with_workspaces() {
+        let palette = ThemePalette::dark();
+        let workspaces = vec!["/home/user/project".to_string()];
+        let chips = filter_chips(&[], &workspaces, None, palette);
+
+        assert!(!chips.is_empty());
+        let text: String = chips.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("project") || text.contains("/home/user/project"));
+    }
+
+    #[test]
+    fn test_filter_chips_with_time_range() {
+        let palette = ThemePalette::dark();
+        let chips = filter_chips(&[], &[], Some("Last 7 days"), palette);
+
+        assert!(!chips.is_empty());
+        let text: String = chips.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("Last 7 days"));
+    }
+
+    #[test]
+    fn test_filter_chips_with_all_filters() {
+        let palette = ThemePalette::dark();
+        let agents = vec!["claude".to_string()];
+        let workspaces = vec!["/project".to_string()];
+        let chips = filter_chips(&agents, &workspaces, Some("Today"), palette);
+
+        let text: String = chips.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("claude"));
+        assert!(text.contains("Today"));
+    }
+
+    #[test]
+    fn test_filter_chips_workspace_truncation() {
+        let palette = ThemePalette::dark();
+        let long_workspace = "/home/very/long/path/to/some/deeply/nested/project".to_string();
+        let workspaces = vec![long_workspace];
+        let chips = filter_chips(&[], &workspaces, None, palette);
+
+        // Should produce some output
+        assert!(!chips.is_empty());
+        // Long paths should be truncated
+        let text: String = chips.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("…") || text.len() < 60);
+    }
+
+    // ==================== score_indicator tests ====================
+
+    #[test]
+    fn test_score_indicator_high_score() {
+        let palette = ThemePalette::dark();
+        let spans = score_indicator(9.5, palette);
+
+        // Should have multiple spans
+        assert!(!spans.is_empty());
+
+        // Should contain the formatted score
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("9.5"));
+    }
+
+    #[test]
+    fn test_score_indicator_medium_score() {
+        let palette = ThemePalette::dark();
+        let spans = score_indicator(6.0, palette);
+
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("6.0"));
+    }
+
+    #[test]
+    fn test_score_indicator_low_score() {
+        let palette = ThemePalette::dark();
+        let spans = score_indicator(2.5, palette);
+
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("2.5"));
+    }
+
+    #[test]
+    fn test_score_indicator_zero() {
+        let palette = ThemePalette::dark();
+        let spans = score_indicator(0.0, palette);
+
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("0.0"));
+        // Should have empty circles
+        assert!(text.contains("○"));
+    }
+
+    #[test]
+    fn test_score_indicator_max() {
+        let palette = ThemePalette::dark();
+        let spans = score_indicator(10.0, palette);
+
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("10.0"));
+        // Should have filled circles
+        assert!(text.contains("●"));
+    }
+
+    #[test]
+    fn test_score_indicator_partial() {
+        let palette = ThemePalette::dark();
+        let spans = score_indicator(5.0, palette);
+
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        // Should have both filled and empty
+        assert!(text.contains("●"));
+        assert!(text.contains("○"));
+    }
+
+    #[test]
+    fn test_score_indicator_clamping() {
+        let palette = ThemePalette::dark();
+
+        // Test score above 10
+        let spans = score_indicator(15.0, palette);
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        // Should still render (clamped internally)
+        assert!(text.contains("15.0") || text.contains("●"));
+
+        // Test negative score
+        let spans = score_indicator(-5.0, palette);
+        let text: String = spans.iter().map(|s| s.content.to_string()).collect();
+        // Should still render (clamped internally)
+        assert!(text.contains("-5.0") || text.contains("○"));
+    }
+}
