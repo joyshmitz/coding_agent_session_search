@@ -104,6 +104,57 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  e2e-orchestrated:
+    name: E2E Orchestrator (Rust + Shell)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@881ba7bf39a41cda34ac9e123fb41b44ed08232f # nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+
+      - name: Run orchestrated E2E runner (Rust + Shell)
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_PLAYWRIGHT=0 E2E_LOG=1 ./scripts/tests/run_all.sh
+
+      - name: Validate E2E JSONL logs
+        if: always()
+        shell: bash
+        run: |
+          if [[ -d "test-results/e2e" ]] && ls test-results/e2e/*.jsonl 1>/dev/null 2>&1; then
+            ./scripts/validate-e2e-jsonl.sh test-results/e2e/*.jsonl
+          else
+            echo "No E2E JSONL logs found to validate"
+          fi
+
+      - name: Show E2E summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "test-results/e2e/summary.md" ]]; then
+            cat test-results/e2e/summary.md
+          else
+            echo "No summary.md found"
+          fi
+
+      - name: Upload orchestrated E2E logs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: e2e-orchestrated-logs
+          path: |
+            test-results/e2e/combined.jsonl
+            test-results/e2e/summary.md
+            test-results/e2e/*.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
+
   # Crypto test vectors
   crypto-vectors:
     name: Crypto Test Vectors
