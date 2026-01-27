@@ -12,7 +12,6 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use coding_agent_search::storage::sqlite::SqliteStorage;
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
 
 mod util;
 use util::EnvGuard;
