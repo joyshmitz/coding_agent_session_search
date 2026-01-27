@@ -169,6 +169,7 @@ pub struct E2eRunSummary {
 
 /// Phase information for phase_start/phase_end events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct E2ePhase {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,6 +209,7 @@ struct BaseEvent {
 }
 
 /// E2E Logger that writes structured JSONL events.
+#[allow(dead_code)]
 pub struct E2eLogger {
     run_id: String,
     runner: String,
@@ -216,6 +218,7 @@ pub struct E2eLogger {
     env: E2eEnvironment,
 }
 
+#[allow(dead_code)]
 impl E2eLogger {
     /// Create a new E2E logger.
     ///

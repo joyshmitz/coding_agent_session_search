@@ -27,8 +27,8 @@ module.exports = {
   assertions: {
     // Accessibility must score at least 90
     'categories:accessibility': ['error', { minScore: 0.9 }],
-    // Performance should score at least 80
-    'categories:performance': ['warn', { minScore: 0.8 }],
+    // Performance must score at least 85 (NFR-2: <3s initial load on 3G)
+    'categories:performance': ['error', { minScore: 0.85 }],
     // Critical accessibility rules must pass
     'color-contrast': 'error',
     'document-title': 'error',

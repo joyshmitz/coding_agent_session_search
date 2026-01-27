@@ -3,7 +3,7 @@
     {
       "path": "/*",
       "timings": [
-        { "metric": "first-contentful-paint", "budget": 3000 },
+        { "metric": "first-contentful-paint", "budget": 2000 },
         { "metric": "interactive", "budget": 5000 },
         { "metric": "total-blocking-time", "budget": 300 }
       ],

@@ -205,7 +205,7 @@ pub fn cleanup_old_backups(db_path: &Path, keep_count: usize) -> Result<(), std:
     }
 
     // Sort by modification time, newest first
-    backups.sort_by(|a, b| b.1.cmp(&a.1));
+    backups.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     // Delete oldest backups beyond keep_count
     for (path, _) in backups.into_iter().skip(keep_count) {

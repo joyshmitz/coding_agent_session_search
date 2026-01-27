@@ -2094,7 +2094,8 @@ async fn execute_cli(
         | Commands::Stats { .. }
         | Commands::Diag { .. }
         | Commands::Status { .. }
-        | Commands::View { .. } => {
+        | Commands::View { .. }
+        | Commands::Pages { .. } => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_writer(std::io::stderr)

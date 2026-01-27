@@ -1566,7 +1566,7 @@ pub fn apply_workspace_rewrite(
 
     // Sort by prefix length descending for longest-prefix match
     let mut mappings: Vec<_> = workspace_rewrites.iter().collect();
-    mappings.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+    mappings.sort_by_key(|m| std::cmp::Reverse(m.from.len()));
 
     // Try to apply a mapping
     for mapping in mappings {

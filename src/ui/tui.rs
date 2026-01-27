@@ -47,7 +47,7 @@ use crate::ui::components::palette::{self, PaletteAction, PaletteState};
 use crate::ui::components::pills::{self, Pill};
 use crate::ui::components::theme::ThemePalette;
 use crate::ui::components::toast::{Toast, ToastManager, render_toasts};
-use crate::ui::components::widgets::{search_bar, score_indicator};
+use crate::ui::components::widgets::{score_indicator, search_bar};
 use crate::ui::data::{ConversationView, InputMode, load_conversation, role_style};
 use crate::ui::shortcuts;
 use crate::update_check::{
@@ -1704,7 +1704,11 @@ fn contextual_snippet(text: &str, query: &str, window: ContextWindow) -> String 
 
     let slice: String = text.chars().skip(start_char_idx).take(size).collect();
     let prefix = if start_char_idx > 0 { "…" } else { "" };
-    let suffix = if start_char_idx + size < char_count { "…" } else { "" };
+    let suffix = if start_char_idx + size < char_count {
+        "…"
+    } else {
+        ""
+    };
     format!("{prefix}{slice}{suffix}")
 }
 
@@ -4070,11 +4074,10 @@ pub fn run_tui(
                             if elapsed_ms >= THROUGHPUT_SAMPLE_INTERVAL_MS {
                                 // Calculate items/second
                                 let items_delta = current.saturating_sub(last_count);
-                                let items_per_sec = if elapsed_ms > 0 {
-                                    (items_delta as u64 * 1000 / elapsed_ms) as u16
-                                } else {
-                                    0
-                                };
+                                let items_per_sec = (items_delta as u64 * 1000)
+                                    .checked_div(elapsed_ms)
+                                    .unwrap_or(0)
+                                    as u16;
                                 if throughput_history.len() == throughput_history.capacity() {
                                     throughput_history.pop_front();
                                 }
@@ -9445,7 +9448,7 @@ mod tests {
         selected.insert((1, 0));
 
         // Use real AgentPane and SearchHit structures
-        let panes = vec![
+        let panes = [
             AgentPane {
                 agent: "codex".into(),
                 hits: vec![
@@ -9692,11 +9695,9 @@ mod tests {
         let items_delta = 100usize;
         let elapsed_ms = 500u64;
 
-        let items_per_sec = if elapsed_ms > 0 {
-            (items_delta as u64 * 1000 / elapsed_ms) as u16
-        } else {
-            0
-        };
+        let items_per_sec = (items_delta as u64 * 1000)
+            .checked_div(elapsed_ms)
+            .unwrap_or(0) as u16;
 
         // 100 items in 500ms = 200 items/sec
         assert_eq!(items_per_sec, 200);
@@ -9708,11 +9709,9 @@ mod tests {
         let items_delta = 100usize;
         let elapsed_ms = 0u64;
 
-        let items_per_sec = if elapsed_ms > 0 {
-            (items_delta as u64 * 1000 / elapsed_ms) as u16
-        } else {
-            0
-        };
+        let items_per_sec = (items_delta as u64 * 1000)
+            .checked_div(elapsed_ms)
+            .unwrap_or(0) as u16;
 
         assert_eq!(items_per_sec, 0);
         let _ = items_delta; // suppress unused warning

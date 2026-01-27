@@ -1862,21 +1862,12 @@ impl PagesWizard {
                                     style(&result.pages_url).cyan().bold()
                                 )?;
                                 if let Some(ref domain) = result.custom_domain {
-                                    writeln!(
-                                        term,
-                                        "  Custom domain: {}",
-                                        style(domain).cyan()
-                                    )?;
+                                    writeln!(term, "  Custom domain: {}", style(domain).cyan())?;
                                 }
                             }
                             Err(e) => {
                                 writeln!(term)?;
-                                writeln!(
-                                    term,
-                                    "  {} Deployment failed: {}",
-                                    style("✗").red(),
-                                    e
-                                )?;
+                                writeln!(term, "  {} Deployment failed: {}", style("✗").red(), e)?;
                                 writeln!(term)?;
                                 writeln!(
                                     term,
@@ -1899,19 +1890,12 @@ impl PagesWizard {
                     Ok(prereqs) => {
                         let missing = prereqs.missing();
                         writeln!(term)?;
-                        writeln!(
-                            term,
-                            "  {} Prerequisites not met:",
-                            style("⚠").yellow()
-                        )?;
+                        writeln!(term, "  {} Prerequisites not met:", style("⚠").yellow())?;
                         for item in &missing {
                             writeln!(term, "    {} {}", style("•").dim(), item)?;
                         }
                         writeln!(term)?;
-                        writeln!(
-                            term,
-                            "To deploy manually after meeting prerequisites:"
-                        )?;
+                        writeln!(term, "To deploy manually after meeting prerequisites:")?;
                         writeln!(
                             term,
                             "  {}",

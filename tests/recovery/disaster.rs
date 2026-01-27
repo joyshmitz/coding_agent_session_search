@@ -9,7 +9,9 @@
 
 use anyhow::Result;
 use coding_agent_search::pages::bundle::IntegrityManifest;
-use coding_agent_search::pages::encrypt::{DecryptionEngine, EncryptionConfig, EncryptionEngine, load_config};
+use coding_agent_search::pages::encrypt::{
+    DecryptionEngine, EncryptionConfig, EncryptionEngine, load_config,
+};
 use coding_agent_search::pages::key_management::key_list;
 use coding_agent_search::pages::qr::RecoverySecret;
 use std::fs;
@@ -193,7 +195,11 @@ fn test_detect_truncated_chunk() -> Result<()> {
     let archive_dir = temp.path().join("archive");
     fs::create_dir_all(&archive_dir)?;
 
-    let config = setup_encrypted_archive(&archive_dir, "password", b"test content for truncation test")?;
+    let config = setup_encrypted_archive(
+        &archive_dir,
+        "password",
+        b"test content for truncation test",
+    )?;
 
     // Truncate the chunk
     let chunk_path = archive_dir.join("payload/chunk-00000.bin");
@@ -233,7 +239,7 @@ fn test_integrity_manifest_validates_files() -> Result<()> {
         let manifest: IntegrityManifest = serde_json::from_str(&content)?;
 
         // Verify each file's hash
-        for (path, _entry) in &manifest.files {
+        for path in manifest.files.keys() {
             let file_path = archive_dir.join(path);
             assert!(file_path.exists(), "File {} should exist", path);
         }
@@ -302,15 +308,14 @@ fn test_corrupted_wrapped_dek_detected() -> Result<()> {
 
     // Parse, corrupt, and rewrite
     let mut config: serde_json::Value = serde_json::from_str(&content)?;
-    if let Some(slots) = config.get_mut("key_slots") {
-        if let Some(slot) = slots.get_mut(0) {
-            if let Some(wrapped) = slot.get_mut("wrapped_dek") {
-                // Corrupt the base64 by changing some characters
-                let original = wrapped.as_str().unwrap_or("");
-                let corrupted = original.chars().rev().collect::<String>();
-                *wrapped = serde_json::Value::String(corrupted);
-            }
-        }
+    if let Some(slots) = config.get_mut("key_slots")
+        && let Some(slot) = slots.get_mut(0)
+        && let Some(wrapped) = slot.get_mut("wrapped_dek")
+    {
+        // Corrupt the base64 by changing some characters
+        let original = wrapped.as_str().unwrap_or("");
+        let corrupted = original.chars().rev().collect::<String>();
+        *wrapped = serde_json::Value::String(corrupted);
     }
     fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
 
@@ -339,12 +344,11 @@ fn test_corrupted_salt_detected() -> Result<()> {
     let content = fs::read_to_string(&config_path)?;
 
     let mut config: serde_json::Value = serde_json::from_str(&content)?;
-    if let Some(slots) = config.get_mut("key_slots") {
-        if let Some(slot) = slots.get_mut(0) {
-            if let Some(salt) = slot.get_mut("salt") {
-                *salt = serde_json::Value::String("invalid_base64!!!".to_string());
-            }
-        }
+    if let Some(slots) = config.get_mut("key_slots")
+        && let Some(slot) = slots.get_mut(0)
+        && let Some(salt) = slot.get_mut("salt")
+    {
+        *salt = serde_json::Value::String("invalid_base64!!!".to_string());
     }
     fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
 
@@ -385,7 +389,10 @@ fn test_archive_copy_preserves_decryptability() -> Result<()> {
     decryptor.decrypt_to_file(&backup_dir, &decrypted_path, |_, _| {})?;
 
     let decrypted = fs::read(&decrypted_path)?;
-    assert_eq!(decrypted, content, "Backup should decrypt to original content");
+    assert_eq!(
+        decrypted, content,
+        "Backup should decrypt to original content"
+    );
 
     Ok(())
 }
@@ -454,14 +461,14 @@ fn test_recover_with_valid_recovery_key_after_password_corruption() -> Result<()
     let config_content = fs::read_to_string(&config_path)?;
     let mut config: serde_json::Value = serde_json::from_str(&config_content)?;
 
-    if let Some(slots) = config.get_mut("key_slots") {
-        if let Some(arr) = slots.as_array_mut() {
-            for slot in arr.iter_mut() {
-                if slot.get("slot_type").and_then(|v| v.as_str()) == Some("password") {
-                    if let Some(wrapped) = slot.get_mut("wrapped_dek") {
-                        *wrapped = serde_json::Value::String("corrupted".to_string());
-                    }
-                }
+    if let Some(slots) = config.get_mut("key_slots")
+        && let Some(arr) = slots.as_array_mut()
+    {
+        for slot in arr.iter_mut() {
+            if slot.get("slot_type").and_then(|v| v.as_str()) == Some("password")
+                && let Some(wrapped) = slot.get_mut("wrapped_dek")
+            {
+                *wrapped = serde_json::Value::String("corrupted".to_string());
             }
         }
     }
@@ -495,7 +502,10 @@ fn test_graceful_error_on_completely_corrupted_archive() -> Result<()> {
 
     // Should return error, not panic
     let result = load_config(&archive_dir);
-    assert!(result.is_err(), "Should gracefully handle corrupted archive");
+    assert!(
+        result.is_err(),
+        "Should gracefully handle corrupted archive"
+    );
 
     Ok(())
 }
@@ -513,9 +523,15 @@ fn test_error_messages_are_informative() -> Result<()> {
     let result = DecryptionEngine::unlock_with_password(config, "wrong-password");
     assert!(result.is_err(), "Wrong password should fail");
 
-    let error_msg = result.err().expect("Expected error").to_string().to_lowercase();
+    let error_msg = result
+        .err()
+        .expect("Expected error")
+        .to_string()
+        .to_lowercase();
     assert!(
-        error_msg.contains("password") || error_msg.contains("key") || error_msg.contains("invalid"),
+        error_msg.contains("password")
+            || error_msg.contains("key")
+            || error_msg.contains("invalid"),
         "Error should mention password/key issue: {}",
         error_msg
     );

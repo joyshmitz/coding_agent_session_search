@@ -366,6 +366,53 @@ fn test_recovery_key_authentication() {
 
 #[test]
 #[instrument]
+fn test_recovery_secret_faster_than_password() {
+    let _tracing = setup_test_tracing("test_recovery_secret_faster_than_password");
+    info!("=== Recovery Secret Speed Comparison Test ===");
+
+    let config = E2EConfig::default();
+    let artifacts = build_pipeline(&config);
+
+    // Measure password unlock time (uses Argon2id)
+    let password_start = Instant::now();
+    let enc_config = load_config(&artifacts.bundle.site_dir).expect("Failed to load config");
+    let _decryptor_password = DecryptionEngine::unlock_with_password(enc_config, TEST_PASSWORD)
+        .expect("Should unlock with password");
+    let password_duration = password_start.elapsed();
+    info!("Password unlock took: {:?}", password_duration);
+
+    // Measure recovery secret unlock time (uses HKDF, should be faster)
+    let recovery_start = Instant::now();
+    let enc_config = load_config(&artifacts.bundle.site_dir).expect("Failed to load config");
+    let _decryptor_recovery =
+        DecryptionEngine::unlock_with_recovery(enc_config, TEST_RECOVERY_SECRET)
+            .expect("Should unlock with recovery key");
+    let recovery_duration = recovery_start.elapsed();
+    info!("Recovery secret unlock took: {:?}", recovery_duration);
+
+    // Recovery should be significantly faster (HKDF vs Argon2id)
+    // Recovery uses HKDF which is nearly instant, while Argon2id takes 1-3 seconds
+    assert!(
+        recovery_duration < password_duration,
+        "Recovery unlock ({:?}) should be faster than password unlock ({:?})",
+        recovery_duration,
+        password_duration
+    );
+
+    // Recovery should be at least 2x faster than password (typically 10-100x faster)
+    let speedup = password_duration.as_secs_f64() / recovery_duration.as_secs_f64().max(0.001);
+    info!("Recovery speedup factor: {:.1}x", speedup);
+    assert!(
+        speedup > 2.0,
+        "Recovery should be at least 2x faster than password (got {:.1}x)",
+        speedup
+    );
+
+    info!("=== Recovery Secret Speed Comparison Test PASSED ===");
+}
+
+#[test]
+#[instrument]
 fn test_multi_key_slot_management() {
     let _tracing = setup_test_tracing("test_multi_key_slot_management");
     info!("=== Multi-Key-Slot Management Test ===");
@@ -506,6 +553,106 @@ fn test_large_archive_handling() {
     );
 
     info!("=== Large Archive Handling Test PASSED ===");
+}
+
+/// Test with 100K messages (P6.5 exit criteria)
+/// This test is marked as ignored because it takes significant time/resources.
+/// Run with: cargo test --test pages_master_e2e test_xlarge_archive_100k -- --ignored
+#[test]
+#[ignore]
+#[instrument]
+fn test_xlarge_archive_100k() {
+    let _tracing = setup_test_tracing("test_xlarge_archive_100k");
+    info!("=== XLarge Archive (100K Messages) Test ===");
+
+    // 1000 conversations * 100 messages = 100K messages
+    let config = E2EConfig {
+        conversation_count: 1000,
+        messages_per_conversation: 100,
+        timeout_ms: 300000, // 5 minute timeout
+        ..Default::default()
+    };
+
+    let start = Instant::now();
+    let artifacts = build_pipeline(&config);
+    let build_duration = start.elapsed();
+    info!("Built 100K message archive in {:?}", build_duration);
+
+    // Verify bundle is valid
+    let result = verify_bundle(&artifacts.bundle.site_dir, false).expect("Verification failed");
+    assert_eq!(
+        result.status, "valid",
+        "100K message bundle should be valid"
+    );
+
+    // Verify bundle size is under GitHub Pages limit (1GB, but target <500MB)
+    let site_size = dir_size(&artifacts.bundle.site_dir);
+    info!("Bundle size: {} MB", site_size / (1024 * 1024));
+    assert!(
+        site_size < 1024 * 1024 * 1024,
+        "Bundle should be under 1GB (GitHub Pages limit)"
+    );
+
+    // Test decryption completes within reasonable time
+    let decrypt_start = Instant::now();
+    let enc_config = load_config(&artifacts.bundle.site_dir).expect("Failed to load config");
+    let decryptor =
+        DecryptionEngine::unlock_with_password(enc_config, TEST_PASSWORD).expect("Should unlock");
+
+    let decrypted_path = artifacts.temp_dir.path().join("xlarge_decrypted.db");
+    decryptor
+        .decrypt_to_file(&artifacts.bundle.site_dir, &decrypted_path, |_, _| {})
+        .expect("Decryption should succeed");
+    let decrypt_duration = decrypt_start.elapsed();
+    info!("Decrypted 100K message archive in {:?}", decrypt_duration);
+
+    // Decryption should complete within 2 minutes
+    assert!(
+        decrypt_duration < Duration::from_secs(120),
+        "100K message decryption should complete within 2 minutes"
+    );
+
+    // Verify FTS search still works and is fast
+    let conn = Connection::open(&decrypted_path).expect("open decrypted db");
+    let search_start = Instant::now();
+    let query = escape_fts5_query("optimize");
+    let hit_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?",
+            [query],
+            |r| r.get(0),
+        )
+        .expect("fts query");
+    let search_duration = search_start.elapsed();
+
+    info!(
+        "FTS search returned {} results in {:?}",
+        hit_count, search_duration
+    );
+    assert!(
+        search_duration < Duration::from_millis(500),
+        "Search should complete within 500ms even on 100K messages"
+    );
+
+    info!("=== XLarge Archive (100K Messages) Test PASSED ===");
+}
+
+/// Calculate directory size recursively
+fn dir_size(path: &Path) -> u64 {
+    let mut size = 0;
+    if path.is_dir()
+        && let Ok(entries) = fs::read_dir(path)
+    {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                size += dir_size(&entry_path);
+            } else if let Ok(metadata) = entry_path.metadata() {
+                size += metadata.len();
+            }
+        }
+    }
+    size
 }
 
 #[test]
@@ -679,7 +826,7 @@ fn setup_test_tracing(_test_name: &str) -> tracing::subscriber::DefaultGuard {
 // E2E Logger Integration
 // =============================================================================
 
-use util::e2e_log::{E2eLogger, E2eTestInfo, E2eRunSummary, E2ePhase, E2eError};
+use util::e2e_log::{E2eError, E2eLogger, E2ePhase, E2eRunSummary, E2eTestInfo};
 
 /// Test result for collecting outcomes.
 #[derive(Debug, Clone)]
@@ -782,9 +929,18 @@ where
 
 /// Generate an HTML test report from collected outcomes.
 pub fn generate_html_report(outcomes: &[TestOutcome], total_duration: Duration) -> String {
-    let passed = outcomes.iter().filter(|o| o.status == TestStatus::Passed).count();
-    let failed = outcomes.iter().filter(|o| o.status == TestStatus::Failed).count();
-    let skipped = outcomes.iter().filter(|o| o.status == TestStatus::Skipped).count();
+    let passed = outcomes
+        .iter()
+        .filter(|o| o.status == TestStatus::Passed)
+        .count();
+    let failed = outcomes
+        .iter()
+        .filter(|o| o.status == TestStatus::Failed)
+        .count();
+    let skipped = outcomes
+        .iter()
+        .filter(|o| o.status == TestStatus::Skipped)
+        .count();
     let total = outcomes.len();
 
     let test_rows: String = outcomes
@@ -801,8 +957,10 @@ pub fn generate_html_report(outcomes: &[TestOutcome], total_duration: Duration) 
                 TestStatus::Skipped => "⊘",
             };
             let error_row = if let Some(ref err) = o.error {
-                format!(r#"<tr class="error-row"><td colspan="4"><pre>{}</pre></td></tr>"#,
-                    html_escape(err))
+                format!(
+                    r#"<tr class="error-row"><td colspan="4"><pre>{}</pre></td></tr>"#,
+                    html_escape(err)
+                )
             } else {
                 String::new()
             };
@@ -1049,29 +1207,37 @@ pub fn run_master_suite() -> std::io::Result<MasterSuiteReport> {
     logger.phase_start(&phase)?;
     let phase_start = Instant::now();
 
-    outcomes.push(run_workflow_test!(&logger, "test_full_export_workflow", || {
-        let config = E2EConfig::default();
-        let artifacts = build_pipeline(&config);
-        let result = verify_bundle(&artifacts.bundle.site_dir, false)?;
-        if result.status != "valid" {
-            return Err(format!("Bundle validation failed: {}", result.status).into());
+    outcomes.push(run_workflow_test!(
+        &logger,
+        "test_full_export_workflow",
+        || {
+            let config = E2EConfig::default();
+            let artifacts = build_pipeline(&config);
+            let result = verify_bundle(&artifacts.bundle.site_dir, false)?;
+            if result.status != "valid" {
+                return Err(format!("Bundle validation failed: {}", result.status).into());
+            }
+            Ok(())
         }
-        Ok(())
-    }));
+    ));
 
-    outcomes.push(run_workflow_test!(&logger, "test_empty_archive_handling", || {
-        let config = E2EConfig {
-            conversation_count: 1,
-            messages_per_conversation: 1,
-            ..Default::default()
-        };
-        let artifacts = build_pipeline(&config);
-        let result = verify_bundle(&artifacts.bundle.site_dir, false)?;
-        if result.status != "valid" {
-            return Err(format!("Minimal bundle validation failed: {}", result.status).into());
+    outcomes.push(run_workflow_test!(
+        &logger,
+        "test_empty_archive_handling",
+        || {
+            let config = E2EConfig {
+                conversation_count: 1,
+                messages_per_conversation: 1,
+                ..Default::default()
+            };
+            let artifacts = build_pipeline(&config);
+            let result = verify_bundle(&artifacts.bundle.site_dir, false)?;
+            if result.status != "valid" {
+                return Err(format!("Minimal bundle validation failed: {}", result.status).into());
+            }
+            Ok(())
         }
-        Ok(())
-    }));
+    ));
 
     logger.phase_end(&phase, phase_start.elapsed().as_millis() as u64)?;
 
@@ -1083,23 +1249,32 @@ pub fn run_master_suite() -> std::io::Result<MasterSuiteReport> {
     logger.phase_start(&phase)?;
     let phase_start = Instant::now();
 
-    outcomes.push(run_workflow_test!(&logger, "test_password_authentication", || {
-        let config = E2EConfig::default();
-        let artifacts = build_pipeline(&config);
-        let enc_config = load_config(&artifacts.bundle.site_dir)?;
-        let _decryptor = DecryptionEngine::unlock_with_password(enc_config, TEST_PASSWORD)
-            .map_err(|e| format!("Password unlock failed: {:?}", e))?;
-        Ok(())
-    }));
+    outcomes.push(run_workflow_test!(
+        &logger,
+        "test_password_authentication",
+        || {
+            let config = E2EConfig::default();
+            let artifacts = build_pipeline(&config);
+            let enc_config = load_config(&artifacts.bundle.site_dir)?;
+            let _decryptor = DecryptionEngine::unlock_with_password(enc_config, TEST_PASSWORD)
+                .map_err(|e| format!("Password unlock failed: {:?}", e))?;
+            Ok(())
+        }
+    ));
 
-    outcomes.push(run_workflow_test!(&logger, "test_recovery_key_authentication", || {
-        let config = E2EConfig::default();
-        let artifacts = build_pipeline(&config);
-        let enc_config = load_config(&artifacts.bundle.site_dir)?;
-        let _decryptor = DecryptionEngine::unlock_with_recovery(enc_config, TEST_RECOVERY_SECRET)
-            .map_err(|e| format!("Recovery unlock failed: {:?}", e))?;
-        Ok(())
-    }));
+    outcomes.push(run_workflow_test!(
+        &logger,
+        "test_recovery_key_authentication",
+        || {
+            let config = E2EConfig::default();
+            let artifacts = build_pipeline(&config);
+            let enc_config = load_config(&artifacts.bundle.site_dir)?;
+            let _decryptor =
+                DecryptionEngine::unlock_with_recovery(enc_config, TEST_RECOVERY_SECRET)
+                    .map_err(|e| format!("Recovery unlock failed: {:?}", e))?;
+            Ok(())
+        }
+    ));
 
     logger.phase_end(&phase, phase_start.elapsed().as_millis() as u64)?;
 
@@ -1111,25 +1286,38 @@ pub fn run_master_suite() -> std::io::Result<MasterSuiteReport> {
     logger.phase_start(&phase)?;
     let phase_start = Instant::now();
 
-    outcomes.push(run_workflow_test!(&logger, "test_invalid_password_rejected", || {
-        let config = E2EConfig::default();
-        let artifacts = build_pipeline(&config);
-        let enc_config = load_config(&artifacts.bundle.site_dir)?;
-        let result = DecryptionEngine::unlock_with_password(enc_config, "wrong-password");
-        if result.is_ok() {
-            return Err("Should have rejected invalid password".into());
+    outcomes.push(run_workflow_test!(
+        &logger,
+        "test_invalid_password_rejected",
+        || {
+            let config = E2EConfig::default();
+            let artifacts = build_pipeline(&config);
+            let enc_config = load_config(&artifacts.bundle.site_dir)?;
+            let result = DecryptionEngine::unlock_with_password(enc_config, "wrong-password");
+            if result.is_ok() {
+                return Err("Should have rejected invalid password".into());
+            }
+            Ok(())
         }
-        Ok(())
-    }));
+    ));
 
     logger.phase_end(&phase, phase_start.elapsed().as_millis() as u64)?;
 
     let total_duration = suite_start.elapsed();
 
     // Generate summary
-    let passed = outcomes.iter().filter(|o| o.status == TestStatus::Passed).count() as u32;
-    let failed = outcomes.iter().filter(|o| o.status == TestStatus::Failed).count() as u32;
-    let skipped = outcomes.iter().filter(|o| o.status == TestStatus::Skipped).count() as u32;
+    let passed = outcomes
+        .iter()
+        .filter(|o| o.status == TestStatus::Passed)
+        .count() as u32;
+    let failed = outcomes
+        .iter()
+        .filter(|o| o.status == TestStatus::Failed)
+        .count() as u32;
+    let skipped = outcomes
+        .iter()
+        .filter(|o| o.status == TestStatus::Skipped)
+        .count() as u32;
 
     let summary = E2eRunSummary {
         total: outcomes.len() as u32,
@@ -1218,7 +1406,9 @@ fn test_master_suite_runner() {
     fs::create_dir_all(&report_dir).ok();
 
     let html_path = report_dir.join("master_e2e_report.html");
-    report.write_html(&html_path).expect("Failed to write HTML report");
+    report
+        .write_html(&html_path)
+        .expect("Failed to write HTML report");
 
     println!("📊 HTML Report: {}", html_path.display());
     println!("📄 JSONL Log: {}", report.jsonl_path.display());

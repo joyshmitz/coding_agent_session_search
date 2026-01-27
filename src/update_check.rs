@@ -254,7 +254,10 @@ pub fn run_self_update(version: &str) -> ! {
         let err = std::process::Command::new("bash")
             .args([
                 "-c",
-                &format!("curl -fsSL '{}' | bash -s -- --easy-mode --version {}", install_url, version),
+                &format!(
+                    "curl -fsSL '{}' | bash -s -- --easy-mode --version {}",
+                    install_url, version
+                ),
             ])
             .exec();
         // If we get here, exec failed

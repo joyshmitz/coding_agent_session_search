@@ -250,7 +250,7 @@ impl SourceDefinition {
             .iter()
             .filter(|m| m.applies_to_agent(agent))
             .collect();
-        mappings.sort_by(|a, b| b.from.len().cmp(&a.from.len()));
+        mappings.sort_by_key(|m| std::cmp::Reverse(m.from.len()));
 
         for mapping in mappings {
             if let Some(rewritten) = mapping.apply(path) {

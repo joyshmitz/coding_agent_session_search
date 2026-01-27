@@ -1272,8 +1272,14 @@ impl CacheShards {
             (v.len(), v.iter().map(CachedHit::approx_bytes).sum())
         });
 
-        self.total_cost = self.total_cost.saturating_add(new_cost).saturating_sub(old_cost);
-        self.total_bytes = self.total_bytes.saturating_add(new_bytes).saturating_sub(old_bytes);
+        self.total_cost = self
+            .total_cost
+            .saturating_add(new_cost)
+            .saturating_sub(old_cost);
+        self.total_bytes = self
+            .total_bytes
+            .saturating_add(new_bytes)
+            .saturating_sub(old_bytes);
         self.evict_until_within_cap();
     }
 

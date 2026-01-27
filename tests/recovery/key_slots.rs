@@ -8,7 +8,9 @@
 //! - Edge cases (empty password, unicode, case sensitivity)
 
 use anyhow::Result;
-use coding_agent_search::pages::encrypt::{DecryptionEngine, EncryptionConfig, EncryptionEngine, load_config};
+use coding_agent_search::pages::encrypt::{
+    DecryptionEngine, EncryptionConfig, EncryptionEngine, load_config,
+};
 use coding_agent_search::pages::key_management::{
     key_add_password, key_add_recovery, key_list, key_revoke, key_rotate,
 };
@@ -32,7 +34,10 @@ fn setup_encrypted_archive(dir: &Path, password: &str) -> Result<EncryptionConfi
 }
 
 /// Create a test encrypted archive with both password and recovery slots
-fn setup_archive_with_recovery(dir: &Path, password: &str) -> Result<(EncryptionConfig, RecoverySecret)> {
+fn setup_archive_with_recovery(
+    dir: &Path,
+    password: &str,
+) -> Result<(EncryptionConfig, RecoverySecret)> {
     let test_file = dir.join("test_input.db");
     fs::write(&test_file, b"test database content for recovery testing")?;
 
@@ -55,7 +60,11 @@ fn setup_archive_with_recovery(dir: &Path, password: &str) -> Result<(Encryption
 fn test_recovery_secret_generation() {
     // Recovery secrets should be 256 bits (32 bytes)
     let secret = RecoverySecret::generate();
-    assert_eq!(secret.as_bytes().len(), 32, "Recovery secret should be 32 bytes");
+    assert_eq!(
+        secret.as_bytes().len(),
+        32,
+        "Recovery secret should be 32 bytes"
+    );
 
     // Each generation should produce a unique secret
     let secret2 = RecoverySecret::generate();
@@ -83,7 +92,11 @@ fn test_recovery_secret_encoding_roundtrip() {
 
     // Roundtrip through encoding
     let decoded = RecoverySecret::from_encoded(encoded).expect("Should decode successfully");
-    assert_eq!(secret.as_bytes(), decoded.as_bytes(), "Roundtrip should preserve bytes");
+    assert_eq!(
+        secret.as_bytes(),
+        decoded.as_bytes(),
+        "Roundtrip should preserve bytes"
+    );
 }
 
 #[test]
@@ -121,7 +134,10 @@ fn test_recovery_key_works_after_password_change() -> Result<()> {
     // Reload config and try recovery key
     let updated_config = load_config(&archive_dir)?;
     let result = DecryptionEngine::unlock_with_recovery(updated_config, recovery_secret.as_bytes());
-    assert!(result.is_ok(), "Recovery key should work after password change");
+    assert!(
+        result.is_ok(),
+        "Recovery key should work after password change"
+    );
 
     Ok(())
 }
@@ -284,7 +300,10 @@ fn test_cannot_revoke_authenticating_slot() -> Result<()> {
 
     // Cannot revoke slot 0 when authenticating with slot 0's password
     let result = key_revoke(&archive_dir, password1, 0);
-    assert!(result.is_err(), "Should not allow revoking authenticating slot");
+    assert!(
+        result.is_err(),
+        "Should not allow revoking authenticating slot"
+    );
     assert!(
         result.unwrap_err().to_string().contains("authentication"),
         "Error should mention authentication"
@@ -310,7 +329,7 @@ fn test_all_active_slots_work_independently() -> Result<()> {
     let (_, recovery) = key_add_recovery(&archive_dir, password1)?;
 
     // Verify all passwords work independently
-    let passwords = vec![password1, password2, password3];
+    let passwords = [password1, password2, password3];
     for (i, pw) in passwords.iter().enumerate() {
         let config = load_config(&archive_dir)?;
         assert!(
@@ -351,7 +370,10 @@ fn test_slot_ids_remain_stable_after_revocation() -> Result<()> {
     // Add another password - should get slot 3 (not reuse slot 1)
     let password4 = "password-four";
     let new_slot_id = key_add_password(&archive_dir, password3, password4)?;
-    assert_eq!(new_slot_id, 3, "New slot should be ID 3, not reuse revoked ID");
+    assert_eq!(
+        new_slot_id, 3,
+        "New slot should be ID 3, not reuse revoked ID"
+    );
 
     // Verify slot structure
     let list = key_list(&archive_dir)?;
@@ -381,7 +403,10 @@ fn test_key_rotation_basic() -> Result<()> {
     let new_password = "new-password";
     let result = key_rotate(&archive_dir, old_password, new_password, false, |_| {})?;
     assert_eq!(result.slot_count, 1, "Should have 1 slot after rotation");
-    assert!(result.recovery_secret.is_none(), "Should not have recovery when keep_recovery=false");
+    assert!(
+        result.recovery_secret.is_none(),
+        "Should not have recovery when keep_recovery=false"
+    );
 
     // Old password should not work
     let config1 = load_config(&archive_dir)?;
@@ -413,7 +438,10 @@ fn test_key_rotation_with_recovery() -> Result<()> {
     let new_password = "new-password";
     let result = key_rotate(&archive_dir, old_password, new_password, true, |_| {})?;
     assert_eq!(result.slot_count, 2, "Should have 2 slots with recovery");
-    assert!(result.recovery_secret.is_some(), "Should have recovery secret");
+    assert!(
+        result.recovery_secret.is_some(),
+        "Should have recovery secret"
+    );
 
     // Verify new recovery works
     let recovery_encoded = result.recovery_secret.unwrap();
@@ -514,10 +542,16 @@ fn test_whitespace_only_password_rejected() {
 
     // Whitespace-only passwords should be rejected
     let result = engine.add_password_slot("   ");
-    assert!(result.is_err(), "Whitespace-only password should be rejected");
+    assert!(
+        result.is_err(),
+        "Whitespace-only password should be rejected"
+    );
 
     let result2 = engine.add_password_slot("\t\n");
-    assert!(result2.is_err(), "Tab/newline only password should be rejected");
+    assert!(
+        result2.is_err(),
+        "Tab/newline only password should be rejected"
+    );
 }
 
 #[test]

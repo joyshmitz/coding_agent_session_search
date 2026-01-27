@@ -653,7 +653,7 @@ impl<'a> AnalyticsGenerator<'a> {
 
         // Sort by count descending
         let mut top: Vec<(String, usize)> = term_counts.into_iter().collect();
-        top.sort_by(|a, b| b.1.cmp(&a.1));
+        top.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
         // Keep top 100
         top.truncate(100);

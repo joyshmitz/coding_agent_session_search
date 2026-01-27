@@ -5,6 +5,8 @@ const { chromium } = require('playwright');
 const { runDecryptTiming } = require('./decrypt-timing.test');
 const { runSearchLatency } = require('./search-latency.test');
 const { runMemoryProfile } = require('./memory-profiler.test');
+const { runScrollPerformance } = require('./scroll-performance.test');
+const { assertAll, TARGETS } = require('./assertions');
 
 const DEFAULT_QUERIES = [
   'authentication',
@@ -160,6 +162,18 @@ async function main() {
   const searchMetrics = await runSearchLatency(page, DEFAULT_QUERIES);
   const memoryMetrics = await runMemoryProfile(page, 100);
 
+  // Run scroll performance test
+  let scrollMetrics = null;
+  try {
+    scrollMetrics = await runScrollPerformance(page, {
+      scrollContainer: '#results-container',
+      scrollSteps: 100,
+      stepDelay: 16
+    });
+  } catch (e) {
+    scrollMetrics = { error: e.message || String(e) };
+  }
+
   let lighthouseMetrics = null;
   if (args.lighthouse) {
     lighthouseMetrics = await runLighthouse(baseUrl);
@@ -168,15 +182,30 @@ async function main() {
   await browser.close();
   server.close();
 
-  const summary = {
-    bundle: bundleDir,
-    baseUrl,
-    elapsed_ms: Date.now() - navigationStart,
+  // Compile all metrics
+  const rawMetrics = {
     navigation: navMetrics,
     decrypt: decryptMetrics,
     search: searchMetrics,
     memory: memoryMetrics,
+    scroll: scrollMetrics,
     lighthouse: lighthouseMetrics
+  };
+
+  // Run assertions
+  const assertions = assertAll(rawMetrics);
+
+  const summary = {
+    bundle: bundleDir,
+    baseUrl,
+    elapsed_ms: Date.now() - navigationStart,
+    targets: TARGETS,
+    ...rawMetrics,
+    assertions: {
+      pass: assertions.pass,
+      summary: assertions.summary,
+      failures: assertions.failures
+    }
   };
 
   const payload = JSON.stringify(summary, null, 2);
@@ -185,9 +214,25 @@ async function main() {
   } else {
     console.log(payload);
   }
+
+  // Print assertion summary to stderr
+  if (!assertions.pass) {
+    console.error('\n[perf] ASSERTIONS FAILED:');
+    for (const failure of assertions.failures) {
+      console.error(`  - ${failure}`);
+    }
+    return 1;
+  }
+
+  console.error(`\n[perf] All ${assertions.summary.passed} assertions passed`);
+  return 0;
 }
 
-main().catch((err) => {
-  console.error('[perf] failed:', err);
-  process.exit(1);
-});
+main()
+  .then((exitCode) => {
+    process.exit(exitCode || 0);
+  })
+  .catch((err) => {
+    console.error('[perf] failed:', err);
+    process.exit(1);
+  });

@@ -6,6 +6,7 @@ use coding_agent_search::pages::export::{ExportEngine, ExportFilter, PathMode};
 use coding_agent_search::pages::key_management::{key_add_password, key_list, key_revoke};
 use coding_agent_search::pages::verify::verify_bundle;
 use coding_agent_search::storage::sqlite::SqliteStorage;
+use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -151,6 +152,56 @@ fn test_pages_pipeline_decrypt_roundtrip() {
 }
 
 #[test]
+fn test_pages_config_validate_cli() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("pages-config.json");
+    let config = r#"{
+  "filters": {
+    "agents": ["claude-code"],
+    "path_mode": "relative"
+  },
+  "encryption": {
+    "password": "test-password-123",
+    "no_encryption": false,
+    "i_understand_risks": false,
+    "generate_recovery": true,
+    "generate_qr": false,
+    "compression": "deflate",
+    "chunk_size": 8388608
+  },
+  "bundle": {
+    "title": "Test Archive",
+    "description": "CLI config validation test",
+    "include_pwa": false,
+    "include_attachments": false,
+    "hide_metadata": false
+  },
+  "deployment": {
+    "target": "local",
+    "output_dir": "./cass-export",
+    "repo": null,
+    "branch": null
+  }
+}"#;
+
+    fs::write(&config_path, config).unwrap();
+
+    let mut cmd = cargo_bin_cmd!("cass");
+    let assert = cmd
+        .arg("pages")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--validate-config")
+        .arg("--json")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let payload: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(payload["valid"].as_bool(), Some(true));
+}
+
+#[test]
 fn test_pages_bundle_key_add_revoke_cycle() {
     let temp_dir = TempDir::new().unwrap();
     let artifacts = build_pipeline(&temp_dir);
@@ -205,7 +256,6 @@ fn test_pages_bundle_verify_detects_corruption() {
 }
 
 #[test]
-#[ignore] // TODO: Debug why cass output is empty in test environment
 fn test_secret_scan_gating() {
     let temp_dir = TempDir::new().unwrap();
 
@@ -241,14 +291,17 @@ fn test_secret_scan_gating() {
     let findings_array = findings.as_array().expect("findings should be array");
     assert!(!findings_array.is_empty(), "Should detect inserted secret");
 
-    // Check that we found the specific type of secret
+    // Check that we found the specific type of secret (openai_key pattern)
     let found_api_key = findings_array.iter().any(|f| {
         f.get("kind")
             .and_then(|k| k.as_str())
-            .map(|s| s.contains("API Key") || s.contains("OpenAI"))
+            .map(|s| s == "openai_key")
             .unwrap_or(false)
     });
-    assert!(found_api_key, "Should detect the fake API key");
+    assert!(
+        found_api_key,
+        "Should detect the fake API key (openai_key pattern)"
+    );
 
     // 2. Fail on secrets
     let mut cmd_fail = cargo_bin_cmd!("cass");
@@ -297,7 +350,8 @@ fn setup_db_internal(data_dir: &Path, include_secret: bool) {
     );
 
     let content = if include_secret {
-        "I accidentally pasted my key: sk-proj-1234567890abcdef1234567890abcdef1234567890abcdef"
+        // Use a valid OpenAI key format (sk- followed by 20+ alphanumeric chars, no extra hyphens)
+        "I accidentally pasted my key: sk-TESTabcdefghijklmnopqrstuvwxyz012345"
     } else {
         "Agent response 1"
     };
