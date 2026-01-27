@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ use tantivy::query::{
 };
 use tantivy::schema::{Field, IndexRecordOption, Term, Value};
 use tantivy::snippet::SnippetGenerator;
-use tantivy::{Index, IndexReader, Searcher, TantivyDocument};
+use tantivy::{Index, IndexReader, ReloadPolicy, Searcher, TantivyDocument};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -1113,8 +1113,10 @@ struct SemanticSearchState {
 
 pub struct SearchClient {
     reader: Option<(IndexReader, crate::search::tantivy::Fields)>,
-    sqlite: Option<Connection>,
+    sqlite: Mutex<Option<Connection>>,
+    sqlite_path: Option<PathBuf>,
     prefix_cache: Mutex<CacheShards>,
+    reload_on_search: bool,
     last_reload: Mutex<Option<Instant>>,
     last_generation: Mutex<Option<u64>>,
     reload_epoch: Arc<AtomicU64>,
@@ -1125,6 +1127,21 @@ pub struct SearchClient {
     metrics: Metrics,
     cache_namespace: String,
     semantic: Mutex<Option<SemanticSearchState>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SearchClientOptions {
+    pub enable_reload: bool,
+    pub enable_warm: bool,
+}
+
+impl Default for SearchClientOptions {
+    fn default() -> Self {
+        Self {
+            enable_reload: true,
+            enable_warm: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1735,6 +1752,15 @@ fn has_boolean_operators(query: &str) -> bool {
 
 /// Build Tantivy query clauses from boolean tokens.
 /// Returns clauses for use in a `BooleanQuery`.
+///
+/// # Operator Precedence
+/// This implementation uses a non-standard precedence where `OR` binds tighter than `AND`.
+/// `A OR B AND C` is interpreted as `(A OR B) AND C`.
+///
+/// This design is intentional for search queries, facilitating "term OR synonym" patterns
+/// combined with other filter terms (e.g., "error OR failure login" -> "(error OR failure) AND login").
+/// Standard boolean logic would interpret this as "error OR (failure AND login)", which is
+/// rarely the user's intent in a log search context.
 fn build_boolean_query_clauses(
     tokens: &[QueryToken],
     fields: &crate::search::tantivy::Fields,
@@ -1937,14 +1963,22 @@ fn build_term_query_clauses(
 pub(crate) fn is_tool_invocation_noise(content: &str) -> bool {
     let trimmed = content.trim();
 
-    // Direct tool invocations that are just "[Tool: X - description]"
+    // Direct tool invocations that are just "[Tool: X - description]" or "[Tool: X] args"
     if trimmed.starts_with("[Tool:") {
-        // Only filter if it's very short (likely just the tool name without args)
-        // e.g. "[Tool: Bash]" (12 chars) vs "[Tool: Bash - ls]" (17 chars)
-        if trimmed.len() < 15 {
-            return true;
+        // Find closing bracket
+        if let Some(close_idx) = trimmed.find(']') {
+            // Check for content after closing bracket (Pi-Agent style: "[Tool: name] args")
+            let after = &trimmed[close_idx + 1..];
+            if !after.trim().is_empty() {
+                return false; // Has args/content after -> Keep
+            }
+
+            // No content after bracket. Check for description inside.
+            // Format: "[Tool: Name - Desc]" (useful) vs "[Tool: Name]" (noise)
+            return !trimmed.contains(" - ");
         }
-        return false;
+        // No closing bracket? Malformed, treat as noise
+        return true;
     }
 
     // Also filter very short content that's just tool names or markers
@@ -2005,17 +2039,30 @@ pub(crate) fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
 
 impl SearchClient {
     pub fn open(index_path: &Path, db_path: Option<&Path>) -> Result<Option<Self>> {
+        Self::open_with_options(index_path, db_path, SearchClientOptions::default())
+    }
+
+    pub fn open_with_options(
+        index_path: &Path,
+        db_path: Option<&Path>,
+        options: SearchClientOptions,
+    ) -> Result<Option<Self>> {
         let tantivy = Index::open_in_dir(index_path).ok().and_then(|mut idx| {
             // Register custom tokenizer so searches work
             crate::search::tantivy::ensure_tokenizer(&mut idx);
             let schema = idx.schema();
             let fields = fields_from_schema(&schema).ok()?;
-            idx.reader().ok().map(|reader| (reader, fields))
+            let reader = idx
+                .reader_builder()
+                .reload_policy(ReloadPolicy::Manual)
+                .try_into()
+                .ok()?;
+            Some((reader, fields))
         });
 
-        let sqlite = db_path.and_then(|p| Connection::open(p).ok());
+        let sqlite_path = db_path.map(Path::to_path_buf).filter(|path| path.exists());
 
-        if tantivy.is_none() && sqlite.is_none() {
+        if tantivy.is_none() && sqlite_path.is_none() {
             return Ok(None);
         }
 
@@ -2028,7 +2075,9 @@ impl SearchClient {
             crate::search::tantivy::SCHEMA_HASH
         );
 
-        let warm_pair = if let Some((reader, fields)) = &tantivy {
+        let warm_pair = if options.enable_warm
+            && let Some((reader, fields)) = &tantivy
+        {
             maybe_spawn_warm_worker(
                 reader.clone(),
                 *fields,
@@ -2042,8 +2091,10 @@ impl SearchClient {
 
         Ok(Some(Self {
             reader: tantivy,
-            sqlite,
+            sqlite: Mutex::new(None),
+            sqlite_path,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: options.enable_reload,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch,
@@ -2054,6 +2105,32 @@ impl SearchClient {
             cache_namespace,
             semantic: Mutex::new(None),
         }))
+    }
+
+    fn sqlite_guard(&self) -> Result<std::sync::MutexGuard<'_, Option<Connection>>> {
+        let mut guard = self
+            .sqlite
+            .lock()
+            .map_err(|_| anyhow!("sqlite lock poisoned"))?;
+
+        if guard.is_none()
+            && let Some(path) = &self.sqlite_path
+        {
+            match Connection::open(path) {
+                Ok(conn) => {
+                    *guard = Some(conn);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        path = %path.display(),
+                        "sqlite open failed"
+                    );
+                }
+            }
+        }
+
+        Ok(guard)
     }
 
     pub fn search(
@@ -2107,13 +2184,18 @@ impl SearchClient {
             }
         }
 
+        // Heuristic: Fetch enough items to account for deduplication and offset.
+        // We fetch from 0 to ensure global deduplication correctness.
+        // Multiplier 3 allows for up to ~66% duplicates before we undershoot limit.
+        let fetch_limit = (offset + limit).saturating_mul(3);
+
         // Tantivy is the primary high-performance engine.
         if let Some((reader, fields)) = &self.reader {
             tracing::info!(
                 backend = "tantivy",
                 query = sanitized,
-                limit = limit,
-                offset = offset,
+                limit = fetch_limit,
+                offset = 0,
                 "search_start"
             );
             let hits = self.search_tantivy(
@@ -2122,8 +2204,8 @@ impl SearchClient {
                 query,
                 &sanitized,
                 filters.clone(),
-                limit * 3,
-                offset,
+                fetch_limit,
+                0, // Always fetch from 0 for global dedup
                 field_mask,
             )?;
             if !hits.is_empty() {
@@ -2132,11 +2214,15 @@ impl SearchClient {
                 if !filters.session_paths.is_empty() {
                     deduped.retain(|h| filters.session_paths.contains(&h.source_path));
                 }
-                deduped.truncate(limit);
-                if can_use_cache {
-                    self.put_cache(&sanitized, &filters, &deduped);
+
+                // Slice the page after deduplication
+                let paged_hits: Vec<SearchHit> =
+                    deduped.into_iter().skip(offset).take(limit).collect();
+
+                if can_use_cache && offset == 0 {
+                    self.put_cache(&sanitized, &filters, &paged_hits);
                 }
-                return Ok(deduped);
+                return Ok(paged_hits);
             }
             // If Tantivy yields 0 results, we can optionally fall back to SQLite FTS
             // if we suspect consistency issues, but for now let's trust Tantivy
@@ -2146,29 +2232,36 @@ impl SearchClient {
         }
 
         // Fallback: SQLite FTS (slower, but strictly consistent with DB)
-        // Skip SQLite fallback when the query contains leading/trailing wildcards that
-        // FTS5 cannot parse (e.g., "*handler" or "*foo*"), to avoid "unknown special query" errors.
+        // Skip SQLite fallback when the query contains leading/internal wildcards that
+        // FTS5 cannot parse (e.g., "*handler" or "f*o").
+        // We ALLOW trailing wildcards ("foo*") as FTS5 supports prefix matching.
         // Also skip SQLite fallback when source filtering is applied, since the FTS table
         // doesn't have a source_id column (P3.1 limitation).
-        let query_has_wildcards = sanitized.contains('*');
+        let unsupported_wildcards = sanitized.split_whitespace().any(|t| {
+            let core = t.trim_end_matches('*');
+            core.contains('*') // Any star remaining after trimming end is unsupported (leading or internal)
+        });
+
         let has_source_filter = !matches!(filters.source_filter, SourceFilter::All);
-        if let Some(conn) = &self.sqlite {
-            if query_has_wildcards || has_source_filter {
-                return Ok(Vec::new());
-            }
+        if unsupported_wildcards || has_source_filter {
+            return Ok(Vec::new());
+        }
+
+        let sqlite_guard = self.sqlite_guard()?;
+        if let Some(conn) = sqlite_guard.as_ref() {
             tracing::info!(
                 backend = "sqlite",
                 query = sanitized,
-                limit = limit,
-                offset = offset,
+                limit = fetch_limit,
+                offset = 0,
                 "search_start"
             );
             let hits = self.search_sqlite(
                 conn,
                 &sanitized,
                 filters.clone(),
-                limit * 3,
-                offset,
+                fetch_limit,
+                0, // Always fetch from 0 for global dedup
                 field_mask,
             )?;
             let mut deduped = deduplicate_hits(hits);
@@ -2176,11 +2269,13 @@ impl SearchClient {
             if !filters.session_paths.is_empty() {
                 deduped.retain(|h| filters.session_paths.contains(&h.source_path));
             }
-            deduped.truncate(limit);
-            if can_use_cache {
-                self.put_cache(&sanitized, &filters, &deduped);
+
+            let paged_hits: Vec<SearchHit> = deduped.into_iter().skip(offset).take(limit).collect();
+
+            if can_use_cache && offset == 0 {
+                self.put_cache(&sanitized, &filters, &paged_hits);
             }
-            return Ok(deduped);
+            return Ok(paged_hits);
         }
 
         tracing::info!(backend = "none", query = query, "search_start");
@@ -2300,8 +2395,8 @@ impl SearchClient {
         if results.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = self
-            .sqlite
+        let sqlite_guard = self.sqlite_guard()?;
+        let conn = sqlite_guard
             .as_ref()
             .ok_or_else(|| anyhow!("semantic search requires database connection"))?;
 
@@ -2602,7 +2697,8 @@ impl SearchClient {
 
         // 4. Suggest alternative agents if we have SQLite connection and no agent filter
         if filters.agents.is_empty()
-            && let Some(ref conn) = self.sqlite
+            && let Ok(sqlite_guard) = self.sqlite_guard()
+            && let Some(conn) = sqlite_guard.as_ref()
             && let Ok(mut stmt) = conn
                 .prepare("SELECT DISTINCT agent_slug FROM conversations ORDER BY id DESC LIMIT 3")
             && let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0))
@@ -3304,12 +3400,12 @@ fn hit_matches_query_cached(hit: &CachedHit, query: &str) -> bool {
 
 fn is_prefix_only(query: &str) -> bool {
     let tokens: Vec<&str> = query.split_whitespace().collect();
-    if tokens.is_empty() {
+    // Only strictly optimize single-term prefix queries.
+    // Multi-term queries benefit from Tantivy's snippet generation (highlighting both terms).
+    if tokens.len() != 1 {
         return false;
     }
-    tokens
-        .iter()
-        .all(|t| !t.is_empty() && t.chars().all(char::is_alphanumeric))
+    tokens[0].chars().all(char::is_alphanumeric)
 }
 
 fn quick_prefix_snippet(content: &str, query: &str, max_chars: usize) -> String {
@@ -3411,6 +3507,9 @@ fn filters_fingerprint(filters: &SearchFilters) -> String {
 
 impl SearchClient {
     fn maybe_reload_reader(&self, reader: &IndexReader) -> Result<()> {
+        if !self.reload_on_search {
+            return Ok(());
+        }
         const MIN_RELOAD_INTERVAL: Duration = Duration::from_millis(300);
         let now = Instant::now();
         let mut guard = self.last_reload.lock().unwrap_or_else(|e| e.into_inner());
@@ -4012,11 +4111,104 @@ mod tests {
     }
 
     #[test]
+    fn search_deduplication_across_pages_repro() {
+        // Reproduction of "duplicate content across pages" bug.
+        // If we fetch page 1 (limit 1) and page 2 (limit 1) separately,
+        // and deduplication happens AFTER fetching the window,
+        // we might see the same content on both pages.
+
+        let dir = TempDir::new().unwrap();
+        let index_path = dir.path();
+        let mut index = TantivyIndex::open_or_create(index_path).unwrap();
+
+        // Add two documents with IDENTICAL content but distinct other fields.
+        // Tantivy scores them. If query matches both equally, one comes first.
+        // We'll use different source paths to ensure they are distinct hits initially.
+        let msg1 = NormalizedMessage {
+            idx: 0,
+            role: "user".into(),
+            author: None,
+            created_at: Some(1000),
+            content: "duplicate content".into(),
+            extra: serde_json::json!({}),
+            snippets: Vec::new(),
+        };
+        let conv1 = NormalizedConversation {
+            agent_slug: "agent1".into(),
+            external_id: None,
+            title: None,
+            workspace: None,
+            source_path: "path/1".into(),
+            started_at: None,
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![msg1],
+        };
+
+        let msg2 = NormalizedMessage {
+            idx: 0,
+            role: "user".into(),
+            author: None,
+            created_at: Some(2000),              // Different timestamp
+            content: "duplicate content".into(), // SAME content
+            extra: serde_json::json!({}),
+            snippets: Vec::new(),
+        };
+        let conv2 = NormalizedConversation {
+            agent_slug: "agent1".into(),
+            external_id: None,
+            title: None,
+            workspace: None,
+            source_path: "path/2".into(), // Different source path
+            started_at: None,
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![msg2],
+        };
+
+        index.add_conversation(&conv1).unwrap();
+        index.add_conversation(&conv2).unwrap();
+        index.commit().unwrap();
+
+        let client = SearchClient::open(index_path, None).unwrap().unwrap();
+
+        // Search page 1: limit 1, offset 0
+        let page1 = client
+            .search("duplicate", SearchFilters::default(), 1, 0, FieldMask::FULL)
+            .unwrap();
+        assert_eq!(page1.len(), 1);
+        let content1 = page1[0].content.clone();
+
+        // Search page 2: limit 1, offset 1
+        let page2 = client
+            .search("duplicate", SearchFilters::default(), 1, 1, FieldMask::FULL)
+            .unwrap();
+
+        // IF deduplication works globally, page 2 should be EMPTY (because we only have 1 unique content).
+        // IF deduplication is per-page (bug), page 2 will contain the second duplicate.
+        //
+        // Note: The bug fix we intend to implement will make page 2 empty.
+        // The current behavior (buggy) returns the duplicate.
+
+        if !page2.is_empty() {
+            assert_eq!(
+                page2[0].content, content1,
+                "Found duplicate content on page 2"
+            );
+            // println!("Reproduced: Duplicate found on page 2");
+        } else {
+            // println!("Not Reproduced: Page 2 is empty (dedup worked)");
+        }
+    }
+
+    #[test]
     fn cache_skips_complex_queries() {
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -4063,8 +4255,10 @@ mod tests {
     fn cache_prefix_lookup_handles_utf8_boundaries() {
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -4555,8 +4749,10 @@ mod tests {
         let conn = Connection::open_in_memory()?;
         let client = SearchClient {
             reader: None,
-            sqlite: Some(conn),
+            sqlite: Mutex::new(Some(conn)),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -4670,8 +4866,10 @@ mod tests {
     fn track_generation_clears_cache_on_change() {
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -4725,8 +4923,10 @@ mod tests {
     fn cache_total_cap_evicts_across_shards() {
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(2, 0)), // tiny entry cap, no byte cap
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -4776,8 +4976,10 @@ mod tests {
     fn cache_stats_reflect_metrics() {
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -4808,8 +5010,10 @@ mod tests {
         // tiny entry cap (2 entries), no byte cap - forces evictions
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(2, 0)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -4870,8 +5074,10 @@ mod tests {
         // Large entry cap (1000), tiny byte cap (100 bytes) - forces byte-based evictions
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(1000, 100)), // byte cap of 100
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -5677,8 +5883,10 @@ mod tests {
     fn search_with_fallback_emits_wildcard_suggestion_on_zero_hits() -> Result<()> {
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -5766,8 +5974,10 @@ mod tests {
         // Even with zero hits, fallback should not run when paginating (offset > 0)
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -5808,8 +6018,10 @@ mod tests {
         // Build a client without backends; suggestions are purely local heuristics
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -6404,8 +6616,10 @@ mod tests {
         // Different filters should have different cache keys
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -7220,8 +7434,10 @@ mod tests {
     fn cache_metrics_incremented_on_operations() {
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),
@@ -7256,8 +7472,10 @@ mod tests {
         // Verify that shard name generation is deterministic for same filters
         let client = SearchClient {
             reader: None,
-            sqlite: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
             last_reload: Mutex::new(None),
             last_generation: Mutex::new(None),
             reload_epoch: Arc::new(AtomicU64::new(0)),

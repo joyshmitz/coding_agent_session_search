@@ -744,14 +744,14 @@ mod tests {
     use super::*;
 
     /// Copy model fixtures from tests/fixtures/models/ to the target directory.
-    /// Copies model.onnx.placeholder as model.onnx plus config files.
+    /// Copies model.onnx plus config files.
     fn copy_model_fixtures(target_dir: &Path) -> std::io::Result<()> {
         let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models");
         fs::create_dir_all(target_dir)?;
 
-        // Copy model.onnx from placeholder
+        // Copy model.onnx fixture
         fs::copy(
-            fixture_dir.join("model.onnx.placeholder"),
+            fixture_dir.join("model.onnx"),
             target_dir.join("model.onnx"),
         )?;
 
@@ -828,11 +828,7 @@ mod tests {
         // Use fixture files instead of fake content - only copy model.onnx
         let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models");
         fs::create_dir_all(&model_dir).unwrap();
-        fs::copy(
-            fixture_dir.join("model.onnx.placeholder"),
-            model_dir.join("model.onnx"),
-        )
-        .unwrap();
+        fs::copy(fixture_dir.join("model.onnx"), model_dir.join("model.onnx")).unwrap();
         assert_eq!(check_model_installed(&model_dir), ModelState::NotInstalled);
     }
 
