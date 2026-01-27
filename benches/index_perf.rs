@@ -94,6 +94,7 @@ fn bench_index_full(c: &mut Criterion) {
         db_path,
         data_dir: data_dir.clone(),
         semantic: false,
+        build_hnsw: false,
         embedder: "fastembed".to_string(),
         progress: None,
     };
@@ -131,6 +132,7 @@ fn bench_streaming_vs_batch(c: &mut Criterion) {
             db_path: db_path.clone(),
             data_dir: data_dir.clone(),
             semantic: false,
+            build_hnsw: false,
             embedder: "fastembed".to_string(),
             progress: None,
         };
@@ -196,6 +198,7 @@ fn bench_channel_overhead(c: &mut Criterion) {
         db_path,
         data_dir: data_dir.clone(),
         semantic: false,
+        build_hnsw: false,
         embedder: "fastembed".to_string(),
         progress: None,
     };

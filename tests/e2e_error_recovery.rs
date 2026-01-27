@@ -323,6 +323,7 @@ fn test_corrupted_index_triggers_rebuild() {
         db_path: db_path.clone(),
         data_dir: data_dir.clone(),
         semantic: false,
+        build_hnsw: false,
         embedder: "fastembed".to_string(),
         progress: None,
     };
@@ -351,6 +352,7 @@ fn test_corrupted_index_triggers_rebuild() {
             db_path: db_path.clone(),
             data_dir: data_dir.clone(),
             semantic: false,
+            build_hnsw: false,
             embedder: "fastembed".to_string(),
             progress: None,
         };
