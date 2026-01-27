@@ -158,6 +158,17 @@ impl ChatGptConnector {
             return dirs;
         }
 
+        // 1. Check if base itself is a conversation dir
+        if base.is_dir()
+            && let Some(name) = base.file_name().and_then(|n| n.to_str())
+            && name.starts_with("conversations-")
+        {
+            let is_encrypted = name.contains("-v2-") || name.contains("-v3-");
+            dirs.push((base.clone(), is_encrypted));
+            return dirs;
+        }
+
+        // 2. Check children (standard behavior)
         for entry in fs::read_dir(base).into_iter().flatten().flatten() {
             let path = entry.path();
             if !path.is_dir() {
@@ -467,7 +478,7 @@ impl Connector for ChatGptConnector {
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
-        // Determine base directory
+        // Helper to check for conversation dirs
         let has_conversation_dirs = |path: &PathBuf| {
             fs::read_dir(path)
                 .map(|entries| {
@@ -482,87 +493,91 @@ impl Connector for ChatGptConnector {
 
         let looks_like_base = |path: &PathBuf| has_conversation_dirs(path);
 
-        let base = if ctx.use_default_detection() {
+        let roots: Vec<PathBuf> = if ctx.use_default_detection() {
             if looks_like_base(&ctx.data_dir) {
-                ctx.data_dir.clone()
+                vec![ctx.data_dir.clone()]
             } else if let Some(default_base) = Self::app_support_dir() {
-                default_base
+                vec![default_base]
             } else {
-                return Ok(Vec::new());
+                vec![]
             }
         } else {
-            if !looks_like_base(&ctx.data_dir) {
-                return Ok(Vec::new());
-            }
-            ctx.data_dir.clone()
+            // Explicit roots
+            ctx.scan_roots.iter().map(|r| r.path.clone()).collect()
         };
 
-        if !base.exists() {
-            return Ok(Vec::new());
-        }
-
-        let conv_dirs = Self::find_conversation_dirs(&base);
         let mut all_convs = Vec::new();
 
-        for (dir_path, is_encrypted) in conv_dirs {
-            // Skip encrypted directories if we don't have a key
-            if is_encrypted && self.encryption_key.is_none() {
-                tracing::debug!(
-                    path = %dir_path.display(),
-                    "chatgpt skipping encrypted directory (no decryption key)"
-                );
+        for base in roots {
+            if !base.exists() {
                 continue;
             }
 
-            // Walk through conversation files
-            for entry in WalkDir::new(&dir_path).max_depth(1).into_iter().flatten() {
-                if !entry.file_type().is_file() {
+            let conv_dirs = Self::find_conversation_dirs(&base);
+
+            for (dir_path, is_encrypted) in conv_dirs {
+                // Skip encrypted directories if we don't have a key
+                if is_encrypted && self.encryption_key.is_none() {
+                    tracing::debug!(
+                        path = %dir_path.display(),
+                        "chatgpt skipping encrypted directory (no decryption key)"
+                    );
                     continue;
                 }
 
-                let path = entry.path();
-                let ext = path.extension().and_then(|s| s.to_str());
-
-                // Look for JSON or data files
-                if ext != Some("json") && ext != Some("data") {
-                    continue;
-                }
-
-                // Skip files not modified since last scan
-                if !crate::connectors::file_modified_since(path, ctx.since_ts) {
-                    continue;
-                }
-
-                match self.parse_conversation_file(&path.to_path_buf(), ctx.since_ts, is_encrypted)
-                {
-                    Ok(Some(conv)) => {
-                        tracing::debug!(
-                            path = %path.display(),
-                            messages = conv.messages.len(),
-                            encrypted = is_encrypted,
-                            "chatgpt extracted conversation"
-                        );
-                        all_convs.push(conv);
+                // Walk through conversation files
+                for entry in WalkDir::new(&dir_path).max_depth(1).into_iter().flatten() {
+                    if !entry.file_type().is_file() {
+                        continue;
                     }
-                    Ok(None) => {
-                        tracing::debug!(
-                            path = %path.display(),
-                            "chatgpt no messages in conversation"
-                        );
+
+                    let path = entry.path();
+                    let ext = path.extension().and_then(|s| s.to_str());
+
+                    // Look for JSON or data files
+                    if ext != Some("json") && ext != Some("data") {
+                        continue;
                     }
-                    Err(e) => {
-                        if is_encrypted {
-                            tracing::warn!(
+
+                    // Skip files not modified since last scan
+                    if !crate::connectors::file_modified_since(path, ctx.since_ts) {
+                        continue;
+                    }
+
+                    match self.parse_conversation_file(
+                        &path.to_path_buf(),
+                        ctx.since_ts,
+                        is_encrypted,
+                    ) {
+                        Ok(Some(conv)) => {
+                            tracing::debug!(
                                 path = %path.display(),
-                                error = %e,
-                                "chatgpt failed to decrypt/parse conversation (key might be wrong)"
+                                messages = conv.messages.len(),
+                                encrypted = is_encrypted,
+                                "chatgpt extracted conversation"
                             );
-                        } else {
-                            tracing::warn!(
+                            all_convs.push(conv);
+                        }
+                        Ok(None) => {
+                            tracing::debug!(
                                 path = %path.display(),
-                                error = %e,
-                                "chatgpt failed to parse conversation"
+                                "chatgpt no messages in conversation"
                             );
+                        }
+                        Err(e) => {
+                            if is_encrypted {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    error = %e,
+                                    "chatgpt failed to decrypt/parse conversation (key might be wrong)"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    error = %e,
+                                    "chatgpt failed to parse conversation"
+                                );
+                            }
                         }
                     }
                 }

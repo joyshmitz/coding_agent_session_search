@@ -821,8 +821,9 @@ impl SyncEngine {
             }
         } else if stat.is_file() {
             // Single file - download to local path
-            std::fs::create_dir_all(local_path.parent().unwrap_or(local_path))
-                .map_err(|e| format!("Failed to create parent dir: {}", e))?;
+            // Ensure the safe-name directory exists for this remote path
+            std::fs::create_dir_all(local_path)
+                .map_err(|e| format!("Failed to create local dir: {}", e))?;
 
             // For single files, use the file name from remote path
             let file_name = remote_path
@@ -925,6 +926,7 @@ fn expand_tilde_local(path: &str) -> String {
 /// - Replacing path separators and spaces with underscores
 /// - Removing parent directory references (`..`) to prevent traversal attacks
 /// - Removing current directory references (`.`)
+/// - Appending a stable hash to prevent collisions (e.g., "foo/bar" vs "foo_bar")
 pub fn path_to_safe_dirname(path: &str) -> String {
     use std::path::{Component, Path};
 
@@ -951,11 +953,24 @@ pub fn path_to_safe_dirname(path: &str) -> String {
 
     let cleaned = parts.join("_").replace([' ', '\\'], "_");
 
+    // Append stable hash to prevent collisions
+    let hash = fnv1a_hash(path);
+    let hash_suffix = format!("{:08x}", hash);
+
     if cleaned.is_empty() {
-        "root".to_string()
+        format!("root_{}", hash_suffix)
     } else {
-        cleaned
+        format!("{}_{}", cleaned, hash_suffix)
     }
+}
+
+fn fnv1a_hash(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 /// Parse transfer statistics from rsync --stats output.
@@ -1107,19 +1122,26 @@ mod tests {
 
     #[test]
     fn test_path_to_safe_dirname() {
-        assert_eq!(
-            path_to_safe_dirname("~/.claude/projects"),
-            ".claude_projects"
-        );
-        assert_eq!(path_to_safe_dirname("/home/user/data"), "home_user_data");
-        assert_eq!(path_to_safe_dirname("~/"), "root"); // Empty after trimming becomes "root"
-        assert_eq!(path_to_safe_dirname(""), "root");
+        let res = path_to_safe_dirname("~/.claude/projects");
+        assert!(res.starts_with(".claude_projects_"));
+
+        let res = path_to_safe_dirname("/home/user/data");
+        assert!(res.starts_with("home_user_data_"));
+
+        let res = path_to_safe_dirname("~/");
+        assert!(res.starts_with("root_"));
+
+        let res = path_to_safe_dirname("");
+        assert!(res.starts_with("root_"));
     }
 
     #[test]
     fn test_path_to_safe_dirname_empty() {
-        assert_eq!(path_to_safe_dirname("~"), "root");
-        assert_eq!(path_to_safe_dirname("/"), "root");
+        let res = path_to_safe_dirname("~");
+        assert!(res.starts_with("root_"));
+
+        let res = path_to_safe_dirname("/");
+        assert!(res.starts_with("root_"));
     }
 
     #[test]
