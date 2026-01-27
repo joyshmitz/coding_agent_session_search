@@ -186,95 +186,52 @@ impl fmt::Display for EmbedderInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use crate::search::hash_embedder::HashEmbedder;
+    use std::path::PathBuf;
 
-    // ALLOWLIST: MockEmbedder is a test utility that verifies the Embedder trait contract
-    // without requiring ONNX runtime or model files. This is necessary because:
-    // 1. Unit tests need to verify trait behavior (dimension, id, is_semantic) independently
-    // 2. Tests should run without external dependencies or model downloads
-    // 3. This only tests the trait abstraction, not real embedding quality
-    // Integration tests use HashEmbedder or real models for semantic verification.
-    //
-    // Classification: (c) ALLOWLIST - Trait verification test utility
-    // See: test-results/no_mock_audit.md
-    struct MockEmbedder {
-        dimension: usize,
-        is_semantic: bool,
+    fn fastembed_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/models/xenova-paraphrase-minilm-l3-v2-int8")
     }
 
-    impl Embedder for MockEmbedder {
-        fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
-            if text.is_empty() {
-                return Err(EmbedderError::InvalidInput("empty text".to_string()));
-            }
-            // Generate a deterministic fake embedding based on text length
-            Ok(vec![text.len() as f32 / 100.0; self.dimension])
-        }
-
-        fn dimension(&self) -> usize {
-            self.dimension
-        }
-
-        fn id(&self) -> &str {
-            if self.is_semantic {
-                "mock-semantic-384"
-            } else {
-                "mock-hash-256"
-            }
-        }
-
-        fn is_semantic(&self) -> bool {
-            self.is_semantic
-        }
+    fn load_fastembed_fixture() -> FastEmbedder {
+        FastEmbedder::load_from_dir(&fastembed_fixture_dir())
+            .expect("fastembed fixture should load")
     }
 
     #[test]
     fn test_embedder_trait_basic() {
-        let embedder = MockEmbedder {
-            dimension: 256,
-            is_semantic: false,
-        };
-
+        let embedder = HashEmbedder::new(256);
         let embedding = embedder.embed("hello world").unwrap();
         assert_eq!(embedding.len(), 256);
-        assert_eq!(embedder.id(), "mock-hash-256");
+        assert_eq!(embedder.id(), "fnv1a-256");
         assert!(!embedder.is_semantic());
     }
 
     #[test]
     fn test_embedder_trait_semantic() {
-        let embedder = MockEmbedder {
-            dimension: 384,
-            is_semantic: true,
-        };
-
+        let embedder = load_fastembed_fixture();
         assert_eq!(embedder.dimension(), 384);
-        assert_eq!(embedder.id(), "mock-semantic-384");
+        assert_eq!(embedder.id(), FastEmbedder::embedder_id_static());
         assert!(embedder.is_semantic());
     }
 
     #[test]
     fn test_embedder_batch() {
-        let embedder = MockEmbedder {
-            dimension: 256,
-            is_semantic: false,
-        };
-
+        let embedder = load_fastembed_fixture();
         let texts = &["hello", "world", "test"];
         let embeddings = embedder.embed_batch(texts).unwrap();
 
         assert_eq!(embeddings.len(), 3);
         for embedding in &embeddings {
-            assert_eq!(embedding.len(), 256);
+            assert_eq!(embedding.len(), 384);
         }
     }
 
     #[test]
     fn test_embedder_empty_input_error() {
-        let embedder = MockEmbedder {
-            dimension: 256,
-            is_semantic: false,
-        };
-
+        let embedder = load_fastembed_fixture();
         let result = embedder.embed("");
         assert!(result.is_err());
         assert!(matches!(
@@ -285,18 +242,14 @@ mod tests {
 
     #[test]
     fn test_embedder_info() {
-        let embedder = MockEmbedder {
-            dimension: 384,
-            is_semantic: true,
-        };
-
+        let embedder = load_fastembed_fixture();
         let info = EmbedderInfo::from_embedder(&embedder);
-        assert_eq!(info.id, "mock-semantic-384");
+        assert_eq!(info.id, FastEmbedder::embedder_id_static());
         assert_eq!(info.dimension, 384);
         assert!(info.is_semantic);
 
         let display = format!("{info}");
-        assert!(display.contains("mock-semantic-384"));
+        assert!(display.contains(FastEmbedder::embedder_id_static()));
         assert!(display.contains("semantic"));
         assert!(display.contains("384"));
     }

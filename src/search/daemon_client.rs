@@ -637,22 +637,22 @@ fn next_jitter_unit() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::embedder::EmbedderError;
+    use crate::search::fastembed_embedder::FastEmbedder;
+    use crate::search::fastembed_reranker::FastEmbedReranker;
     use crate::search::hash_embedder::HashEmbedder;
+    use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // ALLOWLIST: TestDaemon is a test harness that simulates controlled daemon failures
-    // for testing retry/backoff/fallback logic. This cannot be replaced with a "real" daemon
-    // because we need deterministic control over failure modes (timeout, overload, invalid input)
-    // to verify the retry policy. Integration tests in tests/daemon_client_integration.rs use
-    // ChannelDaemonClient for more realistic channel-based communication testing.
-    //
-    // Classification: (c) ALLOWLIST - Test utility for edge case simulation
-    // See: test-results/no_mock_audit.md
-    struct TestDaemon {
-        calls: AtomicUsize,
-        fail_first: usize,
-        available: bool,
-        mode: FailureMode,
+    fn embedder_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/models/xenova-paraphrase-minilm-l3-v2-int8")
+    }
+
+    fn reranker_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/models/xenova-ms-marco-minilm-l6-v2-int8")
     }
 
     #[derive(Clone, Copy)]
@@ -679,41 +679,91 @@ mod tests {
         }
     }
 
-    impl TestDaemon {
-        fn new(fail_first: usize) -> Self {
+    fn load_fastembed_embedder() -> Arc<FastEmbedder> {
+        Arc::new(
+            FastEmbedder::load_from_dir(&embedder_fixture_dir())
+                .expect("fastembed embedder fixture should load"),
+        )
+    }
+
+    fn load_fastembed_reranker() -> Arc<FastEmbedReranker> {
+        Arc::new(
+            FastEmbedReranker::load_from_dir(&reranker_fixture_dir())
+                .expect("fastembed reranker fixture should load"),
+        )
+    }
+
+    struct FixtureDaemon {
+        calls: AtomicUsize,
+        fail_first: usize,
+        available: bool,
+        mode: FailureMode,
+        embedder: Arc<dyn Embedder>,
+        reranker: Arc<dyn Reranker>,
+    }
+
+    impl FixtureDaemon {
+        fn new(embedder: Arc<dyn Embedder>, reranker: Arc<dyn Reranker>) -> Self {
             Self {
                 calls: AtomicUsize::new(0),
-                fail_first,
+                fail_first: 0,
                 available: true,
                 mode: FailureMode::Unavailable,
+                embedder,
+                reranker,
             }
         }
 
-        fn new_with_mode(fail_first: usize, mode: FailureMode) -> Self {
+        fn new_with_mode(
+            fail_first: usize,
+            mode: FailureMode,
+            embedder: Arc<dyn Embedder>,
+            reranker: Arc<dyn Reranker>,
+        ) -> Self {
             Self {
                 calls: AtomicUsize::new(0),
                 fail_first,
                 available: true,
                 mode,
+                embedder,
+                reranker,
             }
         }
     }
 
-    impl DaemonClient for TestDaemon {
+    fn map_embedder_error(err: EmbedderError) -> DaemonError {
+        match err {
+            EmbedderError::Unavailable(msg) => DaemonError::Unavailable(msg),
+            EmbedderError::EmbeddingFailed(msg) => DaemonError::Failed(msg),
+            EmbedderError::InvalidInput(msg) => DaemonError::InvalidInput(msg),
+            EmbedderError::Internal(msg) => DaemonError::Failed(msg),
+        }
+    }
+
+    fn map_reranker_error(err: RerankerError) -> DaemonError {
+        match err {
+            RerankerError::Unavailable(msg) => DaemonError::Unavailable(msg),
+            RerankerError::RerankFailed(msg) => DaemonError::Failed(msg),
+            RerankerError::InvalidInput(msg) => DaemonError::InvalidInput(msg),
+            RerankerError::Internal(msg) => DaemonError::Failed(msg),
+        }
+    }
+
+    impl DaemonClient for FixtureDaemon {
         fn id(&self) -> &str {
-            "test-daemon"
+            "fixture-daemon"
         }
 
         fn is_available(&self) -> bool {
             self.available
         }
 
-        fn embed(&self, _text: &str, _request_id: &str) -> Result<Vec<f32>, DaemonError> {
+        fn embed(&self, text: &str, _request_id: &str) -> Result<Vec<f32>, DaemonError> {
             let call = self.calls.fetch_add(1, Ordering::Relaxed);
             if call < self.fail_first {
                 Err(self.mode.error())
             } else {
-                Ok(vec![2.0; 4])
+                self.embedder.embed(text).map_err(map_embedder_error)
             }
         }
 
@@ -726,13 +776,13 @@ mod tests {
             if call < self.fail_first {
                 Err(self.mode.error())
             } else {
-                Ok(texts.iter().map(|_| vec![2.0; 4]).collect())
+                self.embedder.embed_batch(texts).map_err(map_embedder_error)
             }
         }
 
         fn rerank(
             &self,
-            _query: &str,
+            query: &str,
             documents: &[&str],
             _request_id: &str,
         ) -> Result<Vec<f32>, DaemonError> {
@@ -740,28 +790,61 @@ mod tests {
             if call < self.fail_first {
                 Err(self.mode.error())
             } else {
-                Ok(documents.iter().map(|_| 1.0).collect())
+                self.reranker
+                    .rerank(query, documents)
+                    .map_err(map_reranker_error)
             }
         }
     }
 
-    // Helper constant: TestDaemon returns embeddings with dimension 4
-    const TEST_DAEMON_DIM: usize = 4;
-
-    // Helper to create a HashEmbedder with the same dimension as TestDaemon for fallback
-    fn test_hash_embedder() -> HashEmbedder {
-        HashEmbedder::new(TEST_DAEMON_DIM)
+    fn hash_fallback_embedder() -> HashEmbedder {
+        HashEmbedder::new(384)
     }
 
-    // Helper to check if a result came from the daemon (all 2.0) vs fallback (variable)
-    fn is_daemon_result(result: &[f32]) -> bool {
-        result.iter().all(|&v| (v - 2.0).abs() < f32::EPSILON)
+    fn embeddings_close(a: &[f32], b: &[f32]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut max_diff = 0.0f32;
+        for (left, right) in a.iter().zip(b.iter()) {
+            let diff = (left - right).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+        }
+        max_diff < 1e-4
+    }
+
+    fn scores_close(a: &[f32], b: &[f32]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut max_diff = 0.0f32;
+        for (left, right) in a.iter().zip(b.iter()) {
+            let diff = (left - right).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+        }
+        max_diff < 1e-4
     }
 
     #[test]
     fn daemon_embedder_falls_back_on_failure() {
-        let daemon = Arc::new(TestDaemon::new(10)); // fails 10 times
-        let fallback = Arc::new(test_hash_embedder());
+        let daemon_embedder = load_fastembed_embedder();
+        let daemon_reranker = load_fastembed_reranker();
+        let expected_daemon = daemon_embedder.embed("hello").unwrap();
+
+        let fallback = hash_fallback_embedder();
+        let expected_fallback = fallback.embed("hello").unwrap();
+        let fallback = Arc::new(fallback);
+
+        let daemon = Arc::new(FixtureDaemon::new_with_mode(
+            10,
+            FailureMode::Unavailable,
+            daemon_embedder,
+            daemon_reranker,
+        ));
         let cfg = DaemonRetryConfig {
             max_attempts: 1,
             ..DaemonRetryConfig::default()
@@ -769,45 +852,77 @@ mod tests {
 
         let embedder = DaemonFallbackEmbedder::new(daemon, fallback, cfg);
         let result = embedder.embed("hello").unwrap();
-        // Should use fallback (HashEmbedder), not daemon
-        assert_eq!(result.len(), TEST_DAEMON_DIM);
         assert!(
-            !is_daemon_result(&result),
+            embeddings_close(&result, &expected_fallback),
+            "expected fallback result"
+        );
+        assert!(
+            !embeddings_close(&result, &expected_daemon),
             "expected fallback, got daemon result"
         );
     }
 
     #[test]
     fn daemon_reranker_falls_back_on_failure() {
-        let daemon = Arc::new(TestDaemon::new(10)); // fails 10 times
+        let daemon_embedder = load_fastembed_embedder();
+        let daemon_reranker = load_fastembed_reranker();
         let cfg = DaemonRetryConfig {
             max_attempts: 1,
             ..DaemonRetryConfig::default()
         };
 
         // Without fallback, reranker should return error when daemon fails
-        let reranker_no_fallback = DaemonFallbackReranker::new(daemon.clone(), None, cfg.clone());
+        let daemon_fail = Arc::new(FixtureDaemon::new_with_mode(
+            10,
+            FailureMode::Unavailable,
+            daemon_embedder.clone(),
+            daemon_reranker.clone(),
+        ));
+        let reranker_no_fallback = DaemonFallbackReranker::new(daemon_fail, None, cfg.clone());
         let result = reranker_no_fallback.rerank("query", &["doc a", "doc b"]);
         assert!(
             result.is_err(),
             "expected error when no fallback and daemon fails"
         );
 
-        // With a daemon that eventually succeeds after retries, it should work
-        let working_daemon = Arc::new(TestDaemon::new(0)); // succeeds immediately
+        // With fallback, it should use the local reranker
+        let daemon_fail = Arc::new(FixtureDaemon::new_with_mode(
+            10,
+            FailureMode::Unavailable,
+            daemon_embedder.clone(),
+            daemon_reranker.clone(),
+        ));
+        let fallback_reranker: Arc<dyn Reranker> = daemon_reranker.clone();
+        let reranker_with_fallback =
+            DaemonFallbackReranker::new(daemon_fail, Some(fallback_reranker.clone()), cfg.clone());
+        let docs = ["doc a", "doc b"];
+        let result = reranker_with_fallback.rerank("query", &docs).unwrap();
+        let expected = fallback_reranker.rerank("query", &docs).unwrap();
+        assert!(scores_close(&result, &expected));
+
+        // With a daemon that succeeds immediately, it should return daemon scores
+        let working_daemon = Arc::new(FixtureDaemon::new(daemon_embedder, daemon_reranker.clone()));
         let reranker_working = DaemonFallbackReranker::new(working_daemon, None, cfg);
         let result = reranker_working
             .rerank("query", &["doc a", "doc b"])
             .unwrap();
         assert_eq!(result.len(), 2);
-        // TestDaemon returns 1.0 for each document
-        assert!((result[0] - 1.0).abs() < f32::EPSILON);
+        assert!(result.iter().all(|score| score.is_finite()));
     }
 
     #[test]
     fn daemon_embedder_retries_then_succeeds() {
-        let daemon = Arc::new(TestDaemon::new(1)); // fails first call only
-        let fallback = Arc::new(test_hash_embedder());
+        let daemon_embedder = load_fastembed_embedder();
+        let daemon_reranker = load_fastembed_reranker();
+        let expected_daemon = daemon_embedder.embed("hello").unwrap();
+        let daemon = Arc::new(FixtureDaemon::new_with_mode(
+            1,
+            FailureMode::Failed,
+            daemon_embedder,
+            daemon_reranker,
+        ));
+
+        let fallback = Arc::new(hash_fallback_embedder());
         let cfg = DaemonRetryConfig {
             max_attempts: 2,
             base_delay: Duration::from_millis(1),
@@ -817,9 +932,8 @@ mod tests {
 
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
         let result = embedder.embed("hello").unwrap();
-        // Should succeed on second try with daemon result
         assert!(
-            is_daemon_result(&result),
+            embeddings_close(&result, &expected_daemon),
             "expected daemon result after retry"
         );
         assert_eq!(daemon.calls.load(Ordering::Relaxed), 2);
@@ -827,8 +941,18 @@ mod tests {
 
     #[test]
     fn daemon_timeout_retries_then_falls_back() {
-        let daemon = Arc::new(TestDaemon::new_with_mode(2, FailureMode::Timeout));
-        let fallback = Arc::new(test_hash_embedder());
+        let daemon_embedder = load_fastembed_embedder();
+        let daemon_reranker = load_fastembed_reranker();
+        let daemon = Arc::new(FixtureDaemon::new_with_mode(
+            2,
+            FailureMode::Timeout,
+            daemon_embedder,
+            daemon_reranker,
+        ));
+
+        let fallback = hash_fallback_embedder();
+        let expected_fallback = fallback.embed("hello").unwrap();
+        let fallback = Arc::new(fallback);
         let cfg = DaemonRetryConfig {
             max_attempts: 2,
             base_delay: Duration::from_millis(1),
@@ -838,17 +962,26 @@ mod tests {
 
         let embedder = DaemonFallbackEmbedder::new(daemon, fallback, cfg);
         let result = embedder.embed("hello").unwrap();
-        // Should fall back to HashEmbedder after exhausting retries
         assert!(
-            !is_daemon_result(&result),
+            embeddings_close(&result, &expected_fallback),
             "expected fallback after timeout"
         );
     }
 
     #[test]
     fn daemon_invalid_input_does_not_retry() {
-        let daemon = Arc::new(TestDaemon::new_with_mode(1, FailureMode::InvalidInput));
-        let fallback = Arc::new(test_hash_embedder());
+        let daemon_embedder = load_fastembed_embedder();
+        let daemon_reranker = load_fastembed_reranker();
+        let daemon = Arc::new(FixtureDaemon::new_with_mode(
+            1,
+            FailureMode::InvalidInput,
+            daemon_embedder,
+            daemon_reranker,
+        ));
+
+        let fallback = hash_fallback_embedder();
+        let expected_fallback = fallback.embed("hello").unwrap();
+        let fallback = Arc::new(fallback);
         let cfg = DaemonRetryConfig {
             max_attempts: 3,
             ..DaemonRetryConfig::default()
@@ -858,7 +991,7 @@ mod tests {
         let result = embedder.embed("hello").unwrap();
         // InvalidInput should not retry, just fallback immediately
         assert!(
-            !is_daemon_result(&result),
+            embeddings_close(&result, &expected_fallback),
             "expected fallback on invalid input"
         );
         assert_eq!(daemon.calls.load(Ordering::Relaxed), 1);
@@ -866,8 +999,19 @@ mod tests {
 
     #[test]
     fn daemon_invalid_input_does_not_backoff() {
-        let daemon = Arc::new(TestDaemon::new_with_mode(1, FailureMode::InvalidInput));
-        let fallback = Arc::new(test_hash_embedder());
+        let daemon_embedder = load_fastembed_embedder();
+        let daemon_reranker = load_fastembed_reranker();
+        let expected_daemon = daemon_embedder.embed("hello-again").unwrap();
+        let daemon = Arc::new(FixtureDaemon::new_with_mode(
+            1,
+            FailureMode::InvalidInput,
+            daemon_embedder,
+            daemon_reranker,
+        ));
+
+        let fallback = hash_fallback_embedder();
+        let expected_fallback = fallback.embed("hello").unwrap();
+        let fallback = Arc::new(fallback);
         let cfg = DaemonRetryConfig {
             max_attempts: 1,
             base_delay: Duration::from_millis(50),
@@ -878,12 +1022,15 @@ mod tests {
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
         let first = embedder.embed("hello").unwrap();
         // First call fails with InvalidInput, falls back
-        assert!(!is_daemon_result(&first), "expected fallback on first call");
+        assert!(
+            embeddings_close(&first, &expected_fallback),
+            "expected fallback on first call"
+        );
 
         // Second call should try daemon again (no backoff for InvalidInput)
         let second = embedder.embed("hello-again").unwrap();
         assert!(
-            is_daemon_result(&second),
+            embeddings_close(&second, &expected_daemon),
             "expected daemon result on second call"
         );
         assert_eq!(daemon.calls.load(Ordering::Relaxed), 2);
@@ -891,8 +1038,18 @@ mod tests {
 
     #[test]
     fn daemon_failed_retries_then_falls_back() {
-        let daemon = Arc::new(TestDaemon::new_with_mode(2, FailureMode::Failed));
-        let fallback = Arc::new(test_hash_embedder());
+        let daemon_embedder = load_fastembed_embedder();
+        let daemon_reranker = load_fastembed_reranker();
+        let daemon = Arc::new(FixtureDaemon::new_with_mode(
+            2,
+            FailureMode::Failed,
+            daemon_embedder,
+            daemon_reranker,
+        ));
+
+        let fallback = hash_fallback_embedder();
+        let expected_fallback = fallback.embed("hello").unwrap();
+        let fallback = Arc::new(fallback);
         let cfg = DaemonRetryConfig {
             max_attempts: 2,
             base_delay: Duration::from_millis(1),
@@ -903,7 +1060,7 @@ mod tests {
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
         let result = embedder.embed("hello").unwrap();
         assert!(
-            !is_daemon_result(&result),
+            embeddings_close(&result, &expected_fallback),
             "expected fallback after failures"
         );
         assert_eq!(daemon.calls.load(Ordering::Relaxed), 2);
@@ -911,13 +1068,17 @@ mod tests {
 
     #[test]
     fn daemon_overload_sets_backoff() {
-        let daemon = Arc::new(TestDaemon::new_with_mode(
+        let daemon_embedder = load_fastembed_embedder();
+        let daemon_reranker = load_fastembed_reranker();
+        let daemon = Arc::new(FixtureDaemon::new_with_mode(
             1,
             FailureMode::Overloaded {
                 retry_after: Duration::from_millis(25),
             },
+            daemon_embedder,
+            daemon_reranker,
         ));
-        let fallback = Arc::new(test_hash_embedder());
+        let fallback = Arc::new(hash_fallback_embedder());
         let cfg = DaemonRetryConfig {
             max_attempts: 1,
             base_delay: Duration::from_millis(5),
@@ -938,11 +1099,15 @@ mod tests {
     #[test]
     fn daemon_overload_respects_retry_after() {
         let retry_after = Duration::from_millis(40);
-        let daemon = Arc::new(TestDaemon::new_with_mode(
+        let daemon_embedder = load_fastembed_embedder();
+        let daemon_reranker = load_fastembed_reranker();
+        let daemon = Arc::new(FixtureDaemon::new_with_mode(
             1,
             FailureMode::Overloaded { retry_after },
+            daemon_embedder,
+            daemon_reranker,
         ));
-        let fallback = Arc::new(test_hash_embedder());
+        let fallback = Arc::new(hash_fallback_embedder());
         let cfg = DaemonRetryConfig {
             max_attempts: 1,
             base_delay: Duration::from_millis(1),
@@ -984,8 +1149,15 @@ mod tests {
 
     #[test]
     fn daemon_backoff_skips_until_ready() {
-        let daemon = Arc::new(TestDaemon::new(1)); // fails first call
-        let fallback = Arc::new(test_hash_embedder());
+        let daemon_embedder = load_fastembed_embedder();
+        let daemon_reranker = load_fastembed_reranker();
+        let daemon = Arc::new(FixtureDaemon::new_with_mode(
+            1,
+            FailureMode::Failed,
+            daemon_embedder,
+            daemon_reranker,
+        ));
+        let fallback = Arc::new(hash_fallback_embedder());
         let cfg = DaemonRetryConfig {
             max_attempts: 1,
             base_delay: Duration::from_millis(10),

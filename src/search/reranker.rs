@@ -129,74 +129,44 @@ impl fmt::Display for RerankerInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::fastembed_reranker::FastEmbedReranker;
+    use std::path::PathBuf;
 
-    // ALLOWLIST: MockReranker is a test utility that verifies the Reranker trait contract
-    // without requiring ONNX runtime or model files. This is necessary because:
-    // 1. Unit tests need to verify trait behavior (rerank, id, is_available) independently
-    // 2. Tests should run without external dependencies or model downloads
-    // 3. This only tests the trait abstraction, not real reranking quality
-    // Integration tests use real models for semantic verification.
-    //
-    // Classification: (c) ALLOWLIST - Trait verification test utility
-    // See: test-results/no_mock_audit.md
-    struct MockReranker {
-        available: bool,
+    fn fastembed_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/models/xenova-ms-marco-minilm-l6-v2-int8")
     }
 
-    impl Reranker for MockReranker {
-        fn rerank(&self, query: &str, documents: &[&str]) -> RerankerResult<Vec<f32>> {
-            if query.is_empty() {
-                return Err(RerankerError::InvalidInput("empty query".to_string()));
-            }
-            if documents.is_empty() {
-                return Err(RerankerError::InvalidInput("empty documents".to_string()));
-            }
-            if !self.available {
-                return Err(RerankerError::Unavailable("mock unavailable".to_string()));
-            }
-            // Mock scoring: longer documents score higher
-            Ok(documents.iter().map(|d| d.len() as f32 / 100.0).collect())
-        }
-
-        fn id(&self) -> &str {
-            "mock-reranker"
-        }
-
-        fn is_available(&self) -> bool {
-            self.available
-        }
+    fn load_fastembed_fixture() -> FastEmbedReranker {
+        FastEmbedReranker::load_from_dir(&fastembed_fixture_dir())
+            .expect("fastembed reranker fixture should load")
     }
 
     #[test]
     fn test_reranker_trait_basic() {
-        let reranker = MockReranker { available: true };
-
-        let docs = [
-            "short",
-            "medium length doc",
-            "this is a much longer document",
-        ];
+        let reranker = load_fastembed_fixture();
+        let docs = ["short", "medium length doc", "longer document text"];
         let scores = reranker.rerank("test query", &docs).unwrap();
 
         assert_eq!(scores.len(), 3);
-        // Longer docs should score higher in our mock
-        assert!(scores[2] > scores[1]);
-        assert!(scores[1] > scores[0]);
+        for score in scores {
+            assert!(score.is_finite());
+        }
     }
 
     #[test]
     fn test_reranker_unavailable() {
-        let reranker = MockReranker { available: false };
-
-        let result = reranker.rerank("query", &["doc"]);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), RerankerError::Unavailable(_)));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = match FastEmbedReranker::load_from_dir(tmp.path()) {
+            Ok(_) => panic!("expected unavailable error"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, RerankerError::Unavailable(_)));
     }
 
     #[test]
     fn test_reranker_empty_query_error() {
-        let reranker = MockReranker { available: true };
-
+        let reranker = load_fastembed_fixture();
         let result = reranker.rerank("", &["doc"]);
         assert!(result.is_err());
         assert!(matches!(
@@ -206,15 +176,26 @@ mod tests {
     }
 
     #[test]
+    fn test_reranker_empty_documents_error() {
+        let reranker = load_fastembed_fixture();
+        let result = reranker.rerank("query", &[]);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            RerankerError::InvalidInput(_)
+        ));
+    }
+
+    #[test]
     fn test_reranker_info() {
-        let reranker = MockReranker { available: true };
+        let reranker = load_fastembed_fixture();
         let info = RerankerInfo::from_reranker(&reranker);
 
-        assert_eq!(info.id, "mock-reranker");
+        assert_eq!(info.id, FastEmbedReranker::reranker_id_static());
         assert!(info.is_available);
 
         let display = format!("{info}");
-        assert!(display.contains("mock-reranker"));
+        assert!(display.contains(FastEmbedReranker::reranker_id_static()));
         assert!(display.contains("available"));
     }
 

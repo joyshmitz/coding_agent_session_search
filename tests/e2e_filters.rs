@@ -54,6 +54,7 @@ fn make_claude_session_at(claude_home: &Path, project_name: &str, content: &str,
 #[test]
 fn filter_by_agent_codex() {
     let tracker = tracker_for("filter_by_agent_codex");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -145,6 +146,7 @@ fn filter_by_agent_codex() {
 #[test]
 fn filter_by_time_since() {
     let tracker = tracker_for("filter_by_time_since");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -242,6 +244,7 @@ fn filter_by_time_since() {
 #[test]
 fn filter_by_time_until() {
     let tracker = tracker_for("filter_by_time_until");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -339,6 +342,7 @@ fn filter_by_time_until() {
 #[test]
 fn filter_by_time_range() {
     let tracker = tracker_for("filter_by_time_range");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -458,6 +462,7 @@ fn filter_by_time_range() {
 #[test]
 fn filter_combined_agent_and_time() {
     let tracker = tracker_for("filter_combined_agent_and_time");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -581,6 +586,7 @@ fn filter_combined_agent_and_time() {
 #[test]
 fn filter_no_matches() {
     let tracker = tracker_for("filter_no_matches");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -662,6 +668,7 @@ fn filter_no_matches() {
 #[test]
 fn filter_by_workspace() {
     let tracker = tracker_for("filter_by_workspace");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -769,6 +776,7 @@ fn filter_by_workspace() {
 #[test]
 fn filter_by_days() {
     let tracker = tracker_for("filter_by_days");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -868,6 +876,7 @@ fn filter_by_days() {
 #[test]
 fn filter_by_source_local() {
     let tracker = tracker_for("filter_by_source_local");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -954,6 +963,7 @@ fn filter_by_source_local() {
 #[test]
 fn filter_by_source_specific_name() {
     let tracker = tracker_for("filter_by_source_specific_name");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1030,6 +1040,7 @@ fn filter_by_source_specific_name() {
 #[test]
 fn filter_by_source_nonexistent() {
     let tracker = tracker_for("filter_by_source_nonexistent");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1100,6 +1111,7 @@ fn filter_by_source_nonexistent() {
 #[test]
 fn filter_by_source_remote_empty() {
     let tracker = tracker_for("filter_by_source_remote_empty");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1167,6 +1179,7 @@ fn filter_by_source_remote_empty() {
 #[test]
 fn filter_by_source_all_explicit() {
     let tracker = tracker_for("filter_by_source_all_explicit");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1227,6 +1240,7 @@ fn filter_by_source_all_explicit() {
 #[test]
 fn filter_by_source_remote_returns_empty_without_remote_indexing() {
     let tracker = tracker_for("filter_by_source_remote_returns_empty_without_remote_indexing");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1294,6 +1308,7 @@ fn filter_by_source_remote_returns_empty_without_remote_indexing() {
 #[test]
 fn filter_by_source_specific_unindexed_source() {
     let tracker = tracker_for("filter_by_source_specific_unindexed_source");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1368,6 +1383,7 @@ fn filter_by_source_specific_unindexed_source() {
 #[test]
 fn timeline_source_local() {
     let tracker = tracker_for("timeline_source_local");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1427,6 +1443,7 @@ fn timeline_source_local() {
 #[test]
 fn timeline_source_remote_empty() {
     let tracker = tracker_for("timeline_source_remote_empty");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1490,6 +1507,7 @@ fn timeline_source_remote_empty() {
 #[test]
 fn timeline_source_specific() {
     let tracker = tracker_for("timeline_source_specific");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1557,6 +1575,7 @@ fn timeline_source_specific() {
 #[test]
 fn stats_source_local() {
     let tracker = tracker_for("stats_source_local");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1623,6 +1642,7 @@ fn stats_source_local() {
 #[test]
 fn stats_source_remote_empty() {
     let tracker = tracker_for("stats_source_remote_empty");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1686,6 +1706,7 @@ fn stats_source_remote_empty() {
 #[test]
 fn stats_by_source_grouping() {
     let tracker = tracker_for("stats_by_source_grouping");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -1751,6 +1772,7 @@ fn stats_by_source_grouping() {
 #[test]
 fn stats_by_source_with_filter() {
     let tracker = tracker_for("stats_by_source_with_filter");
+    let _trace_guard = tracker.trace_env_guard();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();

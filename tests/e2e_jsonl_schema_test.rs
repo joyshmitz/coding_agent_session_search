@@ -122,6 +122,7 @@ fn validate_file_structure(events: &[Value]) -> Vec<String> {
 #[test]
 fn jsonl_files_valid_schema() {
     let tracker = tracker_for("jsonl_files_valid_schema");
+    let _trace_guard = tracker.trace_env_guard();
 
     let e2e_dir = Path::new("test-results/e2e");
     if !e2e_dir.exists() {

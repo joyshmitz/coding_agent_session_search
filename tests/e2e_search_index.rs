@@ -79,6 +79,7 @@ fn count_messages(db_path: &Path) -> i64 {
 #[test]
 fn index_full_creates_artifacts() {
     let tracker = tracker_for("index_full_creates_artifacts");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -169,6 +170,7 @@ fn index_full_creates_artifacts() {
 #[test]
 fn incremental_reindex_preserves_and_appends_messages() {
     let tracker = tracker_for("incremental_reindex_preserves_and_appends_messages");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -337,6 +339,8 @@ fn incremental_reindex_preserves_and_appends_messages() {
 /// Reindexing must never drop previously ingested messages in SQLite or Tantivy.
 #[test]
 fn reindex_does_not_drop_messages_in_db_or_search() {
+    let tracker = tracker_for("reindex_does_not_drop_messages_in_db_or_search");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -428,6 +432,8 @@ fn reindex_does_not_drop_messages_in_db_or_search() {
 /// Test: Search returns hits with correct match_type
 #[test]
 fn search_returns_hits_with_match_type() {
+    let tracker = tracker_for("search_returns_hits_with_match_type");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -504,6 +510,8 @@ fn search_returns_hits_with_match_type() {
 /// Test: Search aggregations include agent buckets
 #[test]
 fn search_aggregations_include_agents() {
+    let tracker = tracker_for("search_aggregations_include_agents");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -585,6 +593,8 @@ fn search_aggregations_include_agents() {
 /// Test: Watch-once mode indexes specific paths
 #[test]
 fn watch_once_indexes_specified_path() {
+    let tracker = tracker_for("watch_once_indexes_specified_path");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -660,6 +670,8 @@ fn watch_once_indexes_specified_path() {
 /// Test: Search with filters (agent, time range)
 #[test]
 fn search_with_filters() {
+    let tracker = tracker_for("search_with_filters");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -726,6 +738,8 @@ fn search_with_filters() {
 /// Test: Search returns total_matches and pagination info
 #[test]
 fn search_returns_pagination_info() {
+    let tracker = tracker_for("search_returns_pagination_info");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -799,6 +813,8 @@ fn search_returns_pagination_info() {
 /// Test: Force rebuild recreates index
 #[test]
 fn force_rebuild_recreates_index() {
+    let tracker = tracker_for("force_rebuild_recreates_index");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -867,6 +883,8 @@ fn force_rebuild_recreates_index() {
 /// Test: JSON output mode (--json) for index command
 #[test]
 fn index_json_output_mode() {
+    let tracker = tracker_for("index_json_output_mode");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -917,6 +935,8 @@ fn index_json_output_mode() {
 /// Test: Help text includes expected options
 #[test]
 fn index_help_includes_options() {
+    let tracker = tracker_for("index_help_includes_options");
+    let _trace_guard = tracker.trace_env_guard();
     let output = cargo_bin_cmd!("cass")
         .args(["index", "--help"])
         .output()
@@ -948,6 +968,8 @@ fn index_help_includes_options() {
 /// Test: Search help includes expected options
 #[test]
 fn search_help_includes_options() {
+    let tracker = tracker_for("search_help_includes_options");
+    let _trace_guard = tracker.trace_env_guard();
     let output = cargo_bin_cmd!("cass")
         .args(["search", "--help"])
         .output()
@@ -968,6 +990,8 @@ fn search_help_includes_options() {
 /// Test: Search with wildcard query
 #[test]
 fn search_wildcard_query() {
+    let tracker = tracker_for("search_wildcard_query");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -1016,6 +1040,8 @@ fn search_wildcard_query() {
 /// Test: Trace logging works when enabled
 #[test]
 fn trace_logging_to_file() {
+    let tracker = tracker_for("trace_logging_to_file");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -1054,6 +1080,8 @@ fn trace_logging_to_file() {
 /// Test: Empty query returns recent results
 #[test]
 fn empty_query_returns_recent() {
+    let tracker = tracker_for("empty_query_returns_recent");
+    let _trace_guard = tracker.trace_env_guard();
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
