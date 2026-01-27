@@ -944,6 +944,7 @@ fn cmp_fused_hit_desc(a: &FusedHit, b: &FusedHit) -> CmpOrdering {
 }
 
 /// Threshold below which full sort is faster than quickselect + partial sort.
+#[cfg(test)]
 const QUICKSELECT_THRESHOLD: usize = 64;
 
 /// Partition fused hits to get top-k in O(N + k log k) instead of O(N log N).
@@ -951,6 +952,10 @@ const QUICKSELECT_THRESHOLD: usize = 64;
 /// For k << N, this is significantly faster than sorting all N elements.
 /// Uses `select_nth_unstable_by` for O(N) average-case partitioning,
 /// then sorts only the top-k elements.
+///
+/// Note: Currently only used for tests. Production code uses full sort for
+/// content deduplication which requires seeing all elements.
+#[cfg(test)]
 fn top_k_fused(mut hits: Vec<FusedHit>, k: usize) -> Vec<FusedHit> {
     let n = hits.len();
 
@@ -1025,13 +1030,39 @@ pub fn rrf_fuse_hits(
 
     // Use quickselect to get top-(offset+limit) elements in O(N + k log k)
     // instead of sorting all N elements in O(N log N)
-    let k = offset.saturating_add(limit);
-    let fused = top_k_fused(fused, k);
+    //
+    // UPDATE: We must sort fully to apply content deduplication correctly.
+    // If we only quickselect top K, we might pick a lower-scored duplicate
+    // that happened to fall into top K while the higher-scored version (if any)
+    // is processed. But actually, RRF score is unique per Key.
+    // The issue is: different Keys (messages) can have same Content.
+    // We want to return unique Content.
+    // So we must sort by Score, then Deduplicate by Content, then Slice.
+    
+    fused.sort_by(cmp_fused_hit_desc);
+
+    // Deduplicate by content hash to ensure diversity
+    // Key: (source_id, content_hash) -> seen
+    let mut seen_content: HashSet<(String, u64)> = HashSet::new();
+    let mut unique_fused = Vec::with_capacity(fused.len());
+
+    for entry in fused {
+        // Skip tool noise if present (though inputs should be clean)
+        if !entry.hit.content.is_empty() && is_tool_invocation_noise(&entry.hit.content) {
+            continue;
+        }
+
+        let key = (entry.hit.source_id.clone(), entry.hit.content_hash);
+        if !seen_content.contains(&key) {
+            seen_content.insert(key);
+            unique_fused.push(entry);
+        }
+    }
 
     // Take the slice from offset to offset+limit
-    let start = offset.min(fused.len());
-    let mut results = Vec::with_capacity(limit.min(fused.len().saturating_sub(start)));
-    for mut entry in fused.into_iter().skip(start).take(limit) {
+    let start = offset.min(unique_fused.len());
+    let mut results = Vec::with_capacity(limit.min(unique_fused.len().saturating_sub(start)));
+    for mut entry in unique_fused.into_iter().skip(start).take(limit) {
         entry.hit.score = entry.score.rrf;
         results.push(entry.hit);
     }
@@ -1901,7 +1932,7 @@ fn build_term_query_clauses(
 
 /// Check if content is primarily a tool invocation (noise that shouldn't appear in search results).
 /// Tool invocations like "[Tool: Bash - Check status]" are not informative search results.
-fn is_tool_invocation_noise(content: &str) -> bool {
+pub(crate) fn is_tool_invocation_noise(content: &str) -> bool {
     let trimmed = content.trim();
 
     // Direct tool invocations that are just "[Tool: X - description]"
@@ -1941,7 +1972,7 @@ fn snippet_from_content(content: &str) -> String {
 /// appears as separate results, since they represent distinct conversations.
 ///
 /// Also filters out tool invocation noise that isn't useful for search results.
-fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
+pub(crate) fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
     // Key: (source_id, content_hash) -> index in deduped
     let mut seen: HashMap<(String, u64), usize> = HashMap::new();
     let mut deduped: Vec<SearchHit> = Vec::new();
@@ -2246,7 +2277,12 @@ impl SearchClient {
             results = results.into_iter().skip(offset).collect();
         }
 
-        let mut hits = self.hydrate_semantic_hits(&results, field_mask)?;
+        let hits = self.hydrate_semantic_hits(&results, field_mask)?;
+
+        // Deduplicate semantic hits (filter noise and keep best version of same content)
+        // This aligns behavior with lexical search
+        let mut hits = deduplicate_hits(hits);
+
         // Apply session_paths filter (not supported at SemanticFilter level)
         if !filters.session_paths.is_empty() {
             hits.retain(|h| filters.session_paths.contains(&h.source_path));

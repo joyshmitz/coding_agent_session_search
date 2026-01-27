@@ -57,20 +57,18 @@ export async function initStorage() {
 
     const savedMode = getStoredMode();
     currentMode = savedMode;
-    if (currentMode === StorageMode.OPFS && !isOpfsEnabled()) {
-        currentMode = StorageMode.MEMORY;
-    }
-    console.log('[Storage] Restored mode:', currentMode);
-
-    // Initialize OPFS if enabled
     if (currentMode === StorageMode.OPFS) {
+        if (!isOpfsEnabled()) {
+            setOpfsEnabled(true);
+        }
+        currentMode = StorageMode.MEMORY;
         try {
-            await initOPFS();
+            localStorage.setItem(KEYS.MODE, StorageMode.MEMORY);
         } catch (e) {
-            console.warn('[Storage] OPFS init failed, falling back to memory:', e);
-            currentMode = StorageMode.MEMORY;
+            // Ignore
         }
     }
+    console.log('[Storage] Restored mode:', currentMode);
 
     return currentMode;
 }
@@ -134,6 +132,13 @@ export async function setStorageMode(mode, migrate = false) {
         throw new Error(`Invalid storage mode: ${mode}`);
     }
 
+    if (mode === StorageMode.OPFS) {
+        if (!isOpfsEnabled()) {
+            setOpfsEnabled(true);
+        }
+        mode = StorageMode.MEMORY;
+    }
+
     const oldMode = currentMode;
 
     // Migrate data if requested
@@ -148,14 +153,6 @@ export async function setStorageMode(mode, migrate = false) {
         localStorage.setItem(KEYS.MODE, mode);
     } catch (e) {
         console.warn('[Storage] Could not save mode preference');
-    }
-
-    // Initialize OPFS if switching to it
-    if (mode === StorageMode.OPFS) {
-        if (!isOpfsEnabled()) {
-            setOpfsEnabled(true);
-        }
-        await initOPFS();
     }
 
     console.log('[Storage] Mode changed:', oldMode, '->', mode);

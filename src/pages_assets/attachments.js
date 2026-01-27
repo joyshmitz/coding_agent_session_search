@@ -424,11 +424,11 @@ function createImageAttachment(entry, dek, exportId) {
     container.appendChild(caption);
 
     // Set up lazy loading with IntersectionObserver
-    const observer = new IntersectionObserver(async (entries) => {
-        const [entry] = entries;
-        if (entry.isIntersecting) {
+    const observer = new IntersectionObserver(async (observerEntries) => {
+        const [observerEntry] = observerEntries;
+        if (observerEntry.isIntersecting) {
             observer.disconnect();
-            await loadImageAttachment(container, img, entry.target.dataset.hash, entry.target.dataset.mimeType, dek, exportId, placeholder, loading);
+            await loadImageAttachment(container, img, observerEntry.target.dataset.hash, observerEntry.target.dataset.mimeType, dek, exportId, placeholder, loading);
         }
     }, { rootMargin: '100px' });
 

@@ -220,7 +220,7 @@ pub fn render_encrypted_placeholder(encrypted: &EncryptedContent) -> String {
     let escaped_json = html_escape_for_content(&json);
     format!(
         r###"            <!-- Encrypted content - requires password to decrypt -->
-            <div id="encrypted-content" hidden>{}"</div>
+            <div id="encrypted-content" hidden>{}</div>
             <div class="encrypted-notice">
                 <p>This conversation is encrypted. Enter the password above to view.</p>
             </div>"###,

@@ -142,6 +142,18 @@ function setupEventListeners() {
 
     // Lock button (re-lock archive)
     elements.lockBtn?.addEventListener('click', lockArchive);
+    window.addEventListener('cass:lock', lockArchive);
+    window.addEventListener('cass:session-mode-change', (event) => {
+        const mode = event?.detail?.mode;
+        if (mode === StorageMode.MEMORY) {
+            clearStoredSession();
+            return;
+        }
+
+        if (window.cassSession?.dek) {
+            persistSession(window.cassSession.dek);
+        }
+    });
 
     // Escape key to close QR scanner
     document.addEventListener('keydown', (e) => {
@@ -628,11 +640,6 @@ function lockArchive() {
     // Clear session
     window.cassSession = null;
     clearStoredSession();
-    try {
-        sessionStorage.removeItem(SESSION_KEYS.UNLOCKED);
-    } catch (e) {
-        // Ignore
-    }
 
     // Tell worker to clear keys
     worker?.postMessage({ type: 'CLEAR_KEYS' });

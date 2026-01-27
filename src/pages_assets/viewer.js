@@ -18,7 +18,9 @@ import { initSearch, clearSearch, getSearchState } from './search.js';
 import { initConversationViewer, loadConversation, clearViewer, getCurrentConversation } from './conversation.js';
 import { createRouter, getRouter, parseSearchParams, buildConversationPath } from './router.js';
 import { getConversationLink, copyConversationLink, isWebShareAvailable, shareConversation } from './share.js';
-import { initStats, renderStatsDashboard, clearStatsCache } from './stats.js';
+import { initStats, renderStatsDashboard } from './stats.js';
+import { initStorage, StorageKeys } from './storage.js';
+import { initSettings, render as renderSettings } from './settings.js';
 
 // Application state
 const state = {
@@ -31,6 +33,8 @@ const state = {
 
 // Router instance
 let router = null;
+let storageReady = null;
+let settingsReady = false;
 
 // DOM element references
 let elements = {
@@ -88,6 +92,23 @@ function initializeViews() {
 
     // Create view containers
     createViewContainers();
+
+    // Expose notifications to settings module
+    window.showNotification = showNotification;
+
+    // Apply stored theme early
+    applyStoredTheme();
+
+    // Initialize storage and settings
+    storageReady = initStorage().catch((error) => {
+        console.warn('[Viewer] Storage init failed:', error);
+    });
+    storageReady.then(() => {
+        initSettings(elements.settingsView, {
+            onSessionReset: handleSessionReset,
+        });
+        settingsReady = true;
+    });
 
     // Initialize search view
     initSearch(elements.searchView, handleResultSelect);
@@ -390,76 +411,17 @@ function displayStats() {
  * Render settings panel
  */
 function renderSettingsPanel() {
-    elements.settingsView.innerHTML = `
-        <div class="panel settings-panel">
-            <header class="panel-header">
-                <h2>Settings</h2>
-            </header>
-            <div class="panel-content">
-                <section class="settings-section">
-                    <h3>Storage</h3>
-                    <div class="setting-item">
-                        <label>Clear local cache</label>
-                        <button type="button" class="btn btn-secondary" id="clear-cache-btn">
-                            Clear Cache
-                        </button>
-                    </div>
-                </section>
-
-                <section class="settings-section">
-                    <h3>Display</h3>
-                    <div class="setting-item">
-                        <label for="theme-select">Theme</label>
-                        <select id="theme-select" class="settings-select">
-                            <option value="auto">Auto (System)</option>
-                            <option value="light">Light</option>
-                            <option value="dark">Dark</option>
-                        </select>
-                    </div>
-                </section>
-
-                <section class="settings-section">
-                    <h3>About</h3>
-                    <p class="settings-info">
-                        cass Archive Viewer<br>
-                        <small>Viewing exported conversations from cass (coding agent session search)</small>
-                    </p>
-                </section>
-            </div>
-        </div>
-    `;
-
-    // Set up settings event handlers
-    setupSettingsEventHandlers();
-}
-
-/**
- * Set up settings panel event handlers
- */
-function setupSettingsEventHandlers() {
-    const clearCacheBtn = document.getElementById('clear-cache-btn');
-    if (clearCacheBtn) {
-        clearCacheBtn.addEventListener('click', () => {
-            if (confirm('Clear all cached conversation data? This cannot be undone.')) {
-                // Clear caches
-                clearViewer();
-                clearSearch();
-                showNotification('Cache cleared successfully', 'success');
+    if (storageReady) {
+        storageReady.then(() => {
+            if (settingsReady) {
+                renderSettings();
             }
         });
+        return;
     }
 
-    const themeSelect = document.getElementById('theme-select');
-    if (themeSelect) {
-        // Load saved theme
-        const savedTheme = localStorage.getItem('cass-theme') || 'auto';
-        themeSelect.value = savedTheme;
-
-        themeSelect.addEventListener('change', (e) => {
-            const theme = e.target.value;
-            localStorage.setItem('cass-theme', theme);
-            applyTheme(theme);
-        });
+    if (settingsReady) {
+        renderSettings();
     }
 }
 
@@ -473,6 +435,15 @@ function applyTheme(theme) {
         root.removeAttribute('data-theme');
     } else {
         root.setAttribute('data-theme', theme);
+    }
+}
+
+function applyStoredTheme() {
+    try {
+        const theme = localStorage.getItem(StorageKeys.THEME) || 'auto';
+        applyTheme(theme);
+    } catch (error) {
+        // Ignore storage errors
     }
 }
 
@@ -521,6 +492,13 @@ function handleBackToSearch() {
     if (router) {
         router.goHome();
     }
+}
+
+function handleSessionReset(action) {
+    clearViewer();
+    clearSearch();
+    closeDatabase();
+    window.dispatchEvent(new CustomEvent('cass:lock', { detail: { action } }));
 }
 
 /**

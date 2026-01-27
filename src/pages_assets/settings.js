@@ -12,9 +12,12 @@
 
 import {
     StorageMode,
+    StorageKeys,
     getStorageMode,
     setStorageMode,
     isOPFSAvailable,
+    isOpfsEnabled,
+    setOpfsEnabled,
     clearCurrentStorage,
     clearOPFS,
     clearAllStorage,
@@ -27,6 +30,14 @@ import {
 // Module state
 let settingsContainer = null;
 let onSessionReset = null;
+
+function getEffectiveStorageMode() {
+    const mode = getStorageMode();
+    if (mode === StorageMode.OPFS) {
+        return StorageMode.MEMORY;
+    }
+    return mode;
+}
 
 /**
  * Initialize settings module
@@ -48,8 +59,9 @@ export function initSettings(container, options = {}) {
 export async function render() {
     if (!settingsContainer) return;
 
-    const currentMode = getStorageMode();
+    const currentMode = getEffectiveStorageMode();
     const opfsAvailable = isOPFSAvailable();
+    const opfsEnabled = opfsAvailable && isOpfsEnabled();
     const stats = await getStorageStats();
 
     settingsContainer.innerHTML = `
@@ -118,20 +130,20 @@ export async function render() {
                         <div class="setting-item">
                             <label class="toggle-switch">
                                 <input type="checkbox" id="opfs-toggle"
-                                    ${currentMode === StorageMode.OPFS ? 'checked' : ''}>
+                                    ${opfsEnabled ? 'checked' : ''}>
                                 <span class="toggle-slider"></span>
                                 <span class="toggle-label">Remember on this device</span>
                             </label>
                         </div>
 
-                        ${currentMode === StorageMode.OPFS ? `
+                        ${opfsEnabled ? `
                             <div class="settings-warning">
                                 <span class="warning-icon">⚠️</span>
                                 <span>Database is cached locally. Clear cache when done on shared devices.</span>
                             </div>
                         ` : ''}
                     ` : `
-                        <p class="settings-description text-muted">
+                        <p class="settings-description">
                             Your browser does not support OPFS (Origin Private File System).
                             The database will be decrypted fresh on each visit.
                         </p>
@@ -161,6 +173,10 @@ export async function render() {
                                 <div class="stat-item">
                                     <span class="stat-label">OPFS</span>
                                     <span class="stat-value">${stats.opfs.items} items (${formatBytes(stats.opfs.bytes)})</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">OPFS DB</span>
+                                    <span class="stat-value">${formatBytes(stats.opfs.dbBytes || 0)} (${stats.opfs.dbFiles.length} files)</span>
                                 </div>
                             ` : ''}
                             ${stats.quota ? `
@@ -301,12 +317,22 @@ function setupEventHandlers() {
     const themeSelect = document.getElementById('theme-select');
     if (themeSelect) {
         // Load saved theme
-        const savedTheme = localStorage.getItem('cass-archive-theme') || 'auto';
+        let savedTheme = 'auto';
+        try {
+            savedTheme = localStorage.getItem(StorageKeys.THEME) || 'auto';
+        } catch (e) {
+            // Ignore storage errors
+        }
         themeSelect.value = savedTheme;
+        applyTheme(savedTheme);
 
         themeSelect.addEventListener('change', (e) => {
             const theme = e.target.value;
-            localStorage.setItem('cass-archive-theme', theme);
+            try {
+                localStorage.setItem(StorageKeys.THEME, theme);
+            } catch (err) {
+                // Ignore storage errors
+            }
             applyTheme(theme);
             showNotification('Theme updated', 'success');
         });
@@ -318,7 +344,7 @@ function setupEventHandlers() {
  */
 async function handleStorageModeChange(e) {
     const newMode = e.target.value;
-    const currentMode = getStorageMode();
+    const currentMode = getEffectiveStorageMode();
 
     if (newMode === currentMode) return;
 
@@ -339,6 +365,7 @@ async function handleStorageModeChange(e) {
 
     try {
         await setStorageMode(newMode);
+        window.dispatchEvent(new CustomEvent('cass:session-mode-change', { detail: { mode: newMode } }));
         showNotification(`Storage mode changed to ${newMode}`, 'success');
         render(); // Re-render to update UI
     } catch (err) {
@@ -366,7 +393,7 @@ async function handleOPFSToggle(e) {
         }
 
         try {
-            await setStorageMode(StorageMode.OPFS);
+            setOpfsEnabled(true);
             showNotification('OPFS caching enabled', 'success');
         } catch (err) {
             console.error('[Settings] Failed to enable OPFS:', err);
@@ -377,7 +404,7 @@ async function handleOPFSToggle(e) {
         // Switching away from OPFS - clear it first
         try {
             await clearOPFS();
-            await setStorageMode(StorageMode.MEMORY);
+            setOpfsEnabled(false);
             showNotification('OPFS caching disabled and cleared', 'success');
         } catch (err) {
             console.error('[Settings] Failed to disable OPFS:', err);
@@ -392,7 +419,7 @@ async function handleOPFSToggle(e) {
  * Handle clear current storage
  */
 async function handleClearCurrentStorage() {
-    const mode = getStorageMode();
+    const mode = getEffectiveStorageMode();
     const confirmed = confirm(`Clear all data in ${mode} storage?`);
 
     if (!confirmed) return;
@@ -464,6 +491,9 @@ async function handleClearAll() {
 
     try {
         await clearAllStorage();
+        await setStorageMode(StorageMode.MEMORY);
+        setOpfsEnabled(false);
+        window.dispatchEvent(new CustomEvent('cass:session-mode-change', { detail: { mode: StorageMode.MEMORY } }));
         await clearServiceWorkerCache();
         showNotification('All data cleared', 'success');
         render();
