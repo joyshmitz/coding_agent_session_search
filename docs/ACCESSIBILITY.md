@@ -170,8 +170,8 @@ Expected announcements:
 
 #### NVDA (Windows)
 
-1. Open Chrome/Firefox
-2. Press `Insert+Q` to start NVDA
+1. Start NVDA from the Start Menu or desktop shortcut
+2. Open Chrome/Firefox and navigate to the archive viewer
 3. Press `Tab` to navigate through elements
 
 ## Known Issues
@@ -182,7 +182,7 @@ None currently documented.
 
 If you encounter accessibility barriers:
 
-1. File an issue at https://github.com/anthropics/cass/issues
+1. File an issue at https://github.com/Dicklesworthstone/coding_agent_session_search/issues
 2. Include:
    - Browser and version
    - Assistive technology used
