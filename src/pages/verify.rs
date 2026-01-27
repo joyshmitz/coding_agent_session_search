@@ -376,18 +376,7 @@ fn validate_unencrypted_config(config: &UnencryptedConfig) -> Vec<String> {
         errors.push("payload.path cannot be empty".to_string());
     } else {
         let path = Path::new(&config.payload.path);
-        if path.is_absolute() {
-            errors.push("payload.path must be relative".to_string());
-        }
-        if path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            errors.push("payload.path must not contain '..'".to_string());
-        }
-        if !path.starts_with("payload") {
-            errors.push("payload.path must reside under payload/".to_string());
-        }
+        validate_payload_path(&mut errors, "payload.path", path);
     }
 
     let valid_formats = ["sqlite"];
@@ -399,6 +388,26 @@ fn validate_unencrypted_config(config: &UnencryptedConfig) -> Vec<String> {
     }
 
     errors
+}
+
+fn validate_payload_path(errors: &mut Vec<String>, label: &str, path: &Path) -> bool {
+    let mut ok = true;
+    if path.is_absolute() {
+        errors.push(format!("{label} must be relative"));
+        ok = false;
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        errors.push(format!("{label} must not contain '..'"));
+        ok = false;
+    }
+    if !path.starts_with("payload") {
+        errors.push(format!("{label} must reside under payload/"));
+        ok = false;
+    }
+    ok
 }
 
 /// Check payload manifest validity
@@ -475,16 +484,7 @@ fn check_payload_manifest(site_dir: &Path) -> CheckResult {
         }
         ArchiveConfig::Unencrypted(unenc) => {
             let rel_path = Path::new(&unenc.payload.path);
-            if rel_path.is_absolute() {
-                errors.push("payload.path must be relative".to_string());
-            } else if rel_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                errors.push("payload.path must not contain '..'".to_string());
-            } else if !rel_path.starts_with("payload") {
-                errors.push("payload.path must reside under payload/".to_string());
-            } else {
+            if validate_payload_path(&mut errors, "payload.path", rel_path) {
                 let payload_path = site_dir.join(rel_path);
                 if !payload_path.exists() {
                     errors.push(format!("Missing payload file: {}", unenc.payload.path));
@@ -537,20 +537,23 @@ fn check_size_limits(site_dir: &Path) -> CheckResult {
             }
         }
         ArchiveConfig::Unencrypted(unenc) => {
-            let payload_path = site_dir.join(&unenc.payload.path);
-            if !payload_path.exists() {
-                errors.push(format!(
-                    "payload file not found for size check: {}",
-                    unenc.payload.path
-                ));
-            } else if let Ok(meta) = payload_path.metadata()
-                && meta.len() > MAX_CHUNK_SIZE
-            {
-                errors.push(format!(
-                    "{} exceeds 100MB limit ({} bytes)",
-                    unenc.payload.path,
-                    meta.len()
-                ));
+            let payload_path = Path::new(&unenc.payload.path);
+            if validate_payload_path(&mut errors, "payload.path", payload_path) {
+                let payload_path = site_dir.join(payload_path);
+                if !payload_path.exists() {
+                    errors.push(format!(
+                        "payload file not found for size check: {}",
+                        unenc.payload.path
+                    ));
+                } else if let Ok(meta) = payload_path.metadata()
+                    && meta.len() > MAX_CHUNK_SIZE
+                {
+                    errors.push(format!(
+                        "{} exceeds 100MB limit ({} bytes)",
+                        unenc.payload.path,
+                        meta.len()
+                    ));
+                }
             }
         }
     }
