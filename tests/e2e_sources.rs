@@ -893,16 +893,18 @@ paths = ["~/.claude/projects"]
 /// Test: sources sync --source filters to specific source.
 #[test]
 fn sources_sync_single_source() {
-    logged_test!("sources_sync_single_source", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        let data_dir = tmp.path().join("data");
-        fs::create_dir_all(&config_dir).unwrap();
-        fs::create_dir_all(&data_dir).unwrap();
+    let tracker = tracker_for("sources_sync_single_source");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with two sources for filtered sync"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
@@ -915,75 +917,89 @@ type = "ssh"
 host = "dev@work.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
-        let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with two sources for filtered sync"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "sync", "--source", "laptop", "--dry-run"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .env("XDG_DATA_HOME", &data_dir)
-            .output()
-            .expect("sources sync --source command");
+    let start = tracker.start("run_sources_sync_filtered", Some("Run sync filtered to laptop"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "sync", "--source", "laptop", "--dry-run"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("XDG_DATA_HOME", &data_dir)
+        .output()
+        .expect("sources sync --source command");
+    tracker.end("run_sources_sync_filtered", Some("Run sync filtered to laptop"), start);
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = format!("{stdout}{stderr}");
+    let start = tracker.start("verify_filtered_output", Some("Verify only laptop in output"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
 
-        // Should only mention laptop, not workstation
-        assert!(
-            combined.contains("laptop"),
-            "Expected laptop in output, got: {combined}"
-        );
-        // The source filter should work even if sync fails due to SSH
-    });
+    // Should only mention laptop, not workstation
+    assert!(
+        combined.contains("laptop"),
+        "Expected laptop in output, got: {combined}"
+    );
+    // The source filter should work even if sync fails due to SSH
+    tracker.end("verify_filtered_output", Some("Verify only laptop in output"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources sync --json outputs valid JSON.
 #[test]
 fn sources_sync_json() {
-    logged_test!("sources_sync_json", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        let data_dir = tmp.path().join("data");
-        fs::create_dir_all(&config_dir).unwrap();
-        fs::create_dir_all(&data_dir).unwrap();
+    let tracker = tracker_for("sources_sync_json");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config for sync JSON test"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config for sync JSON test"), start);
+
+    let start = tracker.start("run_sources_sync_json", Some("Run sources sync --json --dry-run"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "sync", "--json", "--dry-run"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("XDG_DATA_HOME", &data_dir)
+        .output()
+        .expect("sources sync --json command");
+    tracker.end("run_sources_sync_json", Some("Run sources sync --json --dry-run"), start);
+
+    let start = tracker.start("verify_json", Some("Verify valid JSON output"));
+    // Should output valid JSON even if sync fails
+    if !output.stdout.is_empty() {
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON output");
+
+        // Should have a sources or results field
+        assert!(
+            json.get("sources").is_some() || json.get("results").is_some(),
+            "Expected sources or results field in JSON output: {}",
+            String::from_utf8_lossy(&output.stdout)
         );
+    }
+    tracker.end("verify_json", Some("Verify valid JSON output"), start);
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
-        let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
-
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "sync", "--json", "--dry-run"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .env("XDG_DATA_HOME", &data_dir)
-            .output()
-            .expect("sources sync --json command");
-
-        // Should output valid JSON even if sync fails
-        if !output.stdout.is_empty() {
-            let json: serde_json::Value =
-                serde_json::from_slice(&output.stdout).expect("valid JSON output");
-
-            // Should have a sources or results field
-            assert!(
-                json.get("sources").is_some() || json.get("results").is_some(),
-                "Expected sources or results field in JSON output: {}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-        }
-    });
+    tracker.complete();
 }
 
 // =============================================================================
@@ -993,121 +1009,143 @@ paths = ["~/.claude/projects"]
 /// Test: Complete workflow - add, list, remove.
 #[test]
 fn sources_workflow_add_list_remove() {
-    logged_test!("sources_workflow_add_list_remove", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("sources_workflow_add_list_remove");
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let start = tracker.start("setup", Some("Create temp config directory"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
 
-        // 1. Add a source
-        let output = cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "add",
-                "user@server.example",
-                "--name",
-                "server",
-                "--preset",
-                "linux-defaults",
-                "--no-test",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources add command");
-        assert!(output.status.success());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create temp config directory"), start);
 
-        // 2. List sources - should show the added source
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "list"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources list command");
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("server"));
+    // 1. Add a source
+    let start = tracker.start("add_source", Some("Add server source"));
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "add",
+            "user@server.example",
+            "--name",
+            "server",
+            "--preset",
+            "linux-defaults",
+            "--no-test",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources add command");
+    assert!(output.status.success());
+    tracker.end("add_source", Some("Add server source"), start);
 
-        // 3. Remove the source
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "remove", "server", "-y"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources remove command");
-        assert!(output.status.success());
+    // 2. List sources - should show the added source
+    let start = tracker.start("list_sources", Some("List sources and verify server present"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "list"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources list command");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("server"));
+    tracker.end("list_sources", Some("List sources and verify server present"), start);
 
-        // 4. List again - should be empty
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "list"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources list command");
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            !stdout.contains("server"),
-            "Source should be removed, got: {stdout}"
-        );
-    });
+    // 3. Remove the source
+    let start = tracker.start("remove_source", Some("Remove server source"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "remove", "server", "-y"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources remove command");
+    assert!(output.status.success());
+    tracker.end("remove_source", Some("Remove server source"), start);
+
+    // 4. List again - should be empty
+    let start = tracker.start("verify_empty", Some("Verify source was removed"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "list"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources list command");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("server"),
+        "Source should be removed, got: {stdout}"
+    );
+    tracker.end("verify_empty", Some("Verify source was removed"), start);
+
+    tracker.complete();
 }
 
 /// Test: Add multiple sources and list them.
 #[test]
 fn sources_multiple_add_list() {
-    logged_test!("sources_multiple_add_list", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("sources_multiple_add_list");
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let start = tracker.start("setup", Some("Create temp config directory"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
 
-        // Add first source
-        cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "add",
-                "user@laptop.local",
-                "--name",
-                "laptop",
-                "--preset",
-                "macos-defaults",
-                "--no-test",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .assert()
-            .success();
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create temp config directory"), start);
 
-        // Add second source
-        cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "add",
-                "dev@workstation.office",
-                "--name",
-                "workstation",
-                "--preset",
-                "linux-defaults",
-                "--no-test",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .assert()
-            .success();
+    // Add first source
+    let start = tracker.start("add_laptop", Some("Add laptop source"));
+    cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "add",
+            "user@laptop.local",
+            "--name",
+            "laptop",
+            "--preset",
+            "macos-defaults",
+            "--no-test",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .assert()
+        .success();
+    tracker.end("add_laptop", Some("Add laptop source"), start);
 
-        // List all sources
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "list", "--json"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources list command");
+    // Add second source
+    let start = tracker.start("add_workstation", Some("Add workstation source"));
+    cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "add",
+            "dev@workstation.office",
+            "--name",
+            "workstation",
+            "--preset",
+            "linux-defaults",
+            "--no-test",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .assert()
+        .success();
+    tracker.end("add_workstation", Some("Add workstation source"), start);
 
-        assert!(output.status.success());
-        let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
-        let sources = json["sources"].as_array().expect("sources array");
+    // List all sources
+    let start = tracker.start("verify_list", Some("List sources and verify both present"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "list", "--json"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources list command");
 
-        assert_eq!(sources.len(), 2);
-        let names: Vec<&str> = sources.iter().filter_map(|s| s["name"].as_str()).collect();
-        assert!(names.contains(&"laptop"));
-        assert!(names.contains(&"workstation"));
-    });
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
+    let sources = json["sources"].as_array().expect("sources array");
+
+    assert_eq!(sources.len(), 2);
+    let names: Vec<&str> = sources.iter().filter_map(|s| s["name"].as_str()).collect();
+    assert!(names.contains(&"laptop"));
+    assert!(names.contains(&"workstation"));
+    tracker.end("verify_list", Some("List sources and verify both present"), start);
+
+    tracker.complete();
 }
 
 // =============================================================================
@@ -1117,50 +1155,60 @@ fn sources_multiple_add_list() {
 /// Test: sources mappings list with no mappings configured.
 #[test]
 fn mappings_list_empty() {
-    logged_test!("mappings_list_empty", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_list_empty");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with source but no mappings"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with source but no mappings"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "mappings", "list", "laptop"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings list command");
+    let start = tracker.start("run_mappings_list", Some("Run mappings list for laptop"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "laptop"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings list command");
+    tracker.end("run_mappings_list", Some("Run mappings list for laptop"), start);
 
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("No") || stdout.contains("0 mapping"),
-            "Expected no mappings message, got: {stdout}"
-        );
-    });
+    let start = tracker.start("verify_output", Some("Verify empty mappings message"));
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No") || stdout.contains("0 mapping"),
+        "Expected no mappings message, got: {stdout}"
+    );
+    tracker.end("verify_output", Some("Verify empty mappings message"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources mappings list with mappings configured.
 #[test]
 fn mappings_list_with_mappings() {
-    logged_test!("mappings_list_with_mappings", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_list_with_mappings");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with source and path mapping"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
@@ -1171,23 +1219,29 @@ paths = ["~/.claude/projects"]
 from = "/home/user/projects"
 to = "/Users/me/projects"
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with source and path mapping"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "mappings", "list", "laptop"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings list command");
+    let start = tracker.start("run_mappings_list", Some("Run mappings list for laptop"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "laptop"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings list command");
+    tracker.end("run_mappings_list", Some("Run mappings list for laptop"), start);
 
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("/home/user/projects") && stdout.contains("/Users/me/projects"),
-            "Expected mapping paths in output, got: {stdout}"
-        );
-    });
+    let start = tracker.start("verify_output", Some("Verify mapping paths in output"));
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("/home/user/projects") && stdout.contains("/Users/me/projects"),
+        "Expected mapping paths in output, got: {stdout}"
+    );
+    tracker.end("verify_output", Some("Verify mapping paths in output"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources mappings list --json outputs valid JSON.

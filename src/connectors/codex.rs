@@ -1194,4 +1194,498 @@ not valid json at all
         );
         assert_eq!(convs[0].messages[0].content, "Real session");
     }
+
+    // =====================================================
+    // Edge case tests — malformed input robustness (br-fiiv)
+    // =====================================================
+
+    #[test]
+    fn truncated_jsonl_mid_json_returns_partial_results() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // First line valid, second truncated mid-JSON
+        let content = b"{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"Valid\"}}\n{\"type\":\"response_item\",\"payload\":{\"role\":\"assistant\",\"con";
+        fs::write(sessions.join("rollout-truncated.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "truncated file should not cause an error");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages.len(),
+            1,
+            "should yield only the 1 valid message from truncated file"
+        );
+        assert_eq!(convs[0].messages[0].content, "Valid");
+    }
+
+    #[test]
+    fn truncated_mid_utf8_does_not_panic() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            b"{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"OK\"}}\n",
+        );
+        // Incomplete 4-byte UTF-8 sequence (U+1F600 = F0 9F 98 80, only 2 bytes)
+        bytes.extend_from_slice(b"\xF0\x9F");
+
+        fs::write(sessions.join("rollout-utf8trunc.jsonl"), &bytes).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "truncated mid-UTF8 should not panic");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "OK");
+    }
+
+    #[test]
+    fn invalid_utf8_skips_corrupted_lines() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            b"{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"Before\"}}\n",
+        );
+        bytes.extend_from_slice(b"\xFF\xFE invalid utf8 line\n");
+        bytes.extend_from_slice(
+            b"{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"After\"}}\n",
+        );
+
+        fs::write(sessions.join("rollout-badbytes.jsonl"), &bytes).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "invalid UTF-8 should not cause a panic");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages.len(),
+            2,
+            "should extract valid messages around invalid UTF-8"
+        );
+        assert_eq!(convs[0].messages[0].content, "Before");
+        assert_eq!(convs[0].messages[1].content, "After");
+    }
+
+    #[test]
+    fn empty_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        fs::write(sessions.join("rollout-empty.jsonl"), b"").unwrap();
+        fs::write(sessions.join("rollout-empty.json"), b"").unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "empty files should not cause errors");
+        let convs = result.unwrap();
+        assert!(
+            convs.is_empty(),
+            "empty files should produce no conversations"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        fs::write(sessions.join("rollout-ws.jsonl"), "  \n\n  \t\n").unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "whitespace-only file should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert!(
+            convs.is_empty(),
+            "whitespace-only file should produce no conversations"
+        );
+    }
+
+    #[test]
+    fn json_type_mismatch_skips_gracefully() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = concat!(
+            // payload is a string instead of object
+            "{\"type\":\"response_item\",\"payload\":\"not an object\"}\n",
+            // type is a number
+            "{\"type\":123,\"payload\":{\"role\":\"user\",\"content\":\"num type\"}}\n",
+            // content is a number
+            "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":99}}\n",
+            // Correct entry
+            "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"Correct\"}}\n",
+        );
+        fs::write(sessions.join("rollout-types.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "type mismatches should not cause errors");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(
+            convs[0]
+                .messages
+                .iter()
+                .any(|m| m.content == "Correct"),
+            "should extract the correctly typed entry"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_json_does_not_stack_overflow() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // serde_json has a recursion limit of 128; 200 levels will trigger parse error
+        let mut nested = String::new();
+        for _ in 0..200 {
+            nested.push_str("{\"a\":");
+        }
+        nested.push('1');
+        for _ in 0..200 {
+            nested.push('}');
+        }
+
+        let content = format!(
+            "{}\n{}\n",
+            nested,
+            r#"{"type":"response_item","payload":{"role":"user","content":"After nesting"}}"#
+        );
+        fs::write(sessions.join("rollout-deep.jsonl"), &content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "deeply nested JSON should not cause stack overflow"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "After nesting");
+    }
+
+    #[test]
+    fn large_message_body_handled_without_oom() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let large_content = "x".repeat(1_000_000);
+        let line = format!(
+            r#"{{"type":"response_item","payload":{{"role":"user","content":"{}"}}}}"#,
+            large_content
+        );
+        fs::write(sessions.join("rollout-large.jsonl"), &line).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "large message body should not cause OOM");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content.len(), 1_000_000);
+    }
+
+    #[test]
+    fn null_bytes_embedded_in_content_handled() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = concat!(
+            r#"{"type":"response_item","payload":{"role":"user","content":"before\u0000after"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"role":"user","content":"Clean"}}"#,
+            "\n"
+        );
+        fs::write(sessions.join("rollout-null.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "null bytes in content should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(convs[0].messages.len() >= 1);
+    }
+
+    #[test]
+    fn bom_marker_at_file_start_handled() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\xEF\xBB\xBF"); // UTF-8 BOM
+        bytes.extend_from_slice(
+            b"{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"BOM line\"}}\n",
+        );
+        bytes.extend_from_slice(
+            b"{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"Second\"}}\n",
+        );
+        fs::write(sessions.join("rollout-bom.jsonl"), &bytes).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "BOM marker should not cause errors");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(
+            convs[0].messages.len() >= 1,
+            "should extract at least the second line after BOM"
+        );
+        assert!(
+            convs[0].messages.iter().any(|m| m.content == "Second"),
+            "second line should parse correctly regardless of BOM"
+        );
+    }
+
+    // =====================================================
+    // Codex-specific edge cases (br-fiiv)
+    // =====================================================
+
+    #[test]
+    fn missing_payload_field_skipped() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // response_item and event_msg without payload field
+        let content = concat!(
+            "{\"type\":\"response_item\",\"timestamp\":\"2025-12-01T10:00:00Z\"}\n",
+            "{\"type\":\"event_msg\",\"timestamp\":\"2025-12-01T10:00:01Z\"}\n",
+            "{\"type\":\"session_meta\",\"timestamp\":\"2025-12-01T10:00:02Z\"}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"Has payload\"}}\n",
+        );
+        fs::write(sessions.join("rollout-nopayload.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "missing payload should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Has payload");
+    }
+
+    #[test]
+    fn timestamp_parsing_edge_cases() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = concat!(
+            // ISO 8601 with milliseconds
+            "{\"type\":\"response_item\",\"timestamp\":\"2025-12-01T10:00:00.123Z\",\"payload\":{\"role\":\"user\",\"content\":\"ms precision\"}}\n",
+            // ISO 8601 with timezone offset
+            "{\"type\":\"response_item\",\"timestamp\":\"2025-12-01T10:00:00+05:30\",\"payload\":{\"role\":\"user\",\"content\":\"tz offset\"}}\n",
+            // Unix epoch milliseconds as number
+            "{\"type\":\"response_item\",\"timestamp\":1700000000000,\"payload\":{\"role\":\"user\",\"content\":\"epoch millis\"}}\n",
+            // No timestamp at all
+            "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"no timestamp\"}}\n",
+            // Null timestamp
+            "{\"type\":\"response_item\",\"timestamp\":null,\"payload\":{\"role\":\"user\",\"content\":\"null ts\"}}\n",
+        );
+        fs::write(sessions.join("rollout-timestamps.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "varied timestamp formats should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].messages.len(),
+            5,
+            "all 5 messages should be extracted regardless of timestamp format"
+        );
+        // Messages with valid timestamps should have created_at set
+        assert!(convs[0].messages[0].created_at.is_some());
+        assert!(convs[0].messages[1].created_at.is_some());
+        assert!(convs[0].messages[2].created_at.is_some());
+    }
+
+    #[test]
+    fn workspace_path_encoding_edge_cases() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // Test various workspace path formats in session_meta
+        let content = concat!(
+            // Path with spaces
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/home/user/my project/src\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"Spaces path\"}}\n",
+        );
+        fs::write(sessions.join("rollout-spaces.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0].workspace,
+            Some(PathBuf::from("/home/user/my project/src"))
+        );
+
+        // Unicode workspace path
+        let content2 = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/home/\u{00FC}ser/projekt\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"role\":\"user\",\"content\":\"Unicode path\"}}\n",
+        );
+        fs::write(sessions.join("rollout-unicode.jsonl"), content2).unwrap();
+
+        let convs2 = connector.scan(&ctx).unwrap();
+        assert!(
+            convs2.len() >= 1,
+            "unicode workspace paths should be handled"
+        );
+    }
+
+    #[test]
+    fn event_msg_with_unknown_subtypes_skipped() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // Various event_msg subtypes that should be gracefully skipped
+        let content = concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"streaming_start\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"streaming_delta\",\"delta\":\"partial\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"streaming_end\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"tool_call\",\"name\":\"bash\",\"input\":{\"cmd\":\"ls\"}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"tool_result\",\"output\":\"file.txt\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Real user input\"}}\n",
+        );
+        fs::write(sessions.join("rollout-events.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "unknown event subtypes should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        // Only user_message event should produce a message
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Real user input");
+        assert_eq!(convs[0].messages[0].role, "user");
+    }
+
+    #[test]
+    fn tool_call_format_variations() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // response_item with tool_use content blocks (like Claude API format)
+        let content = json!({
+            "type": "response_item",
+            "payload": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me check that."},
+                    {"type": "tool_use", "name": "read_file", "input": {"path": "/etc/hosts"}}
+                ]
+            }
+        })
+        .to_string()
+            + "\n"
+            + &json!({
+                "type": "response_item",
+                "payload": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "bash", "input": {"command": "ls -la"}},
+                        {"type": "text", "text": "Here are the results."}
+                    ]
+                }
+            })
+            .to_string()
+            + "\n";
+
+        fs::write(sessions.join("rollout-tools.jsonl"), &content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "tool call format variations should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+        // flatten_content should handle tool_use blocks
+        assert!(convs[0].messages[0].content.contains("Let me check"));
+        assert!(convs[0].messages[1].content.contains("Here are the results"));
+    }
 }
