@@ -5,16 +5,15 @@ This document lists all error codes that may appear when using CASS (Coding Agen
 ## Error Code Format
 
 Error codes follow the format `E<category><number>`:
-- **E1xx**: Authentication errors
-- **E2xx**: Archive format errors
-- **E3xx**: Database errors
-- **E4xx**: Browser compatibility errors
-- **E5xx**: Network errors
-- **E6xx**: Export errors
+- **E1xxx**: Decryption/Authentication errors
+- **E2xxx**: Database errors
+- **E3xxx**: Browser compatibility errors
+- **E4xxx**: Network errors
+- **E5xxx**: Export errors
 
-## Authentication Errors (E1xx)
+## Decryption Errors (E1xxx)
 
-### E101: Authentication Failed
+### E1001: Authentication Failed
 
 **Message**: "The password you entered is incorrect."
 
@@ -25,7 +24,7 @@ Error codes follow the format `E<category><number>`:
 - Ensure you're using the password set when the archive was created
 - If you've forgotten the password, use your recovery key if available
 
-### E102: Empty Password
+### E1002: Empty Password
 
 **Message**: "Please enter a password."
 
@@ -33,22 +32,9 @@ Error codes follow the format `E<category><number>`:
 
 **Resolution**: Enter your password before clicking "Unlock".
 
-### E103: No Matching Key Slot
+### E1003: Invalid Format
 
-**Message**: "No valid key found for this archive."
-
-**Cause**: The provided credentials don't match any encryption slot in the archive.
-
-**Resolution**:
-- Try your password again
-- If using a recovery key, ensure it's the correct one for this archive
-- The archive may have been re-encrypted with different credentials
-
-## Archive Format Errors (E2xx)
-
-### E201: Invalid Archive Format
-
-**Message**: "This doesn't appear to be a valid CASS archive."
+**Message**: "This file is not a valid archive."
 
 **Cause**: The file is not a recognized CASS archive format, or has been modified.
 
@@ -57,7 +43,7 @@ Error codes follow the format `E<category><number>`:
 - Try downloading the archive again
 - Check that the file hasn't been modified or corrupted during transfer
 
-### E202: Integrity Check Failed
+### E1004: Integrity Check Failed
 
 **Message**: "The archive appears to be corrupted or tampered with."
 
@@ -68,9 +54,9 @@ Error codes follow the format `E<category><number>`:
 - Check that the file transferred completely
 - The archive may have been damaged during storage
 
-### E203: Unsupported Version
+### E1005: Unsupported Version
 
-**Message**: "This archive was created with a newer version of CASS."
+**Message**: "This archive requires a newer version of the software."
 
 **Cause**: The archive version is newer than the viewer can handle.
 
@@ -78,9 +64,20 @@ Error codes follow the format `E<category><number>`:
 - Update to the latest version of CASS
 - Check the CASS releases page for updates
 
-### E204: Crypto Error
+### E1006: No Matching Key Slot
 
-**Message**: "An encryption error occurred."
+**Message**: "No matching key slot found for the provided credentials."
+
+**Cause**: The provided credentials don't match any encryption slot in the archive.
+
+**Resolution**:
+- Try your password again
+- If using a recovery key, ensure it's the correct one for this archive
+- The archive may have been re-encrypted with different credentials
+
+### E1007: Crypto Error
+
+**Message**: "An error occurred during decryption."
 
 **Cause**: The cryptographic operation failed unexpectedly.
 
@@ -89,11 +86,11 @@ Error codes follow the format `E<category><number>`:
 - If persisting, download the archive again
 - Report the issue if it continues
 
-## Database Errors (E3xx)
+## Database Errors (E2xxx)
 
-### E301: Corrupt Database
+### E2001: Corrupt Database
 
-**Message**: "The archive's internal database is corrupted."
+**Message**: "The database appears to be corrupted."
 
 **Cause**: The SQLite database inside the archive is damaged.
 
@@ -102,9 +99,9 @@ Error codes follow the format `E<category><number>`:
 - Re-export from the original source if available
 - The archive may have been damaged during creation
 
-### E302: Missing Data
+### E2002: Missing Table
 
-**Message**: "Required data is missing from this archive."
+**Message**: "The archive is missing required data."
 
 **Cause**: The archive is incomplete or was created with an incompatible version.
 
@@ -112,7 +109,7 @@ Error codes follow the format `E<category><number>`:
 - Re-export from the original CASS database
 - Ensure you're using a compatible version of CASS
 
-### E303: Search Query Error
+### E2003: Invalid Query
 
 **Message**: "Your search could not be processed."
 
@@ -123,20 +120,20 @@ Error codes follow the format `E<category><number>`:
 - Remove special characters
 - Use quotes around phrases
 
-### E304: Database Locked
+### E2004: Database Locked
 
-**Message**: "The database is temporarily unavailable."
+**Message**: "The database is currently in use by another process."
 
 **Cause**: Another operation is currently accessing the database.
 
 **Resolution**:
 - Wait a moment and try again
 - Close other browser tabs viewing the same archive
-- Refresh the page
+- Close any other applications that might be using this archive
 
-### E305: No Results
+### E2005: No Results
 
-**Message**: "No matching conversations found."
+**Message**: "No results found."
 
 **Cause**: The search returned no results.
 
@@ -145,11 +142,11 @@ Error codes follow the format `E<category><number>`:
 - Check your filter settings
 - Broaden your date range if filtering by date
 
-## Browser Errors (E4xx)
+## Browser Errors (E3xxx)
 
-### E401: Unsupported Browser
+### E3001: Unsupported Browser
 
-**Message**: "Your browser doesn't support a required feature."
+**Message**: "Your browser doesn't support required features."
 
 **Cause**: The browser is missing Web Crypto API, IndexedDB, or other required APIs.
 
@@ -158,7 +155,7 @@ Error codes follow the format `E<category><number>`:
 - Update your browser to the latest version
 - Disable privacy extensions that may block required features
 
-### E402: WebAssembly Not Supported
+### E3002: WebAssembly Not Supported
 
 **Message**: "Your browser doesn't support WebAssembly."
 
@@ -169,9 +166,9 @@ Error codes follow the format `E<category><number>`:
 - Check that JavaScript is enabled
 - Disable extensions that may block WebAssembly
 
-### E403: Cryptography Not Available
+### E3003: Cryptography Not Supported
 
-**Message**: "Secure encryption is not available in your browser."
+**Message**: "Your browser doesn't support secure cryptography."
 
 **Cause**: The Web Crypto API is not available, possibly due to insecure context (HTTP).
 
@@ -180,9 +177,9 @@ Error codes follow the format `E<category><number>`:
 - Serve the file from a local web server (not `file://`)
 - Use a supported browser
 
-### E404: Storage Quota Exceeded
+### E3004: Storage Quota Exceeded
 
-**Message**: "Browser storage is full."
+**Message**: "Not enough storage space available."
 
 **Cause**: The browser's storage quota has been exceeded.
 
@@ -191,9 +188,9 @@ Error codes follow the format `E<category><number>`:
 - Close other tabs viewing large archives
 - Increase storage allocation in browser settings
 
-### E405: Cross-Origin Isolation Required
+### E3005: Cross-Origin Isolation Required
 
-**Message**: "This feature requires cross-origin isolation."
+**Message**: "Cross-origin isolation is required but not enabled."
 
 **Cause**: SharedArrayBuffer is required but not available due to missing COOP/COEP headers.
 
@@ -201,11 +198,11 @@ Error codes follow the format `E<category><number>`:
 - Serve the archive from a properly configured web server
 - Contact the site administrator about enabling required headers
 
-## Network Errors (E5xx)
+## Network Errors (E4xxx)
 
-### E501: Download Failed
+### E4001: Fetch Failed
 
-**Message**: "Could not download the archive."
+**Message**: "Failed to download the archive."
 
 **Cause**: The network request to fetch the archive failed.
 
@@ -214,7 +211,7 @@ Error codes follow the format `E<category><number>`:
 - Try again in a few moments
 - Verify the archive URL is correct
 
-### E502: Incomplete Download
+### E4002: Incomplete Download
 
 **Message**: "The download was incomplete."
 
@@ -225,9 +222,9 @@ Error codes follow the format `E<category><number>`:
 - Check your internet connection stability
 - Clear browser cache and retry
 
-### E503: Request Timed Out
+### E4003: Timeout
 
-**Message**: "The request timed out."
+**Message**: "The connection timed out."
 
 **Cause**: The server took too long to respond.
 
@@ -236,7 +233,7 @@ Error codes follow the format `E<category><number>`:
 - Check server status
 - The archive may be too large for the current connection
 
-### E504: Server Error
+### E4004: Server Error
 
 **Message**: "The server returned an error."
 
@@ -247,20 +244,20 @@ Error codes follow the format `E<category><number>`:
 - Check that the archive URL is correct
 - Contact the server administrator
 
-## Export Errors (E6xx)
+## Export Errors (E5xxx)
 
-### E601: No Conversations to Export
+### E5001: No Conversations
 
-**Message**: "There are no conversations to export."
+**Message**: "No conversations found to export."
 
 **Cause**: The source database contains no conversations.
 
 **Resolution**:
 - Check that CASS has indexed some conversations
 - Run `cass index` to scan for new conversations
-- Verify the correct database path
+- Make sure you have some agent sessions recorded
 
-### E602: Source Database Error
+### E5002: Source Database Error
 
 **Message**: "Could not read the source database."
 
@@ -271,9 +268,9 @@ Error codes follow the format `E<category><number>`:
 - Check file permissions
 - Run `cass health` to diagnose issues
 
-### E603: Output Error
+### E5003: Output Error
 
-**Message**: "Could not write the output file."
+**Message**: "Could not write to the output location."
 
 **Cause**: The export file could not be written.
 
@@ -282,9 +279,9 @@ Error codes follow the format `E<category><number>`:
 - Verify write permissions
 - Ensure sufficient disk space
 
-### E604: Filter Matched Nothing
+### E5004: Filter Matched Nothing
 
-**Message**: "Your filters didn't match any conversations."
+**Message**: "No conversations matched your filter criteria."
 
 **Cause**: The export filters excluded all conversations.
 
@@ -298,7 +295,7 @@ Error codes follow the format `E<category><number>`:
 If you encounter an error not listed here or need additional assistance:
 
 1. **Check the logs**: Run with `--verbose` for detailed output
-2. **Search existing issues**: https://github.com/anthropics/cass/issues
+2. **Search existing issues**: https://github.com/Dicklesworthstone/coding_agent_session_search/issues
 3. **File a new issue**: Include the error code, message, and steps to reproduce
 
 ## Reporting Bugs
