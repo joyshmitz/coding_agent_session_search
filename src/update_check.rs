@@ -319,9 +319,15 @@ pub fn run_self_update(version: &str) -> ! {
     }
 }
 
+/// Get the base URL for release API (overridable for testing)
+fn release_api_base_url() -> String {
+    dotenvy::var("CASS_UPDATE_API_BASE_URL")
+        .unwrap_or_else(|_| format!("https://api.github.com/repos/{GITHUB_REPO}"))
+}
+
 /// Fetch latest release from GitHub API
 async fn fetch_latest_release() -> Result<GitHubRelease> {
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    let url = format!("{}/releases/latest", release_api_base_url());
 
     let client = Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
@@ -436,7 +442,7 @@ pub fn check_for_updates_sync(current_version: &str) -> Option<UpdateInfo> {
 
 /// Fetch latest release using blocking HTTP client
 fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    let url = format!("{}/releases/latest", release_api_base_url());
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
@@ -678,5 +684,391 @@ mod tests {
         assert!(!parts[1].is_empty(), "repo should not be empty");
         assert_eq!(parts[0], "Dicklesworthstone");
         assert_eq!(parts[1], "coding_agent_session_search");
+    }
+
+    // =========================================================================
+    // Integration Tests with Local HTTP Server (br-e3ze)
+    // Tests real HTTP client behavior against ephemeral local servers
+    // =========================================================================
+
+    /// Helper to create a simple HTTP response
+    fn http_response(status: u16, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {} {}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {}",
+            status,
+            match status {
+                200 => "OK",
+                404 => "Not Found",
+                500 => "Internal Server Error",
+                _ => "Unknown",
+            },
+            body.len(),
+            body
+        )
+    }
+
+    /// Start a simple HTTP server on an ephemeral port that serves a single response
+    fn start_test_server(
+        response_body: &str,
+        status: u16,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind to ephemeral port");
+        let addr = listener.local_addr().expect("get local addr");
+
+        let response = http_response(status, response_body);
+
+        let handle = std::thread::spawn(move || {
+            // Accept one connection and respond
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        // Small delay to ensure server is ready
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        (addr, handle)
+    }
+
+    #[test]
+    fn integration_fetch_release_success() {
+        // Start local server with valid release JSON
+        let release_json = r#"{
+            "tag_name": "v0.2.0",
+            "html_url": "https://github.com/test/repo/releases/tag/v0.2.0"
+        }"#;
+
+        let (addr, handle) = start_test_server(release_json, 200);
+
+        // Set env var to point to our local server
+        // Safety: Tests run sequentially in same process, but this is still racy
+        // We use a unique port each time so it's safe for our purposes
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
+        }
+
+        // Make the request using blocking client
+        let result = fetch_latest_release_blocking();
+
+        // Clean up env var
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        handle.join().expect("server thread");
+
+        let release = result.expect("fetch should succeed");
+        assert_eq!(release.tag_name, "v0.2.0");
+        assert!(release.html_url.contains("v0.2.0"));
+    }
+
+    #[test]
+    fn integration_fetch_release_404_error() {
+        let (addr, handle) = start_test_server(r#"{"message": "Not Found"}"#, 404);
+
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
+        }
+
+        let result = fetch_latest_release_blocking();
+
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        handle.join().expect("server thread");
+
+        assert!(result.is_err(), "should return error for 404");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("404") || err.to_string().contains("Not Found"),
+            "error should mention 404: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn integration_fetch_release_malformed_json() {
+        let (addr, handle) = start_test_server("this is not json", 200);
+
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
+        }
+
+        let result = fetch_latest_release_blocking();
+
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        handle.join().expect("server thread");
+
+        assert!(result.is_err(), "should return error for malformed JSON");
+    }
+
+    #[test]
+    fn integration_fetch_release_missing_fields() {
+        // JSON that doesn't have required fields
+        let incomplete_json = r#"{"some_other_field": "value"}"#;
+
+        let (addr, handle) = start_test_server(incomplete_json, 200);
+
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
+        }
+
+        let result = fetch_latest_release_blocking();
+
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        handle.join().expect("server thread");
+
+        // Should fail to parse because tag_name is missing
+        assert!(result.is_err(), "should error on missing required fields");
+    }
+
+    #[test]
+    fn integration_fetch_release_server_error() {
+        let (addr, handle) = start_test_server(r#"{"error": "Internal error"}"#, 500);
+
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
+        }
+
+        let result = fetch_latest_release_blocking();
+
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        handle.join().expect("server thread");
+
+        assert!(result.is_err(), "should return error for 500");
+    }
+
+    #[test]
+    fn integration_version_comparison_with_real_fetch() {
+        // Test the full flow: fetch -> parse -> compare
+        let release_json = r#"{
+            "tag_name": "v0.3.0",
+            "html_url": "https://github.com/test/repo/releases/tag/v0.3.0"
+        }"#;
+
+        let (addr, handle) = start_test_server(release_json, 200);
+
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
+        }
+
+        let result = fetch_latest_release_blocking();
+
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        handle.join().expect("server thread");
+
+        let release = result.expect("fetch should succeed");
+
+        // Parse and compare versions like the real code does
+        let latest_str = release.tag_name.trim_start_matches('v');
+        let latest = Version::parse(latest_str).expect("parse latest version");
+        let current = Version::parse("0.1.50").expect("parse current version");
+
+        assert!(latest > current, "0.3.0 should be newer than 0.1.50");
+    }
+
+    #[test]
+    fn integration_prerelease_version_handling() {
+        // Test handling of pre-release versions from server
+        let release_json = r#"{
+            "tag_name": "v0.2.0-beta.1",
+            "html_url": "https://github.com/test/repo/releases/tag/v0.2.0-beta.1"
+        }"#;
+
+        let (addr, handle) = start_test_server(release_json, 200);
+
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
+        }
+
+        let result = fetch_latest_release_blocking();
+
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        handle.join().expect("server thread");
+
+        let release = result.expect("fetch should succeed");
+        let latest_str = release.tag_name.trim_start_matches('v');
+        let latest = Version::parse(latest_str).expect("parse prerelease version");
+
+        // Prerelease 0.2.0-beta.1 should be less than 0.2.0
+        let stable = Version::parse("0.2.0").expect("parse stable version");
+        assert!(
+            latest < stable,
+            "prerelease 0.2.0-beta.1 should be older than stable 0.2.0"
+        );
+
+        // But newer than 0.1.50
+        let older = Version::parse("0.1.50").expect("parse older version");
+        assert!(
+            latest > older,
+            "prerelease 0.2.0-beta.1 should be newer than 0.1.50"
+        );
+    }
+
+    #[test]
+    fn integration_connection_refused_is_offline_friendly() {
+        // Point to a port that's not listening
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", "http://127.0.0.1:1");
+        }
+
+        let result = fetch_latest_release_blocking();
+
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        // Should fail gracefully, not panic
+        assert!(
+            result.is_err(),
+            "should return error when server unreachable"
+        );
+        // The error is wrapped in context, so check the full chain
+        let err = result.unwrap_err();
+        let err_chain = format!("{:?}", err).to_lowercase();
+        assert!(
+            err_chain.contains("connection")
+                || err_chain.contains("connect")
+                || err_chain.contains("refused")
+                || err_chain.contains("fetch")
+                || err_chain.contains("os error"),
+            "should be a network/fetch error: {}",
+            err_chain
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_async_fetch_release_success() {
+        let release_json = r#"{
+            "tag_name": "v1.0.0",
+            "html_url": "https://github.com/test/repo/releases/tag/v1.0.0"
+        }"#;
+
+        let (addr, handle) = start_test_server(release_json, 200);
+
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
+        }
+
+        let result = fetch_latest_release().await;
+
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        handle.join().expect("server thread");
+
+        let release = result.expect("async fetch should succeed");
+        assert_eq!(release.tag_name, "v1.0.0");
+    }
+
+    #[tokio::test]
+    async fn integration_async_fetch_release_error() {
+        let (addr, handle) = start_test_server(r#"{"error": "forbidden"}"#, 403);
+
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
+        }
+
+        let result = fetch_latest_release().await;
+
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        handle.join().expect("server thread");
+
+        assert!(result.is_err(), "should error on 403");
+    }
+
+    #[test]
+    fn integration_release_api_base_url_default() {
+        // When env var is not set, should use GitHub API
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        let url = release_api_base_url();
+        assert!(
+            url.contains("api.github.com"),
+            "default should use GitHub API"
+        );
+        assert!(
+            url.contains(GITHUB_REPO),
+            "default should include repo path"
+        );
+    }
+
+    #[test]
+    fn integration_release_api_base_url_override() {
+        let custom_url = "http://localhost:8080/api";
+        unsafe {
+            std::env::set_var("CASS_UPDATE_API_BASE_URL", custom_url);
+        }
+
+        let url = release_api_base_url();
+
+        unsafe {
+            std::env::remove_var("CASS_UPDATE_API_BASE_URL");
+        }
+
+        assert_eq!(url, custom_url, "should use custom URL from env var");
+    }
+
+    #[test]
+    fn integration_http_timeout_is_reasonable() {
+        const _: () = {
+            // Verify the timeout constant is short enough for startup
+            assert!(
+                HTTP_TIMEOUT_SECS <= 10,
+                "HTTP timeout should be short to avoid blocking startup"
+            );
+            assert!(
+                HTTP_TIMEOUT_SECS >= 3,
+                "HTTP timeout should be long enough for slow networks"
+            );
+        };
+    }
+
+    #[test]
+    fn integration_check_interval_is_reasonable() {
+        const _: () = {
+            // Verify check interval is reasonable (not too frequent, not too rare)
+            assert!(
+                CHECK_INTERVAL_SECS >= 3600,
+                "should not check more than once per hour"
+            );
+            assert!(
+                CHECK_INTERVAL_SECS <= 86400,
+                "should check at least once per day"
+            );
+        };
     }
 }

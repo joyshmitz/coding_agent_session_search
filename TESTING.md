@@ -123,6 +123,13 @@ Tests that exercise multiple components together:
 - Playwright tests for HTML exports
 - Run on CI only (see AGENTS.md "E2E Browser Tests")
 
+**Shell E2E** (`scripts/e2e/*.sh`):
+- `connector_stress.sh` - Stress-test connector parsing with malformed/edge fixtures
+- `query_parser_e2e.sh` - Exercise query parsing end-to-end via CLI search flows
+- `security_paths_e2e.sh` - Validate export path security and traversal hardening
+- `full_coverage_validation.sh` - Master runner (executes the scripts above, runs key Rust E2E suites, validates JSONL, and produces coverage + summary)
+- All shell scripts must source `scripts/lib/e2e_log.sh` and emit JSONL to `test-results/e2e/`
+
 #### Scenario Coverage (T4.*)
 
 The following scenario-focused E2E suites are complete and tracked:

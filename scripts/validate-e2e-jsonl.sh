@@ -132,7 +132,19 @@ validate_file() {
     done < "$file"
 
     # Structural validation
-    if [[ "$has_test_start" == true ]] && [[ "$has_run_start" != true ]]; then
+    # Per-test log files (in test subdirectories) don't have run_start - only test_start/test_end
+    # Main run logs (at the root e2e level) should have run_start
+    local is_per_test_log=false
+    if [[ "$file" == *"/cass.log" ]]; then
+        local parent_name
+        parent_name=$(basename "$(dirname "$file")")
+        # If parent directory is not "e2e", it's a per-test log in a subdirectory
+        if [[ "$parent_name" != "e2e" ]]; then
+            is_per_test_log=true
+        fi
+    fi
+
+    if [[ "$has_test_start" == true ]] && [[ "$has_run_start" != true ]] && [[ "$is_per_test_log" == false ]]; then
         errors+=("$file: Has test events but no run_start")
         file_valid=false
     fi

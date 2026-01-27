@@ -1077,17 +1077,19 @@ fn fetch_introspect_json() -> Value {
 }
 
 fn find_command<'a>(json: &'a Value, name: &str) -> &'a Value {
+    let msg = format!("command {name} missing from introspect");
     json["commands"]
         .as_array()
         .and_then(|cmds| cmds.iter().find(|c| c["name"] == name))
-        .expect(&format!("command {name} missing from introspect"))
+        .expect(&msg)
 }
 
 fn find_arg<'a>(cmd: &'a Value, name: &str) -> &'a Value {
+    let msg = format!("arg {name} missing in command {}", cmd["name"]);
     cmd["arguments"]
         .as_array()
         .and_then(|args| args.iter().find(|a| a["name"] == name))
-        .expect(&format!("arg {name} missing in command {}", cmd["name"]))
+        .expect(&msg)
 }
 
 #[test]
@@ -3437,14 +3439,18 @@ fn introspect_index_embedder_default() {
 fn parse_index_semantic_embedder_flags() {
     let cli =
         Cli::try_parse_from(["cass", "index", "--semantic", "--embedder", "fastembed"]).unwrap();
+    let command = cli.command.as_ref();
+    assert!(
+        matches!(command, Some(Commands::Index { .. })),
+        "expected index command, got {:?}",
+        cli.command
+    );
     if let Some(Commands::Index {
         semantic, embedder, ..
-    }) = cli.command
+    }) = command
     {
-        assert!(semantic, "semantic flag should be set");
-        assert_eq!(embedder, "fastembed");
-    } else {
-        assert!(false, "expected index command, got {:?}", cli.command);
+        assert!(*semantic, "semantic flag should be set");
+        assert_eq!(embedder.as_str(), "fastembed");
     }
 }
 
@@ -3452,14 +3458,18 @@ fn parse_index_semantic_embedder_flags() {
 #[test]
 fn parse_index_embedder_default() {
     let cli = Cli::try_parse_from(["cass", "index", "--semantic"]).unwrap();
+    let command = cli.command.as_ref();
+    assert!(
+        matches!(command, Some(Commands::Index { .. })),
+        "expected index command, got {:?}",
+        cli.command
+    );
     if let Some(Commands::Index {
         semantic, embedder, ..
-    }) = cli.command
+    }) = command
     {
-        assert!(semantic, "semantic flag should be set");
-        assert_eq!(embedder, "fastembed");
-    } else {
-        assert!(false, "expected index command, got {:?}", cli.command);
+        assert!(*semantic, "semantic flag should be set");
+        assert_eq!(embedder.as_str(), "fastembed");
     }
 }
 
@@ -3599,10 +3609,8 @@ fn introspect_all_path_options_documented() {
     // Check global path types
     let globals = json["global_flags"].as_array().expect("global_flags");
     for name in ["db", "trace-file"] {
-        let flag = globals
-            .iter()
-            .find(|f| f["name"] == name)
-            .expect(&format!("{name} exists"));
+        let msg = format!("{name} exists");
+        let flag = globals.iter().find(|f| f["name"] == name).expect(&msg);
         assert_eq!(
             flag["value_type"], "path",
             "global --{name} should be path type"
