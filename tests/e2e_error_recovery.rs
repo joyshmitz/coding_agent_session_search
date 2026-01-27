@@ -22,7 +22,6 @@ use coding_agent_search::pages::export::{ExportEngine, ExportFilter, PathMode};
 use coding_agent_search::storage::sqlite::SqliteStorage;
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
 use tempfile::TempDir;
 
 #[path = "util/mod.rs"]
