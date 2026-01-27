@@ -349,6 +349,12 @@ All E2E test infrastructure emits structured JSONL logs following a unified sche
 - `log` - General log messages (INFO, WARN, ERROR, DEBUG)
 - `phase_start`/`phase_end` - Multi-phase run tracking
 
+**Test fields (test_start/test_end):**
+- `test.name`, `test.suite`
+- `test.test_id` (stable `${suite}::${name}`)
+- `test.trace_id` (matches CLI trace spans)
+- `test.artifact_paths` (dir/stdout/stderr/cass_log/trace)
+
 ### Logger Implementations
 
 | Runner | Implementation | Output |

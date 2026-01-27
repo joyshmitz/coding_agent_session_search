@@ -112,11 +112,15 @@ pub struct E2eTestInfo {
     pub name: String,
     pub suite: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_paths: Option<E2eArtifactManifest>,
 }
 
 impl E2eTestInfo {
@@ -124,9 +128,11 @@ impl E2eTestInfo {
         Self {
             name: name.to_string(),
             suite: suite.to_string(),
+            test_id: Some(format!("{suite}::{name}")),
             file: Some(file.to_string()),
             line: Some(line),
             trace_id: None,
+            artifact_paths: None,
         }
     }
 
@@ -134,9 +140,11 @@ impl E2eTestInfo {
         Self {
             name: name.to_string(),
             suite: suite.to_string(),
+            test_id: Some(format!("{suite}::{name}")),
             file: None,
             line: None,
             trace_id: None,
+            artifact_paths: None,
         }
     }
 }
@@ -553,6 +561,28 @@ pub struct E2eArtifactPaths {
     pub cass_log_path: PathBuf,
     pub trace_path: PathBuf,
     pub trace_id: String,
+}
+
+/// Serializable artifact paths for JSONL logs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct E2eArtifactManifest {
+    pub dir: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub cass_log: String,
+    pub trace: String,
+}
+
+impl E2eArtifactManifest {
+    fn from_paths(paths: &E2eArtifactPaths) -> Self {
+        Self {
+            dir: paths.dir.to_string_lossy().to_string(),
+            stdout: paths.stdout_path.to_string_lossy().to_string(),
+            stderr: paths.stderr_path.to_string_lossy().to_string(),
+            cass_log: paths.cass_log_path.to_string_lossy().to_string(),
+            trace: paths.trace_path.to_string_lossy().to_string(),
+        }
+    }
 }
 
 impl E2eArtifactPaths {
@@ -1072,6 +1102,7 @@ impl PhaseTracker {
 
         let mut test_info = E2eTestInfo::simple(test_name, suite);
         test_info.trace_id = Some(trace_id.clone());
+        test_info.artifact_paths = Some(E2eArtifactManifest::from_paths(&artifacts));
 
         if let Some(ref lg) = logger {
             let _ = lg.test_start(&test_info);
@@ -1254,6 +1285,7 @@ where
 
     let mut test_info = E2eTestInfo::new(name, suite, file, line);
     test_info.trace_id = Some(trace_id);
+    test_info.artifact_paths = Some(E2eArtifactManifest::from_paths(&artifacts));
     if let Some(ref lg) = logger {
         let _ = lg.test_start(&test_info);
     }

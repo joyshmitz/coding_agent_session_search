@@ -26,6 +26,7 @@ fn tracker_for(test_name: &str) -> PhaseTracker {
 }
 
 /// Helper to create Claude Code session fixture.
+#[allow(dead_code)]
 fn make_claude_session(root: &Path, project: &str, filename: &str, content: &str, ts: &str) {
     let project_dir = root.join(format!("projects/{project}"));
     fs::create_dir_all(&project_dir).unwrap();
@@ -49,6 +50,36 @@ fn make_codex_session(root: &Path, date_path: &str, filename: &str, content: &st
         ts + 1000
     );
     fs::write(file, sample).unwrap();
+}
+
+/// Check if any vector index (.cvvi) file exists in data_dir/vector_index/
+fn has_vector_index(data_dir: &Path) -> bool {
+    let vector_dir = data_dir.join("vector_index");
+    if !vector_dir.exists() {
+        return false;
+    }
+    fs::read_dir(&vector_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .any(|e| e.path().extension().map_or(false, |ext| ext == "cvvi"))
+        })
+        .unwrap_or(false)
+}
+
+/// Check if any HNSW index (.chsw) file exists in data_dir/vector_index/
+fn has_hnsw_index(data_dir: &Path) -> bool {
+    let vector_dir = data_dir.join("vector_index");
+    if !vector_dir.exists() {
+        return false;
+    }
+    fs::read_dir(&vector_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .any(|e| e.path().extension().map_or(false, |ext| ext == "chsw"))
+        })
+        .unwrap_or(false)
 }
 
 // =============================================================================
@@ -126,13 +157,24 @@ fn semantic_index_builds_vector_file() {
         "verify_vector_index",
         Some("Check vector index file exists"),
     );
-    let vector_file = data_dir.join("vector.cvvi");
+    // Hash embedder creates index at vector_index/index-fnv1a-384.cvvi
+    let vector_dir = data_dir.join("vector_index");
     assert!(
-        vector_file.exists(),
-        "Vector index file should exist at {:?}",
-        vector_file
+        vector_dir.exists(),
+        "Vector index directory should exist at {:?}",
+        vector_dir
     );
-    let metadata = fs::metadata(&vector_file).unwrap();
+    // Find the actual index file (contains embedder ID in name)
+    let vector_files: Vec<_> = fs::read_dir(&vector_dir)
+        .expect("read vector_index dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "cvvi"))
+        .collect();
+    assert!(
+        !vector_files.is_empty(),
+        "Vector index directory should contain .cvvi files"
+    );
+    let metadata = fs::metadata(vector_files[0].path()).unwrap();
     assert!(metadata.len() > 0, "Vector index file should not be empty");
     tracker.end(
         "verify_vector_index",
@@ -205,11 +247,10 @@ fn semantic_index_builds_hnsw() {
 
     // Verify HNSW index file was created
     let ps = tracker.start("verify_hnsw_index", Some("Check HNSW index file"));
-    let hnsw_file = data_dir.join("hnsw.bin");
     assert!(
-        hnsw_file.exists(),
-        "HNSW index file should exist at {:?}",
-        hnsw_file
+        has_hnsw_index(&data_dir),
+        "HNSW index file (.chsw) should exist in {:?}",
+        data_dir.join("vector_index")
     );
     tracker.end("verify_hnsw_index", Some("Check HNSW index file"), ps);
 
@@ -446,7 +487,7 @@ fn search_approximate_uses_hnsw() {
 
     // Verify HNSW file exists
     assert!(
-        data_dir.join("hnsw.bin").exists(),
+        has_hnsw_index(&data_dir),
         "HNSW index should exist before approximate search"
     );
 
@@ -533,7 +574,7 @@ fn semantic_without_index_reports_error() {
 
     // Verify no vector index
     assert!(
-        !data_dir.join("vector.cvvi").exists(),
+        !has_vector_index(&data_dir),
         "Vector index should not exist"
     );
 
@@ -569,7 +610,7 @@ fn semantic_without_index_reports_error() {
                 || has_hint
                 || json
                     .get("hits")
-                    .map_or(true, |h| h.as_array().map_or(true, |a| a.is_empty())),
+                    .is_none_or(|h| { h.as_array().is_none_or(|a| a.is_empty()) }),
             "Should indicate semantic index missing or return empty results"
         );
     }
@@ -622,11 +663,11 @@ fn approximate_without_hnsw_reports_error() {
 
     // Verify vector exists but HNSW does not
     assert!(
-        data_dir.join("vector.cvvi").exists(),
+        has_vector_index(&data_dir),
         "Vector index should exist"
     );
     assert!(
-        !data_dir.join("hnsw.bin").exists(),
+        !has_hnsw_index(&data_dir),
         "HNSW index should not exist"
     );
 
