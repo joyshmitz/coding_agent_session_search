@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
+use crate::search::ann_index::{DEFAULT_EF_CONSTRUCTION, DEFAULT_M, HnswIndex, hnsw_index_path};
 use crate::search::canonicalize::{canonicalize_for_embedding, content_hash};
 use crate::search::embedder::Embedder;
 use crate::search::fastembed_embedder::FastEmbedder;
@@ -255,6 +256,49 @@ impl SemanticIndexer {
         }
         index.save(&index_path)?;
         Ok(index_path)
+    }
+
+    /// Build and save an HNSW index for approximate nearest neighbor search.
+    ///
+    /// This creates an HNSW graph structure from the existing VectorIndex,
+    /// enabling O(log n) approximate search with the `--approximate` flag.
+    ///
+    /// # Arguments
+    /// * `vector_index` - The VectorIndex to build HNSW from
+    /// * `data_dir` - Directory to save the HNSW index
+    /// * `m` - Max connections per node (default: 16)
+    /// * `ef_construction` - Search width during build (default: 200)
+    ///
+    /// # Returns
+    /// Path to the saved HNSW index file
+    pub fn build_hnsw_index(
+        &self,
+        vector_index: &VectorIndex,
+        data_dir: &Path,
+        m: Option<usize>,
+        ef_construction: Option<usize>,
+    ) -> Result<PathBuf> {
+        let m = m.unwrap_or(DEFAULT_M);
+        let ef_construction = ef_construction.unwrap_or(DEFAULT_EF_CONSTRUCTION);
+
+        tracing::info!(
+            embedder = self.embedder_id(),
+            count = vector_index.rows().len(),
+            m,
+            ef_construction,
+            "Building HNSW index for approximate nearest neighbor search"
+        );
+
+        let hnsw = HnswIndex::build_from_vector_index(vector_index, m, ef_construction)?;
+
+        let hnsw_path = hnsw_index_path(data_dir, self.embedder_id());
+        if let Some(parent) = hnsw_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        hnsw.save(&hnsw_path)?;
+
+        tracing::info!(?hnsw_path, "Saved HNSW index");
+        Ok(hnsw_path)
     }
 }
 

@@ -7034,6 +7034,7 @@ fn run_doctor(
                     db_path: db_path.clone(),
                     data_dir: data_dir.clone(),
                     semantic: false,
+                    build_hnsw: false,
                     embedder: "fastembed".to_string(),
                     progress: Some(progress.clone()),
                 };
@@ -8955,6 +8956,7 @@ fn spawn_background_indexer(
             db_path,
             data_dir,
             semantic: false,
+            build_hnsw: false,
             embedder: "fastembed".to_string(),
             progress,
         };
@@ -9106,6 +9108,7 @@ fn run_index_with_data(
         db_path: db_path.clone(),
         data_dir: data_dir.clone(),
         semantic,
+        build_hnsw,
         embedder: embedder.clone(),
         progress: Some(index_progress.clone()),
     };

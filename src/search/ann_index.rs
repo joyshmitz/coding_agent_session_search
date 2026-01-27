@@ -37,7 +37,7 @@ use anyhow::{Context, Result, bail};
 use hnsw_rs::hnsw::{Hnsw, Neighbour};
 use hnsw_rs::prelude::*;
 
-use crate::search::vector_index::{VectorIndex, VECTOR_INDEX_DIR};
+use crate::search::vector_index::{VECTOR_INDEX_DIR, VectorIndex};
 
 /// Magic bytes for HNSW index file format.
 pub const HNSW_MAGIC: [u8; 4] = *b"CHSW";
@@ -101,23 +101,12 @@ impl HnswIndex {
             bail!("cannot build HNSW index from empty VectorIndex");
         }
 
-        tracing::info!(
-            count,
-            dimension,
-            m,
-            ef_construction,
-            "Building HNSW index"
-        );
+        tracing::info!(count, dimension, m, ef_construction, "Building HNSW index");
 
         // Create HNSW with dot product distance.
         // DistDot computes 1 - dot_product, so lower distance = higher similarity.
-        let hnsw: Hnsw<f32, DistDot> = Hnsw::new(
-            m,
-            count,
-            DEFAULT_MAX_LAYER,
-            ef_construction,
-            DistDot,
-        );
+        let hnsw: Hnsw<f32, DistDot> =
+            Hnsw::new(m, count, DEFAULT_MAX_LAYER, ef_construction, DistDot);
 
         // Insert all vectors with their row index as ID.
         // We collect vectors first to enable parallel insertion.
@@ -231,8 +220,8 @@ impl HnswIndex {
         writer.write_all(&HNSW_VERSION.to_le_bytes())?;
 
         let id_bytes = self.embedder_id.as_bytes();
-        let id_len = u16::try_from(id_bytes.len())
-            .map_err(|_| anyhow::anyhow!("embedder_id too long"))?;
+        let id_len =
+            u16::try_from(id_bytes.len()).map_err(|_| anyhow::anyhow!("embedder_id too long"))?;
         writer.write_all(&id_len.to_le_bytes())?;
         writer.write_all(id_bytes)?;
 
@@ -334,9 +323,7 @@ impl HnswIndex {
 
         // Placeholder: Create empty HNSW and log warning.
         // This is a limitation of the current implementation.
-        tracing::warn!(
-            "HNSW load not fully implemented - rebuild index with --build-hnsw"
-        );
+        tracing::warn!("HNSW load not fully implemented - rebuild index with --build-hnsw");
 
         let hnsw: Hnsw<f32, DistDot> = Hnsw::new(
             DEFAULT_M,

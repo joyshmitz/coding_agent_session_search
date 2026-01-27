@@ -95,6 +95,8 @@ pub struct IndexOptions {
     pub data_dir: PathBuf,
     /// Build semantic vector index after text indexing.
     pub semantic: bool,
+    /// Build HNSW index for approximate nearest neighbor search (requires semantic).
+    pub build_hnsw: bool,
     /// Embedder ID to use for semantic indexing (hash, fastembed).
     pub embedder: String,
     pub progress: Option<Arc<IndexingProgress>>,
@@ -855,6 +857,21 @@ pub fn run_index(
                 embedder = semantic_indexer.embedder_id(),
                 "saved semantic vector index"
             );
+
+            // Build HNSW index for approximate nearest neighbor search (if enabled)
+            if opts.build_hnsw {
+                let hnsw_path = semantic_indexer.build_hnsw_index(
+                    &vector_index,
+                    &opts.data_dir,
+                    None, // Use default M
+                    None, // Use default ef_construction
+                )?;
+                tracing::info!(
+                    path = %hnsw_path.display(),
+                    embedder = semantic_indexer.embedder_id(),
+                    "saved HNSW index for approximate search"
+                );
+            }
         }
     }
 
@@ -2260,6 +2277,7 @@ mod tests {
             db_path: data_dir.join("agent_search.db"),
             data_dir: data_dir.clone(),
             semantic: false,
+            build_hnsw: false,
             embedder: "fastembed".to_string(),
             progress: None,
             watch_once_paths: None,
@@ -2374,6 +2392,7 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             db_path: data_dir.join("db.sqlite"),
             data_dir: data_dir.clone(),
             semantic: false,
+            build_hnsw: false,
             embedder: "fastembed".to_string(),
             progress: Some(progress.clone()),
         };
