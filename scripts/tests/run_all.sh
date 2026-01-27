@@ -282,11 +282,21 @@ main() {
 
     # Rust E2E tests
     if [[ "$RUN_RUST" -eq 1 ]]; then
-        if run_suite "rust_e2e" "rust" cargo test --test '*e2e*' -- --test-threads=1; then
-            :
+        mapfile -t rust_tests < <(git ls-files 'tests/e2e_*.rs' | sed 's#^tests/##; s#\\.rs$##')
+        if [[ "${#rust_tests[@]}" -eq 0 ]]; then
+            echo -e "${YELLOW}No Rust e2e_* tests found, skipping${NC}"
+            skip_suite "rust_e2e"
         else
-            failed=1
-            [[ "$FAIL_FAST" -eq 1 ]] && { generate_summary; exit 1; }
+            args=()
+            for t in "${rust_tests[@]}"; do
+                args+=(--test "$t")
+            done
+            if run_suite "rust_e2e" "rust" env E2E_LOG=1 cargo test --all-features --verbose "${args[@]}" -- --test-threads=1 --nocapture; then
+                :
+            else
+                failed=1
+                [[ "$FAIL_FAST" -eq 1 ]] && { generate_summary; exit 1; }
+            fi
         fi
     else
         skip_suite "rust_e2e"
