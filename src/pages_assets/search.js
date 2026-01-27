@@ -798,9 +798,32 @@ function escapeHtml(text) {
 }
 
 /**
+ * Set the search query programmatically.
+ * Optionally triggers a search (default true).
+ */
+export async function setSearchQuery(query, options = {}) {
+    const { runSearch = true } = options;
+    if (!elements.searchInput) {
+        return;
+    }
+
+    const normalized = (query ?? '').toString();
+    elements.searchInput.value = normalized;
+    clearTimeout(searchTimeout);
+
+    if (runSearch) {
+        await handleSearch(normalized);
+    } else {
+        currentQuery = normalized.trim();
+        updateSearchModeIndicator(currentQuery);
+    }
+}
+
+/**
  * Clear search and reset to initial state
  */
 export function clearSearch() {
+    clearTimeout(searchTimeout);
     currentQuery = '';
     currentFilters = { agent: null, since: null, until: null };
     currentSearchMode = 'auto';
@@ -809,6 +832,7 @@ export function clearSearch() {
 
     // Clean up virtual list if it exists
     destroyVirtualList();
+    hideLoading();
 
     if (elements.searchInput) {
         elements.searchInput.value = '';

@@ -165,11 +165,9 @@ impl PagesWizard {
         term.clear_screen()?;
         self.print_header(&mut term)?;
 
-        if self.no_encryption_mode {
-            if !self.step_unencrypted_warning(&mut term, &theme)? {
-                writeln!(term, "{}", style("Export cancelled.").yellow())?;
-                return Ok(());
-            }
+        if self.no_encryption_mode && !self.step_unencrypted_warning(&mut term, &theme)? {
+            writeln!(term, "{}", style("Export cancelled.").yellow())?;
+            return Ok(());
         }
 
         // Step 1: Content Selection
@@ -199,11 +197,9 @@ impl PagesWizard {
         }
 
         // Step 7: Safety Confirmation
-        if !self.no_encryption_mode {
-            if !self.step_confirmation(&mut term, &theme)? {
-                writeln!(term, "{}", style("Export cancelled.").yellow())?;
-                return Ok(());
-            }
+        if !self.no_encryption_mode && !self.step_confirmation(&mut term, &theme)? {
+            writeln!(term, "{}", style("Export cancelled.").yellow())?;
+            return Ok(());
         }
 
         // Step 8: Export Progress
@@ -1948,5 +1944,330 @@ impl PagesWizard {
 
         writeln!(term)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================
+    // DeployTarget Tests
+    // =========================
+
+    #[test]
+    fn deploy_target_display() {
+        assert_eq!(DeployTarget::Local.to_string(), "Local export only");
+        assert_eq!(DeployTarget::GitHubPages.to_string(), "GitHub Pages");
+        assert_eq!(
+            DeployTarget::CloudflarePages.to_string(),
+            "Cloudflare Pages"
+        );
+    }
+
+    #[test]
+    fn deploy_target_equality() {
+        assert_eq!(DeployTarget::Local, DeployTarget::Local);
+        assert_eq!(DeployTarget::GitHubPages, DeployTarget::GitHubPages);
+        assert_eq!(DeployTarget::CloudflarePages, DeployTarget::CloudflarePages);
+        assert_ne!(DeployTarget::Local, DeployTarget::GitHubPages);
+        assert_ne!(DeployTarget::GitHubPages, DeployTarget::CloudflarePages);
+    }
+
+    #[test]
+    fn deploy_target_clone() {
+        let target = DeployTarget::CloudflarePages;
+        let cloned = target;
+        assert_eq!(target, cloned);
+    }
+
+    // =========================
+    // WizardState Tests
+    // =========================
+
+    #[test]
+    fn wizard_state_default_values() {
+        let state = WizardState::default();
+
+        // Content selection defaults
+        assert!(state.agents.is_empty());
+        assert!(state.time_range.is_none());
+        assert!(state.workspaces.is_none());
+
+        // Security defaults
+        assert!(state.password.is_none());
+        assert!(state.recovery_secret.is_none());
+        assert!(state.generate_recovery); // Should default to true
+        assert!(!state.generate_qr); // Should default to false
+
+        // Site configuration defaults
+        assert_eq!(state.title, "cass Archive");
+        assert_eq!(
+            state.description,
+            "Encrypted archive of AI coding agent conversations"
+        );
+        assert!(!state.hide_metadata);
+
+        // Deployment defaults
+        assert_eq!(state.target, DeployTarget::Local);
+        assert_eq!(state.output_dir, PathBuf::from("cass-export"));
+        assert!(state.repo_name.is_none());
+
+        // Exclusions default
+        assert_eq!(state.exclusions.exclusion_counts(), (0, 0, 0));
+
+        // Summary default
+        assert!(state.last_summary.is_none());
+
+        // Secret scan defaults
+        assert!(!state.secret_scan_has_findings);
+        assert!(!state.secret_scan_has_critical);
+        assert_eq!(state.secret_scan_count, 0);
+
+        // Password entropy default
+        assert_eq!(state.password_entropy_bits, 0.0);
+
+        // Unencrypted mode defaults
+        assert!(!state.no_encryption);
+        assert!(!state.unencrypted_confirmed);
+
+        // Attachments default
+        assert!(!state.include_attachments);
+    }
+
+    #[test]
+    fn wizard_state_db_path_is_set() {
+        let state = WizardState::default();
+        // db_path should be set to a valid path containing the expected filename
+        assert!(state.db_path.to_string_lossy().contains("agent_search.db"));
+    }
+
+    #[test]
+    fn wizard_state_clone() {
+        let state = WizardState {
+            title: "Custom Title".to_string(),
+            agents: vec!["claude".to_string(), "codex".to_string()],
+            no_encryption: true,
+            ..Default::default()
+        };
+
+        let cloned = state.clone();
+        assert_eq!(cloned.title, "Custom Title");
+        assert_eq!(
+            cloned.agents,
+            vec!["claude".to_string(), "codex".to_string()]
+        );
+        assert!(cloned.no_encryption);
+    }
+
+    // =========================
+    // PagesWizard Tests
+    // =========================
+
+    #[test]
+    fn pages_wizard_new_initializes_default_state() {
+        let wizard = PagesWizard::new();
+        // Access state through the no_encryption_mode field which is false by default
+        assert!(!wizard.no_encryption_mode);
+    }
+
+    #[test]
+    fn pages_wizard_default_impl() {
+        let wizard1 = PagesWizard::new();
+        let wizard2 = PagesWizard::default();
+        // Both should have same default state
+        assert_eq!(wizard1.no_encryption_mode, wizard2.no_encryption_mode);
+    }
+
+    #[test]
+    fn pages_wizard_set_no_encryption() {
+        let mut wizard = PagesWizard::new();
+        assert!(!wizard.no_encryption_mode);
+        assert!(!wizard.state.no_encryption);
+
+        wizard.set_no_encryption(true);
+        assert!(wizard.no_encryption_mode);
+        assert!(wizard.state.no_encryption);
+
+        wizard.set_no_encryption(false);
+        assert!(!wizard.no_encryption_mode);
+        assert!(!wizard.state.no_encryption);
+    }
+
+    #[test]
+    fn pages_wizard_set_include_attachments() {
+        let mut wizard = PagesWizard::new();
+        assert!(!wizard.state.include_attachments);
+
+        wizard.set_include_attachments(true);
+        assert!(wizard.state.include_attachments);
+
+        wizard.set_include_attachments(false);
+        assert!(!wizard.state.include_attachments);
+    }
+
+    // =========================
+    // Time Range Mapping Tests
+    // =========================
+
+    #[test]
+    fn time_range_selection_mapping() {
+        // Test the time range mapping logic from step_content_selection
+        // This is the mapping: 1 => -7d, 2 => -30d, 3 => -90d, 4 => -365d, 0/_ => None
+
+        fn map_time_selection(selection: usize) -> Option<String> {
+            match selection {
+                1 => Some("-7d".to_string()),
+                2 => Some("-30d".to_string()),
+                3 => Some("-90d".to_string()),
+                4 => Some("-365d".to_string()),
+                _ => None,
+            }
+        }
+
+        assert_eq!(map_time_selection(0), None);
+        assert_eq!(map_time_selection(1), Some("-7d".to_string()));
+        assert_eq!(map_time_selection(2), Some("-30d".to_string()));
+        assert_eq!(map_time_selection(3), Some("-90d".to_string()));
+        assert_eq!(map_time_selection(4), Some("-365d".to_string()));
+        assert_eq!(map_time_selection(5), None);
+    }
+
+    // =========================
+    // Deploy Target Selection Mapping Tests
+    // =========================
+
+    #[test]
+    fn deploy_target_selection_mapping() {
+        // Test the target selection mapping from step_deployment_target
+        fn map_target_selection(selection: usize) -> DeployTarget {
+            match selection {
+                1 => DeployTarget::GitHubPages,
+                2 => DeployTarget::CloudflarePages,
+                _ => DeployTarget::Local,
+            }
+        }
+
+        assert_eq!(map_target_selection(0), DeployTarget::Local);
+        assert_eq!(map_target_selection(1), DeployTarget::GitHubPages);
+        assert_eq!(map_target_selection(2), DeployTarget::CloudflarePages);
+        assert_eq!(map_target_selection(3), DeployTarget::Local);
+    }
+
+    // =========================
+    // State Modification Tests
+    // =========================
+
+    #[test]
+    fn wizard_state_agents_modification() {
+        let mut state = WizardState::default();
+        assert!(state.agents.is_empty());
+
+        state.agents = vec!["claude".to_string()];
+        assert_eq!(state.agents.len(), 1);
+
+        state.agents.push("codex".to_string());
+        assert_eq!(state.agents.len(), 2);
+        assert_eq!(
+            state.agents,
+            vec!["claude".to_string(), "codex".to_string()]
+        );
+    }
+
+    #[test]
+    fn wizard_state_workspaces_modification() {
+        let mut state = WizardState::default();
+        assert!(state.workspaces.is_none());
+
+        state.workspaces = Some(vec![PathBuf::from("/project1")]);
+        assert_eq!(state.workspaces.as_ref().unwrap().len(), 1);
+
+        state
+            .workspaces
+            .as_mut()
+            .unwrap()
+            .push(PathBuf::from("/project2"));
+        assert_eq!(state.workspaces.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn wizard_state_security_configuration() {
+        let state = WizardState {
+            password: Some("test_password".to_string()),
+            recovery_secret: Some(vec![1, 2, 3, 4]),
+            generate_recovery: false,
+            generate_qr: true,
+            ..Default::default()
+        };
+
+        assert_eq!(state.password, Some("test_password".to_string()));
+        assert_eq!(state.recovery_secret, Some(vec![1, 2, 3, 4]));
+        assert!(!state.generate_recovery);
+        assert!(state.generate_qr);
+    }
+
+    #[test]
+    fn wizard_state_password_entropy() {
+        let mut state = WizardState::default();
+        assert_eq!(state.password_entropy_bits, 0.0);
+
+        state.password_entropy_bits = 64.5;
+        assert!((state.password_entropy_bits - 64.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn wizard_state_secret_scan_results() {
+        let state = WizardState {
+            secret_scan_has_findings: true,
+            secret_scan_has_critical: true,
+            secret_scan_count: 5,
+            ..Default::default()
+        };
+
+        assert!(state.secret_scan_has_findings);
+        assert!(state.secret_scan_has_critical);
+        assert_eq!(state.secret_scan_count, 5);
+    }
+
+    #[test]
+    fn wizard_state_output_configuration() {
+        let state = WizardState {
+            output_dir: PathBuf::from("/custom/output"),
+            repo_name: Some("my-archive".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(state.output_dir, PathBuf::from("/custom/output"));
+        assert_eq!(state.repo_name, Some("my-archive".to_string()));
+    }
+
+    // =========================
+    // Edge Cases
+    // =========================
+
+    #[test]
+    fn wizard_state_with_unicode_values() {
+        let state = WizardState {
+            title: "日本語タイトル".to_string(),
+            description: "説明文 with émojis 🎉".to_string(),
+            agents: vec!["クローード".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(state.title, "日本語タイトル");
+        assert_eq!(state.description, "説明文 with émojis 🎉");
+        assert_eq!(state.agents[0], "クローード");
+    }
+
+    #[test]
+    fn wizard_state_empty_strings() {
+        let state = WizardState {
+            title: "".to_string(),
+            description: "".to_string(),
+            ..Default::default()
+        };
+
+        assert!(state.title.is_empty());
+        assert!(state.description.is_empty());
     }
 }

@@ -665,9 +665,52 @@ function handleUnlockFailed(data) {
 /**
  * Handle successful decryption
  */
-function handleDecryptSuccess(data) {
+async function handleDecryptSuccess(data) {
     updateProgress('Database decrypted', 100);
-    // Database will be loaded next
+
+    if (!data?.dbBytes) {
+        hideProgress();
+        showError('Decryption did not return a database payload');
+        enableForm();
+        elements.appScreen.classList.add('hidden');
+        elements.authScreen.classList.remove('hidden');
+        clearStoredSession();
+        window.cassSession = null;
+        return;
+    }
+
+    try {
+        const dbModule = await import('./database.js');
+        let dbBytes;
+        if (data.dbBytes instanceof ArrayBuffer) {
+            dbBytes = new Uint8Array(data.dbBytes);
+        } else if (ArrayBuffer.isView(data.dbBytes)) {
+            dbBytes = new Uint8Array(
+                data.dbBytes.buffer,
+                data.dbBytes.byteOffset,
+                data.dbBytes.byteLength
+            );
+        } else {
+            throw new Error('Invalid database payload');
+        }
+        await dbModule.initDatabase(dbBytes);
+        const stats = dbModule.getStatistics();
+        window.dispatchEvent(new CustomEvent('cass:db-ready', {
+            detail: {
+                conversationCount: stats.conversations || 0,
+                messageCount: stats.messages || 0,
+            },
+        }));
+    } catch (error) {
+        console.error('Failed to initialize database:', error);
+        hideProgress();
+        showError('Failed to initialize database');
+        enableForm();
+        elements.appScreen.classList.add('hidden');
+        elements.authScreen.classList.remove('hidden');
+        clearStoredSession();
+        window.cassSession = null;
+    }
 }
 
 /**
@@ -676,6 +719,12 @@ function handleDecryptSuccess(data) {
 function handleDecryptFailed(data) {
     hideProgress();
     showError(`Decryption failed: ${data.error}`);
+    enableForm();
+    elements.appScreen.classList.add('hidden');
+    elements.authScreen.classList.remove('hidden');
+    clearStoredSession();
+    window.cassSession = null;
+    elements.passwordInput.value = '';
 }
 
 /**
@@ -729,7 +778,8 @@ async function transitionToAppUnencrypted() {
 }
 
 async function loadUnencryptedDatabase() {
-    const response = await fetch('./payload/data.db');
+    const payloadPath = getUnencryptedPayloadPath();
+    const response = await fetch(payloadPath);
     if (!response.ok) {
         throw new Error(`Failed to load database: ${response.status}`);
     }
@@ -745,6 +795,14 @@ async function loadUnencryptedDatabase() {
             messageCount: stats.messages || 0,
         },
     }));
+}
+
+function getUnencryptedPayloadPath() {
+    const rawPath = config?.payload?.path;
+    if (typeof rawPath === 'string' && rawPath.trim().length > 0) {
+        return rawPath.startsWith('./') ? rawPath : `./${rawPath}`;
+    }
+    return './payload/data.db';
 }
 
 /**

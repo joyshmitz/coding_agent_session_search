@@ -748,84 +748,33 @@ mod tests {
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 
-    fn create_minimal_site(dir: &Path) -> Result<()> {
-        // Create required files
-        for file in REQUIRED_FILES {
-            fs::write(dir.join(file), format!("mock {}", file))?;
-        }
-
-        // Create payload directory with a chunk
-        let payload_dir = dir.join("payload");
-        fs::create_dir_all(&payload_dir)?;
-        fs::write(payload_dir.join("chunk-00000.bin"), "encrypted data")?;
-
-        // Create valid config.json
-        let config = serde_json::json!({
-            "version": 2,
-            "export_id": BASE64_STANDARD.encode([0u8; 16]),
-            "base_nonce": BASE64_STANDARD.encode([0u8; 12]),
-            "compression": "deflate",
-            "kdf_defaults": {
-                "memory_kb": 65536,
-                "iterations": 3,
-                "parallelism": 4
-            },
-            "payload": {
-                "chunk_size": 8388608,
-                "chunk_count": 1,
-                "total_compressed_size": 14,
-                "total_plaintext_size": 100,
-                "files": ["payload/chunk-00000.bin"]
-            },
-            "key_slots": [{
-                "id": 0,
-                "slot_type": "password",
-                "kdf": "argon2id",
-                "salt": BASE64_STANDARD.encode([0u8; 16]),
-                "wrapped_dek": BASE64_STANDARD.encode([0u8; 48]),
-                "nonce": BASE64_STANDARD.encode([0u8; 12]),
-                "argon2_params": {
-                    "memory_kb": 65536,
-                    "iterations": 3,
-                    "parallelism": 4
-                }
-            }]
-        });
-        fs::write(
-            dir.join("config.json"),
-            serde_json::to_string_pretty(&config)?,
-        )?;
-
-        Ok(())
+    /// Path to the pages_verify fixtures directory
+    fn fixtures_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pages_verify")
     }
 
-    fn create_unencrypted_site(dir: &Path) -> Result<()> {
-        // Create required files
-        for file in REQUIRED_FILES {
-            fs::write(dir.join(file), format!("mock {}", file))?;
+    /// Copy a fixture directory to the destination.
+    /// `fixture_name` is the subdirectory under tests/fixtures/pages_verify/ (e.g., "valid", "unencrypted")
+    fn copy_fixture(fixture_name: &str, dest: &Path) -> Result<()> {
+        let src = fixtures_dir().join(fixture_name).join("site");
+        copy_dir_recursive(&src, dest)
+    }
+
+    /// Recursively copy a directory and its contents
+    fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
+        if !dest.exists() {
+            fs::create_dir_all(dest)?;
         }
-
-        // Create payload directory with a raw DB
-        let payload_dir = dir.join("payload");
-        fs::create_dir_all(&payload_dir)?;
-        fs::write(payload_dir.join("data.db"), "unencrypted data")?;
-
-        // Create unencrypted config.json
-        let config = serde_json::json!({
-            "encrypted": false,
-            "version": "1.0.0",
-            "payload": {
-                "path": "payload/data.db",
-                "format": "sqlite",
-                "size_bytes": 16
-            },
-            "warning": "UNENCRYPTED - All content is publicly readable"
-        });
-        fs::write(
-            dir.join("config.json"),
-            serde_json::to_string_pretty(&config)?,
-        )?;
-
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let dest_path = dest.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_dir_recursive(&entry.path(), &dest_path)?;
+            } else {
+                fs::copy(entry.path(), &dest_path)?;
+            }
+        }
         Ok(())
     }
 
@@ -833,9 +782,9 @@ mod tests {
     fn test_verify_minimal_valid_site() {
         let temp = TempDir::new().unwrap();
         let site_dir = temp.path().join("site");
-        fs::create_dir_all(&site_dir).unwrap();
 
-        create_minimal_site(&site_dir).unwrap();
+        // Copy the valid fixture to temp directory
+        copy_fixture("valid", &site_dir).unwrap();
 
         let result = verify_bundle(&site_dir, true).unwrap();
 
@@ -883,9 +832,9 @@ mod tests {
     fn test_verify_unencrypted_site() {
         let temp = TempDir::new().unwrap();
         let site_dir = temp.path().join("site");
-        fs::create_dir_all(&site_dir).unwrap();
 
-        create_unencrypted_site(&site_dir).unwrap();
+        // Copy the unencrypted fixture to temp directory
+        copy_fixture("unencrypted", &site_dir).unwrap();
 
         let result = verify_bundle(&site_dir, true).unwrap();
         assert!(result.checks.config_schema.passed);
@@ -896,13 +845,12 @@ mod tests {
     #[test]
     fn test_verify_missing_required_files() {
         let temp = TempDir::new().unwrap();
-        let site_dir = temp.path();
+        let site_dir = temp.path().join("site");
 
-        // Only create some files
-        fs::write(site_dir.join("index.html"), "").unwrap();
-        fs::write(site_dir.join("config.json"), "{}").unwrap();
+        // Copy the missing_required_no_viewer fixture (missing viewer.js)
+        copy_fixture("missing_required_no_viewer", &site_dir).unwrap();
 
-        let result = verify_bundle(site_dir, false).unwrap();
+        let result = verify_bundle(&site_dir, false).unwrap();
         assert_eq!(result.status, "invalid");
         assert!(!result.checks.required_files.passed);
     }
@@ -910,9 +858,10 @@ mod tests {
     #[test]
     fn test_verify_invalid_config() {
         let temp = TempDir::new().unwrap();
-        let site_dir = temp.path();
+        let site_dir = temp.path().join("site");
 
-        create_minimal_site(site_dir).unwrap();
+        // Copy valid fixture then overwrite config with invalid one
+        copy_fixture("valid", &site_dir).unwrap();
 
         // Write invalid config
         fs::write(
@@ -921,30 +870,29 @@ mod tests {
         )
         .unwrap();
 
-        let result = verify_bundle(site_dir, false).unwrap();
+        let result = verify_bundle(&site_dir, false).unwrap();
         assert!(!result.checks.config_schema.passed);
     }
 
     #[test]
     fn test_verify_secret_leakage() {
         let temp = TempDir::new().unwrap();
-        let site_dir = temp.path();
+        let site_dir = temp.path().join("site");
 
-        create_minimal_site(site_dir).unwrap();
+        // Copy the secret_leak fixture (contains recovery-secret.txt)
+        copy_fixture("secret_leak", &site_dir).unwrap();
 
-        // Add secret file
-        fs::write(site_dir.join("recovery-secret.txt"), "secret!").unwrap();
-
-        let result = verify_bundle(site_dir, false).unwrap();
+        let result = verify_bundle(&site_dir, false).unwrap();
         assert!(!result.checks.no_secrets_in_site.passed);
     }
 
     #[test]
     fn test_verify_with_integrity() {
         let temp = TempDir::new().unwrap();
-        let site_dir = temp.path();
+        let site_dir = temp.path().join("site");
 
-        create_minimal_site(site_dir).unwrap();
+        // Copy valid fixture
+        copy_fixture("valid", &site_dir).unwrap();
 
         // Create integrity.json
         let mut files = BTreeMap::new();
@@ -977,16 +925,17 @@ mod tests {
         )
         .unwrap();
 
-        let result = verify_bundle(site_dir, false).unwrap();
+        let result = verify_bundle(&site_dir, false).unwrap();
         assert!(result.checks.integrity.passed);
     }
 
     #[test]
     fn test_verify_integrity_mismatch() {
         let temp = TempDir::new().unwrap();
-        let site_dir = temp.path();
+        let site_dir = temp.path().join("site");
 
-        create_minimal_site(site_dir).unwrap();
+        // Copy valid fixture
+        copy_fixture("valid", &site_dir).unwrap();
 
         // Create integrity.json with wrong hash
         let mut files = BTreeMap::new();
@@ -1010,7 +959,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = verify_bundle(site_dir, false).unwrap();
+        let result = verify_bundle(&site_dir, false).unwrap();
         assert!(!result.checks.integrity.passed);
         assert!(
             result

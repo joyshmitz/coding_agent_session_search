@@ -230,8 +230,6 @@ async function unwrapDek(kek, slot, exportId) {
 async function handleDecryptDatabase(dekBase64, cfg, opfsEnabled) {
     config = cfg;
     dek = base64ToArray(dekBase64);
-    const allowOpfs = opfsEnabled === true;
-
     const { payload } = config;
     const totalChunks = payload.chunk_count;
     const baseNonce = base64ToArray(config.base_nonce);
@@ -314,13 +312,19 @@ async function handleDecryptDatabase(dekBase64, cfg, opfsEnabled) {
     // Store in OPFS or memory
     const dbBytes = decompressed;
 
-    self.postMessage({
-        type: 'DECRYPT_SUCCESS',
-        dbSize: dbBytes.byteLength,
-    });
+    const transfer = dbBytes.buffer.slice(
+        dbBytes.byteOffset,
+        dbBytes.byteOffset + dbBytes.byteLength
+    );
 
-    // Initialize sqlite-wasm with the database
-    await initDatabase(dbBytes, allowOpfs);
+    self.postMessage(
+        {
+            type: 'DECRYPT_SUCCESS',
+            dbSize: dbBytes.byteLength,
+            dbBytes: transfer,
+        },
+        [transfer]
+    );
 }
 
 /**

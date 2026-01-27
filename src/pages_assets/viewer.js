@@ -14,7 +14,7 @@
  */
 
 import { isDatabaseReady, getStatistics, closeDatabase } from './database.js';
-import { initSearch, clearSearch, getSearchState } from './search.js';
+import { initSearch, clearSearch, getSearchState, setSearchQuery } from './search.js';
 import { initConversationViewer, loadConversation, clearViewer, getCurrentConversation } from './conversation.js';
 import { createRouter, getRouter, parseSearchParams, buildConversationPath } from './router.js';
 import { getConversationLink, copyConversationLink, isWebShareAvailable, shareConversation } from './share.js';
@@ -246,7 +246,9 @@ function handleSearchRoute(query = {}) {
     // This would require exposing a setQuery function from search.js
     if (state.searchQuery) {
         console.debug('[Viewer] Search query from URL:', state.searchQuery);
-        // TODO: Trigger search with query
+        setSearchQuery(state.searchQuery).catch((error) => {
+            console.warn('[Viewer] Failed to run search from URL:', error);
+        });
     }
 }
 
