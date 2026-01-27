@@ -1233,6 +1233,19 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         "skip-sync",
         "resume",
         "non-interactive",
+        // Missing flags added
+        "approximate",
+        "build-hnsw",
+        "export-only",
+        "verify",
+        "scan-secrets",
+        "fail-on-secrets",
+        "secrets-allow",
+        "secrets-deny",
+        "no-encryption",
+        "i-understand-unencrypted-risks",
+        "include-attachments",
+        "no-open",
     ];
 
     // Subcommand aliases for common mistakes
@@ -9897,10 +9910,10 @@ fn run_export(
             }
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let Some(ts) = msg.get("timestamp").and_then(|t| t.as_i64()) {
-                    if session_start.is_none() || ts < session_start.unwrap() {
+                    if session_start.map_or(true, |start| ts < start) {
                         session_start = Some(ts);
                     }
-                    if _session_end.is_none() || ts > _session_end.unwrap() {
+                    if _session_end.map_or(true, |end| ts > end) {
                         _session_end = Some(ts);
                     }
                 }
@@ -10140,10 +10153,10 @@ fn run_export_html(
             }
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let Some(ts) = msg.get("timestamp").and_then(|t| t.as_i64()) {
-                    if session_start.is_none() || ts < session_start.unwrap() {
+                    if session_start.map_or(true, |start| ts < start) {
                         session_start = Some(ts);
                     }
-                    if session_end.is_none() || ts > session_end.unwrap() {
+                    if session_end.map_or(true, |end| ts > end) {
                         session_end = Some(ts);
                     }
                 }
@@ -13479,8 +13492,7 @@ fn run_mappings_test(source_name: &str, path: &str, agent: Option<&str>) -> CliR
                 continue;
             }
             if path.starts_with(&mapping.from)
-                && (best_match.is_none()
-                    || mapping.from.len() > best_match.as_ref().unwrap().from.len())
+                && best_match.map_or(true, |best| mapping.from.len() > best.from.len())
             {
                 best_match = Some(mapping);
             }
