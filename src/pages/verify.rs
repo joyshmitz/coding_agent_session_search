@@ -606,14 +606,13 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
         // Extra safety: verify resolved path is still under site_dir
         if let (Ok(canonical_site), Ok(canonical_file)) =
             (site_dir.canonicalize(), file_path.canonicalize())
+            && !canonical_file.starts_with(&canonical_site)
         {
-            if !canonical_file.starts_with(&canonical_site) {
-                errors.push(format!(
-                    "integrity.json path escapes site directory (security violation): {}",
-                    rel_path
-                ));
-                continue;
-            }
+            errors.push(format!(
+                "integrity.json path escapes site directory (security violation): {}",
+                rel_path
+            ));
+            continue;
         }
 
         if !file_path.exists() {

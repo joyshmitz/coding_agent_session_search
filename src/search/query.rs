@@ -422,7 +422,9 @@ impl QueryExplanation {
         }
 
         // Check for wildcards
-        let has_wildcards = parsed.terms.iter()
+        let has_wildcards = parsed
+            .terms
+            .iter()
             .flat_map(|t| &t.subterms)
             .any(|t| t.pattern != "exact");
         if has_wildcards {
@@ -7222,7 +7224,11 @@ mod tests {
         assert_eq!(exp.index_strategy, IndexStrategy::RegexScan);
         assert_eq!(exp.estimated_cost, QueryCost::High);
         assert!(!exp.parsed.terms[0].subterms.is_empty());
-        assert!(exp.parsed.terms[0].subterms[0].pattern.contains("substring"));
+        assert!(
+            exp.parsed.terms[0].subterms[0]
+                .pattern
+                .contains("substring")
+        );
         assert!(exp.warnings.iter().any(|w| w.contains("regex scan")));
     }
 
