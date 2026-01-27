@@ -20,7 +20,7 @@ use tempfile::TempDir;
 
 mod util;
 
-use util::e2e_log::PhaseTracker;
+use util::e2e_log::{E2ePerformanceMetrics, PhaseTracker};
 
 // =============================================================================
 // E2E Logger Support
@@ -93,10 +93,18 @@ fn setup_indexed_env() -> (TempDir, std::path::PathBuf) {
         .env("HOME", home)
         .assert()
         .success();
+    let index_ms = phase_start.elapsed().as_millis() as u64;
     tracker.end(
         "index",
         Some("Run full index on fixture sessions"),
         phase_start,
+    );
+    tracker.metrics(
+        "cass_index",
+        &E2ePerformanceMetrics::new()
+            .with_duration(index_ms)
+            .with_throughput(2, index_ms)
+            .with_custom("operation", "full_index"),
     );
 
     tracker.flush();
@@ -137,25 +145,44 @@ fn search_with_trace_file_creates_trace() {
 
 #[test]
 fn search_basic_returns_valid_json() {
+    let tracker = PhaseTracker::new("e2e_cli_flows", "search_basic_returns_valid_json");
     let (tmp, data_dir) = setup_indexed_env();
 
+    let search_start = tracker.start("run_search", Some("Execute basic search command"));
     let output = base_cmd()
         .args(["search", "database", "--robot", "--data-dir"])
         .arg(&data_dir)
         .env("HOME", tmp.path())
         .output()
         .unwrap();
+    let search_ms = search_start.elapsed().as_millis() as u64;
+    tracker.end("run_search", Some("Search complete"), search_start);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Should be valid JSON
     let json: Value = serde_json::from_str(stdout.trim()).expect("Should be valid JSON");
+    let hit_count = json
+        .get("hits")
+        .or_else(|| json.get("results"))
+        .and_then(|h| h.as_array())
+        .map(|a| a.len() as u64)
+        .unwrap_or(0);
     assert!(
         json.get("hits").is_some() || json.get("results").is_some() || json.get("count").is_some(),
         "Should have results structure. JSON: {}",
         json
     );
+
+    tracker.metrics(
+        "cass_search",
+        &E2ePerformanceMetrics::new()
+            .with_duration(search_ms)
+            .with_throughput(hit_count, search_ms)
+            .with_custom("query", "database"),
+    );
+    tracker.complete();
 }
 
 #[test]
@@ -205,12 +232,14 @@ fn search_returns_hits_with_expected_fields() {
 
 #[test]
 fn view_command_returns_session_detail() {
+    let tracker = PhaseTracker::new("e2e_cli_flows", "view_command_returns_session_detail");
     let (tmp, data_dir) = setup_indexed_env();
     let codex_session = tmp
         .path()
         .join(".codex/sessions/2024/12/01/rollout-test.jsonl");
 
     // View the session
+    let view_start = tracker.start("run_view", Some("Execute view command on session"));
     let output = base_cmd()
         .args(["view", "--robot", "--data-dir"])
         .arg(&data_dir)
@@ -218,6 +247,8 @@ fn view_command_returns_session_detail() {
         .env("HOME", tmp.path())
         .output()
         .unwrap();
+    let view_ms = view_start.elapsed().as_millis() as u64;
+    tracker.end("run_view", Some("View complete"), view_start);
 
     // View may exit with 0 or non-zero depending on whether session is indexed
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -234,6 +265,14 @@ fn view_command_returns_session_detail() {
             stdout
         );
     }
+
+    tracker.metrics(
+        "cass_view",
+        &E2ePerformanceMetrics::new()
+            .with_duration(view_ms)
+            .with_custom("operation", "view_session"),
+    );
+    tracker.complete();
 }
 
 #[test]
@@ -503,14 +542,18 @@ fn robot_mode_json_output_only() {
 
 #[test]
 fn health_command_returns_structured_output() {
+    let tracker = PhaseTracker::new("e2e_cli_flows", "health_command_returns_structured_output");
     let (tmp, data_dir) = setup_indexed_env();
 
+    let health_start = tracker.start("run_health", Some("Execute health check command"));
     let output = base_cmd()
         .args(["health", "--json", "--data-dir"])
         .arg(&data_dir)
         .env("HOME", tmp.path())
         .output()
         .unwrap();
+    let health_ms = health_start.elapsed().as_millis() as u64;
+    tracker.end("run_health", Some("Health check complete"), health_start);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
@@ -521,18 +564,30 @@ fn health_command_returns_structured_output() {
         "Health should report status. JSON: {}",
         json
     );
+
+    tracker.metrics(
+        "cass_health",
+        &E2ePerformanceMetrics::new()
+            .with_duration(health_ms)
+            .with_custom("operation", "health_check"),
+    );
+    tracker.complete();
 }
 
 #[test]
 fn stats_command_returns_aggregations() {
+    let tracker = PhaseTracker::new("e2e_cli_flows", "stats_command_returns_aggregations");
     let (tmp, data_dir) = setup_indexed_env();
 
+    let stats_start = tracker.start("run_stats", Some("Execute stats command"));
     let output = base_cmd()
         .args(["stats", "--json", "--data-dir"])
         .arg(&data_dir)
         .env("HOME", tmp.path())
         .output()
         .unwrap();
+    let stats_ms = stats_start.elapsed().as_millis() as u64;
+    tracker.end("run_stats", Some("Stats complete"), stats_start);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -547,6 +602,14 @@ fn stats_command_returns_aggregations() {
         "Stats should have counts. JSON: {}",
         json
     );
+
+    tracker.metrics(
+        "cass_stats",
+        &E2ePerformanceMetrics::new()
+            .with_duration(stats_ms)
+            .with_custom("operation", "stats"),
+    );
+    tracker.complete();
 }
 
 #[test]
