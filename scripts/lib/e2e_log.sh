@@ -23,6 +23,8 @@ E2E_RUN_ID=""
 E2E_OUTPUT_DIR=""
 E2E_OUTPUT_FILE=""
 E2E_START_TIME=""
+E2E_VERBOSE_ENABLED="false"
+E2E_VERBOSE_LOG=""
 
 # =============================================================================
 # Internal Helpers
@@ -112,6 +114,21 @@ _e2e_write() {
     echo "$line" >> "$E2E_OUTPUT_FILE"
 }
 
+_e2e_verbose_write() {
+    if [[ "$E2E_VERBOSE_ENABLED" != "true" ]]; then
+        return
+    fi
+    local line="$1"
+    local ts
+    ts=$(_e2e_timestamp)
+    echo "[$ts] $line" >> "$E2E_VERBOSE_LOG"
+}
+
+# Public helper for scripts
+verbose_log() {
+    _e2e_verbose_write "$*"
+}
+
 # =============================================================================
 # Public API
 # =============================================================================
@@ -140,6 +157,12 @@ e2e_init() {
 
     E2E_OUTPUT_FILE="${E2E_OUTPUT_DIR}/${runner}_${script_name}_${timestamp_id}.jsonl"
     E2E_START_TIME=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+
+    if [[ -n "${E2E_VERBOSE:-}" ]]; then
+        E2E_VERBOSE_ENABLED="true"
+        E2E_VERBOSE_LOG="${E2E_OUTPUT_DIR}/verbose_${runner}_${script_name}_${timestamp_id}.log"
+        _e2e_verbose_write "Verbose logging enabled for ${runner}:${script_name}"
+    fi
 }
 
 # Emit a run_start event
@@ -169,6 +192,7 @@ e2e_run_start() {
 EOF
 )
     _e2e_write "$json"
+    _e2e_verbose_write "RUN_START run_id=${E2E_RUN_ID} runner=${E2E_RUNNER} parallel=${parallel} fail_fast=${fail_fast}"
 }
 
 # Emit a test_start event
@@ -191,6 +215,7 @@ e2e_test_start() {
     local json
     json="{\"ts\":\"$ts\",\"event\":\"test_start\",\"run_id\":\"$E2E_RUN_ID\",\"runner\":\"$E2E_RUNNER\",\"test\":{\"name\":\"$test_name\",\"suite\":\"$suite_name\"$file_json$line_json}}"
     _e2e_write "$json"
+    _e2e_verbose_write "TEST_START name=${test_name} suite=${suite_name}"
 }
 
 # Emit a test_end event for a passing test
@@ -256,6 +281,11 @@ _e2e_test_end() {
     local json
     json="{\"ts\":\"$ts\",\"event\":\"test_end\",\"run_id\":\"$E2E_RUN_ID\",\"runner\":\"$E2E_RUNNER\",\"test\":{\"name\":\"$test_name\",\"suite\":\"$suite_name\"},\"result\":{\"status\":\"$test_status\",\"duration_ms\":$duration_ms,\"retries\":$retries}$error_json}"
     _e2e_write "$json"
+    if [[ -n "$error_msg" ]]; then
+        _e2e_verbose_write "TEST_END name=${test_name} suite=${suite_name} status=${test_status} duration_ms=${duration_ms} error=\"${error_msg}\""
+    else
+        _e2e_verbose_write "TEST_END name=${test_name} suite=${suite_name} status=${test_status} duration_ms=${duration_ms}"
+    fi
 }
 
 # Emit a run_end event
@@ -277,6 +307,7 @@ e2e_run_end() {
     local json
     json="{\"ts\":\"$ts\",\"event\":\"run_end\",\"run_id\":\"$E2E_RUN_ID\",\"runner\":\"$E2E_RUNNER\",\"summary\":{\"total\":$total,\"passed\":$passed,\"failed\":$failed,\"skipped\":$skipped,\"flaky\":$flaky,\"duration_ms\":$duration_ms},\"exit_code\":$exit_code}"
     _e2e_write "$json"
+    _e2e_verbose_write "RUN_END total=${total} passed=${passed} failed=${failed} skipped=${skipped} flaky=${flaky} duration_ms=${duration_ms} exit_code=${exit_code}"
 }
 
 # Emit a log event
@@ -313,6 +344,7 @@ e2e_log() {
     local json
     json="{\"ts\":\"$ts\",\"event\":\"log\",\"run_id\":\"$E2E_RUN_ID\",\"runner\":\"$E2E_RUNNER\",\"level\":\"$level\",\"msg\":\"$escaped_msg\"$context_json}"
     _e2e_write "$json"
+    _e2e_verbose_write "LOG level=${level} msg=${msg}"
 }
 
 # Convenience: log at INFO level
