@@ -165,10 +165,15 @@ impl PagesWizard {
         term.clear_screen()?;
         self.print_header(&mut term)?;
 
-        // If no-encryption mode, show explicit warning at the start
-        if self.no_encryption_mode && !self.step_unencrypted_warning(&mut term, &theme)? {
-            writeln!(term, "{}", style("Export cancelled.").yellow())?;
-            return Ok(());
+        if self.no_encryption_mode {
+            if !self.step_unencrypted_warning(&mut term, &theme)? {
+                writeln!(term, "{}", style("Export cancelled.").yellow())?;
+                return Ok(());
+            }
+
+            bail!(
+                "Unencrypted pages bundles are not supported yet. Use --export-only for raw DB exports."
+            );
         }
 
         // Step 1: Content Selection
@@ -177,10 +182,8 @@ impl PagesWizard {
         // Step 2: Secret Scan
         self.step_secret_scan(&mut term, &theme)?;
 
-        // Step 3: Security Configuration (skip if no encryption)
-        if !self.no_encryption_mode {
-            self.step_security_config(&mut term, &theme)?;
-        }
+        // Step 3: Security Configuration
+        self.step_security_config(&mut term, &theme)?;
 
         // Step 4: Site Configuration
         self.step_site_config(&mut term, &theme)?;

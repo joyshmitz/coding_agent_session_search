@@ -945,6 +945,7 @@ fn cmp_fused_hit_desc(a: &FusedHit, b: &FusedHit) -> CmpOrdering {
 
 /// Threshold below which full sort is faster than quickselect + partial sort.
 #[cfg(test)]
+#[allow(dead_code)]
 const QUICKSELECT_THRESHOLD: usize = 64;
 
 /// Partition fused hits to get top-k in O(N + k log k) instead of O(N log N).
@@ -956,6 +957,7 @@ const QUICKSELECT_THRESHOLD: usize = 64;
 /// Note: Currently only used for tests. Production code uses full sort for
 /// content deduplication which requires seeing all elements.
 #[cfg(test)]
+#[allow(dead_code)]
 fn top_k_fused(mut hits: Vec<FusedHit>, k: usize) -> Vec<FusedHit> {
     let n = hits.len();
 
@@ -1038,7 +1040,7 @@ pub fn rrf_fuse_hits(
     // The issue is: different Keys (messages) can have same Content.
     // We want to return unique Content.
     // So we must sort by Score, then Deduplicate by Content, then Slice.
-    
+
     fused.sort_by(cmp_fused_hit_desc);
 
     // Deduplicate by content hash to ensure diversity
