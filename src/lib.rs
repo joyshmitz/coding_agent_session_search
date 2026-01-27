@@ -9355,13 +9355,13 @@ fn run_index_with_data(
         });
 
         // Add structured indexing stats if available (T7.4)
-        if let Ok(stats) = index_progress.stats.lock() {
-            if let serde_json::Value::Object(ref mut map) = payload {
-                map.insert(
-                    "indexing_stats".to_string(),
-                    serde_json::to_value(&*stats).unwrap_or_default(),
-                );
-            }
+        if let Ok(stats) = index_progress.stats.lock()
+            && let serde_json::Value::Object(ref mut map) = payload
+        {
+            map.insert(
+                "indexing_stats".to_string(),
+                serde_json::to_value(&*stats).unwrap_or_default(),
+            );
         }
 
         // Store idempotency key if provided
