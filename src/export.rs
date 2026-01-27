@@ -101,6 +101,8 @@ fn escape_markdown(text: &str) -> String {
         .replace('<', "\\<")
         .replace('>', "\\>")
         .replace('`', "\\`")
+        .replace('\n', " ") // Replace newlines with space to prevent breaking tables
+        .replace('\r', "") // Remove carriage returns
 }
 
 /// Determine the appropriate code block delimiter (e.g., ``` or ````) based on content.

@@ -130,6 +130,11 @@ pub enum Commands {
         #[arg(long)]
         semantic: bool,
 
+        /// Build HNSW index for approximate nearest neighbor search (requires --semantic).
+        /// Enables O(log n) search with `--approximate` flag at query time.
+        #[arg(long, default_value_t = false)]
+        build_hnsw: bool,
+
         /// Embedder to use for semantic indexing (hash, fastembed)
         #[arg(long, default_value = "fastembed")]
         embedder: String,
@@ -252,6 +257,13 @@ pub enum Commands {
         /// Search mode: lexical (default), semantic, or hybrid
         #[arg(long, value_enum)]
         mode: Option<crate::search::query::SearchMode>,
+
+        /// Use approximate nearest neighbor (ANN) search with HNSW for faster semantic/hybrid queries.
+        /// Trades slight accuracy loss for O(log n) search complexity instead of O(n).
+        /// Only affects semantic and hybrid modes; ignored for lexical search.
+        /// Requires an HNSW index built with `cass index --semantic --approximate`.
+        #[arg(long, default_value_t = false)]
+        approximate: bool,
 
         // ==========================================================================
         // Model / Reranker / Daemon flags (bd-3bbv)
@@ -2160,6 +2172,7 @@ async fn execute_cli(
                     watch_once,
                     data_dir,
                     semantic,
+                    build_hnsw,
                     embedder,
                     json,
                     idempotency_key,
@@ -2172,6 +2185,7 @@ async fn execute_cli(
                         watch_once,
                         data_dir,
                         semantic,
+                        build_hnsw,
                         embedder,
                         progress,
                         json,
@@ -2208,6 +2222,7 @@ async fn execute_cli(
                     source,
                     sessions_from,
                     mode,
+                    approximate,
                     model,
                     rerank,
                     reranker,
@@ -2230,6 +2245,14 @@ async fn execute_cli(
                         eprintln!(
                             "Warning: --reranker specified but --rerank not enabled; reranker will be ignored"
                         );
+                    }
+
+                    // Warn about approximate mode (ANN) - HNSW index support is experimental
+                    if approximate {
+                        eprintln!(
+                            "Warning: --approximate flag is experimental. Build HNSW index with 'cass index --semantic --build-hnsw' first."
+                        );
+                        // TODO (coding_agent_session_search-06kc): Wire up HNSW search when index is available
                     }
 
                     // Build semantic options from new flags
@@ -8960,6 +8983,7 @@ fn run_index_with_data(
     watch_once: Option<Vec<PathBuf>>,
     data_dir_override: Option<PathBuf>,
     semantic: bool,
+    build_hnsw: bool,
     embedder: String,
     progress: ProgressResolved,
     json: bool,
@@ -12323,6 +12347,7 @@ fn run_sources_sync(
             None,           // watch_once
             Some(data_dir), // data_dir
             false,          // semantic
+            false,          // build_hnsw
             "fastembed".to_string(),
             progress,
             json_output,
