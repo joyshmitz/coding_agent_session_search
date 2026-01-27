@@ -58,3 +58,13 @@ tests/e2e-report/
 tests/e2e-results.json
 tests/e2e/.env.test
 tests/test-results/
+
+# Python bytecode caches (global)
+__pycache__/
+*.pyc
+
+# Performance optimization artifacts
+perf/
+
+# Incomplete/stub scripts
+scripts/e2e/sources_sync.sh
