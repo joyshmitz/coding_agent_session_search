@@ -900,4 +900,205 @@ mod tests {
 
         assert_eq!(convs[0].metadata["source"], "cline");
     }
+
+    // =====================================================
+    // Edge case tests — malformed input robustness (br-2w98)
+    // =====================================================
+
+    #[test]
+    fn scan_truncated_json_skips_task() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-trunc");
+
+        // Write truncated JSON
+        fs::write(
+            task_dir.join("ui_messages.json"),
+            r#"[{"role": "user", "content": "Hello"#,
+        )
+        .unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0, "truncated JSON should be skipped");
+    }
+
+    #[test]
+    fn scan_json_object_instead_of_array_skips_task() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-obj");
+
+        // JSON object instead of array
+        let content = json!({"role": "user", "content": "Not an array"});
+        fs::write(task_dir.join("ui_messages.json"), content.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // val.as_array() returns None for objects, so task is skipped
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_type_mismatch_in_messages_skips_bad_entries() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-mismatch");
+
+        let messages = json!([
+            // String instead of object
+            "not a message object",
+            // Number
+            42,
+            // Null
+            null,
+            // Object with wrong field types (content is a number)
+            {"role": "user", "content": 12345},
+            // Valid entry
+            {"role": "user", "content": "Valid message"}
+        ]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Valid message");
+    }
+
+    #[test]
+    fn scan_deeply_nested_json_does_not_stack_overflow() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-deep");
+
+        // Build deeply nested JSON (200 levels)
+        let mut nested = String::new();
+        for _ in 0..200 {
+            nested.push_str("{\"a\":");
+        }
+        nested.push('1');
+        for _ in 0..200 {
+            nested.push('}');
+        }
+        fs::write(task_dir.join("ui_messages.json"), &nested).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        // Should not panic or stack overflow
+        let convs = connector.scan(&ctx).unwrap();
+        assert!(convs.is_empty());
+    }
+
+    #[test]
+    fn scan_large_message_body_handled() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-large");
+
+        let large_content = "x".repeat(1_000_000);
+        let messages = json!([{"role": "user", "content": large_content}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content.len(), 1_000_000);
+    }
+
+    #[test]
+    fn scan_null_bytes_in_content_handled() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-null");
+
+        let messages = json!([
+            {"role": "user", "content": "before\u{0000}after"},
+            {"role": "user", "content": "Clean message"}
+        ]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert!(convs[0].messages.len() >= 1, "should extract at least the clean message");
+    }
+
+    #[test]
+    fn scan_malformed_metadata_does_not_crash() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-bad-meta");
+
+        let messages = json!([{"role": "user", "content": "Test"}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+        // Write malformed metadata
+        fs::write(task_dir.join("task_metadata.json"), "not valid json {{{").unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Should still extract the conversation even with bad metadata
+        assert_eq!(convs.len(), 1);
+        // Title should fallback to first message content
+        assert_eq!(convs[0].title, Some("Test".to_string()));
+    }
+
+    #[test]
+    fn scan_mixed_valid_and_invalid_tasks() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+
+        // Invalid task: bad JSON
+        let bad_dir = create_task_dir(&storage, "task-bad");
+        fs::write(bad_dir.join("ui_messages.json"), "invalid json").unwrap();
+
+        // Valid task
+        let good_dir = create_task_dir(&storage, "task-good");
+        let messages = json!([{"role": "user", "content": "Valid task"}]);
+        fs::write(good_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        // Another invalid: empty array
+        let empty_dir = create_task_dir(&storage, "task-empty-arr");
+        fs::write(empty_dir.join("ui_messages.json"), "[]").unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1, "should only extract the valid task");
+        assert_eq!(convs[0].messages[0].content, "Valid task");
+    }
+
+    #[test]
+    fn scan_preserves_extra_fields_in_messages() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-extra");
+
+        let messages = json!([{
+            "role": "user",
+            "content": "Test",
+            "customField": "customValue",
+            "nestedData": {"key": "value"}
+        }]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].extra["customField"], "customValue");
+        assert_eq!(convs[0].messages[0].extra["nestedData"]["key"], "value");
+    }
 }

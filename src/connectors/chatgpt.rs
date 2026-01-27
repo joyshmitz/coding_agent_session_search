@@ -1399,6 +1399,259 @@ mod tests {
         assert_eq!(convs[0].title, Some("Direct Base".to_string()));
     }
 
+    // =========================================================================
+    // Edge case tests — malformed input robustness (br-2w98)
+    // =========================================================================
+
+    #[test]
+    fn parse_truncated_json_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let conv_file = dir.path().join("truncated.json");
+        fs::write(&conv_file, r#"{"id": "trunc", "mapping": {"node1": {"message":"#).unwrap();
+
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+        let result = connector.parse_conversation_file(&conv_file, None, false);
+        assert!(result.is_err(), "truncated JSON should return an error");
+    }
+
+    #[test]
+    fn parse_type_mismatch_in_mapping_nodes_handled() {
+        let dir = TempDir::new().unwrap();
+        let conv_file = dir.path().join("mismatch.json");
+
+        let conv_json = json!({
+            "mapping": {
+                // Node with string instead of object for message
+                "bad1": {
+                    "message": "not an object"
+                },
+                // Node with null message
+                "bad2": {
+                    "message": null
+                },
+                // Node without message key
+                "bad3": {
+                    "parent": "bad2"
+                },
+                // Node with number instead of object
+                "bad4": {
+                    "message": 42
+                },
+                // Valid node
+                "good": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "content": {"parts": ["Valid"]},
+                        "create_time": 1700000000.0
+                    }
+                }
+            }
+        });
+
+        fs::write(&conv_file, conv_json.to_string()).unwrap();
+
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+        let result = connector.parse_conversation_file(&conv_file, None, false);
+
+        assert!(result.is_ok());
+        let conv = result.unwrap().unwrap();
+        assert_eq!(conv.messages.len(), 1);
+        assert_eq!(conv.messages[0].content, "Valid");
+    }
+
+    #[test]
+    fn parse_deeply_nested_json_does_not_stack_overflow() {
+        let dir = TempDir::new().unwrap();
+        let conv_file = dir.path().join("deep.json");
+
+        // Build deeply nested JSON (200 levels)
+        let mut nested = String::new();
+        for _ in 0..200 {
+            nested.push_str("{\"a\":");
+        }
+        nested.push('1');
+        for _ in 0..200 {
+            nested.push('}');
+        }
+        fs::write(&conv_file, &nested).unwrap();
+
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+        // Should not panic; may error due to recursion limit
+        let result = connector.parse_conversation_file(&conv_file, None, false);
+        match result {
+            Ok(conv) => assert!(conv.is_none(), "deep JSON without mapping should return None"),
+            Err(_) => {} // Parser error is acceptable
+        }
+    }
+
+    #[test]
+    fn parse_large_message_body_handled() {
+        let dir = TempDir::new().unwrap();
+        let conv_file = dir.path().join("large.json");
+
+        let large_content = "x".repeat(1_000_000);
+        let conv_json = json!({
+            "mapping": {
+                "node1": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "content": {"parts": [large_content]},
+                        "create_time": 1700000000.0
+                    }
+                }
+            }
+        });
+
+        fs::write(&conv_file, conv_json.to_string()).unwrap();
+
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+        let result = connector.parse_conversation_file(&conv_file, None, false);
+
+        let conv = result.unwrap().unwrap();
+        assert_eq!(conv.messages[0].content.len(), 1_000_000);
+    }
+
+    #[test]
+    fn parse_null_bytes_in_content_handled() {
+        let dir = TempDir::new().unwrap();
+        let conv_file = dir.path().join("nullbytes.json");
+
+        let conv_json = json!({
+            "mapping": {
+                "node1": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "content": {"parts": ["before\u{0000}after"]},
+                        "create_time": 1700000000.0
+                    }
+                }
+            }
+        });
+
+        fs::write(&conv_file, conv_json.to_string()).unwrap();
+
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+        let result = connector.parse_conversation_file(&conv_file, None, false);
+        assert!(result.is_ok(), "null bytes should not cause errors");
+    }
+
+    #[test]
+    fn parse_nonexistent_file_returns_error() {
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+        let result =
+            connector.parse_conversation_file(&PathBuf::from("/nonexistent/file.json"), None, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_mapping_nodes_without_content_parts_or_text_skipped() {
+        let dir = TempDir::new().unwrap();
+        let conv_file = dir.path().join("no_content.json");
+
+        let conv_json = json!({
+            "mapping": {
+                // Message with content that has neither parts nor text
+                "bad": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "content": {"type": "unknown"},
+                        "create_time": 1700000000.0
+                    }
+                },
+                // Message with parts containing non-string values
+                "bad2": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "content": {"parts": [42, null, true]},
+                        "create_time": 1700000001.0
+                    }
+                },
+                // Valid message
+                "good": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "content": {"parts": ["Valid"]},
+                        "create_time": 1700000002.0
+                    }
+                }
+            }
+        });
+
+        fs::write(&conv_file, conv_json.to_string()).unwrap();
+
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+        let result = connector.parse_conversation_file(&conv_file, None, false);
+
+        let conv = result.unwrap().unwrap();
+        assert_eq!(conv.messages.len(), 1);
+        assert_eq!(conv.messages[0].content, "Valid");
+    }
+
+    #[test]
+    fn parse_invalid_utf8_file_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let conv_file = dir.path().join("bad_utf8.json");
+        fs::write(&conv_file, b"\xFF\xFE invalid utf8 bytes").unwrap();
+
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+        let result = connector.parse_conversation_file(&conv_file, None, false);
+        assert!(result.is_err(), "invalid UTF-8 should return an error");
+    }
+
+    #[test]
+    fn scan_mixed_valid_and_invalid_conversation_files() {
+        let dir = TempDir::new().unwrap();
+        let conv_dir = dir.path().join("conversations-uuid123");
+        fs::create_dir_all(&conv_dir).unwrap();
+
+        // Invalid JSON file
+        fs::write(conv_dir.join("bad.json"), "not json").unwrap();
+
+        // Valid conversation
+        let good_json = json!({
+            "id": "good-conv",
+            "mapping": {
+                "node1": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "content": {"parts": ["Valid conversation"]},
+                        "create_time": 1700000000.0
+                    }
+                }
+            }
+        });
+        fs::write(conv_dir.join("good.json"), good_json.to_string()).unwrap();
+
+        // Empty conversation
+        let empty_json = json!({"id": "empty", "mapping": {}});
+        fs::write(conv_dir.join("empty.json"), empty_json.to_string()).unwrap();
+
+        let connector = ChatGptConnector {
+            encryption_key: None,
+        };
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1, "should extract only the valid conversation");
+        assert_eq!(convs[0].messages[0].content, "Valid conversation");
+    }
+
     #[test]
     #[serial]
     #[cfg(target_os = "linux")] // Test logic is platform-independent but mocking HOME is easier here
