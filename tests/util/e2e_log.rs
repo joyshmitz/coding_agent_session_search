@@ -26,7 +26,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Environment metadata captured at the start of a test run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -977,6 +977,121 @@ impl E2eLogger {
             .as_nanos()
             .hash(&mut hasher);
         format!("{:x}", hasher.finish() & 0xFFFFFF)
+    }
+}
+
+/// Phase tracker for structured logging in Rust E2E tests.
+///
+/// Emits test_start/test_end events and provides helpers for phase timing.
+#[allow(dead_code)]
+pub struct PhaseTracker {
+    logger: Option<E2eLogger>,
+    test_info: E2eTestInfo,
+    start_time: Instant,
+}
+
+#[allow(dead_code)]
+impl PhaseTracker {
+    /// Create a new PhaseTracker for the given test.
+    pub fn new(suite: &str, test_name: &str) -> Self {
+        let logger = if std::env::var("E2E_LOG").is_ok() {
+            E2eLogger::new("rust").ok()
+        } else {
+            None
+        };
+
+        let test_info = E2eTestInfo::simple(test_name, suite);
+
+        if let Some(ref lg) = logger {
+            let _ = lg.test_start(&test_info);
+        }
+
+        Self {
+            logger,
+            test_info,
+            start_time: Instant::now(),
+        }
+    }
+
+    /// Execute a phase and log start/end events.
+    pub fn phase<F, R>(&self, name: &str, description: &str, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let phase = E2ePhase {
+            name: name.to_string(),
+            description: Some(description.to_string()),
+        };
+
+        if let Some(ref lg) = self.logger {
+            let _ = lg.phase_start(&phase);
+        }
+
+        let start = Instant::now();
+        let result = f();
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        if let Some(ref lg) = self.logger {
+            let _ = lg.phase_end(&phase, duration_ms);
+        }
+
+        result
+    }
+
+    /// Start a phase and return the start time for manual timing.
+    pub fn start(&self, name: &str, description: Option<&str>) -> Instant {
+        let phase = E2ePhase {
+            name: name.to_string(),
+            description: description.map(String::from),
+        };
+        if let Some(ref lg) = self.logger {
+            let _ = lg.phase_start(&phase);
+        }
+        Instant::now()
+    }
+
+    /// End a phase, logging duration.
+    pub fn end(&self, name: &str, description: Option<&str>, start: Instant) {
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let phase = E2ePhase {
+            name: name.to_string(),
+            description: description.map(String::from),
+        };
+        if let Some(ref lg) = self.logger {
+            let _ = lg.phase_end(&phase, duration_ms);
+        }
+    }
+
+    /// Emit a metrics event.
+    pub fn metrics(&self, name: &str, metrics: &E2ePerformanceMetrics) {
+        if let Some(ref lg) = self.logger {
+            let _ = lg.metrics(name, metrics);
+        }
+    }
+
+    /// Mark test as completed successfully.
+    pub fn complete(self) {
+        let duration_ms = self.start_time.elapsed().as_millis() as u64;
+        if let Some(ref lg) = self.logger {
+            let _ = lg.test_end(&self.test_info, "pass", duration_ms, None, None);
+            let _ = lg.flush();
+        }
+    }
+
+    /// Mark test as failed with error.
+    pub fn fail(self, error: E2eError) {
+        let duration_ms = self.start_time.elapsed().as_millis() as u64;
+        if let Some(ref lg) = self.logger {
+            let _ = lg.test_end(&self.test_info, "fail", duration_ms, None, Some(error));
+            let _ = lg.flush();
+        }
+    }
+
+    /// Flush the logger if present.
+    pub fn flush(&self) {
+        if let Some(ref lg) = self.logger {
+            let _ = lg.flush();
+        }
     }
 }
 
