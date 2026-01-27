@@ -334,20 +334,25 @@ impl RemoteInstaller {
 
         // Map arch to release asset naming
         let arch = match self.system_info.arch.as_str() {
-            "x86_64" => "x86_64",
-            "aarch64" | "arm64" => "aarch64",
+            "x86_64" => "amd64",
+            "aarch64" | "arm64" => "arm64",
             _ => return None, // Unsupported arch
         };
 
         let os = match self.system_info.os.to_lowercase().as_str() {
             "linux" => "linux",
-            "darwin" => "macos",
+            "darwin" => "darwin",
             _ => return None, // Unsupported OS
         };
 
+        // macOS Intel builds are not published (see release workflow comment).
+        if os == "darwin" && arch == "amd64" {
+            return None;
+        }
+
         // GitHub releases URL pattern
         Some(format!(
-            "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v{}/cass-{}-{}",
+            "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v{}/cass-{}-{}.tar.gz",
             self.target_version, os, arch
         ))
     }
@@ -510,28 +515,52 @@ impl RemoteInstaller {
             elapsed: start.elapsed(),
         });
 
+        let archive_name = url
+            .split('/')
+            .next_back()
+            .unwrap_or("cass-prebuilt.tar.gz");
+        let remote_archive_path = format!("/tmp/{}", archive_name);
+
         // Use curl or wget depending on availability
         let download_cmd = if self.system_info.has_curl {
             format!(
                 r#"
+set -euo pipefail
+tmp_dir="$(mktemp -d)"
+archive_path="{}"
 mkdir -p ~/.local/bin
-curl -fsSL "{}" -o ~/.local/bin/cass
+curl -fsSL "{}" -o "${{archive_path}}"
+tar -xzf "${{archive_path}}" -C "${{tmp_dir}}"
+if [ ! -f "${{tmp_dir}}/cass" ]; then
+    echo "EXTRACT_FAILED"
+    exit 1
+fi
+mv "${{tmp_dir}}/cass" ~/.local/bin/cass
 chmod +x ~/.local/bin/cass
 # Add to PATH only if not already present
 grep -q '.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 "#,
-                url
+                remote_archive_path, url
             )
         } else {
             format!(
                 r#"
+set -euo pipefail
+tmp_dir="$(mktemp -d)"
+archive_path="{}"
 mkdir -p ~/.local/bin
-wget -q "{}" -O ~/.local/bin/cass
+wget -q "{}" -O "${{archive_path}}"
+tar -xzf "${{archive_path}}" -C "${{tmp_dir}}"
+if [ ! -f "${{tmp_dir}}/cass" ]; then
+    echo "EXTRACT_FAILED"
+    exit 1
+fi
+mv "${{tmp_dir}}/cass" ~/.local/bin/cass
 chmod +x ~/.local/bin/cass
 # Add to PATH only if not already present
 grep -q '.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 "#,
-                url
+                remote_archive_path, url
             )
         };
 
@@ -546,7 +575,7 @@ grep -q '.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bi
                 elapsed: start.elapsed(),
             });
 
-            let actual = self.compute_remote_checksum("~/.local/bin/cass")?;
+            let actual = self.compute_remote_checksum(&remote_archive_path)?;
             if actual.to_lowercase() != expected.to_lowercase() {
                 return Err(InstallError::ChecksumMismatch {
                     expected: expected.to_string(),
@@ -1095,7 +1124,7 @@ mod tests {
         let installer = RemoteInstaller::new("test", system, resources);
         let url = installer.get_prebuilt_url();
         assert!(url.is_some());
-        assert!(url.unwrap().contains("linux-x86_64"));
+        assert!(url.unwrap().contains("linux-amd64.tar.gz"));
     }
 
     #[test]
@@ -1108,7 +1137,7 @@ mod tests {
         let installer = RemoteInstaller::new("test", system, resources);
         let url = installer.get_prebuilt_url();
         assert!(url.is_some());
-        assert!(url.unwrap().contains("macos-aarch64"));
+        assert!(url.unwrap().contains("darwin-arm64.tar.gz"));
     }
 
     #[test]
