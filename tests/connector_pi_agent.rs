@@ -208,10 +208,18 @@ fn pi_agent_connector_handles_model_change() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1, "expected exactly 1 conversation from session with model change");
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation from session with model change"
+    );
     let c = &convs[0];
 
-    assert_eq!(c.messages.len(), 3, "expected 3 messages (user + 2 assistant)");
+    assert_eq!(
+        c.messages.len(),
+        3,
+        "expected 3 messages (user + 2 assistant)"
+    );
 
     // Model change events are tracked in metadata (final model)
     assert_eq!(
@@ -221,10 +229,18 @@ fn pi_agent_connector_handles_model_change() {
     );
 
     // First assistant message (before model_change) uses initial modelId
-    assert_eq!(c.messages[1].author, Some("claude-sonnet-4".to_string()), "first assistant should use initial model from session header");
+    assert_eq!(
+        c.messages[1].author,
+        Some("claude-sonnet-4".to_string()),
+        "first assistant should use initial model from session header"
+    );
 
     // Second assistant message (after model_change) uses updated modelId
-    assert_eq!(c.messages[2].author, Some("claude-opus-4".to_string()), "second assistant should use updated model after model_change");
+    assert_eq!(
+        c.messages[2].author,
+        Some("claude-opus-4".to_string()),
+        "second assistant should use updated model after model_change"
+    );
 }
 
 #[test]
@@ -240,8 +256,14 @@ fn pi_agent_connector_detection_with_sessions_dir() {
 
     let connector = PiAgentConnector::new();
     let result = connector.detect();
-    assert!(result.detected, "connector should detect pi_agent when sessions dir exists");
-    assert!(!result.evidence.is_empty(), "detection evidence should be non-empty when detected");
+    assert!(
+        result.detected,
+        "connector should detect pi_agent when sessions dir exists"
+    );
+    assert!(
+        !result.evidence.is_empty(),
+        "detection evidence should be non-empty when detected"
+    );
 }
 
 #[test]
@@ -256,7 +278,10 @@ fn pi_agent_connector_detection_without_sessions_dir() {
 
     let connector = PiAgentConnector::new();
     let result = connector.detect();
-    assert!(!result.detected, "connector should not detect pi_agent when sessions dir is missing");
+    assert!(
+        !result.detected,
+        "connector should not detect pi_agent when sessions dir is missing"
+    );
 }
 
 #[test]
@@ -286,11 +311,19 @@ also not valid
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation despite malformed lines"
+    );
 
     let c = &convs[0];
     // Should have 2 valid messages, malformed lines skipped
-    assert_eq!(c.messages.len(), 2);
+    assert_eq!(
+        c.messages.len(),
+        2,
+        "expected 2 messages - malformed JSON lines should be skipped"
+    );
 }
 
 #[test]
@@ -319,12 +352,26 @@ fn pi_agent_connector_handles_string_content() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation with string content"
+    );
 
     let c = &convs[0];
-    assert_eq!(c.messages.len(), 2);
-    assert!(c.messages[0].content.contains("simple string content"));
-    assert!(c.messages[1].content.contains("simple response"));
+    assert_eq!(
+        c.messages.len(),
+        2,
+        "expected 2 messages (user + assistant) with string content format"
+    );
+    assert!(
+        c.messages[0].content.contains("simple string content"),
+        "user message string content should be preserved"
+    );
+    assert!(
+        c.messages[1].content.contains("simple response"),
+        "assistant message string content should be preserved"
+    );
 }
 
 #[test]
@@ -353,12 +400,23 @@ fn pi_agent_connector_filters_empty_content() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation when filtering empty content"
+    );
 
     let c = &convs[0];
     // Only the message with "valid content" should be included
-    assert_eq!(c.messages.len(), 1);
-    assert!(c.messages[0].content.contains("valid content"));
+    assert_eq!(
+        c.messages.len(),
+        1,
+        "expected only 1 message - empty/whitespace-only content should be filtered"
+    );
+    assert!(
+        c.messages[0].content.contains("valid content"),
+        "only message with actual content should be preserved"
+    );
 }
 
 #[test]
@@ -386,11 +444,19 @@ fn pi_agent_connector_extracts_title_from_first_user_message() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation for title extraction test"
+    );
 
     let c = &convs[0];
     // Title should be first line of first user message
-    assert_eq!(c.title, Some("This is the user's question".to_string()));
+    assert_eq!(
+        c.title,
+        Some("This is the user's question".to_string()),
+        "title should be extracted from first line of first user message"
+    );
 }
 
 #[test]
@@ -420,11 +486,22 @@ fn pi_agent_connector_truncates_long_title() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation for long title test"
+    );
 
     let c = &convs[0];
-    assert!(c.title.is_some());
-    assert_eq!(c.title.as_ref().unwrap().len(), 100);
+    assert!(
+        c.title.is_some(),
+        "title should be present even for long content"
+    );
+    assert_eq!(
+        c.title.as_ref().unwrap().len(),
+        100,
+        "long titles should be truncated to 100 characters"
+    );
 }
 
 #[test]
@@ -453,13 +530,21 @@ fn pi_agent_connector_assigns_sequential_indices() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation for sequential indices test"
+    );
 
     let c = &convs[0];
-    assert_eq!(c.messages.len(), 3);
-    assert_eq!(c.messages[0].idx, 0);
-    assert_eq!(c.messages[1].idx, 1);
-    assert_eq!(c.messages[2].idx, 2);
+    assert_eq!(
+        c.messages.len(),
+        3,
+        "expected 3 messages for index assignment test"
+    );
+    assert_eq!(c.messages[0].idx, 0, "first message should have index 0");
+    assert_eq!(c.messages[1].idx, 1, "second message should have index 1");
+    assert_eq!(c.messages[2].idx, 2, "third message should have index 2");
 }
 
 #[test]
@@ -486,24 +571,32 @@ fn pi_agent_connector_metadata_includes_provider_info() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation for metadata test"
+    );
 
     let c = &convs[0];
     assert_eq!(
         c.metadata.get("source").and_then(|v| v.as_str()),
-        Some("pi_agent")
+        Some("pi_agent"),
+        "metadata source should be 'pi_agent' for PiAgentConnector"
     );
     assert_eq!(
         c.metadata.get("session_id").and_then(|v| v.as_str()),
-        Some("meta-session-id")
+        Some("meta-session-id"),
+        "metadata session_id should match id from session header"
     );
     assert_eq!(
         c.metadata.get("provider").and_then(|v| v.as_str()),
-        Some("anthropic")
+        Some("anthropic"),
+        "metadata provider should match provider from session header"
     );
     assert_eq!(
         c.metadata.get("model_id").and_then(|v| v.as_str()),
-        Some("claude-sonnet-4")
+        Some("claude-sonnet-4"),
+        "metadata model_id should match modelId from session header"
     );
 }
 
@@ -539,7 +632,11 @@ fn pi_agent_connector_ignores_files_without_underscore() {
     };
     let convs = connector.scan(&ctx).unwrap();
     // Only the file with underscore pattern should be processed
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "should only process files with timestamp_uuid pattern, ignoring others"
+    );
 }
 
 #[test]
@@ -561,7 +658,10 @@ fn pi_agent_connector_handles_empty_sessions() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert!(convs.is_empty());
+    assert!(
+        convs.is_empty(),
+        "empty sessions directory should yield no conversations"
+    );
 }
 
 #[test]
@@ -590,13 +690,24 @@ fn pi_agent_connector_skips_thinking_level_change() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation when skipping thinking_level_change"
+    );
 
     let c = &convs[0];
     // Should have 2 messages - thinking_level_change is not a message
-    assert_eq!(c.messages.len(), 2);
+    assert_eq!(
+        c.messages.len(),
+        2,
+        "thinking_level_change events should not be counted as messages"
+    );
     for msg in &c.messages {
-        assert!(!msg.content.contains("thinking_level_change"));
+        assert!(
+            !msg.content.contains("thinking_level_change"),
+            "message content should not contain thinking_level_change event type"
+        );
     }
 }
 
@@ -626,22 +737,50 @@ fn pi_agent_connector_populates_author_for_assistant_messages() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation for author population test"
+    );
 
     let c = &convs[0];
-    assert_eq!(c.messages.len(), 3);
+    assert_eq!(
+        c.messages.len(),
+        3,
+        "expected 3 messages (user + 2 assistant)"
+    );
 
     // User message should have no author
-    assert_eq!(c.messages[0].role, "user");
-    assert!(c.messages[0].author.is_none());
+    assert_eq!(
+        c.messages[0].role, "user",
+        "first message should be from user"
+    );
+    assert!(
+        c.messages[0].author.is_none(),
+        "user messages should not have author field set"
+    );
 
     // First assistant message uses modelId from session header
-    assert_eq!(c.messages[1].role, "assistant");
-    assert_eq!(c.messages[1].author, Some("claude-sonnet-4".to_string()));
+    assert_eq!(
+        c.messages[1].role, "assistant",
+        "second message should be from assistant"
+    );
+    assert_eq!(
+        c.messages[1].author,
+        Some("claude-sonnet-4".to_string()),
+        "assistant message should use modelId from session header"
+    );
 
     // Second assistant message uses explicit model from message
-    assert_eq!(c.messages[2].role, "assistant");
-    assert_eq!(c.messages[2].author, Some("claude-opus-4-5".to_string()));
+    assert_eq!(
+        c.messages[2].role, "assistant",
+        "third message should be from assistant"
+    );
+    assert_eq!(
+        c.messages[2].author,
+        Some("claude-opus-4-5".to_string()),
+        "assistant message with explicit model should use that model"
+    );
 }
 
 // =============================================================================
@@ -680,21 +819,46 @@ fn pi_agent_connector_handles_multiple_model_changes() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation with multiple model changes"
+    );
 
     let c = &convs[0];
-    assert_eq!(c.messages.len(), 5);
+    assert_eq!(
+        c.messages.len(),
+        5,
+        "expected 5 messages (user + 4 assistant) across model changes"
+    );
 
     // Verify each assistant message has the correct model based on most recent model_change
-    assert_eq!(c.messages[1].author, Some("claude-sonnet-4".to_string())); // Before any model_change
-    assert_eq!(c.messages[2].author, Some("claude-opus-4".to_string())); // After first model_change
-    assert_eq!(c.messages[3].author, Some("gpt-4-turbo".to_string())); // After second model_change
-    assert_eq!(c.messages[4].author, Some("claude-sonnet-4".to_string())); // After third model_change
+    assert_eq!(
+        c.messages[1].author,
+        Some("claude-sonnet-4".to_string()),
+        "msg 1 should use initial model before any model_change"
+    ); // Before any model_change
+    assert_eq!(
+        c.messages[2].author,
+        Some("claude-opus-4".to_string()),
+        "msg 2 should use claude-opus-4 after first model_change"
+    ); // After first model_change
+    assert_eq!(
+        c.messages[3].author,
+        Some("gpt-4-turbo".to_string()),
+        "msg 3 should use gpt-4-turbo after second model_change"
+    ); // After second model_change
+    assert_eq!(
+        c.messages[4].author,
+        Some("claude-sonnet-4".to_string()),
+        "msg 4 should use claude-sonnet-4 after third model_change"
+    ); // After third model_change
 
     // Final metadata should reflect last model state
     assert_eq!(
         c.metadata.get("model_id").and_then(|v| v.as_str()),
-        Some("claude-sonnet-4")
+        Some("claude-sonnet-4"),
+        "final metadata model_id should reflect last model after all changes"
     );
 }
 
@@ -724,14 +888,25 @@ fn pi_agent_connector_handles_empty_thinking_block() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation with empty thinking block"
+    );
 
     let c = &convs[0];
-    assert_eq!(c.messages.len(), 2);
+    assert_eq!(
+        c.messages.len(),
+        2,
+        "expected 2 messages (user + assistant with empty thinking)"
+    );
 
     // The assistant message should still be parsed correctly
     let assistant = &c.messages[1];
-    assert!(assistant.content.contains("Here is my response"));
+    assert!(
+        assistant.content.contains("Here is my response"),
+        "text content should be preserved even with empty thinking block"
+    );
     // Empty thinking blocks may be included as "[Thinking] " or omitted entirely
     // depending on connector implementation - both are valid behaviors
 }
@@ -766,22 +941,57 @@ fn pi_agent_connector_handles_nested_tool_calls() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation with nested tool calls"
+    );
 
     let c = &convs[0];
-    assert_eq!(c.messages.len(), 6);
+    assert_eq!(
+        c.messages.len(),
+        6,
+        "expected 6 messages in nested tool call sequence"
+    );
 
     // Verify all messages are properly parsed in sequence
-    assert_eq!(c.messages[0].role, "user");
-    assert_eq!(c.messages[1].role, "assistant");
-    assert!(c.messages[1].content.contains("[Tool: search]"));
-    assert_eq!(c.messages[2].role, "tool");
-    assert!(c.messages[2].content.contains("/src/main.rs"));
-    assert_eq!(c.messages[3].role, "assistant");
-    assert!(c.messages[3].content.contains("[Tool: read]"));
-    assert_eq!(c.messages[4].role, "tool");
-    assert!(c.messages[4].content.contains("fn main()"));
-    assert_eq!(c.messages[5].role, "assistant");
+    assert_eq!(c.messages[0].role, "user", "msg 0 should be user request");
+    assert_eq!(
+        c.messages[1].role, "assistant",
+        "msg 1 should be assistant with search tool"
+    );
+    assert!(
+        c.messages[1].content.contains("[Tool: search]"),
+        "assistant should have search tool call formatted"
+    );
+    assert_eq!(
+        c.messages[2].role, "tool",
+        "msg 2 should be search tool result"
+    );
+    assert!(
+        c.messages[2].content.contains("/src/main.rs"),
+        "search result should contain found file path"
+    );
+    assert_eq!(
+        c.messages[3].role, "assistant",
+        "msg 3 should be assistant with read tool"
+    );
+    assert!(
+        c.messages[3].content.contains("[Tool: read]"),
+        "assistant should have read tool call formatted"
+    );
+    assert_eq!(
+        c.messages[4].role, "tool",
+        "msg 4 should be read tool result"
+    );
+    assert!(
+        c.messages[4].content.contains("fn main()"),
+        "read result should contain file content"
+    );
+    assert_eq!(
+        c.messages[5].role, "assistant",
+        "msg 5 should be final assistant response"
+    );
 }
 
 #[test]
@@ -830,17 +1040,34 @@ fn pi_agent_connector_handles_very_long_session() {
     let convs = connector.scan(&ctx).unwrap();
     let elapsed = start.elapsed();
 
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation for 1000-message stress test"
+    );
     let c = &convs[0];
-    assert_eq!(c.messages.len(), 1000);
+    assert_eq!(
+        c.messages.len(),
+        1000,
+        "expected all 1000 messages to be parsed"
+    );
 
     // Verify first and last messages
-    assert!(c.messages[0].content.contains("Question number 0"));
-    assert!(c.messages[999].content.contains("Answer number 499"));
+    assert!(
+        c.messages[0].content.contains("Question number 0"),
+        "first message should be 'Question number 0'"
+    );
+    assert!(
+        c.messages[999].content.contains("Answer number 499"),
+        "last message should be 'Answer number 499'"
+    );
 
     // Indices should be sequential
-    assert_eq!(c.messages[0].idx, 0);
-    assert_eq!(c.messages[999].idx, 999);
+    assert_eq!(c.messages[0].idx, 0, "first message should have index 0");
+    assert_eq!(
+        c.messages[999].idx, 999,
+        "last message should have index 999"
+    );
 
     // Should complete in reasonable time (< 5 seconds)
     assert!(
@@ -879,26 +1106,65 @@ fn pi_agent_connector_handles_unicode_content() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation with Unicode content"
+    );
 
     let c = &convs[0];
-    assert_eq!(c.messages.len(), 5);
+    assert_eq!(
+        c.messages.len(),
+        5,
+        "expected 5 messages with various Unicode content"
+    );
 
     // Verify Unicode content is preserved
-    assert!(c.messages[0].content.contains("你好"));
-    assert!(c.messages[0].content.contains("مرحبا"));
-    assert!(c.messages[0].content.contains("🎉🦀"));
-    assert!(c.messages[1].content.contains("👍✅🚀"));
-    assert!(c.messages[2].content.contains("café"));
-    assert!(c.messages[3].content.contains("∑"));
-    assert!(c.messages[3].content.contains("π"));
-    assert!(c.messages[4].content.contains("日本語"));
-    assert!(c.messages[4].content.contains("한국어"));
-    assert!(c.messages[4].content.contains("ภาษาไทย"));
+    assert!(
+        c.messages[0].content.contains("你好"),
+        "Chinese characters should be preserved"
+    );
+    assert!(
+        c.messages[0].content.contains("مرحبا"),
+        "Arabic characters should be preserved"
+    );
+    assert!(
+        c.messages[0].content.contains("🎉🦀"),
+        "emojis should be preserved"
+    );
+    assert!(
+        c.messages[1].content.contains("👍✅🚀"),
+        "emoji sequences should be preserved"
+    );
+    assert!(
+        c.messages[2].content.contains("café"),
+        "combining characters should be preserved"
+    );
+    assert!(
+        c.messages[3].content.contains("∑"),
+        "math symbols should be preserved"
+    );
+    assert!(
+        c.messages[3].content.contains("π"),
+        "Greek letters should be preserved"
+    );
+    assert!(
+        c.messages[4].content.contains("日本語"),
+        "Japanese characters should be preserved"
+    );
+    assert!(
+        c.messages[4].content.contains("한국어"),
+        "Korean characters should be preserved"
+    );
+    assert!(
+        c.messages[4].content.contains("ภาษาไทย"),
+        "Thai characters should be preserved"
+    );
 
     // Title should handle Unicode
     assert!(
-        c.title.as_ref().unwrap().contains("你好") || c.title.as_ref().unwrap().contains("Hello")
+        c.title.as_ref().unwrap().contains("你好") || c.title.as_ref().unwrap().contains("Hello"),
+        "title should preserve Unicode characters from first user message"
     );
 }
 
@@ -928,14 +1194,25 @@ fn pi_agent_connector_handles_null_thinking_content() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation with null thinking content"
+    );
 
     let c = &convs[0];
-    assert_eq!(c.messages.len(), 2);
+    assert_eq!(
+        c.messages.len(),
+        2,
+        "expected 2 messages (user + assistant with null thinking)"
+    );
 
     // The assistant message should still be parsed correctly with null thinking
     let assistant = &c.messages[1];
-    assert!(assistant.content.contains("Here is my response"));
+    assert!(
+        assistant.content.contains("Here is my response"),
+        "text content should be preserved even with null thinking"
+    );
 }
 
 #[test]
@@ -964,12 +1241,23 @@ fn pi_agent_connector_handles_tool_call_with_null_arguments() {
         since_ts: None,
     };
     let convs = connector.scan(&ctx).unwrap();
-    assert_eq!(convs.len(), 1);
+    assert_eq!(
+        convs.len(),
+        1,
+        "expected exactly 1 conversation with null tool arguments"
+    );
 
     let c = &convs[0];
-    assert_eq!(c.messages.len(), 2);
+    assert_eq!(
+        c.messages.len(),
+        2,
+        "expected 2 messages (user + assistant with tool call)"
+    );
 
     // Tool call with null arguments should still be parsed
     let assistant = &c.messages[1];
-    assert!(assistant.content.contains("[Tool: get_status]"));
+    assert!(
+        assistant.content.contains("[Tool: get_status]"),
+        "tool call should be formatted even with null arguments"
+    );
 }

@@ -285,7 +285,11 @@ fn search_cursor_and_token_budget() {
     let first_out = first.assert().success().get_output().clone();
     let first_json: Value = serde_json::from_slice(&first_out.stdout).expect("valid search json");
     assert_eq!(first_json["request_id"], "rid-123");
-    assert!(first_json["hits_clamped"].as_bool().unwrap_or(false));
+    assert!(
+        first_json["hits_clamped"].as_bool().unwrap_or(false),
+        "hits_clamped should be true when --max-results limits output, got: {:?}",
+        first_json["hits_clamped"]
+    );
     if let Some(cursor) = first_json["_meta"]
         .get("next_cursor")
         .and_then(|c| c.as_str())
@@ -1076,14 +1080,14 @@ fn find_command<'a>(json: &'a Value, name: &str) -> &'a Value {
     json["commands"]
         .as_array()
         .and_then(|cmds| cmds.iter().find(|c| c["name"] == name))
-        .unwrap_or_else(|| panic!("command {name} missing from introspect"))
+        .expect(&format!("command {name} missing from introspect"))
 }
 
 fn find_arg<'a>(cmd: &'a Value, name: &str) -> &'a Value {
     cmd["arguments"]
         .as_array()
         .and_then(|args| args.iter().find(|a| a["name"] == name))
-        .unwrap_or_else(|| panic!("arg {name} missing in command {}", cmd["name"]))
+        .expect(&format!("arg {name} missing in command {}", cmd["name"]))
 }
 
 #[test]
@@ -3433,14 +3437,14 @@ fn introspect_index_embedder_default() {
 fn parse_index_semantic_embedder_flags() {
     let cli =
         Cli::try_parse_from(["cass", "index", "--semantic", "--embedder", "fastembed"]).unwrap();
-    match cli.command {
-        Some(Commands::Index {
-            semantic, embedder, ..
-        }) => {
-            assert!(semantic, "semantic flag should be set");
-            assert_eq!(embedder, "fastembed");
-        }
-        other => panic!("expected index command, got {other:?}"),
+    if let Some(Commands::Index {
+        semantic, embedder, ..
+    }) = cli.command
+    {
+        assert!(semantic, "semantic flag should be set");
+        assert_eq!(embedder, "fastembed");
+    } else {
+        assert!(false, "expected index command, got {:?}", cli.command);
     }
 }
 
@@ -3448,14 +3452,14 @@ fn parse_index_semantic_embedder_flags() {
 #[test]
 fn parse_index_embedder_default() {
     let cli = Cli::try_parse_from(["cass", "index", "--semantic"]).unwrap();
-    match cli.command {
-        Some(Commands::Index {
-            semantic, embedder, ..
-        }) => {
-            assert!(semantic, "semantic flag should be set");
-            assert_eq!(embedder, "fastembed");
-        }
-        other => panic!("expected index command, got {other:?}"),
+    if let Some(Commands::Index {
+        semantic, embedder, ..
+    }) = cli.command
+    {
+        assert!(semantic, "semantic flag should be set");
+        assert_eq!(embedder, "fastembed");
+    } else {
+        assert!(false, "expected index command, got {:?}", cli.command);
     }
 }
 
@@ -3598,7 +3602,7 @@ fn introspect_all_path_options_documented() {
         let flag = globals
             .iter()
             .find(|f| f["name"] == name)
-            .unwrap_or_else(|| panic!("{name} exists"));
+            .expect(&format!("{name} exists"));
         assert_eq!(
             flag["value_type"], "path",
             "global --{name} should be path type"

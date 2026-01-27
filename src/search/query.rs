@@ -9640,4 +9640,432 @@ mod tests {
         assert!(!tokens.is_empty());
         assert!(!qt.is_empty());
     }
+
+    // ==========================================================================
+    // Query Parser Unit Tests (br-335y) - Unicode, Special Chars, Edge Cases
+    // ==========================================================================
+
+    // --- Unicode queries with emoji in terms ---
+
+    #[test]
+    fn unicode_emoji_mixed_with_alphanumeric() {
+        // Emoji surrounded by alphanumeric text
+        let tokens = parse_boolean_query("rocket🚀launch");
+        assert_eq!(tokens.len(), 1);
+        // sanitize_query strips emoji (non-alphanumeric), so this becomes "rocket launch"
+        let sanitized = sanitize_query("rocket🚀launch");
+        assert_eq!(sanitized, "rocket launch");
+
+        // Multiple emoji between words
+        let sanitized2 = sanitize_query("test🔥🎯code");
+        assert_eq!(sanitized2, "test  code");
+    }
+
+    #[test]
+    fn unicode_emoji_with_boolean_operators() {
+        // AND/OR/NOT with queries containing emoji
+        let tokens = parse_boolean_query("🚀code AND test");
+        // After parsing, we should have 3 tokens (emoji becomes space/empty)
+        let term_count = tokens
+            .iter()
+            .filter(|t| matches!(t, QueryToken::Term(_)))
+            .count();
+        assert!(term_count >= 1, "Should have at least one term");
+
+        // OR with emoji
+        let tokens_or = parse_boolean_query("deploy OR 🎯target");
+        let has_or = tokens_or.iter().any(|t| matches!(t, QueryToken::Or));
+        assert!(has_or, "Should detect OR operator");
+    }
+
+    #[test]
+    fn unicode_emoji_at_word_boundaries() {
+        // Emoji at start of query
+        let sanitized_start = sanitize_query("🔍search");
+        assert_eq!(sanitized_start, " search");
+
+        // Emoji at end of query
+        let sanitized_end = sanitize_query("complete✅");
+        assert_eq!(sanitized_end, "complete ");
+
+        // Only emoji - becomes empty
+        let sanitized_only = sanitize_query("🎉🎊🎁");
+        assert!(
+            sanitized_only.trim().is_empty(),
+            "Emoji-only should be empty after trimming"
+        );
+    }
+
+    // --- RTL (Right-to-Left) text: Arabic and Hebrew ---
+
+    #[test]
+    fn unicode_arabic_text_preserved() {
+        // Arabic text should be preserved as alphanumeric
+        let arabic = "مرحبا بالعالم"; // "Hello World" in Arabic
+        let sanitized = sanitize_query(arabic);
+        assert_eq!(
+            sanitized, arabic,
+            "Arabic alphanumeric chars should be preserved"
+        );
+
+        let tokens = parse_boolean_query(arabic);
+        assert!(!tokens.is_empty(), "Arabic query should produce tokens");
+    }
+
+    #[test]
+    fn unicode_hebrew_text_preserved() {
+        // Hebrew text should be preserved
+        let hebrew = "שלום עולם"; // "Hello World" in Hebrew
+        let sanitized = sanitize_query(hebrew);
+        assert_eq!(
+            sanitized, hebrew,
+            "Hebrew alphanumeric chars should be preserved"
+        );
+
+        let tokens = parse_boolean_query(hebrew);
+        assert!(!tokens.is_empty(), "Hebrew query should produce tokens");
+    }
+
+    #[test]
+    fn unicode_mixed_rtl_and_ltr() {
+        // Mixed RTL (Arabic) and LTR (English) text
+        let mixed = "hello مرحبا world";
+        let sanitized = sanitize_query(mixed);
+        assert_eq!(sanitized, mixed, "Mixed RTL/LTR should be preserved");
+
+        let tokens = parse_boolean_query(mixed);
+        let term_count = tokens
+            .iter()
+            .filter(|t| matches!(t, QueryToken::Term(_)))
+            .count();
+        assert_eq!(term_count, 3, "Should have 3 terms");
+    }
+
+    #[test]
+    fn unicode_rtl_with_boolean_operators() {
+        // Hebrew with AND operator
+        let hebrew_and = "שלום AND עולם";
+        let tokens = parse_boolean_query(hebrew_and);
+        let has_and = tokens.iter().any(|t| matches!(t, QueryToken::And));
+        assert!(has_and, "Should detect AND operator in Hebrew query");
+
+        // Arabic with NOT operator
+        let arabic_not = "مرحبا NOT بالعالم";
+        let tokens_not = parse_boolean_query(arabic_not);
+        let has_not = tokens_not.iter().any(|t| matches!(t, QueryToken::Not));
+        assert!(has_not, "Should detect NOT operator in Arabic query");
+    }
+
+    // --- Backslash handling ---
+
+    #[test]
+    fn special_chars_backslash_stripped() {
+        // Backslash is not alphanumeric, so it becomes space
+        let query = r"path\to\file";
+        let sanitized = sanitize_query(query);
+        assert_eq!(sanitized, "path to file");
+    }
+
+    #[test]
+    fn special_chars_escaped_quotes_handling() {
+        // Backslash before quote - backslash stripped, quote preserved
+        let query = r#"say \"hello\""#;
+        let sanitized = sanitize_query(query);
+        // Backslash becomes space, quotes preserved
+        assert!(sanitized.contains('"'), "Quotes should be preserved");
+    }
+
+    #[test]
+    fn special_chars_windows_paths() {
+        // Windows-style paths with backslashes
+        let path = r"C:\Users\test\Documents";
+        let sanitized = sanitize_query(path);
+        assert_eq!(sanitized, "C  Users test Documents");
+    }
+
+    // --- Nested/Complex boolean operators ---
+
+    #[test]
+    fn boolean_deeply_nested_operators() {
+        // Complex nested expression (parser treats this as linear)
+        let query = "a AND b OR c NOT d AND e";
+        let tokens = parse_boolean_query(query);
+
+        let mut and_count = 0;
+        let mut or_count = 0;
+        let mut not_count = 0;
+        for token in &tokens {
+            match token {
+                QueryToken::And => and_count += 1,
+                QueryToken::Or => or_count += 1,
+                QueryToken::Not => not_count += 1,
+                _ => {}
+            }
+        }
+
+        assert_eq!(and_count, 2, "Should have 2 AND operators");
+        assert_eq!(or_count, 1, "Should have 1 OR operator");
+        assert_eq!(not_count, 1, "Should have 1 NOT operator");
+    }
+
+    #[test]
+    fn boolean_consecutive_operators_degenerate() {
+        // Consecutive operators: "AND AND" - second AND becomes a term
+        let tokens = parse_boolean_query("foo AND AND bar");
+        // "AND" as the final part of "AND AND" is treated as operator, then next "bar" is term
+        let term_count = tokens
+            .iter()
+            .filter(|t| matches!(t, QueryToken::Term(_)))
+            .count();
+        assert!(term_count >= 2, "Should have at least 2 terms (foo and bar)");
+    }
+
+    #[test]
+    fn boolean_operator_at_start() {
+        // Operator at start of query
+        let tokens = parse_boolean_query("AND foo");
+        let has_and = tokens.iter().any(|t| matches!(t, QueryToken::And));
+        assert!(has_and, "Leading AND should be detected");
+
+        let tokens_or = parse_boolean_query("OR test");
+        let has_or = tokens_or.iter().any(|t| matches!(t, QueryToken::Or));
+        assert!(has_or, "Leading OR should be detected");
+    }
+
+    #[test]
+    fn boolean_operator_at_end() {
+        // Operator at end of query
+        let tokens = parse_boolean_query("foo AND");
+        let has_and = tokens.iter().any(|t| matches!(t, QueryToken::And));
+        assert!(has_and, "Trailing AND should be detected");
+    }
+
+    // --- Numeric-only queries ---
+
+    #[test]
+    fn numeric_query_digits_only() {
+        // Query with only digits
+        let tokens = parse_boolean_query("12345");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0], QueryToken::Term("12345".to_string()));
+
+        let sanitized = sanitize_query("12345");
+        assert_eq!(sanitized, "12345");
+    }
+
+    #[test]
+    fn numeric_query_with_text() {
+        // Mixed numeric and text
+        let tokens = parse_boolean_query("error 404 not found");
+        let term_count = tokens
+            .iter()
+            .filter(|t| matches!(t, QueryToken::Term(_)))
+            .count();
+        // "404", "error", "found" are terms, "not" is NOT operator
+        assert!(term_count >= 3, "Should have at least 3 terms");
+    }
+
+    #[test]
+    fn numeric_versions_with_dots() {
+        // Version numbers like "1.2.3"
+        let sanitized = sanitize_query("version 1.2.3");
+        assert_eq!(sanitized, "version 1 2 3"); // dots become spaces
+    }
+
+    // --- Tab and newline handling ---
+
+    #[test]
+    fn whitespace_tabs_treated_as_separators() {
+        let tokens = parse_boolean_query("foo\tbar\tbaz");
+        let term_count = tokens
+            .iter()
+            .filter(|t| matches!(t, QueryToken::Term(_)))
+            .count();
+        assert_eq!(term_count, 3, "Tabs should separate terms");
+    }
+
+    #[test]
+    fn whitespace_newlines_treated_as_separators() {
+        let tokens = parse_boolean_query("foo\nbar\nbaz");
+        let term_count = tokens
+            .iter()
+            .filter(|t| matches!(t, QueryToken::Term(_)))
+            .count();
+        assert_eq!(term_count, 3, "Newlines should separate terms");
+    }
+
+    #[test]
+    fn whitespace_mixed_types() {
+        let tokens = parse_boolean_query("a \t b \n c   d");
+        let term_count = tokens
+            .iter()
+            .filter(|t| matches!(t, QueryToken::Term(_)))
+            .count();
+        assert_eq!(term_count, 4, "Mixed whitespace should separate properly");
+    }
+
+    // --- Very long single terms (no spaces) ---
+
+    #[test]
+    fn stress_very_long_single_term() {
+        // Single term with 10K characters (no spaces)
+        let long_term = "a".repeat(10_000);
+
+        let start = std::time::Instant::now();
+        let tokens = parse_boolean_query(&long_term);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "10K char term took {:?} (>1s)",
+            elapsed
+        );
+        assert_eq!(tokens.len(), 1);
+        if let QueryToken::Term(t) = &tokens[0] {
+            assert_eq!(t.len(), 10_000);
+        } else {
+            panic!("Expected Term token");
+        }
+    }
+
+    #[test]
+    fn stress_very_long_term_with_wildcard() {
+        // Long term with wildcard suffix
+        let long_pattern = format!("{}*", "prefix".repeat(1000));
+
+        let start = std::time::Instant::now();
+        let sanitized = sanitize_query(&long_pattern);
+        let pattern = WildcardPattern::parse(&sanitized);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "Long wildcard pattern took {:?} (>1s)",
+            elapsed
+        );
+        assert!(
+            matches!(pattern, WildcardPattern::Prefix(_)),
+            "Should parse as prefix pattern"
+        );
+    }
+
+    // --- QueryExplanation edge cases ---
+
+    #[test]
+    fn query_explanation_empty_query() {
+        let explanation = QueryExplanation::analyze("", &SearchFilters::default());
+        assert_eq!(explanation.query_type, QueryType::Empty);
+    }
+
+    #[test]
+    fn query_explanation_whitespace_only_query() {
+        let explanation = QueryExplanation::analyze("   \t\n  ", &SearchFilters::default());
+        assert_eq!(explanation.query_type, QueryType::Empty);
+    }
+
+    #[test]
+    fn query_explanation_unicode_query() {
+        let explanation = QueryExplanation::analyze("日本語 search", &SearchFilters::default());
+        // Should classify as Simple (no operators, multiple terms = implicit AND)
+        assert!(!explanation.parsed.terms.is_empty());
+    }
+
+    // --- SQL placeholders edge cases ---
+
+    #[test]
+    fn sql_placeholders_zero_returns_empty() {
+        assert_eq!(sql_placeholders(0), "");
+    }
+
+    #[test]
+    fn sql_placeholders_one_returns_single() {
+        assert_eq!(sql_placeholders(1), "?");
+    }
+
+    #[test]
+    fn sql_placeholders_many() {
+        assert_eq!(sql_placeholders(5), "?,?,?,?,?");
+    }
+
+    #[test]
+    fn sql_placeholders_large_count() {
+        let result = sql_placeholders(1000);
+        assert_eq!(result.len(), 1000 * 2 - 1); // 1000 "?" + 999 ","
+        assert!(result.starts_with('?'));
+        assert!(result.ends_with('?'));
+        assert_eq!(result.matches('?').count(), 1000);
+        assert_eq!(result.matches(',').count(), 999);
+    }
+
+    // --- QueryTermsLower edge cases ---
+
+    #[test]
+    fn query_terms_lower_unicode_normalization() {
+        // Accented characters should be lowercased properly
+        let terms = QueryTermsLower::from_query("CAFÉ RÉSUMÉ");
+        assert_eq!(terms.query_lower, "café résumé");
+    }
+
+    #[test]
+    fn query_terms_lower_mixed_case_unicode() {
+        // Mixed case CJK and Latin
+        let terms = QueryTermsLower::from_query("Hello日本語World");
+        // CJK chars have no case, Latin chars should be lowercased
+        assert!(terms.query_lower.contains("hello"));
+        assert!(terms.query_lower.contains("world"));
+    }
+
+    #[test]
+    fn query_terms_lower_preserves_numbers() {
+        let terms = QueryTermsLower::from_query("ABC123XYZ");
+        assert_eq!(terms.query_lower, "abc123xyz");
+    }
+
+    // --- WildcardPattern edge cases ---
+
+    #[test]
+    fn wildcard_pattern_internal_asterisk() {
+        // Internal wildcard: f*o
+        let pattern = WildcardPattern::parse("f*o");
+        assert!(
+            matches!(pattern, WildcardPattern::Complex(_)),
+            "Internal asterisk should be Complex"
+        );
+    }
+
+    #[test]
+    fn wildcard_pattern_multiple_internal_asterisks() {
+        // Multiple internal wildcards: a*b*c
+        let pattern = WildcardPattern::parse("a*b*c");
+        assert!(
+            matches!(pattern, WildcardPattern::Complex(_)),
+            "Multiple internal asterisks should be Complex"
+        );
+    }
+
+    #[test]
+    fn wildcard_pattern_regex_escapes_special_chars() {
+        // Pattern with regex-special characters
+        let pattern = WildcardPattern::parse("*foo.bar*");
+        if let Some(regex) = pattern.to_regex() {
+            assert!(
+                regex.contains("\\."),
+                "Dot should be escaped in regex: {}",
+                regex
+            );
+        }
+    }
+
+    #[test]
+    fn wildcard_pattern_complex_regex_generation() {
+        let pattern = WildcardPattern::parse("f*o*o");
+        if let Some(regex) = pattern.to_regex() {
+            // Should handle internal wildcards
+            assert!(
+                regex.contains(".*"),
+                "Should have .* for internal wildcards: {}",
+                regex
+            );
+        }
+    }
 }

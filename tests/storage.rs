@@ -55,7 +55,11 @@ fn schema_version_created_on_open() {
 
     // If meta row is removed, the getter surfaces an error.
     storage.raw().execute("DELETE FROM meta", []).unwrap();
-    assert!(storage.schema_version().is_err());
+    assert!(
+        storage.schema_version().is_err(),
+        "schema_version should return error after meta table is deleted, got: {:?}",
+        storage.schema_version()
+    );
 }
 
 #[test]
@@ -379,13 +383,25 @@ fn agents_table_has_correct_columns() {
         .map(|r| r.unwrap())
         .collect();
 
-    assert!(columns.contains(&"id".to_string()));
-    assert!(columns.contains(&"slug".to_string()));
-    assert!(columns.contains(&"name".to_string()));
-    assert!(columns.contains(&"version".to_string()));
-    assert!(columns.contains(&"kind".to_string()));
-    assert!(columns.contains(&"created_at".to_string()));
-    assert!(columns.contains(&"updated_at".to_string()));
+    let missing: Vec<&str> = [
+        "id",
+        "slug",
+        "name",
+        "version",
+        "kind",
+        "created_at",
+        "updated_at",
+    ]
+    .iter()
+    .filter(|&&col| !columns.contains(&col.to_string()))
+    .copied()
+    .collect();
+    assert!(
+        missing.is_empty(),
+        "agents table missing columns: {:?}, found: {:?}",
+        missing,
+        columns
+    );
 }
 
 #[test]
@@ -403,16 +419,29 @@ fn conversations_table_has_correct_columns() {
         .map(|r| r.unwrap())
         .collect();
 
-    assert!(columns.contains(&"id".to_string()));
-    assert!(columns.contains(&"agent_id".to_string()));
-    assert!(columns.contains(&"workspace_id".to_string()));
-    assert!(columns.contains(&"external_id".to_string()));
-    assert!(columns.contains(&"title".to_string()));
-    assert!(columns.contains(&"source_path".to_string()));
-    assert!(columns.contains(&"started_at".to_string()));
-    assert!(columns.contains(&"ended_at".to_string()));
-    assert!(columns.contains(&"approx_tokens".to_string()));
-    assert!(columns.contains(&"metadata_json".to_string()));
+    let expected = [
+        "id",
+        "agent_id",
+        "workspace_id",
+        "external_id",
+        "title",
+        "source_path",
+        "started_at",
+        "ended_at",
+        "approx_tokens",
+        "metadata_json",
+    ];
+    let missing: Vec<&str> = expected
+        .iter()
+        .filter(|&&col| !columns.contains(&col.to_string()))
+        .copied()
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "conversations table missing columns: {:?}, found: {:?}",
+        missing,
+        columns
+    );
 }
 
 #[test]
