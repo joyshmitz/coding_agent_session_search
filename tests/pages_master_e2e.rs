@@ -1013,6 +1013,15 @@ fn html_escape(s: &str) -> String {
 // Master Test Runner (Programmatic Execution)
 // =============================================================================
 
+/// Macro to run a workflow test with correct line number capture.
+///
+/// Using a macro instead of a function ensures `line!()` captures the call site.
+macro_rules! run_workflow_test {
+    ($logger:expr, $name:expr, $f:expr) => {
+        run_with_logging($logger, $name, "pages_master_e2e", file!(), line!(), $f)
+    };
+}
+
 /// Run all master E2E tests programmatically with comprehensive logging.
 ///
 /// This function is designed to be called from a binary or integration test
@@ -1040,7 +1049,7 @@ pub fn run_master_suite() -> std::io::Result<MasterSuiteReport> {
     logger.phase_start(&phase)?;
     let phase_start = Instant::now();
 
-    outcomes.push(run_workflow_test(&logger, "test_full_export_workflow", || {
+    outcomes.push(run_workflow_test!(&logger, "test_full_export_workflow", || {
         let config = E2EConfig::default();
         let artifacts = build_pipeline(&config);
         let result = verify_bundle(&artifacts.bundle.site_dir, false)?;
@@ -1050,7 +1059,7 @@ pub fn run_master_suite() -> std::io::Result<MasterSuiteReport> {
         Ok(())
     }));
 
-    outcomes.push(run_workflow_test(&logger, "test_empty_archive_handling", || {
+    outcomes.push(run_workflow_test!(&logger, "test_empty_archive_handling", || {
         let config = E2EConfig {
             conversation_count: 1,
             messages_per_conversation: 1,
@@ -1074,7 +1083,7 @@ pub fn run_master_suite() -> std::io::Result<MasterSuiteReport> {
     logger.phase_start(&phase)?;
     let phase_start = Instant::now();
 
-    outcomes.push(run_workflow_test(&logger, "test_password_authentication", || {
+    outcomes.push(run_workflow_test!(&logger, "test_password_authentication", || {
         let config = E2EConfig::default();
         let artifacts = build_pipeline(&config);
         let enc_config = load_config(&artifacts.bundle.site_dir)?;
@@ -1083,7 +1092,7 @@ pub fn run_master_suite() -> std::io::Result<MasterSuiteReport> {
         Ok(())
     }));
 
-    outcomes.push(run_workflow_test(&logger, "test_recovery_key_authentication", || {
+    outcomes.push(run_workflow_test!(&logger, "test_recovery_key_authentication", || {
         let config = E2EConfig::default();
         let artifacts = build_pipeline(&config);
         let enc_config = load_config(&artifacts.bundle.site_dir)?;
@@ -1102,7 +1111,7 @@ pub fn run_master_suite() -> std::io::Result<MasterSuiteReport> {
     logger.phase_start(&phase)?;
     let phase_start = Instant::now();
 
-    outcomes.push(run_workflow_test(&logger, "test_invalid_password_rejected", || {
+    outcomes.push(run_workflow_test!(&logger, "test_invalid_password_rejected", || {
         let config = E2EConfig::default();
         let artifacts = build_pipeline(&config);
         let enc_config = load_config(&artifacts.bundle.site_dir)?;
@@ -1144,13 +1153,6 @@ pub fn run_master_suite() -> std::io::Result<MasterSuiteReport> {
         html,
         exit_code,
     })
-}
-
-fn run_workflow_test<F>(logger: &E2eLogger, name: &str, f: F) -> TestOutcome
-where
-    F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
-{
-    run_with_logging(logger, name, "pages_master_e2e", file!(), line!(), f)
 }
 
 /// Report from running the master test suite.
