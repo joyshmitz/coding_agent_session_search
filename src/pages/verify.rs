@@ -13,6 +13,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
+use super::archive_config::{ArchiveConfig, UnencryptedConfig};
 use super::bundle::IntegrityManifest;
 use super::encrypt::EncryptionConfig;
 
@@ -244,7 +245,7 @@ fn check_config_schema(site_dir: &Path) -> CheckResult {
     let config_path = site_dir.join("config.json");
 
     // Parse config
-    let config: EncryptionConfig = match File::open(&config_path)
+    let config: ArchiveConfig = match File::open(&config_path)
         .context("Failed to open config.json")
         .and_then(|f| serde_json::from_reader(BufReader::new(f)).context("Failed to parse JSON"))
     {
@@ -252,6 +253,19 @@ fn check_config_schema(site_dir: &Path) -> CheckResult {
         Err(e) => return CheckResult::fail(format!("Failed to parse config.json: {}", e)),
     };
 
+    let errors = match &config {
+        ArchiveConfig::Encrypted(enc) => validate_encrypted_config(enc),
+        ArchiveConfig::Unencrypted(unenc) => validate_unencrypted_config(unenc),
+    };
+
+    if errors.is_empty() {
+        CheckResult::pass()
+    } else {
+        CheckResult::fail(errors.join("; "))
+    }
+}
+
+fn validate_encrypted_config(config: &EncryptionConfig) -> Vec<String> {
     let mut errors = Vec::new();
 
     // Validate export_id (base64, 16 bytes)
@@ -324,11 +338,47 @@ fn check_config_schema(site_dir: &Path) -> CheckResult {
         }
     }
 
-    if errors.is_empty() {
-        CheckResult::pass()
-    } else {
-        CheckResult::fail(errors.join("; "))
+    errors
+}
+
+fn validate_unencrypted_config(config: &UnencryptedConfig) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    if config.encrypted {
+        errors.push("unencrypted config must set encrypted=false".to_string());
     }
+
+    if config.version.trim().is_empty() {
+        errors.push("version cannot be empty".to_string());
+    }
+
+    if config.payload.path.trim().is_empty() {
+        errors.push("payload.path cannot be empty".to_string());
+    } else {
+        let path = Path::new(&config.payload.path);
+        if path.is_absolute() {
+            errors.push("payload.path must be relative".to_string());
+        }
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            errors.push("payload.path must not contain '..'".to_string());
+        }
+        if !path.starts_with("payload") {
+            errors.push("payload.path must reside under payload/".to_string());
+        }
+    }
+
+    let valid_formats = ["sqlite"];
+    if !valid_formats.contains(&config.payload.format.as_str()) {
+        errors.push(format!(
+            "payload.format should be one of {:?}, got '{}'",
+            valid_formats, config.payload.format
+        ));
+    }
+
+    errors
 }
 
 /// Check payload manifest validity
@@ -340,8 +390,8 @@ fn check_payload_manifest(site_dir: &Path) -> CheckResult {
         return CheckResult::fail("payload/ directory not found");
     }
 
-    // Parse config for expected chunks
-    let config: EncryptionConfig = match File::open(&config_path)
+    // Parse config for expected payload
+    let config: ArchiveConfig = match File::open(&config_path)
         .and_then(|f| Ok(serde_json::from_reader(BufReader::new(f))?))
     {
         Ok(c) => c,
@@ -350,50 +400,72 @@ fn check_payload_manifest(site_dir: &Path) -> CheckResult {
 
     let mut errors = Vec::new();
 
-    // Check each expected chunk file exists
-    for (i, expected_file) in config.payload.files.iter().enumerate() {
-        let chunk_path = site_dir.join(expected_file);
-        if !chunk_path.exists() {
-            errors.push(format!("Missing chunk file: {}", expected_file));
-        }
+    match &config {
+        ArchiveConfig::Encrypted(enc) => {
+            // Check each expected chunk file exists
+            for (i, expected_file) in enc.payload.files.iter().enumerate() {
+                let chunk_path = site_dir.join(expected_file);
+                if !chunk_path.exists() {
+                    errors.push(format!("Missing chunk file: {}", expected_file));
+                }
 
-        // Verify filename follows pattern
-        let expected_name = format!("payload/chunk-{:05}.bin", i);
-        if *expected_file != expected_name {
-            errors.push(format!(
-                "Chunk {} has unexpected name: {} (expected {})",
-                i, expected_file, expected_name
-            ));
-        }
-    }
+                // Verify filename follows pattern
+                let expected_name = format!("payload/chunk-{:05}.bin", i);
+                if *expected_file != expected_name {
+                    errors.push(format!(
+                        "Chunk {} has unexpected name: {} (expected {})",
+                        i, expected_file, expected_name
+                    ));
+                }
+            }
 
-    // Check for contiguous chunk files (no gaps)
-    let mut found_chunks: HashSet<u32> = HashSet::new();
-    if let Ok(entries) = fs::read_dir(&payload_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with("chunk-")
-                && name_str.ends_with(".bin")
-                && let Some(num_str) = name_str
-                    .strip_prefix("chunk-")
-                    .and_then(|s| s.strip_suffix(".bin"))
-                && let Ok(num) = num_str.parse::<u32>()
-            {
-                found_chunks.insert(num);
+            // Check for contiguous chunk files (no gaps)
+            let mut found_chunks: HashSet<u32> = HashSet::new();
+            if let Ok(entries) = fs::read_dir(&payload_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("chunk-")
+                        && name_str.ends_with(".bin")
+                        && let Some(num_str) = name_str
+                            .strip_prefix("chunk-")
+                            .and_then(|s| s.strip_suffix(".bin"))
+                        && let Ok(num) = num_str.parse::<u32>()
+                    {
+                        found_chunks.insert(num);
+                    }
+                }
+            }
+
+            // Check for gaps
+            if !found_chunks.is_empty() {
+                let max_chunk = *found_chunks.iter().max().unwrap_or(&0);
+                for i in 0..=max_chunk {
+                    if !found_chunks.contains(&i) {
+                        errors.push(format!(
+                            "Gap in chunk sequence: chunk-{:05}.bin is missing",
+                            i
+                        ));
+                    }
+                }
             }
         }
-    }
-
-    // Check for gaps
-    if !found_chunks.is_empty() {
-        let max_chunk = *found_chunks.iter().max().unwrap_or(&0);
-        for i in 0..=max_chunk {
-            if !found_chunks.contains(&i) {
-                errors.push(format!(
-                    "Gap in chunk sequence: chunk-{:05}.bin is missing",
-                    i
-                ));
+        ArchiveConfig::Unencrypted(unenc) => {
+            let rel_path = Path::new(&unenc.payload.path);
+            if rel_path.is_absolute() {
+                errors.push("payload.path must be relative".to_string());
+            } else if rel_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                errors.push("payload.path must not contain '..'".to_string());
+            } else if !rel_path.starts_with("payload") {
+                errors.push("payload.path must reside under payload/".to_string());
+            } else {
+                let payload_path = site_dir.join(rel_path);
+                if !payload_path.exists() {
+                    errors.push(format!("Missing payload file: {}", unenc.payload.path));
+                }
             }
         }
     }
@@ -727,6 +799,36 @@ mod tests {
         Ok(())
     }
 
+    fn create_unencrypted_site(dir: &Path) -> Result<()> {
+        // Create required files
+        for file in REQUIRED_FILES {
+            fs::write(dir.join(file), format!("mock {}", file))?;
+        }
+
+        // Create payload directory with a raw DB
+        let payload_dir = dir.join("payload");
+        fs::create_dir_all(&payload_dir)?;
+        fs::write(payload_dir.join("data.db"), "unencrypted data")?;
+
+        // Create unencrypted config.json
+        let config = serde_json::json!({
+            "encrypted": false,
+            "version": "1.0.0",
+            "payload": {
+                "path": "payload/data.db",
+                "format": "sqlite",
+                "size_bytes": 16
+            },
+            "warning": "UNENCRYPTED - All content is publicly readable"
+        });
+        fs::write(
+            dir.join("config.json"),
+            serde_json::to_string_pretty(&config)?,
+        )?;
+
+        Ok(())
+    }
+
     #[test]
     fn test_verify_minimal_valid_site() {
         let temp = TempDir::new().unwrap();
@@ -775,6 +877,20 @@ mod tests {
         assert_eq!(result.status, "valid");
         assert!(result.checks.required_files.passed);
         assert!(result.checks.config_schema.passed);
+    }
+
+    #[test]
+    fn test_verify_unencrypted_site() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path().join("site");
+        fs::create_dir_all(&site_dir).unwrap();
+
+        create_unencrypted_site(&site_dir).unwrap();
+
+        let result = verify_bundle(&site_dir, true).unwrap();
+        assert!(result.checks.config_schema.passed);
+        assert!(result.checks.payload_manifest.passed);
+        assert_eq!(result.status, "valid");
     }
 
     #[test]

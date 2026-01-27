@@ -1,7 +1,7 @@
 //! Bundle builder for pages export.
 //!
 //! Creates the deployable static site bundle (site/) and private offline artifacts (private/)
-//! from an encrypted export. Output is safe for public hosting (GitHub Pages / Cloudflare Pages).
+//! from an export. Output is safe for public hosting (GitHub Pages / Cloudflare Pages).
 
 use anyhow::{Context, Result, bail};
 use base64::prelude::*;
@@ -13,6 +13,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
 
+use super::archive_config::{ArchiveConfig, UnencryptedConfig};
 use super::docs::{DocLocation, GeneratedDoc};
 use super::encrypt::EncryptionConfig;
 
@@ -199,8 +200,8 @@ impl BundleBuilder {
             bail!("Missing payload/ directory in encrypted directory");
         }
 
-        // Load encryption config
-        let enc_config: EncryptionConfig = {
+        // Load archive config (encrypted or unencrypted)
+        let archive_config: ArchiveConfig = {
             let file = File::open(&config_path).context("Failed to open config.json")?;
             serde_json::from_reader(BufReader::new(file))?
         };
@@ -226,10 +227,22 @@ impl BundleBuilder {
             fs::write(&dest_path, content).with_context(|| format!("Failed to write {}", name))?;
         }
 
-        progress("payload", "Copying encrypted payload...");
-
-        // Copy payload chunks to site/payload/
-        let chunk_count = copy_payload_chunks(&payload_dir, &site_payload_dir)?;
+        // Copy payload into site/payload/
+        let (chunk_count, is_encrypted) = match archive_config.as_encrypted() {
+            Some(_enc_config) => {
+                progress("payload", "Copying encrypted payload...");
+                let count = copy_payload_chunks(&payload_dir, &site_payload_dir)?;
+                (count, true)
+            }
+            None => {
+                progress("payload", "Copying unencrypted payload...");
+                let unenc_config = archive_config
+                    .as_unencrypted()
+                    .context("Unencrypted config missing")?;
+                let count = copy_payload_file(encrypted_dir, &site_dir, unenc_config)?;
+                (count, false)
+            }
+        };
 
         // Copy attachment blobs if present
         let blobs_dir = encrypted_dir.join("blobs");
@@ -246,7 +259,7 @@ impl BundleBuilder {
         // Write config.json to site/ (already has public params only)
         let site_config_path = site_dir.join("config.json");
         let config_file = File::create(&site_config_path)?;
-        serde_json::to_writer_pretty(BufWriter::new(config_file), &enc_config)?;
+        serde_json::to_writer_pretty(BufWriter::new(config_file), &archive_config)?;
 
         // Write site metadata
         let site_metadata = SiteMetadata {
@@ -301,7 +314,15 @@ impl BundleBuilder {
         progress("private", "Writing private artifacts...");
 
         // Write private artifacts
-        write_private_artifacts(&private_dir, &self.config, &fingerprint, &enc_config)?;
+        write_private_fingerprint(&private_dir, &fingerprint)?;
+        if is_encrypted {
+            let enc_config = archive_config
+                .as_encrypted()
+                .context("Encrypted config missing")?;
+            write_private_artifacts_encrypted(&private_dir, &self.config, enc_config)?;
+        } else {
+            write_private_unencrypted_notice(&private_dir)?;
+        }
 
         progress("complete", "Bundle complete!");
 
@@ -350,6 +371,40 @@ fn copy_payload_chunks(src_dir: &Path, dest_dir: &Path) -> Result<usize> {
     }
 
     Ok(count)
+}
+
+/// Copy a single unencrypted payload file into the site directory.
+fn copy_payload_file(
+    src_root: &Path,
+    site_dir: &Path,
+    config: &UnencryptedConfig,
+) -> Result<usize> {
+    let rel_path = Path::new(&config.payload.path);
+    if rel_path.is_absolute() {
+        bail!("Unencrypted payload path must be relative");
+    }
+    if rel_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!("Unencrypted payload path must not contain '..'");
+    }
+    if !rel_path.starts_with("payload") {
+        bail!("Unencrypted payload path must reside under payload/");
+    }
+
+    let src_path = src_root.join(rel_path);
+    if !src_path.is_file() {
+        bail!("Unencrypted payload file not found: {}", src_path.display());
+    }
+
+    let dest_path = site_dir.join(rel_path);
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::copy(&src_path, &dest_path)?;
+    Ok(1)
 }
 
 /// Copy encrypted attachment blobs from source to destination
@@ -451,19 +506,13 @@ fn compute_fingerprint(manifest: &IntegrityManifest) -> String {
 }
 
 /// Write private artifacts that should never be deployed
-fn write_private_artifacts(
-    private_dir: &Path,
-    config: &BundleConfig,
-    fingerprint: &str,
-    enc_config: &EncryptionConfig,
-) -> Result<()> {
-    // Write integrity fingerprint
+fn write_private_fingerprint(private_dir: &Path, fingerprint: &str) -> Result<()> {
     let fingerprint_content = format!(
         "Integrity Fingerprint: {}\n\n\
         Generated: {}\n\n\
         Verify this fingerprint matches the one displayed in the web viewer\n\
-        before entering your password. If it doesn't match, the archive may\n\
-        have been tampered with.\n",
+        before proceeding. If it doesn't match, the archive may have been\n\
+        tampered with.\n",
         fingerprint,
         Utc::now().to_rfc3339()
     );
@@ -471,7 +520,14 @@ fn write_private_artifacts(
         private_dir.join("integrity-fingerprint.txt"),
         fingerprint_content,
     )?;
+    Ok(())
+}
 
+fn write_private_artifacts_encrypted(
+    private_dir: &Path,
+    config: &BundleConfig,
+    enc_config: &EncryptionConfig,
+) -> Result<()> {
     // Write recovery secret if provided
     if let Some(secret) = &config.recovery_secret {
         let recovery_b64 = BASE64_STANDARD.encode(secret);
@@ -509,6 +565,19 @@ fn write_private_artifacts(
     let master_key_file = File::create(&master_key_path)?;
     serde_json::to_writer_pretty(BufWriter::new(master_key_file), &master_key_backup)?;
 
+    Ok(())
+}
+
+fn write_private_unencrypted_notice(private_dir: &Path) -> Result<()> {
+    let content = format!(
+        "UNENCRYPTED ARCHIVE WARNING\n\
+        ============================\n\n\
+        This bundle was generated WITHOUT encryption.\n\
+        Anyone with access to the site can read its contents.\n\n\
+        Generated: {}\n",
+        Utc::now().to_rfc3339()
+    );
+    fs::write(private_dir.join("unencrypted-warning.txt"), content)?;
     Ok(())
 }
 

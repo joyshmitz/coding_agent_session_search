@@ -14,6 +14,7 @@ let config = null;
 let worker = null;
 let qrScanner = null;
 let strengthMeter = null;
+let isUnencryptedArchive = false;
 
 const SESSION_KEYS = {
     DEK: 'cass_session_dek',
@@ -59,6 +60,12 @@ async function init() {
     } catch (error) {
         showError('Failed to load archive configuration. The archive may be corrupted.');
         console.error('Config load error:', error);
+        return;
+    }
+
+    if (config?.encrypted === false) {
+        setupUnencryptedMode();
+        enableForm();
         return;
     }
 
@@ -122,11 +129,12 @@ function cacheElements() {
 function setupEventListeners() {
     // Password unlock
     elements.unlockBtn?.addEventListener('click', handleUnlockClick);
+    document.getElementById('auth-form')?.addEventListener('submit', handleUnlockClick);
 
     // Enter key in password field
     elements.passwordInput?.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') {
-            handleUnlockClick();
+            handleUnlockClick(e);
         }
     });
 
@@ -174,12 +182,15 @@ async function loadConfig() {
     return response.json();
 }
 
+function getTofuKey(fingerprint) {
+    const seed = config?.export_id || fingerprint || 'default';
+    return `cass_fingerprint_${seed}`;
+}
+
 /**
  * Display integrity fingerprint with TOFU verification
  */
 async function displayFingerprint() {
-    const tofuKey = `cass_fingerprint_${config?.export_id || 'default'}`;
-
     try {
         // Try to load integrity.json if it exists
         const response = await fetch('./integrity.json');
@@ -189,14 +200,14 @@ async function displayFingerprint() {
             elements.fingerprintValue.textContent = fingerprint;
 
             // TOFU verification
-            const result = await verifyTofu(fingerprint, tofuKey);
+            const result = await verifyTofu(fingerprint, getTofuKey(fingerprint));
             displayTofuStatus(result);
         } else {
             // Fall back to config fingerprint
             const fingerprint = await computeFingerprint(JSON.stringify(config));
             elements.fingerprintValue.textContent = fingerprint;
 
-            const result = await verifyTofu(fingerprint, tofuKey);
+            const result = await verifyTofu(fingerprint, getTofuKey(fingerprint));
             displayTofuStatus(result);
         }
     } catch (error) {
@@ -208,6 +219,59 @@ async function displayFingerprint() {
         } else {
             elements.fingerprintValue.textContent = 'unavailable';
         }
+    }
+}
+
+function setupUnencryptedMode() {
+    isUnencryptedArchive = true;
+
+    const subtitle = document.querySelector('.auth-header .subtitle');
+    if (subtitle) {
+        subtitle.textContent = 'This archive is NOT encrypted. Anyone with access can read it.';
+    }
+
+    if (elements.passwordInput) {
+        elements.passwordInput.required = false;
+    }
+
+    const passwordGroup = elements.passwordInput?.closest('.form-group');
+    passwordGroup?.classList.add('hidden');
+
+    const divider = document.querySelector('.auth-form .divider');
+    divider?.classList.add('hidden');
+
+    elements.qrBtn?.classList.add('hidden');
+    elements.togglePassword?.classList.add('hidden');
+
+    if (elements.unlockBtn) {
+        const label = elements.unlockBtn.querySelector('.btn-text');
+        if (label) {
+            label.textContent = 'Open Archive';
+        }
+    }
+
+    const warning = document.createElement('div');
+    warning.className = 'tofu-warning-banner';
+
+    const warningContent = document.createElement('div');
+    warningContent.className = 'tofu-warning-content';
+
+    const warningTitle = document.createElement('strong');
+    warningTitle.textContent = 'Unencrypted archive';
+    warningContent.appendChild(warningTitle);
+
+    const warningBody = document.createElement('p');
+    warningBody.textContent =
+        'This export was generated WITHOUT encryption. Treat it as public data.';
+    warningContent.appendChild(warningBody);
+
+    warning.appendChild(warningContent);
+
+    const authForm = document.querySelector('.auth-form');
+    if (authForm) {
+        authForm.parentNode.insertBefore(warning, authForm);
+    } else {
+        elements.authScreen?.appendChild(warning);
     }
 }
 
@@ -326,7 +390,7 @@ function showTofuWarning(result) {
  * Accept new fingerprint (user acknowledges the change)
  */
 function acceptNewFingerprint(newFingerprint) {
-    const tofuKey = `cass_fingerprint_${config?.export_id || 'default'}`;
+    const tofuKey = getTofuKey(newFingerprint);
     try {
         localStorage.setItem(tofuKey, newFingerprint);
 
@@ -365,7 +429,16 @@ function formatFingerprint(bytes) {
 /**
  * Handle unlock button click
  */
-async function handleUnlockClick() {
+async function handleUnlockClick(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    if (isUnencryptedArchive) {
+        await transitionToAppUnencrypted();
+        return;
+    }
+
     const password = elements.passwordInput.value.trim();
 
     if (!password) {
@@ -631,6 +704,47 @@ function transitionToApp() {
 
     // Load viewer module
     loadViewerModule();
+}
+
+async function transitionToAppUnencrypted() {
+    hideError();
+    disableForm();
+
+    elements.authScreen.classList.add('hidden');
+    elements.appScreen.classList.remove('hidden');
+
+    // Load viewer module early so it can subscribe to db-ready if needed
+    loadViewerModule();
+
+    try {
+        await loadUnencryptedDatabase();
+    } catch (error) {
+        console.error('Failed to load unencrypted database:', error);
+        elements.appScreen.classList.add('hidden');
+        elements.authScreen.classList.remove('hidden');
+        showError('Failed to load unencrypted database');
+        enableForm();
+        return;
+    }
+}
+
+async function loadUnencryptedDatabase() {
+    const response = await fetch('./payload/data.db');
+    if (!response.ok) {
+        throw new Error(`Failed to load database: ${response.status}`);
+    }
+
+    const dbBytes = new Uint8Array(await response.arrayBuffer());
+    const dbModule = await import('./database.js');
+    await dbModule.initDatabase(dbBytes);
+
+    const stats = dbModule.getStatistics();
+    window.dispatchEvent(new CustomEvent('cass:db-ready', {
+        detail: {
+            conversationCount: stats.conversations || 0,
+            messageCount: stats.messages || 0,
+        },
+    }));
 }
 
 /**
