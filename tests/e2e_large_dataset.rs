@@ -16,63 +16,14 @@ use std::time::Instant;
 
 mod util;
 use util::EnvGuard;
-use util::e2e_log::{E2eLogger, E2ePerformanceMetrics, E2ePhase};
+use util::e2e_log::{E2ePerformanceMetrics, PhaseTracker};
 
 // =============================================================================
 // E2E Logger Support
 // =============================================================================
 
-fn e2e_logging_enabled() -> bool {
-    std::env::var("E2E_LOG").is_ok()
-}
-
-struct PhaseTracker {
-    logger: Option<E2eLogger>,
-}
-
-impl PhaseTracker {
-    fn new() -> Self {
-        let logger = if e2e_logging_enabled() {
-            E2eLogger::new("rust").ok()
-        } else {
-            None
-        };
-        Self { logger }
-    }
-
-    fn start(&self, name: &str, description: Option<&str>) -> Instant {
-        let phase = E2ePhase {
-            name: name.to_string(),
-            description: description.map(String::from),
-        };
-        if let Some(ref lg) = self.logger {
-            let _ = lg.phase_start(&phase);
-        }
-        Instant::now()
-    }
-
-    fn end(&self, name: &str, description: Option<&str>, start: Instant) {
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let phase = E2ePhase {
-            name: name.to_string(),
-            description: description.map(String::from),
-        };
-        if let Some(ref lg) = self.logger {
-            let _ = lg.phase_end(&phase, duration_ms);
-        }
-    }
-
-    fn metrics(&self, name: &str, metrics: &E2ePerformanceMetrics) {
-        if let Some(ref lg) = self.logger {
-            let _ = lg.metrics(name, metrics);
-        }
-    }
-
-    fn flush(&self) {
-        if let Some(ref lg) = self.logger {
-            let _ = lg.flush();
-        }
-    }
+fn tracker_for(test_name: &str) -> PhaseTracker {
+    PhaseTracker::new("e2e_large_dataset", test_name)
 }
 
 // =============================================================================
@@ -178,7 +129,7 @@ fn count_conversations(db_path: &Path) -> i64 {
 /// in a single conversation without memory issues or performance degradation.
 #[test]
 fn index_large_single_session() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("index_large_single_session");
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -275,7 +226,7 @@ fn index_large_single_session() {
 /// efficiently, including proper session boundary detection.
 #[test]
 fn index_many_conversations() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("index_many_conversations");
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -347,7 +298,7 @@ fn index_many_conversations() {
 /// without performance degradation.
 #[test]
 fn search_large_result_set() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("search_large_result_set");
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -458,7 +409,7 @@ fn search_large_result_set() {
 /// which would indicate a memory leak or inefficient buffering.
 #[test]
 fn memory_bounded_during_index() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("memory_bounded_during_index");
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -529,7 +480,7 @@ fn memory_bounded_during_index() {
 /// small amounts of new data to a large existing index.
 #[test]
 fn incremental_index_on_large_base() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("incremental_index_on_large_base");
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");

@@ -32,7 +32,7 @@ use tempfile::TempDir;
 mod util;
 
 use util::ConversationFixtureBuilder;
-use util::e2e_log::{E2eLogger, E2ePhase};
+use util::e2e_log::PhaseTracker;
 
 // =============================================================================
 // Test Constants
@@ -46,65 +46,8 @@ const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB chunks
 // E2E Logger Support
 // =============================================================================
 
-/// Check if E2E logging is enabled via environment variable.
-fn e2e_logging_enabled() -> bool {
-    std::env::var("E2E_LOG").is_ok()
-}
-
-/// Phase tracker that uses E2eLogger when enabled.
-///
-/// Emits structured phase_start/phase_end events and also prints to stderr
-/// for CI parsing compatibility.
-struct PhaseTracker {
-    logger: Option<E2eLogger>,
-}
-
-impl PhaseTracker {
-    /// Create a new PhaseTracker, optionally with E2eLogger if E2E_LOG is set.
-    fn new() -> Self {
-        let logger = if e2e_logging_enabled() {
-            E2eLogger::new("rust").ok()
-        } else {
-            None
-        };
-        Self { logger }
-    }
-
-    /// Start a phase and return the start time for duration calculation.
-    fn start(&self, name: &str, description: Option<&str>) -> Instant {
-        let phase = E2ePhase {
-            name: name.to_string(),
-            description: description.map(String::from),
-        };
-        if let Some(ref lg) = self.logger {
-            let _ = lg.phase_start(&phase);
-        }
-        Instant::now()
-    }
-
-    /// End a phase, logging duration to E2eLogger and stderr.
-    fn end(&self, name: &str, description: Option<&str>, start: Instant) {
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let phase = E2ePhase {
-            name: name.to_string(),
-            description: description.map(String::from),
-        };
-        if let Some(ref lg) = self.logger {
-            let _ = lg.phase_end(&phase, duration_ms);
-        }
-        // Also emit to stderr for CI compatibility
-        eprintln!(
-            "{{\"phase\":\"{}\",\"duration_ms\":{},\"status\":\"PASS\"}}",
-            name, duration_ms
-        );
-    }
-
-    /// Flush the logger if present.
-    fn flush(&self) {
-        if let Some(ref lg) = self.logger {
-            let _ = lg.flush();
-        }
-    }
+fn tracker_for(test_name: &str) -> PhaseTracker {
+    PhaseTracker::new("e2e_pages", test_name)
 }
 
 // =============================================================================
@@ -273,7 +216,7 @@ fn build_full_pipeline(
 /// Test the complete export pipeline with password-only authentication.
 #[test]
 fn test_full_export_pipeline_password_only() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_full_export_pipeline_password_only");
     let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_full_export_pipeline_password_only\",\"status\":\"START\"}}");
 
