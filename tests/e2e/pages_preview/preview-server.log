@@ -1,0 +1,16 @@
+
+[1;32m🌐[0m Preview server running at [1;36mhttp://localhost:8090[0m
+   Serving: [33m/data/projects/coding_agent_session_search/tests/e2e/pages_preview/bundle[0m
+   Press [1mCtrl+C[0m to stop
+
+
+[1;32m🌐[0m Preview server running at [1;36mhttp://localhost:8090[0m
+   Serving: [33m/data/projects/coding_agent_session_search/tests/e2e/pages_preview/bundle[0m
+   Press [1mCtrl+C[0m to stop
+
+
+[1;32m🌐[0m Preview server running at [1;36mhttp://localhost:8090[0m
+   Serving: [33m/data/projects/coding_agent_session_search/tests/e2e/pages_preview/bundle[0m
+   Press [1mCtrl+C[0m to stop
+
+{"error":{"code":9,"kind":"pages","message":"Preview server failed: Failed to bind to port 8090: Address already in use (os error 98)","hint":"Check that the directory exists and port is available","retryable":false}}

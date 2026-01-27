@@ -1,13 +1,13 @@
 {
-  "export_id": "6dlB11GRhZLb5p0TZHlgaA==",
+  "export_id": "SOMOTckK1An03lFkCGLomg==",
   "key_slots": [
     {
       "id": 0,
       "slot_type": "password",
       "kdf": "argon2id",
-      "salt": "OUFRZXRJZ3JRY2s4UGREblRFMnE5Zw==",
-      "wrapped_dek": "VZ83TxRpGltsrJqWfjb1vne7U1xry6Q2JenkfXH2xcYBGXY4pv7pn5q6iUPtIfp6",
-      "nonce": "VyP/XOwImyeG3J1A",
+      "salt": "VVFldGRFTjMrMGRPTzhBazcrUmpCZw==",
+      "wrapped_dek": "QvWvCXC6THrz1KCvJ3Y+BohY+8eEZ4qFtBuzJ6PpEiEvC9ZnfcvKe5p+3erbauYg",
+      "nonce": "PT6NRiEubJ31g09u",
       "argon2_params": {
         "memory_kb": 65536,
         "iterations": 3,
@@ -16,5 +16,5 @@
     }
   ],
   "note": "This file contains the wrapped DEK. Keep it with your recovery secret.",
-  "generated_at": "2026-01-26T16:24:52.373425714+00:00"
+  "generated_at": "2026-01-27T23:00:48.835168048+00:00"
 }

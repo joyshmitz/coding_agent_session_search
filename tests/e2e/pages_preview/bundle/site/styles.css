@@ -1928,6 +1928,230 @@ body:has(.memory-warning-banner) .app-header {
     color: var(--color-text-dim);
 }
 
+.settings-description {
+    color: var(--color-text-muted);
+    font-size: 0.875rem;
+    line-height: 1.5;
+    margin-bottom: var(--space-md);
+}
+
+.setting-description {
+    color: var(--color-text-muted);
+    font-size: 0.75rem;
+    margin-top: var(--space-xs);
+    margin-bottom: 0;
+}
+
+/* Radio Option Group for Storage Mode */
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    width: 100%;
+}
+
+.radio-option {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-md);
+    background: var(--color-bg);
+    border: 2px solid var(--color-border);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: border-color 0.2s, background-color 0.2s;
+}
+
+.radio-option:hover {
+    border-color: var(--color-border-focus);
+}
+
+.radio-option.selected {
+    border-color: var(--color-primary);
+    background: var(--color-bg-highlight);
+}
+
+.radio-option input[type="radio"] {
+    display: none;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+.radio-badge {
+    font-size: 0.625rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+}
+
+.badge-secure {
+    background: var(--color-success-bg);
+    color: var(--color-success);
+}
+
+.badge-warning {
+    background: var(--color-warning-bg);
+    color: var(--color-warning);
+}
+
+.radio-description {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    margin-top: var(--space-xs);
+}
+
+/* Toggle Switch */
+.toggle-switch {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    cursor: pointer;
+}
+
+.toggle-switch input {
+    display: none;
+}
+
+.toggle-slider {
+    position: relative;
+    width: 48px;
+    height: 24px;
+    background: var(--color-bg-input);
+    border: 1px solid var(--color-border);
+    border-radius: 24px;
+    transition: background-color 0.2s;
+}
+
+.toggle-slider::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    background: var(--color-text-muted);
+    border-radius: 50%;
+    transition: transform 0.2s;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+}
+
+.toggle-switch input:checked + .toggle-slider::after {
+    background: white;
+    transform: translateX(24px);
+}
+
+.toggle-label {
+    font-size: 0.875rem;
+    color: var(--color-text);
+}
+
+/* Settings Warning */
+.settings-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+    background: var(--color-warning-bg);
+    border: 1px solid var(--color-warning);
+    border-radius: var(--radius-md);
+    margin-top: var(--space-md);
+    font-size: 0.75rem;
+    color: var(--color-text);
+}
+
+.warning-icon {
+    flex-shrink: 0;
+}
+
+/* Cache Stats */
+.cache-stats {
+    margin-bottom: var(--space-lg);
+}
+
+.cache-stats h4 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--color-text);
+    margin-bottom: var(--space-sm);
+}
+
+.cache-stats .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: var(--space-sm);
+    margin-bottom: 0;
+}
+
+.cache-stats .stat-item {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-sm);
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+}
+
+.cache-stats .stat-label {
+    font-size: 0.625rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin-bottom: 2px;
+}
+
+.cache-stats .stat-value {
+    font-size: 0.75rem;
+    color: var(--color-text);
+}
+
+.stat-quota {
+    grid-column: span 2;
+}
+
+/* Cache Actions */
+.cache-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+}
+
+/* Button variants for settings */
+.btn-warning {
+    background: var(--color-warning);
+    color: var(--color-bg);
+    border-color: var(--color-warning);
+}
+
+.btn-warning:hover {
+    background: var(--color-warning-hover, #e0a000);
+}
+
+.btn-danger {
+    background: var(--color-error);
+    color: white;
+    border-color: var(--color-error);
+}
+
+.btn-danger:hover {
+    background: var(--color-error-hover, #c82333);
+}
+
+/* Storage mode selector layout */
+.storage-mode-selector {
+    display: block;
+    border-bottom: none;
+}
+
 /* ========================================
    Stats Panel
    ======================================== */

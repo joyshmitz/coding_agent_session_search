@@ -6,12 +6,21 @@
  */
 
 import { createStrengthMeter } from './password-strength.js';
+import { StorageMode, StorageKeys, isOpfsEnabled } from './storage.js';
+import { SESSION_CONFIG } from './session.js';
 
 // State
 let config = null;
 let worker = null;
 let qrScanner = null;
 let strengthMeter = null;
+let isUnencryptedArchive = false;
+
+const SESSION_KEYS = {
+    DEK: 'cass_session_dek',
+    EXPIRY: 'cass_session_expiry',
+    UNLOCKED: 'cass_unlocked',
+};
 
 // DOM Elements
 const elements = {
@@ -51,6 +60,12 @@ async function init() {
     } catch (error) {
         showError('Failed to load archive configuration. The archive may be corrupted.');
         console.error('Config load error:', error);
+        return;
+    }
+
+    if (config?.encrypted === false) {
+        setupUnencryptedMode();
+        enableForm();
         return;
     }
 
@@ -114,11 +129,12 @@ function cacheElements() {
 function setupEventListeners() {
     // Password unlock
     elements.unlockBtn?.addEventListener('click', handleUnlockClick);
+    document.getElementById('auth-form')?.addEventListener('submit', handleUnlockClick);
 
     // Enter key in password field
     elements.passwordInput?.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') {
-            handleUnlockClick();
+            handleUnlockClick(e);
         }
     });
 
@@ -134,6 +150,18 @@ function setupEventListeners() {
 
     // Lock button (re-lock archive)
     elements.lockBtn?.addEventListener('click', lockArchive);
+    window.addEventListener('cass:lock', lockArchive);
+    window.addEventListener('cass:session-mode-change', (event) => {
+        const mode = event?.detail?.mode;
+        if (mode === StorageMode.MEMORY) {
+            clearStoredSession();
+            return;
+        }
+
+        if (window.cassSession?.dek) {
+            persistSession(window.cassSession.dek);
+        }
+    });
 
     // Escape key to close QR scanner
     document.addEventListener('keydown', (e) => {
@@ -154,12 +182,15 @@ async function loadConfig() {
     return response.json();
 }
 
+function getTofuKey(fingerprint) {
+    const seed = config?.export_id || fingerprint || 'default';
+    return `cass_fingerprint_${seed}`;
+}
+
 /**
  * Display integrity fingerprint with TOFU verification
  */
 async function displayFingerprint() {
-    const tofuKey = `cass_fingerprint_${config?.export_id || 'default'}`;
-
     try {
         // Try to load integrity.json if it exists
         const response = await fetch('./integrity.json');
@@ -169,14 +200,14 @@ async function displayFingerprint() {
             elements.fingerprintValue.textContent = fingerprint;
 
             // TOFU verification
-            const result = await verifyTofu(fingerprint, tofuKey);
+            const result = await verifyTofu(fingerprint, getTofuKey(fingerprint));
             displayTofuStatus(result);
         } else {
             // Fall back to config fingerprint
             const fingerprint = await computeFingerprint(JSON.stringify(config));
             elements.fingerprintValue.textContent = fingerprint;
 
-            const result = await verifyTofu(fingerprint, tofuKey);
+            const result = await verifyTofu(fingerprint, getTofuKey(fingerprint));
             displayTofuStatus(result);
         }
     } catch (error) {
@@ -188,6 +219,59 @@ async function displayFingerprint() {
         } else {
             elements.fingerprintValue.textContent = 'unavailable';
         }
+    }
+}
+
+function setupUnencryptedMode() {
+    isUnencryptedArchive = true;
+
+    const subtitle = document.querySelector('.auth-header .subtitle');
+    if (subtitle) {
+        subtitle.textContent = 'This archive is NOT encrypted. Anyone with access can read it.';
+    }
+
+    if (elements.passwordInput) {
+        elements.passwordInput.required = false;
+    }
+
+    const passwordGroup = elements.passwordInput?.closest('.form-group');
+    passwordGroup?.classList.add('hidden');
+
+    const divider = document.querySelector('.auth-form .divider');
+    divider?.classList.add('hidden');
+
+    elements.qrBtn?.classList.add('hidden');
+    elements.togglePassword?.classList.add('hidden');
+
+    if (elements.unlockBtn) {
+        const label = elements.unlockBtn.querySelector('.btn-text');
+        if (label) {
+            label.textContent = 'Open Archive';
+        }
+    }
+
+    const warning = document.createElement('div');
+    warning.className = 'tofu-warning-banner';
+
+    const warningContent = document.createElement('div');
+    warningContent.className = 'tofu-warning-content';
+
+    const warningTitle = document.createElement('strong');
+    warningTitle.textContent = 'Unencrypted archive';
+    warningContent.appendChild(warningTitle);
+
+    const warningBody = document.createElement('p');
+    warningBody.textContent =
+        'This export was generated WITHOUT encryption. Treat it as public data.';
+    warningContent.appendChild(warningBody);
+
+    warning.appendChild(warningContent);
+
+    const authForm = document.querySelector('.auth-form');
+    if (authForm) {
+        authForm.parentNode.insertBefore(warning, authForm);
+    } else {
+        elements.authScreen?.appendChild(warning);
     }
 }
 
@@ -306,7 +390,7 @@ function showTofuWarning(result) {
  * Accept new fingerprint (user acknowledges the change)
  */
 function acceptNewFingerprint(newFingerprint) {
-    const tofuKey = `cass_fingerprint_${config?.export_id || 'default'}`;
+    const tofuKey = getTofuKey(newFingerprint);
     try {
         localStorage.setItem(tofuKey, newFingerprint);
 
@@ -345,7 +429,16 @@ function formatFingerprint(bytes) {
 /**
  * Handle unlock button click
  */
-async function handleUnlockClick() {
+async function handleUnlockClick(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    if (isUnencryptedArchive) {
+        await transitionToAppUnencrypted();
+        return;
+    }
+
     const password = elements.passwordInput.value.trim();
 
     if (!password) {
@@ -547,13 +640,8 @@ function handleUnlockSuccess(data) {
         config: config,
     };
 
-    // Optionally store in sessionStorage for page refresh persistence
-    // (Less secure, but better UX)
-    try {
-        sessionStorage.setItem('cass_unlocked', 'true');
-    } catch (e) {
-        // SessionStorage may be disabled
-    }
+    // Persist session based on selected storage mode
+    persistSession(data.dek);
 
     // Transition to app
     transitionToApp();
@@ -577,9 +665,52 @@ function handleUnlockFailed(data) {
 /**
  * Handle successful decryption
  */
-function handleDecryptSuccess(data) {
+async function handleDecryptSuccess(data) {
     updateProgress('Database decrypted', 100);
-    // Database will be loaded next
+
+    if (!data?.dbBytes) {
+        hideProgress();
+        showError('Decryption did not return a database payload');
+        enableForm();
+        elements.appScreen.classList.add('hidden');
+        elements.authScreen.classList.remove('hidden');
+        clearStoredSession();
+        window.cassSession = null;
+        return;
+    }
+
+    try {
+        const dbModule = await import('./database.js');
+        let dbBytes;
+        if (data.dbBytes instanceof ArrayBuffer) {
+            dbBytes = new Uint8Array(data.dbBytes);
+        } else if (ArrayBuffer.isView(data.dbBytes)) {
+            dbBytes = new Uint8Array(
+                data.dbBytes.buffer,
+                data.dbBytes.byteOffset,
+                data.dbBytes.byteLength
+            );
+        } else {
+            throw new Error('Invalid database payload');
+        }
+        await dbModule.initDatabase(dbBytes);
+        const stats = dbModule.getStatistics();
+        window.dispatchEvent(new CustomEvent('cass:db-ready', {
+            detail: {
+                conversationCount: stats.conversations || 0,
+                messageCount: stats.messages || 0,
+            },
+        }));
+    } catch (error) {
+        console.error('Failed to initialize database:', error);
+        hideProgress();
+        showError('Failed to initialize database');
+        enableForm();
+        elements.appScreen.classList.add('hidden');
+        elements.authScreen.classList.remove('hidden');
+        clearStoredSession();
+        window.cassSession = null;
+    }
 }
 
 /**
@@ -588,6 +719,12 @@ function handleDecryptSuccess(data) {
 function handleDecryptFailed(data) {
     hideProgress();
     showError(`Decryption failed: ${data.error}`);
+    enableForm();
+    elements.appScreen.classList.add('hidden');
+    elements.authScreen.classList.remove('hidden');
+    clearStoredSession();
+    window.cassSession = null;
+    elements.passwordInput.value = '';
 }
 
 /**
@@ -611,10 +748,61 @@ function transitionToApp() {
         type: 'DECRYPT_DATABASE',
         dek: window.cassSession.dek,
         config: config,
+        opfsEnabled: isOpfsEnabled(),
     });
 
     // Load viewer module
     loadViewerModule();
+}
+
+async function transitionToAppUnencrypted() {
+    hideError();
+    disableForm();
+
+    elements.authScreen.classList.add('hidden');
+    elements.appScreen.classList.remove('hidden');
+
+    // Load viewer module early so it can subscribe to db-ready if needed
+    loadViewerModule();
+
+    try {
+        await loadUnencryptedDatabase();
+    } catch (error) {
+        console.error('Failed to load unencrypted database:', error);
+        elements.appScreen.classList.add('hidden');
+        elements.authScreen.classList.remove('hidden');
+        showError('Failed to load unencrypted database');
+        enableForm();
+        return;
+    }
+}
+
+async function loadUnencryptedDatabase() {
+    const payloadPath = getUnencryptedPayloadPath();
+    const response = await fetch(payloadPath);
+    if (!response.ok) {
+        throw new Error(`Failed to load database: ${response.status}`);
+    }
+
+    const dbBytes = new Uint8Array(await response.arrayBuffer());
+    const dbModule = await import('./database.js');
+    await dbModule.initDatabase(dbBytes);
+
+    const stats = dbModule.getStatistics();
+    window.dispatchEvent(new CustomEvent('cass:db-ready', {
+        detail: {
+            conversationCount: stats.conversations || 0,
+            messageCount: stats.messages || 0,
+        },
+    }));
+}
+
+function getUnencryptedPayloadPath() {
+    const rawPath = config?.payload?.path;
+    if (typeof rawPath === 'string' && rawPath.trim().length > 0) {
+        return rawPath.startsWith('./') ? rawPath : `./${rawPath}`;
+    }
+    return './payload/data.db';
 }
 
 /**
@@ -623,11 +811,7 @@ function transitionToApp() {
 function lockArchive() {
     // Clear session
     window.cassSession = null;
-    try {
-        sessionStorage.removeItem('cass_unlocked');
-    } catch (e) {
-        // Ignore
-    }
+    clearStoredSession();
 
     // Tell worker to clear keys
     worker?.postMessage({ type: 'CLEAR_KEYS' });
@@ -647,13 +831,103 @@ function lockArchive() {
  * Check for existing session on page load
  */
 function checkExistingSession() {
+    const restored = restoreSession();
+    if (restored) {
+        transitionToApp();
+    }
+}
+
+function getPreferredSessionMode() {
     try {
-        const unlocked = sessionStorage.getItem('cass_unlocked');
-        if (unlocked === 'true' && window.cassSession?.dek) {
-            transitionToApp();
+        const savedMode = localStorage.getItem(StorageKeys.MODE);
+        if (
+            savedMode === StorageMode.MEMORY
+            || savedMode === StorageMode.SESSION
+            || savedMode === StorageMode.LOCAL
+        ) {
+            return savedMode;
         }
     } catch (e) {
-        // SessionStorage may be disabled
+        // Ignore
+    }
+    return StorageMode.MEMORY;
+}
+
+function getSessionStorage(mode) {
+    try {
+        if (mode === StorageMode.SESSION) {
+            return sessionStorage;
+        }
+        if (mode === StorageMode.LOCAL) {
+            return localStorage;
+        }
+    } catch (e) {
+        // Ignore
+    }
+    return null;
+}
+
+function persistSession(dekBase64) {
+    const mode = getPreferredSessionMode();
+    const storage = getSessionStorage(mode);
+    if (!storage) {
+        return;
+    }
+
+    const expiry = Date.now() + SESSION_CONFIG.DEFAULT_DURATION_MS;
+    try {
+        storage.setItem(SESSION_KEYS.DEK, dekBase64);
+        storage.setItem(SESSION_KEYS.EXPIRY, expiry.toString());
+        storage.setItem(SESSION_KEYS.UNLOCKED, 'true');
+    } catch (e) {
+        // Ignore write failures
+    }
+}
+
+function restoreSession() {
+    const mode = getPreferredSessionMode();
+    const storage = getSessionStorage(mode);
+    if (!storage || !config) {
+        clearStoredSession();
+        return false;
+    }
+
+    try {
+        const unlocked = storage.getItem(SESSION_KEYS.UNLOCKED);
+        const dekStored = storage.getItem(SESSION_KEYS.DEK);
+        const expiry = parseInt(storage.getItem(SESSION_KEYS.EXPIRY) || '0', 10);
+
+        if (unlocked !== 'true' || !dekStored) {
+            clearStoredSession();
+            return false;
+        }
+
+        if (Date.now() > expiry) {
+            clearStoredSession();
+            return false;
+        }
+
+        window.cassSession = {
+            dek: dekStored,
+            config: config,
+        };
+        return true;
+    } catch (e) {
+        clearStoredSession();
+        return false;
+    }
+}
+
+function clearStoredSession() {
+    const storages = [sessionStorage, localStorage];
+    for (const storage of storages) {
+        try {
+            storage.removeItem(SESSION_KEYS.DEK);
+            storage.removeItem(SESSION_KEYS.EXPIRY);
+            storage.removeItem(SESSION_KEYS.UNLOCKED);
+        } catch (e) {
+            // Ignore
+        }
     }
 }
 

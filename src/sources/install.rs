@@ -958,7 +958,7 @@ fn detect_missing_dependency(error: &str) -> Option<(&'static str, &'static str)
 mod tests {
     use super::*;
 
-    fn mock_system_info() -> SystemInfo {
+    fn fixture_system_info() -> SystemInfo {
         SystemInfo {
             os: "linux".into(),
             arch: "x86_64".into(),
@@ -971,7 +971,7 @@ mod tests {
         }
     }
 
-    fn mock_resources() -> ResourceInfo {
+    fn fixture_resources() -> ResourceInfo {
         ResourceInfo {
             disk_available_mb: 10000,
             memory_total_mb: 8000,
@@ -1009,9 +1009,9 @@ mod tests {
 
     #[test]
     fn test_choose_method_prefers_binstall() {
-        let mut system = mock_system_info();
+        let mut system = fixture_system_info();
         system.has_cargo_binstall = true;
-        let resources = mock_resources();
+        let resources = fixture_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
         assert_eq!(
@@ -1022,11 +1022,11 @@ mod tests {
 
     #[test]
     fn test_choose_method_cargo_install() {
-        let mut system = mock_system_info();
+        let mut system = fixture_system_info();
         // Disable curl/wget so pre-built binary is not available
         system.has_curl = false;
         system.has_wget = false;
-        let resources = mock_resources();
+        let resources = fixture_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
         // With cargo but no binstall and no download tools, should choose cargo install
@@ -1035,8 +1035,8 @@ mod tests {
 
     #[test]
     fn test_choose_method_prebuilt_binary() {
-        let system = mock_system_info();
-        let resources = mock_resources();
+        let system = fixture_system_info();
+        let resources = fixture_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
         // With curl available, should prefer pre-built binary over cargo install
@@ -1048,14 +1048,14 @@ mod tests {
 
     #[test]
     fn test_choose_method_bootstrap_when_no_cargo() {
-        let mut system = mock_system_info();
+        let mut system = fixture_system_info();
         system.has_cargo = false;
         // curl is needed for bootstrap (to download rustup)
         system.has_curl = true;
         system.has_wget = false;
         // Use unsupported arch so prebuilt binary is not available
         system.arch = "armv7".into();
-        let resources = mock_resources();
+        let resources = fixture_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
         assert_eq!(
@@ -1066,12 +1066,12 @@ mod tests {
 
     #[test]
     fn test_choose_method_none_when_no_tools() {
-        let mut system = mock_system_info();
+        let mut system = fixture_system_info();
         system.has_cargo = false;
         system.has_cargo_binstall = false;
         system.has_curl = false;
         system.has_wget = false;
-        let resources = mock_resources();
+        let resources = fixture_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
         // No curl means no way to download rustup, no wget/curl means no prebuilt binary
@@ -1081,8 +1081,8 @@ mod tests {
 
     #[test]
     fn test_check_resources_ok() {
-        let system = mock_system_info();
-        let resources = mock_resources();
+        let system = fixture_system_info();
+        let resources = fixture_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
         assert!(installer.check_resources().is_ok());
@@ -1090,8 +1090,8 @@ mod tests {
 
     #[test]
     fn test_check_resources_insufficient_disk() {
-        let system = mock_system_info();
-        let mut resources = mock_resources();
+        let system = fixture_system_info();
+        let mut resources = fixture_resources();
         resources.disk_available_mb = 500;
 
         let installer = RemoteInstaller::new("test", system, resources);
@@ -1101,8 +1101,8 @@ mod tests {
 
     #[test]
     fn test_can_compile_insufficient_memory() {
-        let system = mock_system_info();
-        let mut resources = mock_resources();
+        let system = fixture_system_info();
+        let mut resources = fixture_resources();
         resources.memory_total_mb = 512;
 
         let installer = RemoteInstaller::new("test", system, resources);
@@ -1115,8 +1115,8 @@ mod tests {
 
     #[test]
     fn test_get_prebuilt_url_linux_x86() {
-        let system = mock_system_info();
-        let resources = mock_resources();
+        let system = fixture_system_info();
+        let resources = fixture_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
         let url = installer.get_prebuilt_url();
@@ -1126,10 +1126,10 @@ mod tests {
 
     #[test]
     fn test_get_prebuilt_url_macos_arm() {
-        let mut system = mock_system_info();
+        let mut system = fixture_system_info();
         system.os = "darwin".into();
         system.arch = "aarch64".into();
-        let resources = mock_resources();
+        let resources = fixture_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
         let url = installer.get_prebuilt_url();
@@ -1235,11 +1235,13 @@ mod tests {
 
         // Verify deserialization
         let parsed: InstallMethod = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(parsed, InstallMethod::PrebuiltBinary { .. }),
+            "Expected PrebuiltBinary variant with checksum in test_prebuilt_binary_method_with_checksum"
+        );
         if let InstallMethod::PrebuiltBinary { checksum, .. } = parsed {
             assert!(checksum.is_some());
             assert_eq!(checksum.unwrap().len(), 64);
-        } else {
-            panic!("Expected PrebuiltBinary variant");
         }
     }
 
@@ -1252,10 +1254,12 @@ mod tests {
 
         let json = serde_json::to_string(&method).unwrap();
         let parsed: InstallMethod = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(parsed, InstallMethod::PrebuiltBinary { .. }),
+            "Expected PrebuiltBinary variant in test_prebuilt_binary_method_without_checksum"
+        );
         if let InstallMethod::PrebuiltBinary { checksum, .. } = parsed {
             assert!(checksum.is_none());
-        } else {
-            panic!("Expected PrebuiltBinary variant");
         }
     }
 

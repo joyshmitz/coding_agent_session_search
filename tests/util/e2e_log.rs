@@ -1077,6 +1077,7 @@ impl E2eLogger {
 /// Phase tracker for structured logging in Rust E2E tests.
 ///
 /// Emits test_start/test_end events and provides helpers for phase timing.
+/// When E2E_VERBOSE=1 is set, also writes human-readable logs to a separate file.
 #[allow(dead_code)]
 pub struct PhaseTracker {
     logger: Option<E2eLogger>,
@@ -1084,6 +1085,7 @@ pub struct PhaseTracker {
     start_time: Instant,
     completed: bool,
     artifacts: E2eArtifactPaths,
+    verbose_enabled: bool,
 }
 
 #[allow(dead_code)]
@@ -1092,13 +1094,23 @@ impl PhaseTracker {
     pub fn new(suite: &str, test_name: &str) -> Self {
         let trace_id = generate_trace_id();
         let artifacts = E2eArtifactPaths::prepare(suite, test_name, &trace_id)
-            .unwrap_or_else(|e| panic!("Failed to prepare E2E artifacts: {e}"));
+            .expect("Failed to prepare E2E artifacts");
 
         let logger = if std::env::var("E2E_LOG").is_ok() {
             E2eLogger::with_path("rust", artifacts.cass_log_path.clone()).ok()
         } else {
             None
         };
+
+        // Initialize verbose logging if E2E_VERBOSE is set
+        let verbose_enabled = std::env::var("E2E_VERBOSE").is_ok();
+        if verbose_enabled {
+            let verbose_log_path = artifacts.dir.join("verbose.log");
+            let _ = super::init_verbose_log(&verbose_log_path);
+            super::verbose_log(&format!(
+                "=== Verbose log for {suite}::{test_name} (trace_id={trace_id}) ==="
+            ));
+        }
 
         let mut test_info = E2eTestInfo::simple(test_name, suite);
         test_info.trace_id = Some(trace_id.clone());
@@ -1108,12 +1120,17 @@ impl PhaseTracker {
             let _ = lg.test_start(&test_info);
         }
 
+        if verbose_enabled {
+            super::verbose_log(&format!("TEST_START name={test_name} suite={suite}"));
+        }
+
         Self {
             logger,
             test_info,
             start_time: Instant::now(),
             completed: false,
             artifacts,
+            verbose_enabled,
         }
     }
 
@@ -1145,6 +1162,11 @@ impl PhaseTracker {
         if let Some(ref lg) = self.logger {
             let _ = lg.phase_start(&phase);
         }
+        if self.verbose_enabled {
+            super::verbose_log(&format!(
+                "PHASE_START name={name} description=\"{description}\""
+            ));
+        }
 
         let start = Instant::now();
         let result = f();
@@ -1152,6 +1174,9 @@ impl PhaseTracker {
 
         if let Some(ref lg) = self.logger {
             let _ = lg.phase_end(&phase, duration_ms);
+        }
+        if self.verbose_enabled {
+            super::verbose_log(&format!("PHASE_END name={name} duration_ms={duration_ms}"));
         }
 
         result
@@ -1166,6 +1191,13 @@ impl PhaseTracker {
         if let Some(ref lg) = self.logger {
             let _ = lg.phase_start(&phase);
         }
+        if self.verbose_enabled {
+            if let Some(desc) = description {
+                super::verbose_log(&format!("PHASE_START name={name} description=\"{desc}\""));
+            } else {
+                super::verbose_log(&format!("PHASE_START name={name}"));
+            }
+        }
         Instant::now()
     }
 
@@ -1179,12 +1211,25 @@ impl PhaseTracker {
         if let Some(ref lg) = self.logger {
             let _ = lg.phase_end(&phase, duration_ms);
         }
+        if self.verbose_enabled {
+            super::verbose_log(&format!("PHASE_END name={name} duration_ms={duration_ms}"));
+        }
     }
 
     /// Emit a metrics event.
     pub fn metrics(&self, name: &str, metrics: &E2ePerformanceMetrics) {
         if let Some(ref lg) = self.logger {
             let _ = lg.metrics(name, metrics);
+        }
+        if self.verbose_enabled {
+            super::verbose_log(&format!("METRICS name={name} data={:?}", metrics));
+        }
+    }
+
+    /// Log a verbose message (only if E2E_VERBOSE is set).
+    pub fn verbose(&self, msg: &str) {
+        if self.verbose_enabled {
+            super::verbose_log(msg);
         }
     }
 
@@ -1196,6 +1241,12 @@ impl PhaseTracker {
             let _ = lg.test_end(&self.test_info, "pass", duration_ms, None, None);
             let _ = lg.flush();
         }
+        if self.verbose_enabled {
+            super::verbose_log(&format!(
+                "TEST_END name={} suite={} status=pass duration_ms={duration_ms}",
+                self.test_info.name, self.test_info.suite
+            ));
+        }
     }
 
     /// Mark test as failed with error.
@@ -1203,8 +1254,20 @@ impl PhaseTracker {
         self.completed = true;
         let duration_ms = self.start_time.elapsed().as_millis() as u64;
         if let Some(ref lg) = self.logger {
-            let _ = lg.test_end(&self.test_info, "fail", duration_ms, None, Some(error));
+            let _ = lg.test_end(
+                &self.test_info,
+                "fail",
+                duration_ms,
+                None,
+                Some(error.clone()),
+            );
             let _ = lg.flush();
+        }
+        if self.verbose_enabled {
+            super::verbose_log(&format!(
+                "TEST_END name={} suite={} status=fail duration_ms={duration_ms} error=\"{}\"",
+                self.test_info.name, self.test_info.suite, error.message
+            ));
         }
     }
 
@@ -1275,7 +1338,7 @@ where
 {
     let trace_id = generate_trace_id();
     let artifacts = E2eArtifactPaths::prepare(suite, name, &trace_id)
-        .unwrap_or_else(|e| panic!("Failed to prepare E2E artifacts for {suite}/{name}: {e}"));
+        .expect("Failed to prepare E2E artifacts for run_logged_test");
 
     let logger = if std::env::var("E2E_LOG").is_ok() {
         E2eLogger::with_path("rust", artifacts.cass_log_path.clone()).ok()
