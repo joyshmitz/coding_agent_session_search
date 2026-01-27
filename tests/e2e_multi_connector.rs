@@ -929,55 +929,61 @@ fn multi_connector_multiple_agent_filter() {
 /// Test: Empty connector doesn't break indexing of other connectors
 #[test]
 fn multi_connector_empty_connector() {
-    logged_test!("multi_connector_empty_connector", "e2e_multi_connector", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let home = tmp.path();
-        let codex_home = home.join(".codex");
-        let data_dir = home.join("cass_data");
+    let tracker = tracker_for("multi_connector_empty_connector");
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let data_dir = home.join("cass_data");
 
-        // Only create data_dir and codex_home, leave claude_home empty/nonexistent
-        fs::create_dir_all(&data_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
 
-        let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
-        let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
+    let _guard_home = EnvGuard::set("HOME", home.to_string_lossy());
+    let _guard_codex = EnvGuard::set("CODEX_HOME", codex_home.to_string_lossy());
 
-        // Create only codex session
-        make_codex_session(
-            &codex_home,
-            "2024/11/20",
-            "rollout-only.jsonl",
-            "singleconnector codex_only",
-            1732118400000,
-        );
+    // Phase: Setup (only codex, no claude)
+    let phase_start = tracker.start("setup_fixtures", Some("Create only Codex session, no Claude"));
+    make_codex_session(
+        &codex_home,
+        "2024/11/20",
+        "rollout-only.jsonl",
+        "singleconnector codex_only",
+        1732118400000,
+    );
+    tracker.end("setup_fixtures", Some("Create only Codex session, no Claude"), phase_start);
 
-        // Index should succeed even with non-existent claude_home
-        cargo_bin_cmd!("cass")
-            .args(["index", "--full", "--data-dir"])
-            .arg(&data_dir)
-            .env("CODEX_HOME", &codex_home)
-            .env("HOME", home)
-            .assert()
-            .success();
+    // Phase: Index with missing connector
+    let phase_start = tracker.start("run_index", Some("Index with non-existent claude_home"));
+    cargo_bin_cmd!("cass")
+        .args(["index", "--full", "--data-dir"])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .assert()
+        .success();
+    tracker.end("run_index", Some("Index with non-existent claude_home"), phase_start);
 
-        // Search should work and return codex results
-        let output = cargo_bin_cmd!("cass")
-            .args(["search", "singleconnector", "--robot", "--data-dir"])
-            .arg(&data_dir)
-            .env("HOME", home)
-            .output()
-            .expect("search command");
+    // Phase: Search and verify
+    let phase_start = tracker.start("verify_results", Some("Search and verify codex-only results"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["search", "singleconnector", "--robot", "--data-dir"])
+        .arg(&data_dir)
+        .env("HOME", home)
+        .output()
+        .expect("search command");
 
-        assert!(output.status.success());
-        let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
-        let hits = json
-            .get("hits")
-            .and_then(|h| h.as_array())
-            .expect("hits array");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let hits = json
+        .get("hits")
+        .and_then(|h| h.as_array())
+        .expect("hits array");
 
-        assert!(!hits.is_empty(), "Should find codex results");
-        assert!(
-            hits.iter().all(|h| h["agent"] == "codex"),
-            "All results should be from codex"
-        );
-    });
+    assert!(!hits.is_empty(), "Should find codex results");
+    assert!(
+        hits.iter().all(|h| h["agent"] == "codex"),
+        "All results should be from codex"
+    );
+    tracker.end("verify_results", Some("Search and verify codex-only results"), phase_start);
+
+    tracker.complete();
 }
