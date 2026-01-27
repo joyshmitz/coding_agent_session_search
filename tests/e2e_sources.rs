@@ -1345,211 +1345,245 @@ paths = ["~/.claude/projects"]
 /// Test: sources mappings add basic mapping.
 #[test]
 fn mappings_add_basic() {
-    logged_test!("mappings_add_basic", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_add_basic");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with laptop source"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with laptop source"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "mappings",
-                "add",
-                "laptop",
-                "--from",
-                "/remote/path",
-                "--to",
-                "/local/path",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings add command");
+    let start = tracker.start("run_mappings_add", Some("Add basic path mapping"));
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "laptop",
+            "--from",
+            "/remote/path",
+            "--to",
+            "/local/path",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings add command");
+    tracker.end("run_mappings_add", Some("Add basic path mapping"), start);
 
-        assert!(
-            output.status.success(),
-            "mappings add failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let start = tracker.start("verify_config", Some("Verify mapping in config file"));
+    assert!(
+        output.status.success(),
+        "mappings add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-        // Verify config was updated
-        let config_content = read_sources_config(&config_dir);
-        assert!(
-            config_content.contains("/remote/path") && config_content.contains("/local/path"),
-            "Mapping not in config: {config_content}"
-        );
-    });
+    // Verify config was updated
+    let config_content = read_sources_config(&config_dir);
+    assert!(
+        config_content.contains("/remote/path") && config_content.contains("/local/path"),
+        "Mapping not in config: {config_content}"
+    );
+    tracker.end("verify_config", Some("Verify mapping in config file"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources mappings add with agent filter.
 #[test]
 fn mappings_add_with_agents() {
-    logged_test!("mappings_add_with_agents", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_add_with_agents");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with laptop source"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with laptop source"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "mappings",
-                "add",
-                "laptop",
-                "--from",
-                "/opt/work",
-                "--to",
-                "/Volumes/Work",
-                "--agents",
-                "claude_code,codex",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings add command");
+    let start = tracker.start("run_mappings_add", Some("Add mapping with agent filter"));
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "laptop",
+            "--from",
+            "/opt/work",
+            "--to",
+            "/Volumes/Work",
+            "--agents",
+            "claude_code,codex",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings add command");
+    tracker.end("run_mappings_add", Some("Add mapping with agent filter"), start);
 
-        assert!(
-            output.status.success(),
-            "mappings add failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let start = tracker.start("verify_config", Some("Verify agent filter in config"));
+    assert!(
+        output.status.success(),
+        "mappings add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-        let config_content = read_sources_config(&config_dir);
-        assert!(
-            config_content.contains("claude_code") || config_content.contains("agents"),
-            "Agent filter not in config: {config_content}"
-        );
-    });
+    let config_content = read_sources_config(&config_dir);
+    assert!(
+        config_content.contains("claude_code") || config_content.contains("agents"),
+        "Agent filter not in config: {config_content}"
+    );
+    tracker.end("verify_config", Some("Verify agent filter in config"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources mappings add multiple mappings.
 #[test]
 fn mappings_add_multiple() {
-    logged_test!("mappings_add_multiple", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_add_multiple");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with laptop source"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with laptop source"), start);
 
-        // Add first mapping
-        cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "mappings",
-                "add",
-                "laptop",
-                "--from",
-                "/home/user",
-                "--to",
-                "/Users/me",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .assert()
-            .success();
+    // Add first mapping
+    let start = tracker.start("add_first_mapping", Some("Add /home/user mapping"));
+    cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "laptop",
+            "--from",
+            "/home/user",
+            "--to",
+            "/Users/me",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .assert()
+        .success();
+    tracker.end("add_first_mapping", Some("Add /home/user mapping"), start);
 
-        // Add second mapping
-        cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "mappings",
-                "add",
-                "laptop",
-                "--from",
-                "/opt/projects",
-                "--to",
-                "/Projects",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .assert()
-            .success();
+    // Add second mapping
+    let start = tracker.start("add_second_mapping", Some("Add /opt/projects mapping"));
+    cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "laptop",
+            "--from",
+            "/opt/projects",
+            "--to",
+            "/Projects",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .assert()
+        .success();
+    tracker.end("add_second_mapping", Some("Add /opt/projects mapping"), start);
 
-        // Verify both mappings are in config
-        let config_content = read_sources_config(&config_dir);
-        assert!(
-            config_content.contains("/home/user") && config_content.contains("/opt/projects"),
-            "Both mappings not in config: {config_content}"
-        );
-    });
+    // Verify both mappings are in config
+    let start = tracker.start("verify_config", Some("Verify both mappings in config"));
+    let config_content = read_sources_config(&config_dir);
+    assert!(
+        config_content.contains("/home/user") && config_content.contains("/opt/projects"),
+        "Both mappings not in config: {config_content}"
+    );
+    tracker.end("verify_config", Some("Verify both mappings in config"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources mappings add to nonexistent source.
 #[test]
 fn mappings_add_nonexistent_source() {
-    logged_test!("mappings_add_nonexistent_source", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_add_nonexistent_source");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with laptop source"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with laptop source"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "mappings",
-                "add",
-                "nonexistent",
-                "--from",
-                "/from",
-                "--to",
-                "/to",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings add command");
+    let start = tracker.start("run_mappings_add", Some("Add mapping to nonexistent source"));
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "nonexistent",
+            "--from",
+            "/from",
+            "--to",
+            "/to",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings add command");
+    tracker.end("run_mappings_add", Some("Add mapping to nonexistent source"), start);
 
-        assert!(!output.status.success());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("not found") || stderr.contains("does not exist"),
-            "Expected not found error, got: {stderr}"
-        );
-    });
+    let start = tracker.start("verify_error", Some("Verify not found error"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("does not exist"),
+        "Expected not found error, got: {stderr}"
+    );
+    tracker.end("verify_error", Some("Verify not found error"), start);
+
+    tracker.complete();
 }
 
 // =============================================================================
@@ -1559,14 +1593,16 @@ paths = ["~/.claude/projects"]
 /// Test: sources mappings remove by index.
 #[test]
 fn mappings_remove_by_index() {
-    logged_test!("mappings_remove_by_index", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_remove_by_index");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with two path mappings"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
@@ -1581,46 +1617,54 @@ to = "/Users/me"
 from = "/opt/work"
 to = "/Work"
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with two path mappings"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "mappings", "remove", "laptop", "0"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings remove command");
+    let start = tracker.start("run_mappings_remove", Some("Remove mapping at index 0"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "remove", "laptop", "0"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings remove command");
+    tracker.end("run_mappings_remove", Some("Remove mapping at index 0"), start);
 
-        assert!(
-            output.status.success(),
-            "mappings remove failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let start = tracker.start("verify_removal", Some("Verify first mapping removed, second kept"));
+    assert!(
+        output.status.success(),
+        "mappings remove failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-        // First mapping should be gone, second should remain
-        let config_content = read_sources_config(&config_dir);
-        assert!(
-            !config_content.contains("/home/user"),
-            "Removed mapping still in config"
-        );
-        assert!(
-            config_content.contains("/opt/work"),
-            "Other mapping incorrectly removed"
-        );
-    });
+    // First mapping should be gone, second should remain
+    let config_content = read_sources_config(&config_dir);
+    assert!(
+        !config_content.contains("/home/user"),
+        "Removed mapping still in config"
+    );
+    assert!(
+        config_content.contains("/opt/work"),
+        "Other mapping incorrectly removed"
+    );
+    tracker.end("verify_removal", Some("Verify first mapping removed, second kept"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources mappings remove with invalid index.
 #[test]
 fn mappings_remove_invalid_index() {
-    logged_test!("mappings_remove_invalid_index", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_remove_invalid_index");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with one path mapping"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
@@ -1631,59 +1675,73 @@ paths = ["~/.claude/projects"]
 from = "/home/user"
 to = "/Users/me"
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with one path mapping"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "mappings", "remove", "laptop", "99"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings remove command");
+    let start = tracker.start("run_mappings_remove", Some("Remove mapping at invalid index 99"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "remove", "laptop", "99"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings remove command");
+    tracker.end("run_mappings_remove", Some("Remove mapping at invalid index 99"), start);
 
-        assert!(!output.status.success());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("index") || stderr.contains("out of") || stderr.contains("range"),
-            "Expected index error, got: {stderr}"
-        );
-    });
+    let start = tracker.start("verify_error", Some("Verify index out of range error"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("index") || stderr.contains("out of") || stderr.contains("range"),
+        "Expected index error, got: {stderr}"
+    );
+    tracker.end("verify_error", Some("Verify index out of range error"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources mappings remove from empty mappings list.
 #[test]
 fn mappings_remove_from_empty() {
-    logged_test!("mappings_remove_from_empty", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_remove_from_empty");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with no mappings"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with no mappings"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "mappings", "remove", "laptop", "0"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings remove command");
+    let start = tracker.start("run_mappings_remove", Some("Remove from empty mappings list"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "remove", "laptop", "0"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings remove command");
+    tracker.end("run_mappings_remove", Some("Remove from empty mappings list"), start);
 
-        assert!(!output.status.success());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("no mapping") || stderr.contains("empty") || stderr.contains("index"),
-            "Expected no mappings error, got: {stderr}"
-        );
-    });
+    let start = tracker.start("verify_error", Some("Verify empty mappings error"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no mapping") || stderr.contains("empty") || stderr.contains("index"),
+        "Expected no mappings error, got: {stderr}"
+    );
+    tracker.end("verify_error", Some("Verify empty mappings error"), start);
+
+    tracker.complete();
 }
 
 // =============================================================================
@@ -1693,14 +1751,16 @@ paths = ["~/.claude/projects"]
 /// Test: sources mappings test with matching path.
 #[test]
 fn mappings_test_match() {
-    logged_test!("mappings_test_match", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_test_match");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with path mapping"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
@@ -1711,42 +1771,50 @@ paths = ["~/.claude/projects"]
 from = "/home/user/projects"
 to = "/Users/me/projects"
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with path mapping"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "mappings",
-                "test",
-                "laptop",
-                "/home/user/projects/myapp/src/main.rs",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings test command");
+    let start = tracker.start("run_mappings_test", Some("Test path that matches mapping"));
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "test",
+            "laptop",
+            "/home/user/projects/myapp/src/main.rs",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings test command");
+    tracker.end("run_mappings_test", Some("Test path that matches mapping"), start);
 
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("/Users/me/projects/myapp/src/main.rs"),
-            "Expected rewritten path, got: {stdout}"
-        );
-    });
+    let start = tracker.start("verify_rewritten_path", Some("Verify path was rewritten"));
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("/Users/me/projects/myapp/src/main.rs"),
+        "Expected rewritten path, got: {stdout}"
+    );
+    tracker.end("verify_rewritten_path", Some("Verify path was rewritten"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources mappings test with non-matching path.
 #[test]
 fn mappings_test_no_match() {
-    logged_test!("mappings_test_no_match", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_test_no_match");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with path mapping"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
@@ -1757,43 +1825,51 @@ paths = ["~/.claude/projects"]
 from = "/home/user/projects"
 to = "/Users/me/projects"
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with path mapping"), start);
 
-        let output = cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "mappings",
-                "test",
-                "laptop",
-                "/opt/other/path/file.rs",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings test command");
+    let start = tracker.start("run_mappings_test", Some("Test path that does not match mapping"));
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "test",
+            "laptop",
+            "/opt/other/path/file.rs",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings test command");
+    tracker.end("run_mappings_test", Some("Test path that does not match mapping"), start);
 
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Path should be unchanged or indicate no match
-        assert!(
-            stdout.contains("/opt/other/path/file.rs") || stdout.contains("no match"),
-            "Expected unchanged path or no match, got: {stdout}"
-        );
-    });
+    let start = tracker.start("verify_unchanged_path", Some("Verify path unchanged or no match"));
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Path should be unchanged or indicate no match
+    assert!(
+        stdout.contains("/opt/other/path/file.rs") || stdout.contains("no match"),
+        "Expected unchanged path or no match, got: {stdout}"
+    );
+    tracker.end("verify_unchanged_path", Some("Verify path unchanged or no match"), start);
+
+    tracker.complete();
 }
 
 /// Test: sources mappings test with agent filter.
 #[test]
 fn mappings_test_with_agent() {
-    logged_test!("mappings_test_with_agent", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_test_with_agent");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with agent-filtered mapping"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
@@ -1805,32 +1881,38 @@ from = "/home/user"
 to = "/Users/me"
 agents = ["claude_code"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with agent-filtered mapping"), start);
 
-        // Test with matching agent
-        let output = cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "mappings",
-                "test",
-                "laptop",
-                "/home/user/file.rs",
-                "--agent",
-                "claude_code",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("sources mappings test command");
+    // Test with matching agent
+    let start = tracker.start("run_mappings_test", Some("Test mapping with matching agent"));
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "test",
+            "laptop",
+            "/home/user/file.rs",
+            "--agent",
+            "claude_code",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings test command");
+    tracker.end("run_mappings_test", Some("Test mapping with matching agent"), start);
 
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("/Users/me/file.rs"),
-            "Expected rewritten path for matching agent, got: {stdout}"
-        );
-    });
+    let start = tracker.start("verify_rewritten_path", Some("Verify path rewritten for matching agent"));
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("/Users/me/file.rs"),
+        "Expected rewritten path for matching agent, got: {stdout}"
+    );
+    tracker.end("verify_rewritten_path", Some("Verify path rewritten for matching agent"), start);
+
+    tracker.complete();
 }
 
 // =============================================================================
@@ -1840,85 +1922,99 @@ agents = ["claude_code"]
 /// Test: Complete mappings workflow - add, list, test, remove.
 #[test]
 fn mappings_workflow_complete() {
-    logged_test!("mappings_workflow_complete", "e2e_sources", {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("config");
-        fs::create_dir_all(&config_dir).unwrap();
+    let tracker = tracker_for("mappings_workflow_complete");
 
-        create_sources_config(
-            &config_dir,
-            r#"
+    let start = tracker.start("setup", Some("Create config with laptop source"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
 [[sources]]
 name = "laptop"
 type = "ssh"
 host = "user@laptop.local"
 paths = ["~/.claude/projects"]
 "#,
-        );
+    );
 
-        let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create config with laptop source"), start);
 
-        // 1. Add a mapping
-        cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "mappings",
-                "add",
-                "laptop",
-                "--from",
-                "/remote/path",
-                "--to",
-                "/local/path",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .assert()
-            .success();
+    // 1. Add a mapping
+    let start = tracker.start("add_mapping", Some("Add path mapping"));
+    cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "laptop",
+            "--from",
+            "/remote/path",
+            "--to",
+            "/local/path",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .assert()
+        .success();
+    tracker.end("add_mapping", Some("Add path mapping"), start);
 
-        // 2. List mappings - should show the added mapping
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "mappings", "list", "laptop"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("list command");
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("/remote/path"));
+    // 2. List mappings - should show the added mapping
+    let start = tracker.start("list_mappings", Some("List mappings and verify added"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "laptop"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("list command");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("/remote/path"));
+    tracker.end("list_mappings", Some("List mappings and verify added"), start);
 
-        // 3. Test the mapping
-        let output = cargo_bin_cmd!("cass")
-            .args([
-                "sources",
-                "mappings",
-                "test",
-                "laptop",
-                "/remote/path/subdir/file.rs",
-            ])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("test command");
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("/local/path/subdir/file.rs"));
+    // 3. Test the mapping
+    let start = tracker.start("test_mapping", Some("Test path rewriting"));
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "test",
+            "laptop",
+            "/remote/path/subdir/file.rs",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("test command");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("/local/path/subdir/file.rs"));
+    tracker.end("test_mapping", Some("Test path rewriting"), start);
 
-        // 4. Remove the mapping
-        cargo_bin_cmd!("cass")
-            .args(["sources", "mappings", "remove", "laptop", "0"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .assert()
-            .success();
+    // 4. Remove the mapping
+    let start = tracker.start("remove_mapping", Some("Remove the mapping"));
+    cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "remove", "laptop", "0"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .assert()
+        .success();
+    tracker.end("remove_mapping", Some("Remove the mapping"), start);
 
-        // 5. List again - should be empty
-        let output = cargo_bin_cmd!("cass")
-            .args(["sources", "mappings", "list", "laptop"])
-            .env("XDG_CONFIG_HOME", &config_dir)
-            .output()
-            .expect("list command");
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // After removal, should show "No path mappings" message
-        assert!(
-            stdout.contains("No") || !stdout.contains("/remote/path"),
-            "Mapping should be removed, got: {stdout}"
-        );
-    });
+    // 5. List again - should be empty
+    let start = tracker.start("verify_empty", Some("Verify mapping was removed"));
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "laptop"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("list command");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // After removal, should show "No path mappings" message
+    assert!(
+        stdout.contains("No") || !stdout.contains("/remote/path"),
+        "Mapping should be removed, got: {stdout}"
+    );
+    tracker.end("verify_empty", Some("Verify mapping was removed"), start);
+
+    tracker.complete();
 }

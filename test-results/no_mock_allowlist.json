@@ -106,24 +106,6 @@
       "note": "This is product functionality, not test infrastructure"
     },
     {
-      "path": "tests/e2e_install_easy.rs",
-      "pattern": "fake_bin",
-      "rationale": "PERMANENT: Fast local test for install.sh script logic. Real install verification runs in CI via .github/workflows/install-test.yml with actual Rust tooling",
-      "owner": "infra-team",
-      "review_date": "2026-07-26",
-      "permanent": true,
-      "note": "Fake rustc/cargo/sha256sum binaries allow fast isolated testing of install script logic. Full real-world install testing runs in CI workflow install-test.yml on Linux and macOS"
-    },
-    {
-      "path": "tests/e2e_install_easy.rs",
-      "pattern": "mock_allowlist",
-      "rationale": "Documentation comment referencing no_mock_allowlist.json filename (false positive)",
-      "owner": "infra-team",
-      "review_date": "2026-07-26",
-      "permanent": true,
-      "note": "Comment references the allowlist file, not mock code"
-    },
-    {
       "path": "src/sources/install.rs",
       "pattern": "mock_system_info",
       "rationale": "PERMANENT: Fixture constructor for testing pure install method selection logic with deterministic inputs",

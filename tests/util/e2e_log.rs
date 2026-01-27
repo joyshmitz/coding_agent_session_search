@@ -1119,12 +1119,86 @@ impl Drop for PhaseTracker {
     }
 }
 
+/// Run a test and emit structured logging events when E2E_LOG is enabled.
+#[allow(dead_code)]
+pub fn run_logged_test<F>(name: &str, suite: &str, file: &str, line: u32, test_fn: F)
+where
+    F: FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+{
+    let logger = if std::env::var("E2E_LOG").is_ok() {
+        E2eLogger::new("rust").ok()
+    } else {
+        None
+    };
+
+    let test_info = E2eTestInfo::new(name, suite, file, line);
+    if let Some(ref lg) = logger {
+        let _ = lg.test_start(&test_info);
+    }
+
+    let start = Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test_fn));
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    let (is_pass, error_msg, panic_type) = match &result {
+        Ok(Ok(())) => (true, None, None),
+        Ok(Err(e)) => (false, Some(e.to_string()), None),
+        Err(panic) => {
+            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic".to_string()
+            };
+            (false, Some(msg), Some("Panic"))
+        }
+    };
+
+    if let Some(ref lg) = logger {
+        if is_pass {
+            let _ = lg.test_pass(&test_info, duration_ms, None);
+        } else {
+            let _ = lg.test_fail(
+                &test_info,
+                duration_ms,
+                None,
+                E2eError {
+                    message: error_msg.unwrap_or_default(),
+                    error_type: panic_type.map(String::from),
+                    stack: None,
+                    context: None,
+                },
+            );
+        }
+        let _ = lg.flush();
+    }
+
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// Convenience macro for creating E2eTestInfo with file and line.
 #[macro_export]
 macro_rules! e2e_test_info {
     ($name:expr, $suite:expr) => {
         $crate::util::e2e_log::E2eTestInfo::new($name, $suite, file!(), line!())
     };
+}
+
+/// Log a test run with optional structured output (E2E_LOG=1).
+#[macro_export]
+macro_rules! logged_test {
+    ($name:expr, $suite:expr, $body:block) => {{
+        $crate::util::e2e_log::run_logged_test($name, $suite, file!(), line!(), || {
+            let result: Result<(), Box<dyn std::error::Error>> = (|| {
+                $body
+                Ok(())
+            })();
+            result
+        });
+    }};
 }
 
 #[cfg(test)]
@@ -1595,5 +1669,98 @@ mod tests {
         assert!(content.contains("\"status\":\"pass\""));
         // metrics should not be present when not provided
         assert!(!content.contains("\"metrics\""));
+    }
+
+    // ==================== PhaseTracker Tests ====================
+
+    #[test]
+    fn test_phase_tracker_new() {
+        // PhaseTracker initializes without panic even without E2E_LOG
+        let tracker = PhaseTracker::new("test_suite", "tracker_init");
+        tracker.complete();
+    }
+
+    #[test]
+    fn test_phase_tracker_phase_lifecycle() {
+        let tracker = PhaseTracker::new("test_suite", "phase_lifecycle");
+
+        // phase() executes the closure and returns its result
+        let result = tracker.phase("setup", "Setting up test fixtures", || 42);
+        assert_eq!(result, 42, "phase() must return the closure's result");
+
+        // Multiple phases execute sequentially
+        let result2 = tracker.phase("verify", "Verifying results", || "hello");
+        assert_eq!(result2, "hello", "Sequential phases must each return correctly");
+
+        tracker.complete();
+    }
+
+    #[test]
+    fn test_phase_tracker_manual_timing() {
+        let tracker = PhaseTracker::new("test_suite", "manual_timing");
+
+        // start()/end() pair with description
+        let start = tracker.start("setup", Some("Manual phase with description"));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tracker.end("setup", Some("Manual phase with description"), start);
+
+        // start()/end() pair without description
+        let start2 = tracker.start("run", None);
+        tracker.end("run", None, start2);
+
+        tracker.complete();
+    }
+
+    #[test]
+    fn test_phase_tracker_nested_phases() {
+        let tracker = PhaseTracker::new("test_suite", "nested_phases");
+
+        // Nested phases: closure-based outer with manual inner
+        let outer_result = tracker.phase("outer", "Outer phase", || {
+            let inner_start = tracker.start("inner", Some("Inner phase"));
+            let value = 100 + 42;
+            tracker.end("inner", Some("Inner phase"), inner_start);
+            value
+        });
+        assert_eq!(outer_result, 142, "Nested phases must compose correctly");
+
+        tracker.complete();
+    }
+
+    #[test]
+    fn test_phase_tracker_complete_prevents_double_log() {
+        // After complete(), the Drop impl should no-op (completed flag is true)
+        let tracker = PhaseTracker::new("test_suite", "complete_idempotent");
+        tracker.complete();
+        // Drop runs here but should detect completed=true and skip
+    }
+
+    #[test]
+    fn test_phase_tracker_drop_without_complete() {
+        // When complete() is not called and thread is not panicking,
+        // Drop should handle gracefully with status "pass"
+        let _tracker = PhaseTracker::new("test_suite", "drop_implicit");
+        // Drop runs here - should not panic
+    }
+
+    #[test]
+    fn test_phase_tracker_fail() {
+        let tracker = PhaseTracker::new("test_suite", "fail_test");
+        tracker.fail(E2eError::new("Deliberate test failure"));
+        // Should not panic; Drop should detect completed=true and skip
+    }
+
+    #[test]
+    fn test_phase_tracker_metrics() {
+        let tracker = PhaseTracker::new("test_suite", "metrics_emission");
+
+        let metrics = E2ePerformanceMetrics::new()
+            .with_duration(100)
+            .with_memory(1024);
+
+        // metrics() should not panic even when logger is None
+        tracker.metrics("test_operation", &metrics);
+
+        tracker.complete();
     }
 }
