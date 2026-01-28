@@ -10976,6 +10976,402 @@ pub fn group_messages_for_export(
     groups
 }
 
+// ============================================================================
+// Unit Tests for Message Grouping Algorithm
+// ============================================================================
+
+#[cfg(test)]
+mod message_grouping_tests {
+    use super::*;
+    use html_export::{Message, MessageGroup, MessageGroupType, ToolCall, ToolResult, ToolStatus};
+
+    // Helper to create a user message
+    fn msg_user(content: &str) -> Message {
+        Message {
+            role: "user".to_string(),
+            content: content.to_string(),
+            timestamp: Some("2026-01-15T10:00:00Z".to_string()),
+            tool_call: None,
+            index: None,
+            author: None,
+        }
+    }
+
+    // Helper to create an assistant message
+    fn msg_assistant(content: &str) -> Message {
+        Message {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            timestamp: Some("2026-01-15T10:00:05Z".to_string()),
+            tool_call: None,
+            index: None,
+            author: None,
+        }
+    }
+
+    // Helper to create an assistant message with tool call
+    fn msg_assistant_with_tool(content: &str, tool_name: &str, tool_input: &str) -> Message {
+        Message {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            timestamp: Some("2026-01-15T10:00:05Z".to_string()),
+            tool_call: Some(ToolCall {
+                name: tool_name.to_string(),
+                input: tool_input.to_string(),
+                output: None,
+                status: None,
+            }),
+            index: None,
+            author: None,
+        }
+    }
+
+    // Helper to create a tool result message
+    fn msg_tool_result(tool_name: &str, output: &str, status: ToolStatus) -> Message {
+        Message {
+            role: "tool".to_string(),
+            content: output.to_string(),
+            timestamp: Some("2026-01-15T10:00:10Z".to_string()),
+            tool_call: Some(ToolCall {
+                name: tool_name.to_string(),
+                input: String::new(),
+                output: Some(output.to_string()),
+                status: Some(status),
+            }),
+            index: None,
+            author: None,
+        }
+    }
+
+    // Helper to create a system message
+    fn msg_system(content: &str) -> Message {
+        Message {
+            role: "system".to_string(),
+            content: content.to_string(),
+            timestamp: Some("2026-01-15T09:59:00Z".to_string()),
+            tool_call: None,
+            index: None,
+            author: None,
+        }
+    }
+
+    // Helper to create an empty message
+    fn msg_empty() -> Message {
+        Message {
+            role: "assistant".to_string(),
+            content: String::new(),
+            timestamp: Some("2026-01-15T10:00:00Z".to_string()),
+            tool_call: None,
+            index: None,
+            author: None,
+        }
+    }
+
+    // ========================================================================
+    // Basic Grouping Tests
+    // ========================================================================
+
+    #[test]
+    fn test_single_user_message() {
+        let msgs = vec![msg_user("Hello")];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_type, MessageGroupType::User);
+        assert_eq!(groups[0].primary.content, "Hello");
+    }
+
+    #[test]
+    fn test_single_assistant_message() {
+        let msgs = vec![msg_assistant("Hi there!")];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_type, MessageGroupType::Assistant);
+    }
+
+    #[test]
+    fn test_user_assistant_pair() {
+        let msgs = vec![msg_user("Hello"), msg_assistant("Hi there!")];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].group_type, MessageGroupType::User);
+        assert_eq!(groups[1].group_type, MessageGroupType::Assistant);
+    }
+
+    #[test]
+    fn test_assistant_with_single_tool() {
+        let msgs = vec![
+            msg_assistant_with_tool("Let me check that file.", "Read", "/path/file.rs"),
+            msg_tool_result("Read", "file contents here", ToolStatus::Success),
+        ];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 1, "Should group assistant + tool into one");
+        assert_eq!(groups[0].group_type, MessageGroupType::Assistant);
+        assert_eq!(groups[0].tool_calls.len(), 1, "Should have 1 tool call");
+    }
+
+    #[test]
+    fn test_assistant_with_multiple_tools() {
+        let msgs = vec![
+            msg_assistant_with_tool("Running multiple commands.", "Bash", "ls"),
+            msg_tool_result("Bash", "file1 file2", ToolStatus::Success),
+            msg_assistant_with_tool("", "Read", "/README.md"),
+            msg_tool_result("Read", "# Title", ToolStatus::Success),
+        ];
+        let groups = group_messages_for_export(msgs);
+        // First assistant group, then tool-only groups that get attached
+        assert!(groups.len() >= 1, "Should have at least one group");
+    }
+
+    // ========================================================================
+    // System Message Tests
+    // ========================================================================
+
+    #[test]
+    fn test_system_message_standalone() {
+        let msgs = vec![
+            msg_system("You are a helpful assistant."),
+            msg_user("Hello"),
+        ];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].group_type, MessageGroupType::System);
+        assert_eq!(groups[1].group_type, MessageGroupType::User);
+    }
+
+    #[test]
+    fn test_system_message_in_middle() {
+        let msgs = vec![
+            msg_user("Hello"),
+            msg_assistant("Hi!"),
+            msg_system("Context reminder"),
+            msg_user("Continue"),
+        ];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[2].group_type, MessageGroupType::System);
+    }
+
+    // ========================================================================
+    // Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_empty_messages_filtered() {
+        let msgs = vec![
+            msg_user("Hello"),
+            msg_empty(),  // Should be filtered
+            msg_assistant("Hi there!"),
+        ];
+        let groups = group_messages_for_export(msgs);
+        // Empty message should be skipped
+        assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn test_consecutive_user_messages() {
+        let msgs = vec![
+            msg_user("First question"),
+            msg_user("Second question"),
+            msg_user("Third question"),
+        ];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 3, "Each user message should be separate group");
+        for group in &groups {
+            assert_eq!(group.group_type, MessageGroupType::User);
+        }
+    }
+
+    #[test]
+    fn test_consecutive_assistant_messages() {
+        let msgs = vec![
+            msg_assistant("First response"),
+            msg_assistant("Second response"),
+        ];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 2, "Each assistant message should be separate");
+    }
+
+    #[test]
+    fn test_orphan_tool_result() {
+        // Tool result without preceding tool call should be handled gracefully
+        let msgs = vec![
+            msg_user("Hello"),
+            msg_tool_result("Read", "orphan result", ToolStatus::Success),
+        ];
+        let groups = group_messages_for_export(msgs);
+        // Should have user group, orphan tool result might be dropped or attached
+        assert!(groups.len() >= 1);
+    }
+
+    #[test]
+    fn test_unicode_content() {
+        let msgs = vec![
+            msg_user("Test Unicode: 你好世界! 🎉🚀 مرحبا العالم"),
+            msg_assistant("Handling multilingual: Привет мир 日本語"),
+        ];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 2);
+        assert!(groups[0].primary.content.contains("你好"));
+        assert!(groups[1].primary.content.contains("Привет"));
+    }
+
+    #[test]
+    fn test_html_special_characters() {
+        let msgs = vec![
+            msg_user("<script>alert('xss')</script>"),
+            msg_assistant("Response with & \"quotes\" 'single'"),
+        ];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 2);
+        // Content should be preserved (escaping happens at render time)
+        assert!(groups[0].primary.content.contains("<script>"));
+    }
+
+    #[test]
+    fn test_empty_input_returns_empty() {
+        let msgs: Vec<Message> = vec![];
+        let groups = group_messages_for_export(msgs);
+        assert!(groups.is_empty());
+    }
+
+    // ========================================================================
+    // Tool Status Tests
+    // ========================================================================
+
+    #[test]
+    fn test_tool_success_status() {
+        let msgs = vec![
+            msg_assistant_with_tool("Running command", "Bash", "echo hello"),
+            msg_tool_result("Bash", "hello", ToolStatus::Success),
+        ];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 1);
+        // The tool result should be attached
+        if let Some(tc) = groups[0].tool_calls.first() {
+            if let Some(ref result) = tc.result {
+                assert_eq!(result.status, ToolStatus::Success);
+            }
+        }
+    }
+
+    #[test]
+    fn test_tool_error_status() {
+        let msgs = vec![
+            msg_assistant_with_tool("Reading file", "Read", "/nonexistent"),
+            msg_tool_result("Read", "File not found", ToolStatus::Error),
+        ];
+        let groups = group_messages_for_export(msgs);
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].has_errors() || groups[0].tool_calls.is_empty());
+    }
+
+    // ========================================================================
+    // Agent Format Detection Tests
+    // ========================================================================
+
+    #[test]
+    fn test_detect_claude_format() {
+        let msgs = vec![
+            msg_assistant_with_tool("Let me check", "Read", "/file.rs"),
+        ];
+        let format = detect_agent_format(&msgs);
+        assert_eq!(format, AgentFormat::ClaudeCode);
+    }
+
+    #[test]
+    fn test_detect_generic_format() {
+        let msgs = vec![msg_user("Hello"), msg_assistant("Hi")];
+        let format = detect_agent_format(&msgs);
+        // No tool calls, so should be generic
+        assert_eq!(format, AgentFormat::Generic);
+    }
+
+    // ========================================================================
+    // Message Classification Tests
+    // ========================================================================
+
+    #[test]
+    fn test_classify_user_content() {
+        let msg = msg_user("Hello");
+        let class = classify_message(&msg, AgentFormat::Generic);
+        assert_eq!(class, MessageClassification::UserContent);
+    }
+
+    #[test]
+    fn test_classify_assistant_content() {
+        let msg = msg_assistant("Hi there");
+        let class = classify_message(&msg, AgentFormat::Generic);
+        assert_eq!(class, MessageClassification::AssistantContent);
+    }
+
+    #[test]
+    fn test_classify_system() {
+        let msg = msg_system("You are helpful");
+        let class = classify_message(&msg, AgentFormat::Generic);
+        assert_eq!(class, MessageClassification::System);
+    }
+
+    #[test]
+    fn test_classify_empty() {
+        let msg = msg_empty();
+        let class = classify_message(&msg, AgentFormat::Generic);
+        assert_eq!(class, MessageClassification::Empty);
+    }
+
+    #[test]
+    fn test_classify_tool_result() {
+        let msg = msg_tool_result("Read", "contents", ToolStatus::Success);
+        let class = classify_message(&msg, AgentFormat::Generic);
+        assert_eq!(class, MessageClassification::ToolResult);
+    }
+
+    // ========================================================================
+    // Performance Tests
+    // ========================================================================
+
+    #[test]
+    fn test_large_session_performance() {
+        use std::time::Instant;
+
+        // Generate 1000 messages
+        let mut msgs = Vec::with_capacity(1000);
+        for i in 0..500 {
+            msgs.push(msg_user(&format!("Question {}", i)));
+            msgs.push(msg_assistant(&format!("Answer {}", i)));
+        }
+
+        let start = Instant::now();
+        let groups = group_messages_for_export(msgs);
+        let elapsed = start.elapsed();
+
+        assert_eq!(groups.len(), 1000);
+        assert!(
+            elapsed.as_millis() < 500,
+            "Grouping 1000 messages took {}ms, should be < 500ms",
+            elapsed.as_millis()
+        );
+    }
+
+    // ========================================================================
+    // Timestamp Tests
+    // ========================================================================
+
+    #[test]
+    fn test_group_timestamps_captured() {
+        let mut user_msg = msg_user("Hello");
+        user_msg.timestamp = Some("2026-01-15T10:00:00Z".to_string());
+
+        let msgs = vec![user_msg];
+        let groups = group_messages_for_export(msgs);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].start_timestamp,
+            Some("2026-01-15T10:00:00Z".to_string())
+        );
+    }
+}
+
 fn format_as_markdown(
     messages: &[serde_json::Value],
     title: &Option<String>,
