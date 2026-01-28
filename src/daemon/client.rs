@@ -391,7 +391,12 @@ impl DaemonClient for UdsDaemonClient {
                     dimension = embed.embeddings[0].len(),
                     "Daemon embed completed"
                 );
-                Ok(embed.embeddings.into_iter().next().unwrap())
+                // Safety: We've verified embeddings is not empty above
+                embed
+                    .embeddings
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| DaemonError::Failed("embedding unexpectedly empty".to_string()))
             }
             other => Err(DaemonError::Failed(format!(
                 "unexpected response: {:?}",
