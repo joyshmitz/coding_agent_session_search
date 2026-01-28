@@ -45,7 +45,8 @@ pub use filename::{
     normalize_topic, unique_filename, workspace_slug,
 };
 pub use renderer::{
-    Message, RenderError, RenderOptions, ToolCall, ToolStatus, agent_css_class, agent_display_name,
+    Message, MessageGroup, MessageGroupType, RenderError, RenderOptions, ToolCall,
+    ToolCallWithResult, ToolResult, ToolStatus, agent_css_class, agent_display_name,
     render_conversation, render_message,
 };
 pub use scripts::{ScriptBundle, generate_scripts};

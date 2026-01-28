@@ -10621,6 +10621,355 @@ fn extract_tool_call(msg: &serde_json::Value) -> Option<html_export::ToolCall> {
     None
 }
 
+// ============================================================================
+// Message Grouping Algorithm for Consolidated HTML Export
+// ============================================================================
+
+/// Agent format for message structure detection.
+///
+/// Different coding agents use different message formats. This enum helps
+/// the grouping algorithm understand how to parse and correlate messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentFormat {
+    /// Claude Code: content array with tool_use/tool_result blocks, correlation via tool_use_id
+    ClaudeCode,
+    /// Codex CLI: function_call and function role messages, correlation via function name
+    Codex,
+    /// Cursor: type: "tool" at top level with tool_name/tool_input/tool_output
+    Cursor,
+    /// OpenCode: special handling already exists
+    OpenCode,
+    /// Generic/unknown format
+    Generic,
+}
+
+/// Message classification for grouping decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageClassification {
+    /// User message with actual text content
+    UserContent,
+    /// Assistant message with text (may also have embedded tools)
+    AssistantContent,
+    /// Assistant message with only tool calls, no text
+    AssistantToolOnly,
+    /// Response to a tool call (tool_result, function response)
+    ToolResult,
+    /// System message
+    System,
+    /// Empty or skip-worthy message
+    Empty,
+}
+
+/// Detect the agent format from a set of messages.
+///
+/// Examines message structure to determine which agent produced them.
+/// This enables format-specific correlation logic.
+pub fn detect_agent_format(messages: &[html_export::Message]) -> AgentFormat {
+    use tracing::trace;
+
+    // Check first few messages for format indicators
+    for msg in messages.iter().take(10) {
+        let role = msg.role.as_str();
+
+        // Codex uses "function" role for tool results
+        if role == "function" {
+            trace!(agent_format = "codex", "Detected Codex format from function role");
+            return AgentFormat::Codex;
+        }
+
+        // Check for tool_call presence and structure
+        if let Some(ref tc) = msg.tool_call {
+            // Cursor format has specific tool names like "tool"
+            if tc.name == "tool" || tc.name.starts_with("tool_") {
+                trace!(agent_format = "cursor", "Detected Cursor format from tool name pattern");
+                return AgentFormat::Cursor;
+            }
+            // Claude Code uses standard tool names (Bash, Read, Write, etc.)
+            if matches!(
+                tc.name.as_str(),
+                "Bash" | "Read" | "Write" | "Edit" | "Glob" | "Grep" | "Task" | "WebFetch"
+            ) {
+                trace!(agent_format = "claude_code", "Detected Claude Code format from tool name");
+                return AgentFormat::ClaudeCode;
+            }
+        }
+    }
+
+    trace!(agent_format = "generic", "Using generic format (no specific pattern detected)");
+    AgentFormat::Generic
+}
+
+/// Classify a message for grouping purposes.
+///
+/// Determines how a message should be handled in the grouping algorithm:
+/// - Starting a new group
+/// - Attaching to current group
+/// - Being a tool result
+/// - Being skipped
+pub fn classify_message(
+    msg: &html_export::Message,
+    _format: AgentFormat,
+) -> MessageClassification {
+    use tracing::trace;
+
+    let role = msg.role.as_str();
+    let has_content = !msg.content.trim().is_empty();
+    let has_tool = msg.tool_call.is_some();
+
+    trace!(
+        role = role,
+        has_content = has_content,
+        has_tool = has_tool,
+        "Classifying message"
+    );
+
+    match role {
+        "user" => {
+            if has_content {
+                MessageClassification::UserContent
+            } else {
+                MessageClassification::Empty
+            }
+        }
+        "assistant" | "agent" => {
+            if has_content {
+                MessageClassification::AssistantContent
+            } else if has_tool {
+                MessageClassification::AssistantToolOnly
+            } else {
+                MessageClassification::Empty
+            }
+        }
+        "tool" | "function" => {
+            // Tool result messages
+            MessageClassification::ToolResult
+        }
+        "system" => MessageClassification::System,
+        _ => {
+            // Unknown role - check if it has meaningful content
+            if has_content || has_tool {
+                MessageClassification::AssistantContent
+            } else {
+                MessageClassification::Empty
+            }
+        }
+    }
+}
+
+/// Extract correlation ID from a message for tool call/result matching.
+///
+/// Different formats use different correlation mechanisms:
+/// - Claude Code: tool_use_id in content blocks
+/// - Codex: function call name
+/// - Generic: message index fallback
+pub fn extract_correlation_id(
+    msg: &html_export::Message,
+    format: AgentFormat,
+) -> Option<String> {
+    use tracing::trace;
+
+    // First, try to use the tool call name as a simple correlation
+    // This works for most formats as a baseline
+    if let Some(ref tc) = msg.tool_call {
+        let corr_id = match format {
+            AgentFormat::ClaudeCode => {
+                // Claude uses tool_use_id but we don't have access to raw JSON here
+                // Fall back to tool name + index
+                Some(format!("claude-{}", tc.name))
+            }
+            AgentFormat::Codex => {
+                // Codex correlates by function name
+                Some(format!("codex-{}", tc.name))
+            }
+            AgentFormat::Cursor => Some(format!("cursor-{}", tc.name)),
+            AgentFormat::OpenCode => Some(format!("opencode-{}", tc.name)),
+            AgentFormat::Generic => Some(format!("generic-{}", tc.name)),
+        };
+        trace!(correlation_id = ?corr_id, tool_name = %tc.name, "Extracted correlation ID");
+        return corr_id;
+    }
+
+    // For tool results without explicit tool_call, use index as fallback
+    msg.index.map(|idx| format!("index-{}", idx))
+}
+
+/// Flush the current group into the groups vector if it exists.
+fn flush_group(
+    groups: &mut Vec<html_export::MessageGroup>,
+    current_group: &mut Option<html_export::MessageGroup>,
+) {
+    if let Some(group) = current_group.take() {
+        tracing::trace!(
+            group_type = ?group.group_type,
+            tool_count = group.tool_count(),
+            "Flushing message group"
+        );
+        groups.push(group);
+    }
+}
+
+/// Groups flat messages into MessageGroups with tool correlation.
+///
+/// # Algorithm
+/// 1. Detect agent format from message structure
+/// 2. Classify each message
+/// 3. User/Assistant content messages start new groups
+/// 4. Tool-only messages attach to current assistant group
+/// 5. Tool results correlate by ID to matching tool call
+/// 6. System messages are standalone groups
+/// 7. Track timestamps for group range
+///
+/// # Logging
+/// - INFO: Group formation summary
+/// - DEBUG: Each message classification
+/// - TRACE: Correlation matching details
+///
+/// # Example
+/// ```ignore
+/// let messages: Vec<Message> = load_messages();
+/// let groups = group_messages_for_export(messages);
+/// for group in groups {
+///     render_message_group(&group);
+/// }
+/// ```
+pub fn group_messages_for_export(
+    messages: Vec<html_export::Message>,
+) -> Vec<html_export::MessageGroup> {
+    use tracing::{debug, info, trace};
+
+    info!(message_count = messages.len(), "Starting message grouping");
+
+    let format = detect_agent_format(&messages);
+    debug!(?format, "Detected agent format");
+
+    let mut groups: Vec<html_export::MessageGroup> = Vec::new();
+    let mut current_group: Option<html_export::MessageGroup> = None;
+
+    for (idx, msg) in messages.iter().enumerate() {
+        let classification = classify_message(msg, format);
+        debug!(
+            idx = idx,
+            classification = ?classification,
+            role = %msg.role,
+            content_preview = %msg.content.chars().take(50).collect::<String>(),
+            "Classified message"
+        );
+
+        match classification {
+            MessageClassification::UserContent => {
+                // User messages start a new group
+                flush_group(&mut groups, &mut current_group);
+                let mut group = html_export::MessageGroup::user(msg.clone());
+                group.start_timestamp = msg.timestamp.clone();
+                group.end_timestamp = msg.timestamp.clone();
+                current_group = Some(group);
+            }
+
+            MessageClassification::AssistantContent => {
+                // Assistant content starts a new group
+                flush_group(&mut groups, &mut current_group);
+                let mut group = html_export::MessageGroup::assistant(msg.clone());
+                group.start_timestamp = msg.timestamp.clone();
+                group.end_timestamp = msg.timestamp.clone();
+
+                // If assistant has embedded tool calls, add them
+                if let Some(ref tc) = msg.tool_call {
+                    let corr_id = extract_correlation_id(msg, format);
+                    group.add_tool_call(tc.clone(), corr_id);
+                    trace!(tool_name = %tc.name, "Added embedded tool call to assistant group");
+                }
+                current_group = Some(group);
+            }
+
+            MessageClassification::AssistantToolOnly => {
+                // Tool-only messages attach to current group or create tool-only group
+                if let Some(ref mut g) = current_group {
+                    // Attach to existing group
+                    if let Some(ref tc) = msg.tool_call {
+                        let corr_id = extract_correlation_id(msg, format);
+                        g.add_tool_call(tc.clone(), corr_id);
+                        g.update_end_timestamp(msg.timestamp.clone());
+                        trace!(tool_name = %tc.name, "Attached tool call to current group");
+                    }
+                } else {
+                    // Create a new tool-only group
+                    let mut group = html_export::MessageGroup::tool_only(msg.clone());
+                    group.start_timestamp = msg.timestamp.clone();
+                    group.end_timestamp = msg.timestamp.clone();
+                    if let Some(ref tc) = msg.tool_call {
+                        let corr_id = extract_correlation_id(msg, format);
+                        group.add_tool_call(tc.clone(), corr_id);
+                    }
+                    current_group = Some(group);
+                    trace!("Created new tool-only group");
+                }
+            }
+
+            MessageClassification::ToolResult => {
+                // Tool results attach to current group
+                if let Some(ref mut g) = current_group {
+                    // Create a ToolResult from the message
+                    let tool_name = msg
+                        .tool_call
+                        .as_ref()
+                        .map(|tc| tc.name.clone())
+                        .unwrap_or_else(|| "tool_result".to_string());
+
+                    let content = if let Some(ref tc) = msg.tool_call {
+                        tc.output.clone().unwrap_or_else(|| msg.content.clone())
+                    } else {
+                        msg.content.clone()
+                    };
+
+                    let status = msg
+                        .tool_call
+                        .as_ref()
+                        .and_then(|tc| tc.status)
+                        .unwrap_or(html_export::ToolStatus::Success);
+
+                    let mut result = html_export::ToolResult::new(tool_name.clone(), content, status);
+
+                    // Try to get correlation ID
+                    if let Some(corr_id) = extract_correlation_id(msg, format) {
+                        result = result.with_correlation_id(corr_id);
+                    }
+
+                    g.add_tool_result(result);
+                    g.update_end_timestamp(msg.timestamp.clone());
+                    trace!(tool_name = %tool_name, "Added tool result to group");
+                } else {
+                    debug!(idx = idx, "Orphan tool result, no current group to attach to");
+                }
+            }
+
+            MessageClassification::System => {
+                // System messages are standalone groups
+                flush_group(&mut groups, &mut current_group);
+                let mut group = html_export::MessageGroup::system(msg.clone());
+                group.start_timestamp = msg.timestamp.clone();
+                group.end_timestamp = msg.timestamp.clone();
+                groups.push(group);
+                trace!("Added standalone system group");
+            }
+
+            MessageClassification::Empty => {
+                trace!(idx = idx, "Skipping empty message");
+            }
+        }
+    }
+
+    // Flush any remaining group
+    flush_group(&mut groups, &mut current_group);
+
+    info!(
+        group_count = groups.len(),
+        original_messages = messages.len(),
+        "Message grouping complete"
+    );
+
+    groups
+}
+
 fn format_as_markdown(
     messages: &[serde_json::Value],
     title: &Option<String>,
