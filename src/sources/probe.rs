@@ -238,22 +238,27 @@ fi
 
 if [ -n "$CASS_BIN" ]; then
     CASS_VER=$("$CASS_BIN" --version 2>/dev/null | head -1 | awk '{print $2}')
-    echo "CASS_VERSION=$CASS_VER"
-
-    # Get health status (JSON output)
-    if "$CASS_BIN" health --json &>/dev/null; then
-        echo "CASS_HEALTH=OK"
-        # Try to get session count from stats
-        STATS=$("$CASS_BIN" stats --json 2>/dev/null)
-        if [ $? -eq 0 ] && [ -n "$STATS" ]; then
-            # Extract total conversations from JSON (allow whitespace/newlines)
-            SESSIONS=$(echo "$STATS" | tr -d '\n' | sed -n 's/.*"conversations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
-            echo "CASS_SESSIONS=${SESSIONS:-0}"
-        else
-            echo "CASS_SESSIONS=0"
-        fi
+    if [ -z "$CASS_VER" ]; then
+        # Binary exists but version command failed - treat as not found
+        echo "CASS_VERSION=NOT_FOUND"
     else
-        echo "CASS_HEALTH=NOT_INDEXED"
+        echo "CASS_VERSION=$CASS_VER"
+
+        # Get health status (JSON output) - only if version was detected
+        if "$CASS_BIN" health --json &>/dev/null; then
+            echo "CASS_HEALTH=OK"
+            # Try to get session count from stats
+            STATS=$("$CASS_BIN" stats --json 2>/dev/null)
+            if [ $? -eq 0 ] && [ -n "$STATS" ]; then
+                # Extract total conversations from JSON (allow whitespace/newlines)
+                SESSIONS=$(echo "$STATS" | tr -d '\n' | sed -n 's/.*"conversations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+                echo "CASS_SESSIONS=${SESSIONS:-0}"
+            else
+                echo "CASS_SESSIONS=0"
+            fi
+        else
+            echo "CASS_HEALTH=NOT_INDEXED"
+        fi
     fi
 else
     echo "CASS_VERSION=NOT_FOUND"
