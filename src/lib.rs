@@ -10301,6 +10301,9 @@ fn run_export_html(
         })
         .collect();
 
+    // Store original message count for explain/dry_run modes
+    let message_count = messages.len();
+
     // --- Build metadata ---
     let duration = match (session_start, session_end) {
         (Some(start), Some(end)) if end > start => {
@@ -10325,7 +10328,7 @@ fn run_export_html(
                 .unwrap_or_default()
         }),
         agent: agent_name.clone(),
-        message_count: messages.len(),
+        message_count,
         duration,
         project: workspace.clone(),
     };
@@ -10366,7 +10369,7 @@ fn run_export_html(
     let output_path = output_directory.join(final_filename);
 
     // Estimate file size (rough: 200 bytes per message + overhead)
-    let estimated_size = messages.len() * 200 + 15000;
+    let estimated_size = message_count * 200 + 15000;
 
     // --- Explain mode ---
     if explain {
@@ -10374,7 +10377,7 @@ fn run_export_html(
             "plan": {
                 "session_path": session_path.display().to_string(),
                 "agent": agent_name,
-                "messages": messages.len(),
+                "messages": message_count,
                 "output_path": output_path.display().to_string(),
                 "estimated_size_bytes": estimated_size,
                 "options": {
@@ -10398,7 +10401,7 @@ fn run_export_html(
             "valid": true,
             "session_path": session_path.display().to_string(),
             "output_path": output_path.display().to_string(),
-            "messages": messages.len(),
+            "messages": message_count,
             "encrypted": encrypt,
             "estimated_size_bytes": estimated_size
         });
@@ -10424,8 +10427,11 @@ fn run_export_html(
     let exporter = HtmlExporter::with_options(export_options);
     let title = session_title.as_deref().unwrap_or("Conversation Export");
 
+    // Group messages for consolidated rendering (tool calls with parent messages)
+    let message_groups = group_messages_for_export(messages);
+
     let html = exporter
-        .export_messages(title, &messages, metadata, final_password.as_deref())
+        .export_messages(title, &message_groups, metadata, final_password.as_deref())
         .map_err(|e| CliError {
             code: 5,
             kind: "export_failed",

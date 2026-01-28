@@ -595,11 +595,14 @@ impl HtmlExporter {
         }
     }
 
-    /// Generate a full HTML export for a set of messages.
+    /// Generate a full HTML export for a set of message groups.
+    ///
+    /// Message groups are created by `group_messages_for_export()` which consolidates
+    /// tool calls with their parent assistant messages for cleaner rendering.
     pub fn export_messages(
         &self,
         title: &str,
-        messages: &[renderer::Message],
+        groups: &[renderer::MessageGroup],
         metadata: TemplateMetadata,
         password: Option<&str>,
     ) -> Result<String, TemplateError> {
@@ -607,7 +610,8 @@ impl HtmlExporter {
         info!(
             component = "template",
             operation = "export_messages",
-            message_count = messages.len(),
+            group_count = groups.len(),
+            total_tool_calls = groups.iter().map(|g| g.tool_count()).sum::<usize>(),
             encrypt = self.options.encrypt,
             include_cdn = self.options.include_cdn,
             include_search = self.options.include_search,
@@ -629,14 +633,15 @@ impl HtmlExporter {
         };
 
         let render_started = Instant::now();
-        let rendered = renderer::render_conversation(messages, &render_options)
+        let rendered = renderer::render_message_groups(groups, &render_options)
             .map_err(|e| TemplateError::RenderFailed(e.to_string()))?;
         debug!(
             component = "renderer",
-            operation = "render_conversation_complete",
+            operation = "render_message_groups_complete",
             duration_ms = render_started.elapsed().as_millis(),
             bytes = rendered.len(),
-            "Conversation HTML rendered"
+            groups = groups.len(),
+            "Message groups rendered"
         );
 
         let content = if self.options.encrypt {
