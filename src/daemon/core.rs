@@ -302,7 +302,7 @@ impl ModelDaemon {
 
             // Send response
             let encoded = encode_message(&response)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             stream.write_all(&encoded)?;
 
             // Check if this was a shutdown request
@@ -442,8 +442,12 @@ mod tests {
         let models = ModelManager::new(&test_data_dir());
         let daemon = ModelDaemon::new(config, models);
 
+        // Uptime should be 0 or 1 second initially
+        let initial = daemon.uptime_secs();
         std::thread::sleep(Duration::from_millis(50));
-        assert!(daemon.uptime_secs() >= 0);
+        let after = daemon.uptime_secs();
+        // Uptime should not decrease
+        assert!(after >= initial);
     }
 
     #[test]

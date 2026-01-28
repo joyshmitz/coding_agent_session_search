@@ -516,9 +516,11 @@ mod tests {
 
     #[test]
     fn test_client_not_available_initially() {
-        let mut config = DaemonClientConfig::default();
-        config.auto_spawn = false;
-        config.socket_path = PathBuf::from("/tmp/nonexistent-test-socket.sock");
+        let config = DaemonClientConfig {
+            auto_spawn: false,
+            socket_path: PathBuf::from("/tmp/nonexistent-test-socket.sock"),
+            ..Default::default()
+        };
 
         let client = UdsDaemonClient::new(config);
         assert!(!client.is_available());

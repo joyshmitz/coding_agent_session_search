@@ -686,6 +686,7 @@ dependencies = [
  "indicatif",
  "insta",
  "itertools 0.14.0",
+ "libc",
  "lru 0.16.3",
  "memmap2",
  "notify",
