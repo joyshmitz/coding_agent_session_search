@@ -200,30 +200,17 @@ body {
   overflow-x: hidden;
 }
 
-/* Sophisticated multi-layer background */
+/* Subtle ambient background - does NOT cover content */
 body::before {
   content: '';
   position: fixed;
   inset: 0;
   pointer-events: none;
-  z-index: -2;
+  z-index: -10;
+  opacity: 0.5;
   background:
-    radial-gradient(ellipse 100% 80% at 10% 20%, oklch(0.78 0.16 195 / 0.1) 0%, transparent 50%),
-    radial-gradient(ellipse 80% 60% at 90% 80%, oklch(0.72 0.18 330 / 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse 60% 60% at 50% 50%, oklch(0.68 0.16 290 / 0.05) 0%, transparent 60%),
-    radial-gradient(ellipse 120% 100% at 50% 100%, oklch(0.06 0.02 270) 0%, transparent 50%);
-}
-
-/* Subtle animated noise texture */
-body::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: -1;
-  opacity: 0.4;
-  mix-blend-mode: overlay;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    radial-gradient(ellipse 80% 50% at 10% 20%, oklch(0.78 0.16 195 / 0.06) 0%, transparent 40%),
+    radial-gradient(ellipse 60% 40% at 90% 80%, oklch(0.72 0.18 330 / 0.04) 0%, transparent 40%);
 }
 
 /* ============================================
@@ -232,7 +219,7 @@ body::after {
 
 .app-container {
   width: 100%;
-  max-width: 720px;
+  max-width: 100%;
   margin: 0 auto;
   padding: var(--space-md);
   padding-bottom: calc(var(--space-xl) + env(safe-area-inset-bottom, 0px));
@@ -241,31 +228,39 @@ body::after {
 /* Tablet */
 @media (min-width: 768px) {
   .app-container {
-    padding: var(--space-lg);
-    max-width: 760px;
+    padding: var(--space-lg) var(--space-xl);
+    max-width: 100%;
   }
 }
 
-/* Desktop */
+/* Desktop - use the space! */
 @media (min-width: 1024px) {
   .app-container {
-    padding: var(--space-xl);
-    max-width: 840px;
+    padding: var(--space-xl) var(--space-2xl);
+    max-width: calc(100% - 80px);
   }
 }
 
 /* Large desktop */
 @media (min-width: 1280px) {
   .app-container {
-    max-width: 920px;
-    padding: var(--space-xl) var(--space-2xl);
+    max-width: calc(100% - 120px);
+    padding: var(--space-xl) 60px;
   }
 }
 
-/* Ultra-wide */
+/* Ultra-wide - still use most of the screen */
 @media (min-width: 1536px) {
   .app-container {
-    max-width: 1000px;
+    max-width: calc(100% - 160px);
+    padding: var(--space-xl) 80px;
+  }
+}
+
+/* Very wide screens - cap at reasonable reading width */
+@media (min-width: 1920px) {
+  .app-container {
+    max-width: 1600px;
   }
 }
 
