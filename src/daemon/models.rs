@@ -209,6 +209,7 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
     }
 
+    #[allow(dead_code)]
     fn model_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/models/xenova-paraphrase-minilm-l3-v2-int8")
