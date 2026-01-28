@@ -193,7 +193,7 @@ const Search = {
         }
 
         this.matches = [];
-        const messages = $$('.prose');
+        const messages = $$('.message-content');
         messages.forEach((el) => {
             const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
             let node;
@@ -351,10 +351,10 @@ const WorldClass = {
     messages: [],
 
     init() {
-        this.messages = Array.from($$('article[role="article"]'));
-        this.createScrollProgress();
-        this.createFloatingNav();
-        this.createGradientMesh();
+        this.messages = Array.from($$('.message'));
+        this.scrollProgress = $('#scroll-progress');
+        this.floatingNav = $('#floating-nav');
+        this.initFloatingNav();
         this.initIntersectionObserver();
         this.initKeyboardNav();
         this.initMessageLinks();
@@ -362,41 +362,15 @@ const WorldClass = {
         this.initShareButton();
     },
 
-    createScrollProgress() {
-        this.scrollProgress = document.createElement('div');
-        this.scrollProgress.className = 'scroll-progress';
-        document.body.appendChild(this.scrollProgress);
-    },
+    initFloatingNav() {
+        if (!this.floatingNav) return;
 
-    createGradientMesh() {
-        this.gradientMesh = document.createElement('div');
-        this.gradientMesh.className = 'gradient-mesh';
-        document.body.insertBefore(this.gradientMesh, document.body.firstChild);
-    },
-
-    createFloatingNav() {
-        this.floatingNav = document.createElement('div');
-        this.floatingNav.className = 'floating-nav';
-        this.floatingNav.innerHTML = `
-            <button class="floating-btn" id="scroll-top-btn" aria-label="Scroll to top" title="Scroll to top">
-                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M18 15l-6-6-6 6"/>
-                </svg>
-            </button>
-            <button class="floating-btn" id="scroll-bottom-btn" aria-label="Scroll to bottom" title="Scroll to bottom">
-                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M6 9l6 6 6-6"/>
-                </svg>
-            </button>
-        `;
-        document.body.appendChild(this.floatingNav);
-
-        $('#scroll-top-btn').onclick = () => {
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-        };
-        $('#scroll-bottom-btn').onclick = () => {
-            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-        };
+        const scrollTopBtn = $('#scroll-top');
+        if (scrollTopBtn) {
+            scrollTopBtn.onclick = () => {
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+        }
     },
 
     initScrollHandler() {
@@ -553,7 +527,7 @@ const WorldClass = {
     initMessageLinks() {
         this.messages.forEach((msg, i) => {
             const btn = document.createElement('button');
-            btn.className = 'message-link-btn';
+            btn.className = 'message-link';
             btn.title = 'Copy link to message';
             btn.setAttribute('aria-label', 'Copy link to message');
             btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>';
@@ -566,7 +540,6 @@ const WorldClass = {
                 btn.classList.add('copied');
                 setTimeout(() => btn.classList.remove('copied'), 1500);
             };
-            msg.style.position = 'relative';
             msg.appendChild(btn);
         });
     },
@@ -578,10 +551,10 @@ const WorldClass = {
         if (!toolbar) return;
 
         const shareBtn = document.createElement('button');
-        shareBtn.className = 'flex items-center justify-center w-8 h-8 rounded border border-transparent text-text-secondary hover:bg-elevated hover:border-border hover:text-text transition-colors cursor-pointer';
+        shareBtn.className = 'toolbar-btn';
         shareBtn.title = 'Share';
         shareBtn.setAttribute('aria-label', 'Share');
-        shareBtn.innerHTML = '<svg class="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16,6 12,2 8,6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>';
+        shareBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16,6 12,2 8,6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>';
         shareBtn.onclick = async () => {
             try {
                 await navigator.share({
@@ -896,12 +869,11 @@ mod tests {
         assert!(bundle.inline_js.contains("WorldClass.init()"));
 
         // Scroll progress indicator
-        assert!(bundle.inline_js.contains("createScrollProgress"));
         assert!(bundle.inline_js.contains("scroll-progress"));
 
         // Floating navigation
-        assert!(bundle.inline_js.contains("createFloatingNav"));
-        assert!(bundle.inline_js.contains("scroll-top-btn"));
+        assert!(bundle.inline_js.contains("initFloatingNav"));
+        assert!(bundle.inline_js.contains("scroll-top"));
 
         // Keyboard navigation (vim-style j/k)
         assert!(bundle.inline_js.contains("initKeyboardNav"));
@@ -910,7 +882,7 @@ mod tests {
 
         // Message link copying
         assert!(bundle.inline_js.contains("initMessageLinks"));
-        assert!(bundle.inline_js.contains("message-link-btn"));
+        assert!(bundle.inline_js.contains("message-link"));
 
         // Intersection observer for animations
         assert!(bundle.inline_js.contains("IntersectionObserver"));

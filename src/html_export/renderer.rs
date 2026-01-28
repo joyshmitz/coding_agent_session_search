@@ -17,6 +17,7 @@ use std::fmt;
 use std::time::Instant;
 
 use super::template::html_escape;
+use pulldown_cmark::{html, Options, Parser};
 use serde_json;
 use tracing::{debug, info, trace};
 
@@ -129,9 +130,9 @@ pub enum ToolStatus {
 impl ToolStatus {
     fn css_class(&self) -> &'static str {
         match self {
-            ToolStatus::Success => "bg-success/15 text-success",
-            ToolStatus::Error => "bg-error/15 text-error",
-            ToolStatus::Pending => "bg-warning/15 text-warning",
+            ToolStatus::Success => "tool-status-success",
+            ToolStatus::Error => "tool-status-error",
+            ToolStatus::Pending => "tool-status-pending",
         }
     }
 
@@ -253,22 +254,14 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
         content_len = message.content.len(),
         "Rendering message"
     );
-    // Tailwind classes for role-specific styling
-    let role_class = match message.role.as_str() {
-        "user" => "border-l-[3px] border-l-user",
-        "assistant" | "agent" => "border-l-[3px] border-l-agent",
-        "tool" => "border-l-[3px] border-l-tool",
-        "system" => "border-l-[3px] border-l-system",
-        _ => "border-l-[3px] border-l-text-muted",
-    };
 
-    // Role-specific author color
-    let author_class = match message.role.as_str() {
-        "user" => "text-user",
-        "assistant" | "agent" => "text-agent",
-        "tool" => "text-tool",
-        "system" => "text-system",
-        _ => "text-text",
+    // Role class for semantic styling (matches styles.rs)
+    let role_class = match message.role.as_str() {
+        "user" => "message-user",
+        "assistant" | "agent" => "message-assistant",
+        "tool" => "message-tool",
+        "system" => "message-system",
+        _ => "",
     };
 
     // Message anchor for deep linking
@@ -287,7 +280,7 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     let timestamp_html = if options.show_timestamps {
         if let Some(ts) = &message.timestamp {
             format!(
-                r#"<time class="text-[10px] md:text-xs text-text-muted ml-auto" datetime="{}">{}</time>"#,
+                r#"<time class="message-time" datetime="{}">{}</time>"#,
                 html_escape(ts),
                 html_escape(&format_timestamp(ts))
             )
@@ -318,12 +311,12 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
         let preview = &message.content[..safe_len];
         (
             format!(
-                r#"<details class="group">
-                    <summary class="cursor-pointer list-none">
-                        <span class="line-clamp-3 text-text-secondary">{}</span>
-                        <span class="text-xs text-accent font-medium group-open:hidden">Click to expand ({} chars)</span>
+                r#"<details class="message-collapse">
+                    <summary>
+                        <span class="message-preview">{}</span>
+                        <span class="message-expand-hint">Click to expand ({} chars)</span>
                     </summary>
-                    <div class="mt-2">"#,
+                    <div class="message-expanded">"#,
                 html_escape(preview),
                 message.content.len()
             ),
@@ -345,13 +338,11 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
 
     // Role icon for visual differentiation
     let role_icon = match message.role.as_str() {
-        "user" => r#"<span class="text-sm leading-none" aria-hidden="true">👤</span>"#,
-        "assistant" | "agent" => {
-            r#"<span class="text-sm leading-none" aria-hidden="true">🤖</span>"#
-        }
-        "tool" => r#"<span class="text-sm leading-none" aria-hidden="true">🔧</span>"#,
-        "system" => r#"<span class="text-sm leading-none" aria-hidden="true">⚙️</span>"#,
-        _ => r#"<span class="text-sm leading-none" aria-hidden="true">💬</span>"#,
+        "user" => "👤",
+        "assistant" | "agent" => "🤖",
+        "tool" => "🔧",
+        "system" => "⚙️",
+        _ => "💬",
     };
 
     // Only render content div if there's actual content
@@ -360,7 +351,7 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     } else {
         format!(
             r#"
-                <div class="text-sm md:text-base text-text-secondary leading-relaxed prose prose-invert max-w-none">
+                <div class="message-content">
                     {wrapper_start}{content}{wrapper_end}
                 </div>"#,
             wrapper_start = content_wrapper_start,
@@ -370,16 +361,15 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     };
 
     let rendered = format!(
-        r#"            <article class="p-3 md:p-4 lg:p-5 bg-surface border border-border rounded-lg {role_class} hover:border-border-hover transition-colors"{anchor} role="article" aria-label="{role} message">
-                <header class="flex items-center gap-2 mb-2">
-                    {role_icon}
-                    <span class="font-semibold text-xs md:text-sm {author_class}">{author}</span>
+        r#"            <article class="message {role_class}"{anchor} role="article" aria-label="{role} message">
+                <header class="message-header">
+                    <span class="message-icon" aria-hidden="true">{role_icon}</span>
+                    <span class="message-author">{author}</span>
                     {timestamp}
                 </header>{content_section}
                 {tool_call}
             </article>"#,
         role_class = role_class,
-        author_class = author_class,
         anchor = anchor_id,
         role = html_escape(&message.role),
         role_icon = role_icon,
@@ -412,51 +402,32 @@ fn format_role_display(role: &str) -> String {
     }
 }
 
-/// Render message content, converting markdown to HTML.
-fn render_content(content: &str, options: &RenderOptions) -> String {
-    let mut result = String::new();
-    let mut in_code_block = false;
-    let mut code_lang = String::new();
-    let mut code_content = String::new();
+/// Render message content, converting markdown to HTML using pulldown-cmark.
+/// Raw HTML in the input is escaped for security (XSS prevention).
+fn render_content(content: &str, _options: &RenderOptions) -> String {
+    use pulldown_cmark::{Event, Tag, TagEnd};
 
-    for line in content.lines() {
-        if line.starts_with("```") {
-            if in_code_block {
-                // End code block
-                result.push_str(&render_code_block(&code_content, &code_lang, options));
-                code_content.clear();
-                code_lang.clear();
-                in_code_block = false;
-            } else {
-                // Start code block
-                code_lang = line.trim_start_matches('`').trim().to_string();
-                in_code_block = true;
-            }
-        } else if in_code_block {
-            if !code_content.is_empty() {
-                code_content.push('\n');
-            }
-            code_content.push_str(line);
-        } else {
-            // Regular paragraph
-            let escaped = html_escape(line);
-            let with_inline_code = render_inline_code(&escaped);
-            let with_links = render_links(&with_inline_code);
+    // Configure pulldown-cmark with all common extensions
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_FOOTNOTES);
+    opts.insert(Options::ENABLE_TASKLISTS);
+    opts.insert(Options::ENABLE_SMART_PUNCTUATION);
 
-            if !with_links.is_empty() {
-                result.push_str("<p>");
-                result.push_str(&with_links);
-                result.push_str("</p>\n");
-            }
-        }
-    }
+    // Parse markdown and filter out raw HTML for security
+    let parser = Parser::new_ext(content, opts).map(|event| match event {
+        // Convert raw HTML to escaped text (XSS prevention)
+        Event::Html(html) => Event::Text(html),
+        Event::InlineHtml(html) => Event::Text(html),
+        // Pass through all other events
+        other => other,
+    });
 
-    // Handle unclosed code block
-    if in_code_block && !code_content.is_empty() {
-        result.push_str(&render_code_block(&code_content, &code_lang, options));
-    }
+    let mut html_output = String::new();
+    html::push_html(&mut html_output, parser);
 
-    result
+    html_output
 }
 
 /// Render a code block with optional syntax highlighting.
@@ -584,6 +555,7 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
         output_len = tool_call.output.as_ref().map(|s| s.len()).unwrap_or(0),
         "Rendering tool call"
     );
+
     // Status indicator
     let (status_class, status_icon) = tool_call
         .status
@@ -607,16 +579,16 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
         };
 
         let truncate_notice = if is_truncated {
-            r#"<p class="text-[10px] text-warning mt-1">Output truncated (10,000+ chars)</p>"#
+            r#"<p class="tool-truncated">Output truncated (10,000+ chars)</p>"#
         } else {
             ""
         };
 
         format!(
             r#"
-                        <div class="mt-2">
-                            <div class="text-[10px] font-semibold uppercase text-text-muted mb-1">Output</div>
-                            <pre class="bg-bg border border-border rounded text-[11px] overflow-x-auto"><code class="language-json block p-2">{}</code></pre>
+                        <div class="tool-call-section">
+                            <div class="tool-call-label">Output</div>
+                            <pre><code class="language-json">{}</code></pre>
                             {}
                         </div>"#,
             html_escape(&display_output),
@@ -639,22 +611,22 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
         _ => "🔧",
     };
 
-    // Code preview lines option
+    // Code preview lines option (add class for long inputs)
     let input_class = if options.code_preview_lines > 0
         && formatted_input.lines().count() > options.code_preview_lines
     {
-        "tool-input-long"
+        " tool-input-long"
     } else {
-        "tool-input"
+        ""
     };
 
     // Only show input section if there's actual content
     let input_html = if !formatted_input.trim().is_empty() {
         format!(
             r#"
-                        <div class="{input_class}">
-                            <div class="text-[10px] font-semibold uppercase text-text-muted mb-1">Input</div>
-                            <pre class="bg-bg border border-border rounded text-[11px] overflow-x-auto"><code class="language-json block p-2">{input}</code></pre>
+                        <div class="tool-call-section{input_class}">
+                            <div class="tool-call-label">Input</div>
+                            <pre><code class="language-json">{input}</code></pre>
                         </div>"#,
             input_class = input_class,
             input = html_escape(&formatted_input),
@@ -665,21 +637,21 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
 
     let rendered = format!(
         r#"
-                <details class="mt-2 border border-border rounded text-xs overflow-hidden group/tool">
-                    <summary class="flex items-center gap-1.5 px-2 py-1 bg-elevated cursor-pointer list-none hover:bg-tool/10 transition-colors">
-                        <span class="text-xs" aria-hidden="true">{icon}</span>
-                        <span class="font-medium text-tool">{name}</span>
+                <details class="tool-call">
+                    <summary>
+                        <span class="tool-call-icon" aria-hidden="true">{icon}</span>
+                        <span class="tool-call-name">{name}</span>
                         {status_badge}
-                        <span class="ml-auto text-[10px] text-text-muted transition-transform group-open/tool:rotate-180" aria-hidden="true">▼</span>
+                        <span class="tool-call-chevron" aria-hidden="true">▼</span>
                     </summary>
-                    <div class="p-2 border-t border-border bg-surface">{input}{output}
+                    <div class="tool-call-body">{input}{output}
                     </div>
                 </details>"#,
         icon = tool_icon,
         name = html_escape(&tool_call.name),
         status_badge = if !status_class.is_empty() {
             format!(
-                r#"<span class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-medium {}">{}</span>"#,
+                r#"<span class="tool-call-status {}">{}</span>"#,
                 status_class, status_icon
             )
         } else {
@@ -759,7 +731,7 @@ mod tests {
         let opts = RenderOptions::default();
         let html = render_message(&msg, &opts).unwrap();
 
-        assert!(html.contains("border-l-user"));
+        assert!(html.contains("message-user"));
         assert!(html.contains("Hello, world!"));
         assert!(html.contains("👤")); // User icon
     }
@@ -855,7 +827,7 @@ mod tests {
         };
 
         let html = render_message(&msg, &RenderOptions::default()).unwrap();
-        assert!(html.contains("bg-success/15 text-success"));
+        assert!(html.contains("tool-status-success"));
         assert!(html.contains("✓")); // Success icon
         assert!(html.contains("💻")); // Bash icon
     }
