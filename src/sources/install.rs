@@ -1448,6 +1448,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "environment-dependent: requires >=2GB disk space"]
     fn real_system_check_resources_ok() {
         let sys = local_system_info();
         let res = local_resource_info();
@@ -1460,6 +1461,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "environment-dependent: requires >=2GB disk space and >=1GB memory"]
     fn real_system_can_compile_ok() {
         let sys = local_system_info();
         let res = local_resource_info();
