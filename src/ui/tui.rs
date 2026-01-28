@@ -29,6 +29,7 @@ use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
 use crate::default_data_dir;
+use crate::group_messages_for_export;
 use crate::html_export::{HtmlExporter, Message as HtmlMessage, TemplateMetadata};
 use crate::model::types::MessageRole;
 use crate::search::model_download::{DownloadProgress, ModelDownloader, ModelManifest};
@@ -5846,10 +5847,13 @@ pub fn run_tui(
                                         send(ExportTaskEvent::Progress(ExportProgress::Encrypting));
                                     }
 
+                                    // Group messages for consolidated rendering
+                                    let message_groups = group_messages_for_export(messages);
+
                                     let exporter = HtmlExporter::with_options(export_options);
                                     let html = match exporter.export_messages(
                                         &title,
-                                        &messages,
+                                        &message_groups,
                                         metadata,
                                         export_passphrase.as_deref(),
                                     ) {

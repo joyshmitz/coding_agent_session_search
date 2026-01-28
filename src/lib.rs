@@ -10492,7 +10492,7 @@ fn run_export_html(
                 "filename": output_path.file_name().map(|n| n.to_string_lossy().to_string()),
                 "size_bytes": file_size,
                 "encrypted": encrypt,
-                "messages_count": messages.len(),
+                "messages_count": message_count,
                 "agent": agent_name,
                 "workspace": workspace,
                 "title": session_title
@@ -10504,7 +10504,7 @@ fn run_export_html(
         if encrypt {
             println!("  🔒 Encrypted with Web Crypto (AES-256-GCM)");
         }
-        println!("  {} messages, {} bytes", messages.len(), file_size);
+        println!("  {} messages, {} bytes", message_count, file_size);
     }
 
     Ok(())
