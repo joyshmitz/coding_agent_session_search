@@ -301,36 +301,37 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     let content_html = render_content(&message.content, options);
 
     // Check if message should be collapsed
-    let (content_wrapper_start, content_wrapper_end) =
-        if options.collapse_threshold > 0 && message.content.len() > options.collapse_threshold {
-            debug!(
-                component = "renderer",
-                operation = "collapse_message",
-                message_index = message.index.unwrap_or(0),
-                content_len = message.content.len(),
-                collapse_threshold = options.collapse_threshold,
-                "Collapsing long message"
-            );
-            let preview_len = options.collapse_threshold.min(500);
-            // Safe truncation at char boundary to avoid panic on multi-byte UTF-8
-            let safe_len = truncate_to_char_boundary(&message.content, preview_len);
-            let preview = &message.content[..safe_len];
-            (
-                format!(
-                    r#"<details class="group">
+    let (content_wrapper_start, content_wrapper_end) = if options.collapse_threshold > 0
+        && message.content.len() > options.collapse_threshold
+    {
+        debug!(
+            component = "renderer",
+            operation = "collapse_message",
+            message_index = message.index.unwrap_or(0),
+            content_len = message.content.len(),
+            collapse_threshold = options.collapse_threshold,
+            "Collapsing long message"
+        );
+        let preview_len = options.collapse_threshold.min(500);
+        // Safe truncation at char boundary to avoid panic on multi-byte UTF-8
+        let safe_len = truncate_to_char_boundary(&message.content, preview_len);
+        let preview = &message.content[..safe_len];
+        (
+            format!(
+                r#"<details class="group">
                     <summary class="cursor-pointer list-none">
                         <span class="line-clamp-3 text-text-secondary">{}</span>
                         <span class="text-xs text-accent font-medium group-open:hidden">Click to expand ({} chars)</span>
                     </summary>
                     <div class="mt-2">"#,
-                    html_escape(preview),
-                    message.content.len()
-                ),
-                "</div></details>".to_string(),
-            )
-        } else {
-            (String::new(), String::new())
-        };
+                html_escape(preview),
+                message.content.len()
+            ),
+            "</div></details>".to_string(),
+        )
+    } else {
+        (String::new(), String::new())
+    };
 
     let tool_call_html = if options.show_tool_calls {
         if let Some(tc) = &message.tool_call {
@@ -345,7 +346,9 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     // Role icon for visual differentiation
     let role_icon = match message.role.as_str() {
         "user" => r#"<span class="text-sm leading-none" aria-hidden="true">👤</span>"#,
-        "assistant" | "agent" => r#"<span class="text-sm leading-none" aria-hidden="true">🤖</span>"#,
+        "assistant" | "agent" => {
+            r#"<span class="text-sm leading-none" aria-hidden="true">🤖</span>"#
+        }
         "tool" => r#"<span class="text-sm leading-none" aria-hidden="true">🔧</span>"#,
         "system" => r#"<span class="text-sm leading-none" aria-hidden="true">⚙️</span>"#,
         _ => r#"<span class="text-sm leading-none" aria-hidden="true">💬</span>"#,

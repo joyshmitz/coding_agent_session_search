@@ -746,8 +746,6 @@ fn render_footer(frame: &mut Frame, state: &ExportModalState, area: Rect, palett
     );
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

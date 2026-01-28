@@ -1,7 +1,6 @@
-
-use cass::search::tantivy::TantivyIndex;
-use cass::search::query::{SearchClient, SearchFilters, FieldMask};
 use cass::connectors::{NormalizedConversation, NormalizedMessage};
+use cass::search::query::{FieldMask, SearchClient, SearchFilters};
+use cass::search::tantivy::TantivyIndex;
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -55,7 +54,13 @@ async fn test_reproduce_not_or_bug() -> anyhow::Result<()> {
     // - doc1 ("apple"): Match.
     // - doc2 ("banana"): No match.
 
-    let hits = client.search("NOT apple OR orange", SearchFilters::default(), 10, 0, FieldMask::FULL)?;
+    let hits = client.search(
+        "NOT apple OR orange",
+        SearchFilters::default(),
+        10,
+        0,
+        FieldMask::FULL,
+    )?;
 
     let found_doc1 = hits.iter().any(|h| h.content.contains("apple"));
     let found_doc2 = hits.iter().any(|h| h.content.contains("banana"));
@@ -70,7 +75,7 @@ async fn test_reproduce_not_or_bug() -> anyhow::Result<()> {
     if found_doc1 {
         panic!("'NOT apple OR orange' matched 'apple' (should be excluded)");
     }
-    
+
     if !found_doc2 {
         panic!("'NOT apple OR orange' did not match 'banana' (should match via NOT apple)");
     }

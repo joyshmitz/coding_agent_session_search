@@ -461,10 +461,7 @@ impl HtmlTemplate {
         }
 
         if let Some(duration) = &self.metadata.duration {
-            meta_items.push(format!(
-                r#"<span>{}</span>"#,
-                html_escape(duration)
-            ));
+            meta_items.push(format!(r#"<span>{}</span>"#, html_escape(duration)));
         }
 
         if let Some(project) = &self.metadata.project {
