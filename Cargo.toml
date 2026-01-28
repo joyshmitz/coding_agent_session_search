@@ -48,6 +48,7 @@ dirs = "*"
 walkdir = "*"
 glob = "*"
 base64 = ">=0.21"
+pulldown-cmark = { version = "*", default-features = false, features = ["html"] }
 chrono = { version = "*", features = ["serde"] }
 semver = "*"
 tracing-appender = "*"
