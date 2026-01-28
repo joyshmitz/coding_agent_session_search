@@ -238,6 +238,471 @@ fn dcg_at_k(relevances: &[f64], k: usize) -> f64 {
         .sum()
 }
 
+// ==================== Evaluation Harness ====================
+
+/// A document in the evaluation corpus.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Document {
+    /// Unique document identifier.
+    pub id: String,
+    /// Document content (text to embed).
+    pub content: String,
+}
+
+/// Ground truth relevance judgment for a query-document pair.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelevanceJudgment {
+    /// Document ID.
+    pub doc_id: String,
+    /// Relevance score (0=not relevant, 1=somewhat, 2=highly, 3=perfect).
+    pub relevance: f64,
+}
+
+/// A query with ground truth relevance judgments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueryWithJudgments {
+    /// Query text.
+    pub query: String,
+    /// Ground truth relevance judgments for this query.
+    pub judgments: Vec<RelevanceJudgment>,
+}
+
+/// Evaluation corpus containing documents and queries with ground truth.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluationCorpus {
+    /// Corpus name/identifier.
+    pub name: String,
+    /// Documents in the corpus.
+    pub documents: Vec<Document>,
+    /// Queries with ground truth judgments.
+    pub queries: Vec<QueryWithJudgments>,
+}
+
+impl EvaluationCorpus {
+    /// Create a new empty corpus.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            documents: Vec::new(),
+            queries: Vec::new(),
+        }
+    }
+
+    /// Add a document to the corpus.
+    pub fn add_document(&mut self, id: &str, content: &str) {
+        self.documents.push(Document {
+            id: id.to_string(),
+            content: content.to_string(),
+        });
+    }
+
+    /// Add a query with judgments.
+    pub fn add_query(&mut self, query: &str, judgments: Vec<(&str, f64)>) {
+        self.queries.push(QueryWithJudgments {
+            query: query.to_string(),
+            judgments: judgments
+                .into_iter()
+                .map(|(doc_id, relevance)| RelevanceJudgment {
+                    doc_id: doc_id.to_string(),
+                    relevance,
+                })
+                .collect(),
+        });
+    }
+
+    /// Compute a hash of the corpus for reproducibility.
+    pub fn compute_hash(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        self.name.hash(&mut hasher);
+        for doc in &self.documents {
+            doc.id.hash(&mut hasher);
+            doc.content.hash(&mut hasher);
+        }
+        for query in &self.queries {
+            query.query.hash(&mut hasher);
+            for j in &query.judgments {
+                j.doc_id.hash(&mut hasher);
+                // Hash relevance as bits to avoid float issues
+                j.relevance.to_bits().hash(&mut hasher);
+            }
+        }
+        format!("{:016x}", hasher.finish())
+    }
+
+    /// Create a sample corpus for testing embedders on code search scenarios.
+    pub fn code_search_sample() -> Self {
+        let mut corpus = Self::new("code-search-sample");
+
+        // Add sample documents representing code snippets and discussions
+        corpus.add_document("d1", "implementing authentication with jwt tokens in rust using jsonwebtoken crate for secure api access");
+        corpus.add_document("d2", "database connection pool configuration using sqlx with postgres for high performance queries");
+        corpus.add_document("d3", "error handling patterns in rust using thiserror and anyhow for better error messages");
+        corpus.add_document("d4", "async runtime setup with tokio for concurrent task processing and io operations");
+        corpus.add_document("d5", "parsing json data with serde for serialization and deserialization of structs");
+        corpus.add_document("d6", "logging configuration using tracing crate for structured observability and debugging");
+        corpus.add_document("d7", "cli argument parsing with clap for building command line applications");
+        corpus.add_document("d8", "http client requests using reqwest for making api calls to external services");
+        corpus.add_document("d9", "unit testing patterns with cargo test and mock objects for reliable tests");
+        corpus.add_document("d10", "file system operations reading and writing files with std fs module");
+
+        // Add queries with ground truth relevance judgments
+        // Relevance: 0=not relevant, 1=somewhat, 2=highly, 3=perfect match
+        corpus.add_query("how to authenticate users with jwt", vec![
+            ("d1", 3.0),  // Perfect match
+            ("d2", 0.0),  // Not relevant
+            ("d8", 1.0),  // Somewhat (might involve API auth)
+        ]);
+
+        corpus.add_query("database connection setup", vec![
+            ("d2", 3.0),  // Perfect match
+            ("d4", 1.0),  // Async might be related
+            ("d10", 0.0), // Not relevant
+        ]);
+
+        corpus.add_query("error handling best practices", vec![
+            ("d3", 3.0),  // Perfect match
+            ("d6", 1.0),  // Logging errors
+            ("d9", 1.0),  // Testing error cases
+        ]);
+
+        corpus.add_query("async programming tokio", vec![
+            ("d4", 3.0),  // Perfect match
+            ("d2", 1.0),  // Async DB queries
+            ("d8", 2.0),  // Async HTTP
+        ]);
+
+        corpus.add_query("json serialization", vec![
+            ("d5", 3.0),  // Perfect match
+            ("d8", 1.0),  // API often uses JSON
+            ("d1", 1.0),  // JWT is JSON-based
+        ]);
+
+        corpus
+    }
+}
+
+/// Result of evaluating a single query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryEvalResult {
+    /// The query text.
+    pub query: String,
+    /// NDCG@10 for this query.
+    pub ndcg_at_10: f64,
+    /// Ranked document IDs returned by the model.
+    pub ranked_docs: Vec<String>,
+    /// Latency for this query in milliseconds.
+    pub latency_ms: u64,
+}
+
+/// Configuration for the evaluation harness.
+#[derive(Debug, Clone)]
+pub struct EvaluationConfig {
+    /// Number of warmup queries before timing.
+    pub warmup_queries: usize,
+    /// Number of timing iterations per query.
+    pub timing_iterations: usize,
+    /// Top-k for NDCG calculation.
+    pub ndcg_k: usize,
+}
+
+impl Default for EvaluationConfig {
+    fn default() -> Self {
+        Self {
+            warmup_queries: 3,
+            timing_iterations: 5,
+            ndcg_k: 10,
+        }
+    }
+}
+
+/// Compute cosine similarity between two vectors.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
+/// Evaluation harness for running bake-off evaluations.
+pub struct EvaluationHarness {
+    config: EvaluationConfig,
+}
+
+impl EvaluationHarness {
+    /// Create a new evaluation harness with default config.
+    pub fn new() -> Self {
+        Self {
+            config: EvaluationConfig::default(),
+        }
+    }
+
+    /// Create with custom config.
+    pub fn with_config(config: EvaluationConfig) -> Self {
+        Self { config }
+    }
+
+    /// Evaluate an embedder against a corpus.
+    ///
+    /// Returns a ValidationReport with NDCG, latency, and memory metrics.
+    pub fn evaluate<E: crate::search::embedder::Embedder>(
+        &self,
+        embedder: &E,
+        corpus: &EvaluationCorpus,
+        metadata: &ModelMetadata,
+    ) -> Result<ValidationReport, String> {
+        let corpus_hash = corpus.compute_hash();
+
+        // Measure cold start (first embedding)
+        let cold_start = Instant::now();
+        let first_doc = corpus.documents.first().ok_or("Empty corpus")?;
+        embedder
+            .embed(&first_doc.content)
+            .map_err(|e| e.to_string())?;
+        let cold_start_ms = cold_start.elapsed().as_millis() as u64;
+
+        // Embed all documents
+        let doc_embeddings: Vec<Vec<f32>> = corpus
+            .documents
+            .iter()
+            .map(|d| embedder.embed(&d.content))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        // Warmup queries
+        for i in 0..self.config.warmup_queries.min(corpus.queries.len()) {
+            let _ = embedder.embed(&corpus.queries[i].query);
+        }
+
+        // Evaluate each query
+        let mut query_results = Vec::new();
+        let mut latencies = Vec::new();
+
+        for query_with_judgments in &corpus.queries {
+            // Build relevance map
+            let relevance_map: std::collections::HashMap<&str, f64> = query_with_judgments
+                .judgments
+                .iter()
+                .map(|j| (j.doc_id.as_str(), j.relevance))
+                .collect();
+
+            // Time the query embedding (average over iterations)
+            let mut query_latencies = Vec::new();
+            let mut query_embedding = Vec::new();
+            for _ in 0..self.config.timing_iterations {
+                let start = Instant::now();
+                query_embedding = embedder
+                    .embed(&query_with_judgments.query)
+                    .map_err(|e| e.to_string())?;
+                query_latencies.push(start.elapsed());
+            }
+            let avg_latency =
+                query_latencies.iter().map(|d| d.as_millis() as u64).sum::<u64>()
+                    / query_latencies.len() as u64;
+            latencies.push(Duration::from_millis(avg_latency));
+
+            // Rank documents by similarity
+            let mut scored_docs: Vec<(usize, f32)> = doc_embeddings
+                .iter()
+                .enumerate()
+                .map(|(idx, emb)| (idx, cosine_similarity(&query_embedding, emb)))
+                .collect();
+            scored_docs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Get ranked doc IDs
+            let ranked_docs: Vec<String> = scored_docs
+                .iter()
+                .take(self.config.ndcg_k)
+                .map(|(idx, _)| corpus.documents[*idx].id.clone())
+                .collect();
+
+            // Compute relevances in ranked order
+            let relevances: Vec<f64> = ranked_docs
+                .iter()
+                .map(|id| *relevance_map.get(id.as_str()).unwrap_or(&0.0))
+                .collect();
+
+            let ndcg = ndcg_at_k(&relevances, self.config.ndcg_k);
+
+            query_results.push(QueryEvalResult {
+                query: query_with_judgments.query.clone(),
+                ndcg_at_10: ndcg,
+                ranked_docs,
+                latency_ms: avg_latency,
+            });
+        }
+
+        // Compute aggregate metrics
+        let avg_ndcg = if query_results.is_empty() {
+            0.0
+        } else {
+            query_results.iter().map(|r| r.ndcg_at_10).sum::<f64>() / query_results.len() as f64
+        };
+
+        let latency_stats = LatencyStats::from_durations(&latencies);
+
+        // Estimate memory (model size as proxy - real measurement would need system APIs)
+        let memory_mb = metadata.size_bytes.unwrap_or(0) / (1024 * 1024);
+
+        let eligible = metadata.is_eligible();
+        let mut report = ValidationReport {
+            model_id: metadata.id.clone(),
+            corpus_hash,
+            ndcg_at_10: avg_ndcg,
+            latency_ms_p50: latency_stats.p50_ms,
+            latency_ms_p95: latency_stats.p95_ms,
+            latency_ms_p99: latency_stats.p99_ms,
+            cold_start_ms,
+            memory_mb,
+            eligible,
+            meets_criteria: false,
+            warnings: Vec::new(),
+        };
+
+        report.meets_criteria = report.check_criteria();
+
+        // Add warnings
+        if cold_start_ms > criteria::COLD_START_MAX_MS {
+            report.warnings.push(format!(
+                "Cold start {}ms exceeds {}ms limit",
+                cold_start_ms,
+                criteria::COLD_START_MAX_MS
+            ));
+        }
+        if latency_stats.p99_ms > criteria::WARM_P99_MAX_MS {
+            report.warnings.push(format!(
+                "P99 latency {}ms exceeds {}ms limit",
+                latency_stats.p99_ms,
+                criteria::WARM_P99_MAX_MS
+            ));
+        }
+        if memory_mb > criteria::MEMORY_MAX_MB {
+            report.warnings.push(format!(
+                "Memory {}MB exceeds {}MB limit",
+                memory_mb,
+                criteria::MEMORY_MAX_MB
+            ));
+        }
+
+        Ok(report)
+    }
+
+    /// Run a full bake-off comparison with baseline and candidates.
+    pub fn run_comparison<E: crate::search::embedder::Embedder>(
+        &self,
+        baseline: (&E, &ModelMetadata),
+        candidates: Vec<(&E, &ModelMetadata)>,
+        corpus: &EvaluationCorpus,
+    ) -> Result<BakeoffComparison, String> {
+        let corpus_hash = corpus.compute_hash();
+
+        // Evaluate baseline
+        let baseline_report = self.evaluate(baseline.0, corpus, baseline.1)?;
+
+        // Evaluate all candidates
+        let mut candidate_reports = Vec::new();
+        for (embedder, metadata) in candidates {
+            let report = self.evaluate(embedder, corpus, metadata)?;
+            candidate_reports.push(report);
+        }
+
+        // Find the winner
+        let mut comparison = BakeoffComparison {
+            corpus_hash,
+            baseline: baseline_report.clone(),
+            candidates: candidate_reports,
+            recommendation: None,
+            recommendation_reason: String::new(),
+        };
+
+        if let Some(winner) = comparison.find_winner() {
+            comparison.recommendation = Some(winner.model_id.clone());
+            comparison.recommendation_reason = format!(
+                "Best eligible candidate with NDCG@10={:.3} ({}% of baseline), p99={}ms, memory={}MB",
+                winner.ndcg_at_10,
+                (winner.ndcg_at_10 / baseline_report.ndcg_at_10 * 100.0) as u32,
+                winner.latency_ms_p99,
+                winner.memory_mb
+            );
+        } else {
+            comparison.recommendation_reason =
+                "No eligible candidate meets all criteria".to_string();
+        }
+
+        Ok(comparison)
+    }
+}
+
+impl Default for EvaluationHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Format a comparison as a markdown table for reporting.
+pub fn format_comparison_table(comparison: &BakeoffComparison) -> String {
+    let mut output = String::new();
+
+    output.push_str("# Bake-off Results\n\n");
+    output.push_str(&format!("Corpus hash: `{}`\n\n", comparison.corpus_hash));
+
+    output.push_str("| Model | NDCG@10 | P50 (ms) | P95 (ms) | P99 (ms) | Cold (ms) | Memory (MB) | Eligible | Meets Criteria |\n");
+    output.push_str("|-------|---------|----------|----------|----------|-----------|-------------|----------|----------------|\n");
+
+    // Baseline first
+    let b = &comparison.baseline;
+    output.push_str(&format!(
+        "| {} (baseline) | {:.3} | {} | {} | {} | {} | {} | {} | {} |\n",
+        b.model_id,
+        b.ndcg_at_10,
+        b.latency_ms_p50,
+        b.latency_ms_p95,
+        b.latency_ms_p99,
+        b.cold_start_ms,
+        b.memory_mb,
+        if b.eligible { "✓" } else { "✗" },
+        if b.meets_criteria { "✓" } else { "✗" }
+    ));
+
+    // Candidates
+    for c in &comparison.candidates {
+        let marker = if Some(&c.model_id) == comparison.recommendation.as_ref() {
+            " ⭐"
+        } else {
+            ""
+        };
+        output.push_str(&format!(
+            "| {}{} | {:.3} | {} | {} | {} | {} | {} | {} | {} |\n",
+            c.model_id,
+            marker,
+            c.ndcg_at_10,
+            c.latency_ms_p50,
+            c.latency_ms_p95,
+            c.latency_ms_p99,
+            c.cold_start_ms,
+            c.memory_mb,
+            if c.eligible { "✓" } else { "✗" },
+            if c.meets_criteria { "✓" } else { "✗" }
+        ));
+    }
+
+    output.push_str("\n## Recommendation\n\n");
+    if let Some(ref winner) = comparison.recommendation {
+        output.push_str(&format!("**Winner:** {}\n\n", winner));
+    }
+    output.push_str(&format!("{}\n", comparison.recommendation_reason));
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,5 +939,162 @@ mod tests {
         let winner = comparison.find_winner();
         assert!(winner.is_some());
         assert_eq!(winner.unwrap().model_id, "candidate2");
+    }
+
+    // ==================== Harness Tests ====================
+
+    #[test]
+    fn corpus_creation_and_hash() {
+        let mut corpus = EvaluationCorpus::new("test-corpus");
+        corpus.add_document("d1", "hello world");
+        corpus.add_document("d2", "goodbye world");
+        corpus.add_query("hello", vec![("d1", 3.0), ("d2", 0.0)]);
+
+        assert_eq!(corpus.name, "test-corpus");
+        assert_eq!(corpus.documents.len(), 2);
+        assert_eq!(corpus.queries.len(), 1);
+
+        let hash1 = corpus.compute_hash();
+        assert_eq!(hash1.len(), 16); // 16 hex chars
+
+        // Same corpus should produce same hash
+        let hash2 = corpus.compute_hash();
+        assert_eq!(hash1, hash2);
+
+        // Different corpus should produce different hash
+        corpus.add_document("d3", "new document");
+        let hash3 = corpus.compute_hash();
+        assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn sample_corpus_is_valid() {
+        let corpus = EvaluationCorpus::code_search_sample();
+        assert!(!corpus.documents.is_empty());
+        assert!(!corpus.queries.is_empty());
+
+        // Each query should have at least one judgment
+        for query in &corpus.queries {
+            assert!(!query.judgments.is_empty());
+        }
+
+        // Hash should be stable
+        let hash = corpus.compute_hash();
+        assert!(!hash.is_empty());
+    }
+
+    #[test]
+    fn cosine_similarity_identical_vectors() {
+        let v = vec![1.0, 2.0, 3.0];
+        let sim = cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal_vectors() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_opposite_vectors() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![-1.0, -2.0, -3.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_different_lengths() {
+        let a = vec![1.0, 2.0];
+        let b = vec![1.0, 2.0, 3.0];
+        let sim = cosine_similarity(&a, &b);
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn evaluation_config_defaults() {
+        let config = EvaluationConfig::default();
+        assert_eq!(config.warmup_queries, 3);
+        assert_eq!(config.timing_iterations, 5);
+        assert_eq!(config.ndcg_k, 10);
+    }
+
+    #[test]
+    fn harness_creation() {
+        let harness = EvaluationHarness::new();
+        assert_eq!(harness.config.ndcg_k, 10);
+
+        let custom_config = EvaluationConfig {
+            warmup_queries: 5,
+            timing_iterations: 10,
+            ndcg_k: 5,
+        };
+        let harness = EvaluationHarness::with_config(custom_config);
+        assert_eq!(harness.config.ndcg_k, 5);
+    }
+
+    #[test]
+    fn corpus_roundtrip() {
+        let corpus = EvaluationCorpus::code_search_sample();
+        let json = serde_json::to_string(&corpus).expect("serialize");
+        let decoded: EvaluationCorpus = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(corpus, decoded);
+    }
+
+    #[test]
+    fn query_eval_result_roundtrip() {
+        let result = QueryEvalResult {
+            query: "test query".to_string(),
+            ndcg_at_10: 0.85,
+            ranked_docs: vec!["d1".to_string(), "d2".to_string()],
+            latency_ms: 15,
+        };
+        let json = serde_json::to_string(&result).expect("serialize");
+        let decoded: QueryEvalResult = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(result.query, decoded.query);
+        assert_eq!(result.ndcg_at_10, decoded.ndcg_at_10);
+    }
+
+    #[test]
+    fn format_comparison_table_output() {
+        let baseline = ValidationReport {
+            model_id: "baseline".to_string(),
+            corpus_hash: "test123".to_string(),
+            ndcg_at_10: 0.80,
+            latency_ms_p50: 50,
+            latency_ms_p95: 100,
+            latency_ms_p99: 150,
+            cold_start_ms: 1000,
+            memory_mb: 200,
+            eligible: false,
+            meets_criteria: true,
+            warnings: vec![],
+        };
+
+        let candidate = ValidationReport {
+            model_id: "winner".to_string(),
+            ndcg_at_10: 0.85,
+            eligible: true,
+            meets_criteria: true,
+            ..baseline.clone()
+        };
+
+        let comparison = BakeoffComparison {
+            corpus_hash: "test123".to_string(),
+            baseline,
+            candidates: vec![candidate],
+            recommendation: Some("winner".to_string()),
+            recommendation_reason: "Best candidate".to_string(),
+        };
+
+        let table = format_comparison_table(&comparison);
+        assert!(table.contains("Bake-off Results"));
+        assert!(table.contains("baseline"));
+        assert!(table.contains("winner"));
+        assert!(table.contains("⭐")); // Winner marker
+        assert!(table.contains("Recommendation"));
     }
 }
