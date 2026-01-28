@@ -5526,7 +5526,8 @@ mod tests {
     #[test]
     fn wildcard_pattern_to_regex_suffix() {
         let pattern = WildcardPattern::Suffix("foo".into());
-        assert_eq!(pattern.to_regex(), Some(".*foo".into()));
+        // Suffix patterns need $ anchor to ensure "ends with" semantics
+        assert_eq!(pattern.to_regex(), Some(".*foo$".into()));
     }
 
     #[test]
@@ -7000,9 +7001,10 @@ mod tests {
         assert_eq!(WildcardPattern::Exact("foo".into()).to_regex(), None);
         assert_eq!(WildcardPattern::Prefix("foo".into()).to_regex(), None);
         // Suffix and substring need regex
+        // Suffix needs $ anchor for "ends with" semantics
         assert_eq!(
             WildcardPattern::Suffix("foo".into()).to_regex(),
-            Some(".*foo".into())
+            Some(".*foo$".into())
         );
         assert_eq!(
             WildcardPattern::Substring("foo".into()).to_regex(),
