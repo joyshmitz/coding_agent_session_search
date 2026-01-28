@@ -718,9 +718,26 @@ pub fn blend_scores(fast: &[f32], quality: &[f32], quality_weight: f32) -> Vec<f
 }
 
 /// SIMD-accelerated f16 dot product.
+///
+/// # Panics
+/// Debug-asserts that `a.len() == b.len()`. In release mode, mismatched
+/// lengths will cause out-of-bounds access if `b` is shorter than `a`.
 #[inline]
 fn dot_product_f16(a: &[f16], b: &[f32]) -> f32 {
     use wide::f32x8;
+
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "dot_product_f16: dimension mismatch (a={}, b={})",
+        a.len(),
+        b.len()
+    );
+
+    // Early return for mismatched lengths in release mode to avoid UB
+    if a.len() != b.len() {
+        return 0.0;
+    }
 
     let chunks = a.len() / 8;
     let mut sum = f32x8::ZERO;
@@ -737,13 +754,16 @@ fn dot_product_f16(a: &[f16], b: &[f32]) -> f32 {
             f32::from(a[base + 6]),
             f32::from(a[base + 7]),
         ];
-        let b_arr: [f32; 8] = b[base..base + 8].try_into().unwrap();
+        // Safety: We've verified a.len() == b.len() and base + 8 <= chunks * 8 <= a.len()
+        let b_arr: [f32; 8] = b[base..base + 8]
+            .try_into()
+            .expect("slice length mismatch in SIMD chunk");
         sum += f32x8::from(a_f32) * f32x8::from(b_arr);
     }
 
     let mut result: f32 = sum.reduce_add();
 
-    // Handle remainder
+    // Handle remainder - bounds are guaranteed by the length check above
     let remainder_start = chunks * 8;
     for i in remainder_start..a.len() {
         result += f32::from(a[i]) * b[i];
