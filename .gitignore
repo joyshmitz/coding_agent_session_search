@@ -66,3 +66,6 @@ __pycache__/
 # Performance optimization artifacts
 perf/
 
+# Claude subagent conversation exports
+claude_subagents_*.html
+
