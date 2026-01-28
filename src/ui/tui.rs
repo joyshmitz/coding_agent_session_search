@@ -47,7 +47,9 @@ use crate::ui::components::palette::{self, PaletteAction, PaletteState};
 use crate::ui::components::pills::{self, Pill};
 use crate::ui::components::theme::ThemePalette;
 use crate::ui::components::toast::{Toast, ToastManager, render_toasts};
-use crate::ui::components::widgets::{centered_rect, centered_rect_fixed, score_indicator, search_bar};
+use crate::ui::components::widgets::{
+    centered_rect, centered_rect_fixed, score_indicator, search_bar,
+};
 use crate::ui::data::{ConversationView, InputMode, load_conversation, role_style};
 use crate::ui::shortcuts;
 use crate::update_check::{
@@ -1060,8 +1062,6 @@ fn render_help_overlay(frame: &mut Frame, palette: ThemePalette, scroll: u16) {
         popup_area,
     );
 }
-
-
 
 /// Render parsed content lines from a conversation for the detail modal.
 /// Parses tool use, code blocks, and formats beautifully for human reading.

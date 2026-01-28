@@ -1846,9 +1846,8 @@ fn build_boolean_query_clauses(
                     if pending_or_group.is_empty() {
                         // Pull last Must clause into OR group if exists
                         // Fix: Check if last clause is Must BEFORE popping to avoid dropping MustNot clauses
-                        let can_group = clauses
-                            .last()
-                            .map_or(false, |(occ, _)| *occ == Occur::Must);
+                        let can_group =
+                            clauses.last().map_or(false, |(occ, _)| *occ == Occur::Must);
 
                         if can_group {
                             if let Some((_, last_q)) = clauses.pop() {
@@ -1875,9 +1874,8 @@ fn build_boolean_query_clauses(
                     if pending_or_group.is_empty() {
                         // Pull last Must clause into OR group if exists
                         // Fix: Check if last clause is Must BEFORE popping to avoid dropping MustNot clauses
-                        let can_group = clauses
-                            .last()
-                            .map_or(false, |(occ, _)| *occ == Occur::Must);
+                        let can_group =
+                            clauses.last().map_or(false, |(occ, _)| *occ == Occur::Must);
 
                         if can_group {
                             if let Some((_, last_q)) = clauses.pop() {
@@ -10202,7 +10200,10 @@ mod tests {
     #[test]
     fn test_transpile_to_fts5() {
         // Simple terms
-        assert_eq!(transpile_to_fts5("foo bar"), Some("foo AND bar".to_string()));
+        assert_eq!(
+            transpile_to_fts5("foo bar"),
+            Some("foo AND bar".to_string())
+        );
 
         // Boolean operators
         assert_eq!(

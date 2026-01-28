@@ -233,10 +233,7 @@ impl Connector for ClaudeCodeConnector {
                     };
 
                     // Extract title from root object if present
-                    json_title = val
-                        .get("title")
-                        .and_then(|t| t.as_str())
-                        .map(String::from);
+                    json_title = val.get("title").and_then(|t| t.as_str()).map(String::from);
 
                     if let Some(arr) = val.get("messages").and_then(|m| m.as_array()) {
                         for item in arr {

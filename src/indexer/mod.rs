@@ -2154,7 +2154,8 @@ mod tests {
         let paths = vec![codex.clone(), claude.clone(), aider, cursor, chatgpt];
         let classified = classify_paths(paths, &roots);
 
-        let kinds: std::collections::HashSet<_> = classified.iter().map(|(k, _, _, _)| *k).collect();
+        let kinds: std::collections::HashSet<_> =
+            classified.iter().map(|(k, _, _, _)| *k).collect();
         assert!(kinds.contains(&ConnectorKind::Codex));
         assert!(kinds.contains(&ConnectorKind::Claude));
         assert!(kinds.contains(&ConnectorKind::Aider));

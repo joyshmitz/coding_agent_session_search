@@ -313,7 +313,6 @@ pub fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
     horizontal[1]
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
