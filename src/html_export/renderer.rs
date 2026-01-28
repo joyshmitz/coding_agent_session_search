@@ -156,6 +156,9 @@ impl ToolStatus {
 // ============================================
 // Message Grouping Types for Consolidated Rendering
 // ============================================
+// NOTE: These types are used by the message grouping algorithm (Task 1c6z)
+// and renderer updates (Task 27t2). Allow dead_code until integration.
+#[allow(dead_code)]
 
 /// Type of message group for rendering decisions.
 ///
