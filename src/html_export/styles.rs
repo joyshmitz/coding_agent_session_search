@@ -150,6 +150,9 @@ body{margin:0;font-family:system-ui,-apple-system,sans-serif;line-height:1.5;-we
 .border-l-text-muted{border-left-color:var(--color-text-muted)}
 
 /* Layout utilities */
+.block{display:block}
+.inline-flex{display:inline-flex}
+.hidden{display:none}
 .min-h-screen{min-height:100vh}
 .w-full{width:100%}
 .max-w-3xl{max-width:48rem}
@@ -159,6 +162,7 @@ body{margin:0;font-family:system-ui,-apple-system,sans-serif;line-height:1.5;-we
 .flex-1{flex:1 1 0%}
 .items-center{align-items:center}
 .justify-center{justify-content:center}
+.gap-1{gap:0.25rem}
 .gap-1\.5{gap:0.375rem}
 .gap-2{gap:0.5rem}
 .flex-wrap{flex-wrap:wrap}
@@ -167,15 +171,21 @@ body{margin:0;font-family:system-ui,-apple-system,sans-serif;line-height:1.5;-we
 .p-1\.5{padding:0.375rem}
 .p-2{padding:0.5rem}
 .p-3{padding:0.75rem}
+.px-1\.5{padding-left:0.375rem;padding-right:0.375rem}
 .px-2\.5{padding-left:0.625rem;padding-right:0.625rem}
 .px-3{padding-left:0.75rem;padding-right:0.75rem}
+.py-0\.5{padding-top:0.125rem;padding-bottom:0.125rem}
 .py-1\.5{padding-top:0.375rem;padding-bottom:0.375rem}
 .py-3{padding-top:0.75rem;padding-bottom:0.75rem}
 .mb-1{margin-bottom:0.25rem}
 .mb-2{margin-bottom:0.5rem}
 .mb-3{margin-bottom:0.75rem}
+.mt-1{margin-top:0.25rem}
 .mt-2{margin-top:0.5rem}
+.ml-1\.5{margin-left:0.375rem}
 .ml-auto{margin-left:auto}
+.pb-2{padding-bottom:0.5rem}
+.pb-3{padding-bottom:0.75rem}
 
 /* Typography */
 .text-xs{font-size:0.75rem;line-height:1rem}
@@ -219,9 +229,10 @@ input:focus{outline:none}
 .focus\:border-accent:focus{border-color:var(--color-accent)}
 .placeholder\:text-text-muted::placeholder{color:var(--color-text-muted)}
 
-/* Lists */
+/* Lists & Details */
 .list-none{list-style:none}
 summary::-webkit-details-marker{display:none}
+details[open] .group-open\:hidden{display:none}
 
 /* Width/Height */
 .w-8{width:2rem}
@@ -232,6 +243,7 @@ summary::-webkit-details-marker{display:none}
 /* Overflow */
 .overflow-hidden{overflow:hidden}
 .overflow-x-auto{overflow-x:auto}
+.line-clamp-3{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
 
 /* Prose reset for content */
 .prose{color:var(--color-text-secondary)}
