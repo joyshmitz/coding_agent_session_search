@@ -79,3 +79,4 @@ claude_*.html
 session_export_test.html
 tests/fixtures/search_demo_data/*.db-shm
 tests/fixtures/search_demo_data/*.db-wal
+session_export.html

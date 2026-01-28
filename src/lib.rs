@@ -10759,15 +10759,26 @@ fn format_as_html(
     <meta charset="UTF-8">
     <title>{title_str}</title>
     <style>
-        body {{ font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f5f5f5; }}
-        .message {{ background: white; border-radius: 8px; padding: 16px; margin: 12px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-        .user {{ border-left: 4px solid #2563eb; }}
-        .assistant {{ border-left: 4px solid #16a34a; }}
-        .role {{ font-weight: bold; color: #374151; margin-bottom: 8px; }}
+        body {{ font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #0d0d12; color: #e0e0e5; }}
+        .message {{ background: #18181f; border-radius: 8px; padding: 16px; margin: 12px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }}
+        .user {{ border-left: 4px solid #3b82f6; }}
+        .assistant {{ border-left: 4px solid #22c55e; }}
+        .role {{ font-weight: bold; color: #a0a0a8; margin-bottom: 8px; }}
         .content {{ white-space: pre-wrap; line-height: 1.6; }}
-        .tool {{ background: #f3f4f6; padding: 8px; border-radius: 4px; font-family: monospace; font-size: 0.9em; margin: 8px 0; }}
-        h1 {{ color: #1f2937; }}
+        h1 {{ color: #f0f0f5; }}
         .meta {{ color: #6b7280; font-size: 0.9em; }}
+        /* Tool badges */
+        .tool-badges {{ display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }}
+        .tool-badge {{ position: relative; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 11px; font-family: 'JetBrains Mono', ui-monospace, monospace; background: #1e1e26; border: 1px solid #2e2e38; border-radius: 4px; cursor: pointer; transition: all 0.15s; }}
+        .tool-badge:hover {{ border-color: #f59e0b; background: rgba(245,158,11,0.1); }}
+        .tool-badge-name {{ font-weight: 600; color: #f59e0b; }}
+        .tool-popover {{ position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%) scale(0.95); min-width: 280px; max-width: 400px; padding: 12px; background: #18181f; border: 1px solid #2e2e38; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); opacity: 0; visibility: hidden; transition: all 0.15s; z-index: 1000; pointer-events: none; text-align: left; white-space: normal; }}
+        .tool-badge:hover .tool-popover {{ opacity: 1; visibility: visible; transform: translateX(-50%) scale(1); pointer-events: auto; }}
+        .tool-popover::after {{ content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 6px solid transparent; border-top-color: #2e2e38; }}
+        .tool-popover-header {{ display: flex; align-items: center; gap: 8px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid #2e2e38; font-weight: 600; color: #f59e0b; }}
+        .tool-popover-section {{ margin-bottom: 8px; }}
+        .tool-popover-label {{ font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: #6b7280; margin-bottom: 4px; display: block; }}
+        .tool-popover pre {{ margin: 0; padding: 8px; font-size: 10px; background: #0d0d12; border-radius: 4px; max-height: 150px; overflow: auto; white-space: pre-wrap; word-break: break-word; }}
     </style>
 </head>
 <body>
@@ -10794,6 +10805,12 @@ fn format_as_html(
 
         // Use extract_text_content for consistent content extraction
         let content = extract_text_content(msg);
+        // Strip "[Tool: X]" markers when we're showing tool badges
+        let content = if include_tools {
+            strip_tool_marker(&content)
+        } else {
+            content
+        };
         html.push_str(&html_escape(&content));
 
         // Also handle tool use blocks if requested
@@ -10804,14 +10821,65 @@ fn format_as_html(
                 .and_then(|m| m.get("content"))
                 .or_else(|| msg.get("content"));
             if let Some(arr) = content_val.and_then(|c| c.as_array()) {
+                let mut tool_badges = Vec::new();
                 for block in arr {
                     if let Some("tool_use") = block.get("type").and_then(|t| t.as_str()) {
                         let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-                        html.push_str(&format!(
-                            r#"<div class="tool">🔧 {}</div>"#,
-                            html_escape(name)
+                        let icon = match name.to_lowercase().as_str() {
+                            "bash" | "shell" => "💻",
+                            "read" | "read_file" => "📖",
+                            "write" | "write_file" => "📝",
+                            "edit" => "✏️",
+                            "glob" | "find" => "🔍",
+                            "grep" | "search" => "🔎",
+                            "webfetch" | "fetch" | "http" => "🌐",
+                            "websearch" => "🔍",
+                            "task" => "🚀",
+                            _ => "🔧",
+                        };
+                        // Get input preview (truncated)
+                        let input_preview = block
+                            .get("input")
+                            .map(|v| {
+                                let s = serde_json::to_string_pretty(v).unwrap_or_default();
+                                if s.len() > 400 {
+                                    format!("{}…", &s[..400])
+                                } else {
+                                    s
+                                }
+                            })
+                            .unwrap_or_default();
+
+                        let popover_content = if !input_preview.is_empty() {
+                            format!(
+                                r#"<div class="tool-popover-section"><span class="tool-popover-label">Input</span><pre>{}</pre></div>"#,
+                                html_escape(&input_preview)
+                            )
+                        } else {
+                            String::new()
+                        };
+
+                        tool_badges.push(format!(
+                            r#"<span class="tool-badge" tabindex="0">
+                                <span>{icon}</span>
+                                <span class="tool-badge-name">{name}</span>
+                                <div class="tool-popover">
+                                    <div class="tool-popover-header">{icon} {name}</div>
+                                    {popover}
+                                </div>
+                            </span>"#,
+                            icon = icon,
+                            name = html_escape(name),
+                            popover = popover_content,
                         ));
                     }
+                }
+                if !tool_badges.is_empty() {
+                    html.push_str(r#"<div class="tool-badges">"#);
+                    for badge in tool_badges {
+                        html.push_str(&badge);
+                    }
+                    html.push_str("</div>");
                 }
             }
         }

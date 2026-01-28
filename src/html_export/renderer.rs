@@ -143,6 +143,14 @@ impl ToolStatus {
             ToolStatus::Pending => "⋯",
         }
     }
+
+    fn label(&self) -> &'static str {
+        match self {
+            ToolStatus::Success => "success",
+            ToolStatus::Error => "error",
+            ToolStatus::Pending => "pending",
+        }
+    }
 }
 
 /// Get the CSS class for an agent slug.
@@ -558,47 +566,15 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
         "Rendering tool call"
     );
 
-    // Status indicator
-    let (status_class, status_icon) = tool_call
+    // Status indicator - get CSS class and icon
+    let (status_class, status_icon, status_label) = tool_call
         .status
         .as_ref()
-        .map(|s| (s.css_class(), s.icon()))
-        .unwrap_or(("", ""));
+        .map(|s| (s.css_class(), s.icon(), s.label()))
+        .unwrap_or(("", "", ""));
 
     // Format input as pretty JSON if possible
     let formatted_input = format_json_or_raw(&tool_call.input);
-
-    // Format output with truncation for very long outputs
-    let output_html = if let Some(output) = &tool_call.output {
-        let formatted = format_json_or_raw(output);
-        let (display_output, is_truncated) = if formatted.len() > 10000 {
-            // Safe truncation at char boundary to avoid panic on multi-byte UTF-8
-            let safe_len = truncate_to_char_boundary(&formatted, 10000);
-            let truncated = &formatted[..safe_len];
-            (truncated.to_string(), true)
-        } else {
-            (formatted, false)
-        };
-
-        let truncate_notice = if is_truncated {
-            r#"<p class="tool-truncated">Output truncated (10,000+ chars)</p>"#
-        } else {
-            ""
-        };
-
-        format!(
-            r#"
-                        <div class="tool-call-section">
-                            <div class="tool-call-label">Output</div>
-                            <pre><code class="language-json">{}</code></pre>
-                            {}
-                        </div>"#,
-            html_escape(&display_output),
-            truncate_notice
-        )
-    } else {
-        String::new()
-    };
 
     // Tool icon based on name
     let tool_icon = match tool_call.name.to_lowercase().as_str() {
@@ -613,54 +589,69 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
         _ => "🔧",
     };
 
-    // Code preview lines option (add class for long inputs)
-    let input_class = if options.code_preview_lines > 0
-        && formatted_input.lines().count() > options.code_preview_lines
-    {
-        " tool-input-long"
+    // Suppress unused warning for options - may be used for future customization
+    let _ = options;
+
+    // Truncate input/output for popover display
+    let input_preview = if formatted_input.len() > 500 {
+        let safe_len = truncate_to_char_boundary(&formatted_input, 500);
+        format!("{}…", &formatted_input[..safe_len])
     } else {
-        ""
+        formatted_input.clone()
     };
 
-    // Only show input section if there's actual content
-    let input_html = if !formatted_input.trim().is_empty() {
+    let output_preview = if let Some(output) = &tool_call.output {
+        let formatted = format_json_or_raw(output);
+        if formatted.len() > 500 {
+            let safe_len = truncate_to_char_boundary(&formatted, 500);
+            format!("{}…", &formatted[..safe_len])
+        } else {
+            formatted
+        }
+    } else {
+        String::new()
+    };
+
+    // Build popover content
+    let popover_input = if !input_preview.trim().is_empty() {
         format!(
-            r#"
-                        <div class="tool-call-section{input_class}">
-                            <div class="tool-call-label">Input</div>
-                            <pre><code class="language-json">{input}</code></pre>
-                        </div>"#,
-            input_class = input_class,
-            input = html_escape(&formatted_input),
+            r#"<div class="tool-popover-section"><span class="tool-popover-label">Input</span><pre><code>{}</code></pre></div>"#,
+            html_escape(&input_preview)
         )
     } else {
         String::new()
     };
 
+    let popover_output = if !output_preview.is_empty() {
+        format!(
+            r#"<div class="tool-popover-section"><span class="tool-popover-label">Output</span><pre><code>{}</code></pre></div>"#,
+            html_escape(&output_preview)
+        )
+    } else {
+        String::new()
+    };
+
+    // Compact badge with hover popover
     let rendered = format!(
-        r#"
-                <details class="tool-call">
-                    <summary>
-                        <span class="tool-call-icon" aria-hidden="true">{icon}</span>
-                        <span class="tool-call-name">{name}</span>
-                        {status_badge}
-                        <span class="tool-call-chevron" aria-hidden="true">▼</span>
-                    </summary>
-                    <div class="tool-call-body">{input}{output}
-                    </div>
-                </details>"#,
+        r#"<span class="tool-badge {status_class}" tabindex="0" role="button" aria-label="{name} tool call">
+            <span class="tool-badge-icon">{icon}</span>
+            <span class="tool-badge-name">{name}</span>
+            {status_badge}
+            <div class="tool-popover" role="tooltip">
+                <div class="tool-popover-header">{icon} {name} {status_badge}</div>
+                {input}{output}
+            </div>
+        </span>"#,
         icon = tool_icon,
         name = html_escape(&tool_call.name),
-        status_badge = if !status_class.is_empty() {
-            format!(
-                r#"<span class="tool-call-status {}">{}</span>"#,
-                status_class, status_icon
-            )
+        status_class = status_class,
+        status_badge = if !status_label.is_empty() {
+            format!(r#"<span class="tool-badge-status {}">{}</span>"#, status_label, status_icon)
         } else {
             String::new()
         },
-        input = input_html,
-        output = output_html,
+        input = popover_input,
+        output = popover_output,
     );
 
     debug!(
@@ -986,9 +977,13 @@ mod tests {
             author: None,
         };
 
-        // Should not panic even though we're truncating at 10000 bytes
+        // Should not panic even though we're truncating the long output
+        // The new badge format truncates at 500 chars with ellipsis
         let html = render_message(&msg, &RenderOptions::default()).unwrap();
-        assert!(html.contains("Output truncated"));
+        // Verify we have a tool badge (new compact format)
+        assert!(html.contains("tool-badge"));
+        // Verify output was truncated (ends with ellipsis in popover)
+        assert!(html.contains("…"));
     }
 
     #[test]

@@ -759,115 +759,157 @@ const COMPONENT_STYLES: &str = r#"
    Tool Calls - Collapsible
    ============================================ */
 
-.tool-call {
-  margin-top: var(--space-4);
+/* Tool Badge - Compact inline badges with hover popovers */
+.tool-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.tool-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1875rem 0.5rem;
+  font-size: 0.6875rem;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  background: var(--secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.tool-badge:hover,
+.tool-badge:focus {
+  border-color: var(--amber);
+  background: oklch(0.78 0.16 75 / 0.1);
+  outline: none;
+}
+
+.tool-badge-icon {
+  font-size: 0.75rem;
+}
+
+.tool-badge-name {
+  font-weight: 600;
+  color: var(--amber);
+}
+
+.tool-badge-status {
+  padding: 0.0625rem 0.375rem;
+  font-size: 0.5rem;
+  font-weight: 700;
+  border-radius: 2px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  margin-left: 0.25rem;
+}
+
+.tool-badge.tool-status-success { border-left: 2px solid var(--green); }
+.tool-badge.tool-status-error { border-left: 2px solid var(--red); }
+.tool-badge.tool-status-pending { border-left: 2px solid var(--amber); }
+
+.tool-badge-status.success {
+  background: oklch(0.72 0.19 145 / 0.2);
+  color: var(--green);
+}
+.tool-badge-status.error {
+  background: oklch(0.65 0.22 25 / 0.2);
+  color: var(--red);
+}
+.tool-badge-status.pending {
+  background: oklch(0.78 0.16 75 / 0.2);
+  color: var(--amber);
+}
+
+/* Popover - shown on hover/focus */
+.tool-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) scale(0.95);
+  min-width: 320px;
+  max-width: 480px;
+  padding: var(--space-3);
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  overflow: hidden;
-  font-size: var(--text-sm);
-  background: var(--secondary);
-  transition: border-color var(--transition-fast);
+  box-shadow: 0 8px 32px oklch(0 0 0 / 0.4);
+  opacity: 0;
+  visibility: hidden;
+  transition: all 0.15s ease-out;
+  z-index: 1000;
+  pointer-events: none;
+  text-align: left;
+  white-space: normal;
 }
 
-.tool-call:hover {
-  border-color: oklch(0.35 0.02 260);
+.tool-badge:hover .tool-popover,
+.tool-badge:focus .tool-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) scale(1);
+  pointer-events: auto;
 }
 
-.tool-call summary {
+/* Arrow pointing down */
+.tool-popover::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: var(--border);
+}
+
+.tool-popover-header {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: 0.625rem 0.875rem;
-  background: transparent;
-  cursor: pointer;
-  list-style: none;
-  transition: background var(--transition-fast);
-  min-height: var(--touch-min);
-}
-
-.tool-call summary::-webkit-details-marker { display: none; }
-.tool-call summary:hover { background: var(--muted); }
-
-.tool-call-icon {
-  font-size: var(--text-sm);
-}
-
-.tool-call-name {
+  padding-bottom: var(--space-2);
+  margin-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
   font-weight: 600;
   color: var(--amber);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: var(--text-xs);
 }
 
-.tool-call-status {
-  margin-left: auto;
-  padding: 0.1875rem 0.625rem;
-  font-size: 0.625rem;
-  font-weight: 600;
-  border-radius: var(--radius-sm);
-  letter-spacing: 0.3px;
-  text-transform: uppercase;
+.tool-popover-section {
+  margin-bottom: var(--space-2);
 }
+.tool-popover-section:last-child { margin-bottom: 0; }
 
-.tool-status-success {
-  background: oklch(0.72 0.19 145 / 0.15);
-  color: var(--green);
-  box-shadow: inset 0 0 0 1px oklch(0.72 0.19 145 / 0.2);
-}
-.tool-status-error {
-  background: oklch(0.65 0.22 25 / 0.15);
-  color: var(--red);
-  box-shadow: inset 0 0 0 1px oklch(0.65 0.22 25 / 0.2);
-}
-.tool-status-pending {
-  background: oklch(0.78 0.16 75 / 0.15);
-  color: var(--amber);
-  box-shadow: inset 0 0 0 1px oklch(0.78 0.16 75 / 0.2);
-}
-
-.tool-call-chevron {
-  font-size: 0.625rem;
-  color: var(--muted-foreground);
-  transition: transform var(--transition-fast);
-  margin-left: var(--space-1);
-}
-
-.tool-call[open] .tool-call-chevron { transform: rotate(180deg); }
-
-.tool-call-body {
-  padding: var(--space-4);
-  border-top: 1px solid var(--border);
-  background: var(--card);
-}
-
-.tool-call-section {
-  margin-bottom: var(--space-4);
-}
-.tool-call-section:last-child { margin-bottom: 0; }
-
-.tool-call-label {
-  font-size: 0.625rem;
+.tool-popover-label {
+  font-size: 0.5625rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: var(--muted-foreground);
-  margin-bottom: var(--space-1);
+  margin-bottom: 0.25rem;
 }
 
-.tool-call pre {
+.tool-popover pre {
   margin: 0;
-  padding: var(--space-2) var(--space-3);
-  font-size: 0.6875rem;
+  padding: var(--space-2);
+  font-size: 0.625rem;
+  background: var(--secondary);
   border-radius: var(--radius-sm);
-  max-height: 300px;
+  max-height: 150px;
   overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tool-truncated {
-  font-size: 0.6875rem;
+  font-size: 0.5625rem;
   color: var(--amber);
-  margin-top: var(--space-1);
+  margin-top: 0.25rem;
   font-weight: 500;
+  font-style: italic;
 }
 
 /* ============================================
