@@ -397,8 +397,10 @@ fn fast_only_mode_skips_refinement() {
         SearchPhase, TwoTierConfig, TwoTierSearcher,
     };
 
-    let mut config = TwoTierConfig::default();
-    config.fast_only = true;
+    let config = TwoTierConfig {
+        fast_only: true,
+        ..TwoTierConfig::default()
+    };
 
     let fast_embedder = Arc::new(HashEmbedder::new(config.fast_dimension));
     let quality_embedder = HashEmbedder::new(config.quality_dimension);
@@ -714,9 +716,11 @@ fn quality_weight_affects_ranking() {
     let fast_dim = 128; // Different dimensions to get different rankings
     let quality_dim = 256;
 
-    let mut config = TwoTierConfig::default();
-    config.fast_dimension = fast_dim;
-    config.quality_dimension = quality_dim;
+    let config = TwoTierConfig {
+        fast_dimension: fast_dim,
+        quality_dimension: quality_dim,
+        ..TwoTierConfig::default()
+    };
 
     let fast_embedder = HashEmbedder::new(fast_dim);
     let quality_embedder = HashEmbedder::new(quality_dim);
