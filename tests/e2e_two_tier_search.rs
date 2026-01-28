@@ -247,7 +247,10 @@ fn fast_search_matches_ground_truth() {
     }
 
     // Verify top results include auth-related documents
-    let top_3_ids: Vec<&str> = results[..3].iter().map(|r| documents[r.idx].id).collect();
+    let top_3_ids: Vec<&str> = results[..3.min(results.len())]
+        .iter()
+        .map(|r| documents[r.idx].id)
+        .collect();
     assert!(
         top_3_ids.contains(&"doc-auth") || top_3_ids.contains(&"doc-auth2"),
         "auth-related documents should rank highly for auth query: got {:?}",
@@ -290,7 +293,10 @@ fn quality_search_matches_ground_truth() {
     );
 
     // Verify top results include database-related documents
-    let top_3_ids: Vec<&str> = results[..3].iter().map(|r| documents[r.idx].id).collect();
+    let top_3_ids: Vec<&str> = results[..3.min(results.len())]
+        .iter()
+        .map(|r| documents[r.idx].id)
+        .collect();
     assert!(
         top_3_ids.contains(&"doc-db") || top_3_ids.contains(&"doc-db2"),
         "database-related documents should rank highly for db query: got {:?}",
@@ -576,6 +582,13 @@ fn progressive_search_timing() {
     let start = Instant::now();
     let phases: Vec<SearchPhase> = searcher.search(query, 5).collect();
     let total_time = start.elapsed();
+
+    // Verify we got both phases
+    assert!(
+        phases.len() >= 2,
+        "expected at least 2 phases, got {}",
+        phases.len()
+    );
 
     // Extract timings from phases
     let initial_latency = match &phases[0] {
