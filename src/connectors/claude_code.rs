@@ -101,7 +101,6 @@ impl Connector for ClaudeCodeConnector {
                 let mut workspace: Option<PathBuf> = None;
                 let mut session_id: Option<String> = None;
                 let mut git_branch: Option<String> = None;
-                let mut content_string = String::new();
                 let mut json_title: Option<String> = None;
 
                 if ext == Some("jsonl") {
@@ -221,7 +220,7 @@ impl Connector for ClaudeCodeConnector {
                         continue;
                     }
 
-                    content_string = fs::read_to_string(entry.path())
+                    let content_string = fs::read_to_string(entry.path())
                         .with_context(|| format!("read {}", entry.path().display()))?;
                     // JSON or Claude format files
                     let val: Value = match serde_json::from_str(&content_string) {

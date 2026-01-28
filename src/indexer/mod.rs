@@ -23,9 +23,9 @@ use crate::search::tantivy::{TantivyIndex, index_dir, schema_hash_matches};
 use crate::search::vector_index::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_USER};
 
 use crate::sources::config::{Platform, SourcesConfig};
-use crate::sources::provenance::{LOCAL_SOURCE_ID, Origin, Source};
+use crate::sources::provenance::{Origin, Source};
 use crate::sources::sync::path_to_safe_dirname;
-use crate::storage::sqlite::{SqliteStorage, StatsAggregator};
+use crate::storage::sqlite::SqliteStorage;
 use semantic::{EmbeddingInput, SemanticIndexer};
 
 #[derive(Debug, Clone)]

@@ -405,7 +405,7 @@ fn format_role_display(role: &str) -> String {
 /// Render message content, converting markdown to HTML using pulldown-cmark.
 /// Raw HTML in the input is escaped for security (XSS prevention).
 fn render_content(content: &str, _options: &RenderOptions) -> String {
-    use pulldown_cmark::{Event, Tag, TagEnd};
+    use pulldown_cmark::Event;
 
     // Configure pulldown-cmark with all common extensions
     let mut opts = Options::empty();
@@ -431,6 +431,7 @@ fn render_content(content: &str, _options: &RenderOptions) -> String {
 }
 
 /// Render a code block with optional syntax highlighting.
+#[allow(dead_code)]
 fn render_code_block(content: &str, lang: &str, options: &RenderOptions) -> String {
     trace!(
         component = "renderer",
