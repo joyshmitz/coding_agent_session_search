@@ -193,15 +193,24 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   font-size: var(--text-base);
   line-height: 1.65;
+  color: #e8e9ed;
   color: var(--foreground);
-  background: var(--background);
+  /* Solid dark background - hex fallback first, then oklch if supported */
+  background-color: #16161f;
   min-height: 100vh;
   min-height: 100dvh;
   overflow-x: hidden;
   max-width: 100vw;
 }
 
-/* Hero background - from reference bg-gradient-hero */
+/* Override background with oklch for modern browsers */
+@supports (background: oklch(0.11 0.015 260)) {
+  body {
+    background-color: oklch(0.11 0.015 260);
+  }
+}
+
+/* Hero background overlay - subtle ambient glow */
 body::before {
   content: '';
   position: fixed;
@@ -209,9 +218,9 @@ body::before {
   pointer-events: none;
   z-index: -1;
   background:
-    radial-gradient(ellipse at 30% 20%, oklch(0.75 0.18 195 / 0.15) 0%, transparent 40%),
-    radial-gradient(ellipse at 70% 80%, oklch(0.7 0.2 330 / 0.1) 0%, transparent 40%),
-    radial-gradient(ellipse at 90% 30%, oklch(0.78 0.16 75 / 0.08) 0%, transparent 30%);
+    radial-gradient(ellipse at 30% 20%, rgba(70, 180, 220, 0.12) 0%, transparent 40%),
+    radial-gradient(ellipse at 70% 80%, rgba(200, 100, 180, 0.08) 0%, transparent 40%),
+    radial-gradient(ellipse at 90% 30%, rgba(220, 180, 80, 0.06) 0%, transparent 30%);
 }
 
 /* Custom scrollbar - from reference */
@@ -603,14 +612,26 @@ const COMPONENT_STYLES: &str = r#"
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  position: relative;
+  z-index: 1;
+}
+
+/* Message wrapper - inherits conversation layout */
+.conversation-messages {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
 .message {
   position: relative;
   padding: var(--space-4) var(--space-5);
+  background: #1e1e28;
   background: var(--card);
+  border: 1px solid #2d2d3a;
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
+  border-left: 4px solid #2d2d3a;
   border-left: 4px solid var(--border);
   transition: all var(--transition-fast);
 }
@@ -992,17 +1013,19 @@ const COMPONENT_STYLES: &str = r#"
   }
 }
 
+/* Staggered fade-in animation - uses forwards to ensure visibility after animation */
 .message {
-  animation: fadeIn 0.35s cubic-bezier(0.33, 1, 0.68, 1) backwards;
+  animation: fadeIn 0.35s cubic-bezier(0.33, 1, 0.68, 1) forwards;
+  opacity: 1; /* Fallback for when animations don't run */
 }
 
-/* Staggered animation */
-.message:nth-child(1) { animation-delay: 0.05s; }
-.message:nth-child(2) { animation-delay: 0.1s; }
-.message:nth-child(3) { animation-delay: 0.15s; }
-.message:nth-child(4) { animation-delay: 0.2s; }
-.message:nth-child(5) { animation-delay: 0.25s; }
-.message:nth-child(n+6) { animation-delay: 0.3s; }
+/* Staggered animation delays for visual polish */
+.message:nth-child(1) { animation-delay: 0.02s; }
+.message:nth-child(2) { animation-delay: 0.04s; }
+.message:nth-child(3) { animation-delay: 0.06s; }
+.message:nth-child(4) { animation-delay: 0.08s; }
+.message:nth-child(5) { animation-delay: 0.1s; }
+.message:nth-child(n+6) { animation-delay: 0.12s; }
 
 /* ============================================
    Accessibility
