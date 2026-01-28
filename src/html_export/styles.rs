@@ -1767,7 +1767,11 @@ mod tests {
         // Glassmorphic popover
         assert!(bundle.critical_css.contains(".tool-popover"));
         assert!(bundle.critical_css.contains("backdrop-filter: blur(16px)"));
-        assert!(bundle.critical_css.contains("-webkit-backdrop-filter: blur(16px)"));
+        assert!(
+            bundle
+                .critical_css
+                .contains("-webkit-backdrop-filter: blur(16px)")
+        );
 
         // Fixed positioning
         assert!(bundle.critical_css.contains("position: fixed"));
@@ -1783,7 +1787,11 @@ mod tests {
 
         // Mobile popover becomes bottom sheet
         assert!(bundle.critical_css.contains("max-height: 60vh"));
-        assert!(bundle.critical_css.contains("border-radius: var(--radius-xl) var(--radius-xl) 0 0"));
+        assert!(
+            bundle
+                .critical_css
+                .contains("border-radius: var(--radius-xl) var(--radius-xl) 0 0")
+        );
     }
 
     #[test]
@@ -1806,7 +1814,11 @@ mod tests {
         assert!(bundle.critical_css.contains("--shadow-glow-amber"));
 
         // Hover glow on tool badges
-        assert!(bundle.critical_css.contains("box-shadow: var(--shadow-glow-amber)"));
+        assert!(
+            bundle
+                .critical_css
+                .contains("box-shadow: var(--shadow-glow-amber)")
+        );
     }
 
     #[test]
@@ -1815,6 +1827,10 @@ mod tests {
         let bundle = generate_styles(&opts);
 
         // Print mode hides popovers
-        assert!(bundle.critical_css.contains(".tool-popover { display: none"));
+        assert!(
+            bundle
+                .critical_css
+                .contains(".tool-popover { display: none")
+        );
     }
 }

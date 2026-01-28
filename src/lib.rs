@@ -10679,7 +10679,10 @@ pub fn detect_agent_format(messages: &[html_export::Message]) -> AgentFormat {
 
         // Codex uses "function" role for tool results
         if role == "function" {
-            trace!(agent_format = "codex", "Detected Codex format from function role");
+            trace!(
+                agent_format = "codex",
+                "Detected Codex format from function role"
+            );
             return AgentFormat::Codex;
         }
 
@@ -10687,7 +10690,10 @@ pub fn detect_agent_format(messages: &[html_export::Message]) -> AgentFormat {
         if let Some(ref tc) = msg.tool_call {
             // Cursor format has specific tool names like "tool"
             if tc.name == "tool" || tc.name.starts_with("tool_") {
-                trace!(agent_format = "cursor", "Detected Cursor format from tool name pattern");
+                trace!(
+                    agent_format = "cursor",
+                    "Detected Cursor format from tool name pattern"
+                );
                 return AgentFormat::Cursor;
             }
             // Claude Code uses standard tool names (Bash, Read, Write, etc.)
@@ -10695,13 +10701,19 @@ pub fn detect_agent_format(messages: &[html_export::Message]) -> AgentFormat {
                 tc.name.as_str(),
                 "Bash" | "Read" | "Write" | "Edit" | "Glob" | "Grep" | "Task" | "WebFetch"
             ) {
-                trace!(agent_format = "claude_code", "Detected Claude Code format from tool name");
+                trace!(
+                    agent_format = "claude_code",
+                    "Detected Claude Code format from tool name"
+                );
                 return AgentFormat::ClaudeCode;
             }
         }
     }
 
-    trace!(agent_format = "generic", "Using generic format (no specific pattern detected)");
+    trace!(
+        agent_format = "generic",
+        "Using generic format (no specific pattern detected)"
+    );
     AgentFormat::Generic
 }
 
@@ -10712,10 +10724,7 @@ pub fn detect_agent_format(messages: &[html_export::Message]) -> AgentFormat {
 /// - Attaching to current group
 /// - Being a tool result
 /// - Being skipped
-pub fn classify_message(
-    msg: &html_export::Message,
-    _format: AgentFormat,
-) -> MessageClassification {
+pub fn classify_message(msg: &html_export::Message, _format: AgentFormat) -> MessageClassification {
     use tracing::trace;
 
     let role = msg.role.as_str();
@@ -10768,10 +10777,7 @@ pub fn classify_message(
 /// - Claude Code: tool_use_id in content blocks
 /// - Codex: function call name
 /// - Generic: message index fallback
-pub fn extract_correlation_id(
-    msg: &html_export::Message,
-    format: AgentFormat,
-) -> Option<String> {
+pub fn extract_correlation_id(msg: &html_export::Message, format: AgentFormat) -> Option<String> {
     use tracing::trace;
 
     // First, try to use the tool call name as a simple correlation
@@ -10933,7 +10939,8 @@ pub fn group_messages_for_export(
                         .and_then(|tc| tc.status)
                         .unwrap_or(html_export::ToolStatus::Success);
 
-                    let mut result = html_export::ToolResult::new(tool_name.clone(), content, status);
+                    let mut result =
+                        html_export::ToolResult::new(tool_name.clone(), content, status);
 
                     // Try to get correlation ID
                     if let Some(corr_id) = extract_correlation_id(msg, format) {
@@ -10944,7 +10951,10 @@ pub fn group_messages_for_export(
                     g.update_end_timestamp(msg.timestamp.clone());
                     trace!(tool_name = %tool_name, "Added tool result to group");
                 } else {
-                    debug!(idx = idx, "Orphan tool result, no current group to attach to");
+                    debug!(
+                        idx = idx,
+                        "Orphan tool result, no current group to attach to"
+                    );
                 }
             }
 
@@ -11159,7 +11169,7 @@ mod message_grouping_tests {
     fn test_empty_messages_filtered() {
         let msgs = vec![
             msg_user("Hello"),
-            msg_empty(),  // Should be filtered
+            msg_empty(), // Should be filtered
             msg_assistant("Hi there!"),
         ];
         let groups = group_messages_for_export(msgs);
@@ -11175,7 +11185,11 @@ mod message_grouping_tests {
             msg_user("Third question"),
         ];
         let groups = group_messages_for_export(msgs);
-        assert_eq!(groups.len(), 3, "Each user message should be separate group");
+        assert_eq!(
+            groups.len(),
+            3,
+            "Each user message should be separate group"
+        );
         for group in &groups {
             assert_eq!(group.group_type, MessageGroupType::User);
         }
@@ -11271,9 +11285,7 @@ mod message_grouping_tests {
 
     #[test]
     fn test_detect_claude_format() {
-        let msgs = vec![
-            msg_assistant_with_tool("Let me check", "Read", "/file.rs"),
-        ];
+        let msgs = vec![msg_assistant_with_tool("Let me check", "Read", "/file.rs")];
         let format = detect_agent_format(&msgs);
         assert_eq!(format, AgentFormat::ClaudeCode);
     }

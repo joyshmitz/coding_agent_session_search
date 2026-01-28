@@ -218,7 +218,11 @@ pub struct ToolResult {
 #[allow(dead_code)]
 impl ToolResult {
     /// Create a new tool result.
-    pub fn new(tool_name: impl Into<String>, content: impl Into<String>, status: ToolStatus) -> Self {
+    pub fn new(
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+        status: ToolStatus,
+    ) -> Self {
         Self {
             tool_name: tool_name.into(),
             content: content.into(),
@@ -741,11 +745,12 @@ fn render_message_group(
     let content_html = render_content(&group.primary.content, options);
 
     // Render tool badges with overflow handling
-    let (tool_badges_html, overflow_count) = if options.show_tool_calls && !group.tool_calls.is_empty() {
-        render_tool_badges_with_overflow(&group.tool_calls, options)
-    } else {
-        (String::new(), 0)
-    };
+    let (tool_badges_html, overflow_count) =
+        if options.show_tool_calls && !group.tool_calls.is_empty() {
+            render_tool_badges_with_overflow(&group.tool_calls, options)
+        } else {
+            (String::new(), 0)
+        };
 
     // ARIA label for the article
     let aria_label = if group.tool_calls.is_empty() {
@@ -760,27 +765,28 @@ fn render_message_group(
     };
 
     // Check for content collapse
-    let (content_wrapper_start, content_wrapper_end) =
-        if options.collapse_threshold > 0 && group.primary.content.len() > options.collapse_threshold {
-            let preview_len = options.collapse_threshold.min(500);
-            let safe_len = truncate_to_char_boundary(&group.primary.content, preview_len);
-            let preview = &group.primary.content[..safe_len];
-            (
-                format!(
-                    r#"<details class="message-collapse">
+    let (content_wrapper_start, content_wrapper_end) = if options.collapse_threshold > 0
+        && group.primary.content.len() > options.collapse_threshold
+    {
+        let preview_len = options.collapse_threshold.min(500);
+        let safe_len = truncate_to_char_boundary(&group.primary.content, preview_len);
+        let preview = &group.primary.content[..safe_len];
+        (
+            format!(
+                r#"<details class="message-collapse">
                     <summary>
                         <span class="message-preview">{}</span>
                         <span class="message-expand-hint">Click to expand ({} chars)</span>
                     </summary>
                     <div class="message-expanded">"#,
-                    super::template::html_escape(preview),
-                    group.primary.content.len()
-                ),
-                "</div></details>".to_string(),
-            )
-        } else {
-            (String::new(), String::new())
-        };
+                super::template::html_escape(preview),
+                group.primary.content.len()
+            ),
+            "</div></details>".to_string(),
+        )
+    } else {
+        (String::new(), String::new())
+    };
 
     // Only render content div if there's actual content
     let content_section = if content_html.trim().is_empty() {
@@ -887,7 +893,10 @@ fn render_tool_badges_with_overflow(
             s = if overflow_count == 1 { "" } else { "s" },
         );
 
-        (format!("{}\n                        {}", visible, overflow_badge), overflow_count)
+        (
+            format!("{}\n                        {}", visible, overflow_badge),
+            overflow_count,
+        )
     }
 }
 
@@ -1358,7 +1367,10 @@ fn render_tool_badge(tool_call: &ToolCall, options: &RenderOptions) -> String {
         name = html_escape(&tool_call.name),
         status_class = status_class,
         status_badge = if !status_label.is_empty() {
-            format!(r#"<span class="tool-badge-status {}">{}</span>"#, status_label, status_icon_svg)
+            format!(
+                r#"<span class="tool-badge-status {}">{}</span>"#,
+                status_label, status_icon_svg
+            )
         } else {
             String::new()
         },
@@ -1612,8 +1624,8 @@ mod tests {
     fn test_tool_icons_for_different_tools() {
         // Check that different tools get appropriate Lucide SVG icons
         let tools_and_svg_markers = vec![
-            ("Read", "M15 2H6a2 2 0 0 0-2 2v16"),       // FileText icon path
-            ("Write", "M21.174 6.812"),                  // Pencil icon path
+            ("Read", "M15 2H6a2 2 0 0 0-2 2v16"), // FileText icon path
+            ("Write", "M21.174 6.812"),           // Pencil icon path
             ("Bash", "polyline points=\"4 17 10 11 4 5\""), // Terminal icon
             ("Grep", "circle cx=\"11\" cy=\"11\" r=\"8\""), // Search icon
             ("WebFetch", "circle cx=\"12\" cy=\"12\" r=\"10\""), // Globe icon
@@ -1754,10 +1766,7 @@ mod tests {
         let mut group = MessageGroup::assistant(msg);
 
         // Add tool calls
-        group.add_tool_call(
-            test_tool_call("Read"),
-            Some("toolu_abc123".to_string()),
-        );
+        group.add_tool_call(test_tool_call("Read"), Some("toolu_abc123".to_string()));
         group.add_tool_result(
             ToolResult::new("Read", "file contents here", ToolStatus::Success)
                 .with_correlation_id("toolu_abc123"),
@@ -1782,10 +1791,7 @@ mod tests {
         // Add multiple tool calls
         let tools = ["Bash", "Read", "Write"];
         for (i, name) in tools.iter().enumerate() {
-            group.add_tool_call(
-                test_tool_call(name),
-                Some(format!("toolu_{}", i)),
-            );
+            group.add_tool_call(test_tool_call(name), Some(format!("toolu_{}", i)));
         }
 
         let opts = RenderOptions::default();
@@ -1793,7 +1799,11 @@ mod tests {
 
         // Should have all tool badges
         for tool_name in tools {
-            assert!(html.contains(tool_name), "Should contain badge for {}", tool_name);
+            assert!(
+                html.contains(tool_name),
+                "Should contain badge for {}",
+                tool_name
+            );
         }
         assert!(html.contains("with 3 tool calls")); // Aria label mentions count
     }
@@ -1801,7 +1811,9 @@ mod tests {
     #[test]
     fn test_render_tool_badges_overflow() {
         // Create more tools than MAX_VISIBLE_BADGES
-        let tool_names = ["Read", "Write", "Bash", "Glob", "Grep", "WebFetch", "Task", "Search"];
+        let tool_names = [
+            "Read", "Write", "Bash", "Glob", "Grep", "WebFetch", "Task", "Search",
+        ];
         let tools: Vec<ToolCallWithResult> = tool_names
             .iter()
             .map(|name| test_tool_call_with_result(name, ToolStatus::Success))

@@ -253,9 +253,8 @@ fn test_popover_js_present() {
     let html = export_fixture("claude_session.jsonl");
 
     // Popover controller should be initialized
-    let has_popover_js = html.contains("ToolPopovers")
-        || html.contains("popover")
-        || html.contains("showPopover");
+    let has_popover_js =
+        html.contains("ToolPopovers") || html.contains("popover") || html.contains("showPopover");
 
     assert!(
         has_popover_js,
@@ -337,10 +336,12 @@ fn test_color_contrast_indicators() {
     let html = export_fixture("claude_session.jsonl");
 
     // Success should use green-ish colors
-    let success_styles = html.contains("success") && (html.contains("green") || html.contains("0.7 0.15 145"));
+    let success_styles =
+        html.contains("success") && (html.contains("green") || html.contains("0.7 0.15 145"));
 
     // Error should use red-ish colors
-    let error_styles = html.contains("error") && (html.contains("red") || html.contains("0.65 0.2 25"));
+    let error_styles =
+        html.contains("error") && (html.contains("red") || html.contains("0.65 0.2 25"));
 
     assert!(
         success_styles || error_styles || html.contains("tool-status"),
