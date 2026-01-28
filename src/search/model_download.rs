@@ -411,6 +411,173 @@ impl ModelManifest {
         }
     }
 
+    // ==================== Reranker Models ====================
+
+    /// MS MARCO MiniLM reranker manifest (baseline for bake-off).
+    pub fn msmarco_reranker() -> Self {
+        Self {
+            id: "ms-marco-MiniLM-L-6-v2".into(),
+            repo: "cross-encoder/ms-marco-MiniLM-L-6-v2".into(),
+            revision: "main".into(),
+            files: vec![
+                ModelFile {
+                    name: "onnx/model.onnx".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 90_000_000,
+                },
+                ModelFile {
+                    name: "tokenizer.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500_000,
+                },
+                ModelFile {
+                    name: "config.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 1000,
+                },
+                ModelFile {
+                    name: "special_tokens_map.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500,
+                },
+                ModelFile {
+                    name: "tokenizer_config.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500,
+                },
+            ],
+            license: "Apache-2.0".into(),
+        }
+    }
+
+    /// BGE Reranker v2 M3 manifest.
+    ///
+    /// Released: 2025-11-15
+    /// Updated BGE model with improved quality.
+    ///
+    /// Note: Checksums are placeholders until model is downloaded and verified.
+    pub fn bge_reranker_v2() -> Self {
+        Self {
+            id: "bge-reranker-v2-m3".into(),
+            repo: "BAAI/bge-reranker-v2-m3".into(),
+            revision: "main".into(),
+            files: vec![
+                ModelFile {
+                    name: "model.onnx".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 560_000_000, // ~560MB estimated
+                },
+                ModelFile {
+                    name: "tokenizer.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500_000,
+                },
+                ModelFile {
+                    name: "config.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 1000,
+                },
+                ModelFile {
+                    name: "special_tokens_map.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500,
+                },
+                ModelFile {
+                    name: "tokenizer_config.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500,
+                },
+            ],
+            license: "MIT".into(),
+        }
+    }
+
+    /// Jina Reranker v1 Turbo EN manifest.
+    ///
+    /// Released: 2025-11-20
+    /// Fast, optimized for English.
+    ///
+    /// Note: Checksums are placeholders until model is downloaded and verified.
+    pub fn jina_reranker_turbo() -> Self {
+        Self {
+            id: "jina-reranker-v1-turbo-en".into(),
+            repo: "jinaai/jina-reranker-v1-turbo-en".into(),
+            revision: "main".into(),
+            files: vec![
+                ModelFile {
+                    name: "model.onnx".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 140_000_000, // ~140MB estimated
+                },
+                ModelFile {
+                    name: "tokenizer.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500_000,
+                },
+                ModelFile {
+                    name: "config.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 1000,
+                },
+                ModelFile {
+                    name: "special_tokens_map.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500,
+                },
+                ModelFile {
+                    name: "tokenizer_config.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500,
+                },
+            ],
+            license: "Apache-2.0".into(),
+        }
+    }
+
+    /// Jina Reranker v2 Base Multilingual manifest.
+    ///
+    /// Released: 2025-12-01
+    /// Multilingual support.
+    ///
+    /// Note: Checksums are placeholders until model is downloaded and verified.
+    pub fn jina_reranker_v2() -> Self {
+        Self {
+            id: "jina-reranker-v2-base-multilingual".into(),
+            repo: "jinaai/jina-reranker-v2-base-multilingual".into(),
+            revision: "main".into(),
+            files: vec![
+                ModelFile {
+                    name: "model.onnx".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 280_000_000, // ~280MB estimated
+                },
+                ModelFile {
+                    name: "tokenizer.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500_000,
+                },
+                ModelFile {
+                    name: "config.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 1000,
+                },
+                ModelFile {
+                    name: "special_tokens_map.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500,
+                },
+                ModelFile {
+                    name: "tokenizer_config.json".into(),
+                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
+                    size: 500,
+                },
+            ],
+            license: "Apache-2.0".into(),
+        }
+    }
+
+    // ==================== Lookup Functions ====================
+
     /// Get manifest by embedder name.
     pub fn for_embedder(name: &str) -> Option<Self> {
         match name {
@@ -424,8 +591,19 @@ impl ModelManifest {
         }
     }
 
-    /// Get all bake-off eligible model manifests.
-    pub fn bakeoff_candidates() -> Vec<Self> {
+    /// Get manifest by reranker name.
+    pub fn for_reranker(name: &str) -> Option<Self> {
+        match name {
+            "ms-marco" => Some(Self::msmarco_reranker()),
+            "bge-reranker-v2" => Some(Self::bge_reranker_v2()),
+            "jina-reranker-turbo" => Some(Self::jina_reranker_turbo()),
+            "jina-reranker-v2" => Some(Self::jina_reranker_v2()),
+            _ => None,
+        }
+    }
+
+    /// Get all bake-off eligible embedder manifests.
+    pub fn bakeoff_embedder_candidates() -> Vec<Self> {
         vec![
             Self::embeddinggemma(),
             Self::qwen3_embedding(),
@@ -433,6 +611,22 @@ impl ModelManifest {
             Self::snowflake_arctic_s(),
             Self::nomic_embed(),
         ]
+    }
+
+    /// Get all bake-off eligible reranker manifests.
+    pub fn bakeoff_reranker_candidates() -> Vec<Self> {
+        vec![
+            Self::bge_reranker_v2(),
+            Self::jina_reranker_turbo(),
+            Self::jina_reranker_v2(),
+        ]
+    }
+
+    /// Get all bake-off eligible model manifests (embedders + rerankers).
+    pub fn bakeoff_candidates() -> Vec<Self> {
+        let mut candidates = Self::bakeoff_embedder_candidates();
+        candidates.extend(Self::bakeoff_reranker_candidates());
+        candidates
     }
 
     /// Total size of all files in bytes.
