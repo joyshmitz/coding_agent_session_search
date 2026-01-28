@@ -1548,7 +1548,7 @@ impl WildcardPattern {
     /// Convert to regex pattern for Tantivy `RegexQuery`
     fn to_regex(&self) -> Option<String> {
         match self {
-            WildcardPattern::Suffix(core) => Some(format!(".*{}", escape_regex(core))),
+            WildcardPattern::Suffix(core) => Some(format!(".*{}$", escape_regex(core))),
             WildcardPattern::Substring(core) => Some(format!(".*{}.*", escape_regex(core))),
             WildcardPattern::Complex(full_term) => {
                 let mut regex = String::with_capacity(full_term.len() * 2 + 2);
@@ -1845,8 +1845,15 @@ fn build_boolean_query_clauses(
                     // Add to OR group
                     if pending_or_group.is_empty() {
                         // Pull last Must clause into OR group if exists
-                        if let Some((Occur::Must, last_q)) = clauses.pop() {
-                            pending_or_group.push(last_q);
+                        // Fix: Check if last clause is Must BEFORE popping to avoid dropping MustNot clauses
+                        let can_group = clauses
+                            .last()
+                            .map_or(false, |(occ, _)| *occ == Occur::Must);
+
+                        if can_group {
+                            if let Some((_, last_q)) = clauses.pop() {
+                                pending_or_group.push(last_q);
+                            }
                         }
                     }
                     pending_or_group.push(term_query);
@@ -1865,10 +1872,18 @@ fn build_boolean_query_clauses(
                 let phrase_query = phrase_query.unwrap();
 
                 if in_or_sequence {
-                    if pending_or_group.is_empty()
-                        && let Some((Occur::Must, last_q)) = clauses.pop()
-                    {
-                        pending_or_group.push(last_q);
+                    if pending_or_group.is_empty() {
+                        // Pull last Must clause into OR group if exists
+                        // Fix: Check if last clause is Must BEFORE popping to avoid dropping MustNot clauses
+                        let can_group = clauses
+                            .last()
+                            .map_or(false, |(occ, _)| *occ == Occur::Must);
+
+                        if can_group {
+                            if let Some((_, last_q)) = clauses.pop() {
+                                pending_or_group.push(last_q);
+                            }
+                        }
                     }
                     pending_or_group.push(phrase_query);
                 } else {
@@ -2295,7 +2310,7 @@ impl SearchClient {
             );
             let hits = self.search_sqlite(
                 conn,
-                &sanitized,
+                query,
                 filters.clone(),
                 fetch_limit,
                 0, // Always fetch from 0 for global dedup
@@ -3142,25 +3157,21 @@ impl SearchClient {
     fn search_sqlite(
         &self,
         conn: &Connection,
-        query: &str,
+        raw_query: &str,
         filters: SearchFilters,
         limit: usize,
         offset: usize,
         field_mask: FieldMask,
     ) -> Result<Vec<SearchHit>> {
-        // FTS5 cannot handle empty queries
-        if query.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        // Compute match type once for all results
-        let query_match_type = dominant_match_type(query);
+        // Transpile raw query to FTS5 syntax
+        // Returns None if unsupported features (leading wildcards) are used or query is empty
+        let fts_query = match transpile_to_fts5(raw_query) {
+            Some(q) if !q.trim().is_empty() => q,
+            _ => return Ok(Vec::new()),
+        };
 
-        // FTS5 requires balanced double quotes.
-        // If unbalanced, strip them to avoid syntax error.
-        let mut safe_query = query.to_string();
-        if !safe_query.matches('"').count().is_multiple_of(2) {
-            safe_query = safe_query.replace('"', "");
-        }
+        // Compute match type once for all results
+        let query_match_type = dominant_match_type(raw_query);
 
         let content_expr = if field_mask.needs_content() {
             "f.content"
@@ -3183,7 +3194,7 @@ impl SearchClient {
              LEFT JOIN messages m ON f.message_id = m.id
              WHERE fts_messages MATCH ?"
         );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(fts_query)];
 
         if !filters.agents.is_empty() {
             let placeholders = sql_placeholders(filters.agents.len());
@@ -3257,6 +3268,149 @@ impl SearchClient {
         }
         Ok(hits)
     }
+}
+
+/// Transpile a raw query string into an FTS5-compatible query string.
+/// Preserves custom precedence (OR > AND) by adding parentheses.
+/// Returns None if the query contains features unsupported by FTS5 (e.g. leading wildcards).
+fn transpile_to_fts5(raw_query: &str) -> Option<String> {
+    let tokens = parse_boolean_query(raw_query);
+    if tokens.is_empty() {
+        return Some("".to_string());
+    }
+
+    let mut fts_clauses: Vec<(&str, String)> = Vec::new();
+    let mut pending_or_group: Vec<String> = Vec::new();
+    let mut next_op = "AND";
+    let mut in_or_sequence = false;
+
+    for token in tokens {
+        match token {
+            QueryToken::And => {
+                if !pending_or_group.is_empty() {
+                    let group = if pending_or_group.len() > 1 {
+                        format!("({})", pending_or_group.join(" OR "))
+                    } else {
+                        pending_or_group.pop().unwrap()
+                    };
+                    fts_clauses.push(("AND", group));
+                    pending_or_group.clear();
+                }
+                in_or_sequence = false;
+                next_op = "AND";
+            }
+            QueryToken::Or => {
+                in_or_sequence = true;
+            }
+            QueryToken::Not => {
+                if !pending_or_group.is_empty() {
+                    let group = if pending_or_group.len() > 1 {
+                        format!("({})", pending_or_group.join(" OR "))
+                    } else {
+                        pending_or_group.pop().unwrap()
+                    };
+                    fts_clauses.push(("AND", group));
+                    pending_or_group.clear();
+                }
+                in_or_sequence = false;
+                next_op = "NOT";
+            }
+            QueryToken::Term(t) => {
+                // Check for unsupported wildcards
+                let pattern = WildcardPattern::parse(&t);
+                if matches!(
+                    pattern,
+                    WildcardPattern::Suffix(_)
+                        | WildcardPattern::Substring(_)
+                        | WildcardPattern::Complex(_)
+                ) {
+                    return None;
+                }
+
+                // Sanitize and normalize. FTS5 implicitly ANDs words in a string.
+                // e.g. "foo bar" -> foo AND bar.
+                // normalize_term_parts splits "foo-bar" -> "foo", "bar".
+                let term_parts = normalize_term_parts(&t);
+                if term_parts.is_empty() {
+                    continue;
+                }
+
+                // If multiple parts, wrap in parens and join with AND to ensure they stay together
+                let fts_term = if term_parts.len() > 1 {
+                    format!("({})", term_parts.join(" AND "))
+                } else {
+                    term_parts[0].clone()
+                };
+
+                if in_or_sequence {
+                    if pending_or_group.is_empty() {
+                        // Try to pull last clause if it was AND (Must)
+                        if let Some((op, _)) = fts_clauses.last() {
+                            if *op == "AND" {
+                                let (_, val) = fts_clauses.pop().unwrap();
+                                pending_or_group.push(val);
+                            }
+                        }
+                    }
+                    pending_or_group.push(fts_term);
+                    in_or_sequence = true;
+                } else {
+                    fts_clauses.push((next_op, fts_term));
+                }
+                next_op = "AND";
+            }
+            QueryToken::Phrase(p) => {
+                let phrase_parts = normalize_phrase_terms(&p);
+                if phrase_parts.is_empty() {
+                    continue;
+                }
+                let fts_phrase = format!("\"{}\"", phrase_parts.join(" "));
+
+                if in_or_sequence {
+                    if pending_or_group.is_empty() {
+                        if let Some((op, _)) = fts_clauses.last() {
+                            if *op == "AND" {
+                                let (_, val) = fts_clauses.pop().unwrap();
+                                pending_or_group.push(val);
+                            }
+                        }
+                    }
+                    pending_or_group.push(fts_phrase);
+                    in_or_sequence = true;
+                } else {
+                    fts_clauses.push((next_op, fts_phrase));
+                }
+                next_op = "AND";
+            }
+        }
+    }
+
+    if !pending_or_group.is_empty() {
+        let group = if pending_or_group.len() > 1 {
+            format!("({})", pending_or_group.join(" OR "))
+        } else {
+            pending_or_group.pop().unwrap()
+        };
+        fts_clauses.push((next_op, group));
+    }
+
+    if fts_clauses.is_empty() {
+        return Some("".to_string());
+    }
+
+    // Join clauses. The first operator is ignored (start of query).
+    let mut query = String::new();
+    for (i, (op, text)) in fts_clauses.into_iter().enumerate() {
+        if i > 0 {
+            query.push_str(&format!(" {} ", op));
+        } else if op == "NOT" {
+            // Leading NOT
+            query.push_str("NOT ");
+        }
+        query.push_str(&text);
+    }
+
+    Some(query)
 }
 
 #[derive(Default, Clone)]
@@ -10043,5 +10197,69 @@ mod tests {
                 regex
             );
         }
+    }
+
+    #[test]
+    fn test_transpile_to_fts5() {
+        // Simple terms
+        assert_eq!(transpile_to_fts5("foo bar"), Some("foo AND bar".to_string()));
+
+        // Boolean operators
+        assert_eq!(
+            transpile_to_fts5("foo AND bar"),
+            Some("foo AND bar".to_string())
+        );
+        assert_eq!(
+            transpile_to_fts5("foo OR bar"),
+            Some("(foo OR bar)".to_string())
+        );
+        assert_eq!(transpile_to_fts5("NOT foo"), Some("NOT foo".to_string()));
+
+        // Precedence: OR binds tighter than AND in our parser logic
+        // "A AND B OR C" -> "A AND (B OR C)"
+        assert_eq!(
+            transpile_to_fts5("A AND B OR C"),
+            Some("A AND (B OR C)".to_string())
+        );
+
+        // "A OR B AND C" -> "(A OR B) AND C"
+        assert_eq!(
+            transpile_to_fts5("A OR B AND C"),
+            Some("(A OR B) AND C".to_string())
+        );
+
+        // "A OR B OR C" -> "(A OR B OR C)"
+        assert_eq!(
+            transpile_to_fts5("A OR B OR C"),
+            Some("(A OR B OR C)".to_string())
+        );
+
+        // Phrases
+        assert_eq!(
+            transpile_to_fts5("\"foo bar\""),
+            Some("\"foo bar\"".to_string())
+        );
+
+        // Wildcards (allowed trailing)
+        assert_eq!(transpile_to_fts5("foo*"), Some("foo*".to_string()));
+
+        // Unsupported wildcards (leading/internal)
+        assert_eq!(transpile_to_fts5("*foo"), None);
+        assert_eq!(transpile_to_fts5("f*o"), None);
+
+        // Mixed sanitization
+        // "foo-bar" -> "foo bar" -> "foo AND bar" in FTS5 implicit syntax?
+        // My implementation splits "foo-bar" into "foo", "bar" and joins with AND.
+        // And wraps in parens if >1 part.
+        assert_eq!(
+            transpile_to_fts5("foo-bar"),
+            Some("(foo AND bar)".to_string())
+        );
+
+        // NOT A OR B -> NOT A AND B (Tantivy logic replication)
+        assert_eq!(
+            transpile_to_fts5("NOT A OR B"),
+            Some("NOT A AND B".to_string())
+        );
     }
 }

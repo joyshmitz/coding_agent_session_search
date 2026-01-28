@@ -256,8 +256,8 @@ impl ChatGptConnector {
             .with_context(|| format!("parse JSON from {}", path.display()))?;
 
         let mut messages = Vec::new();
-        let mut started_at = None;
-        let mut ended_at = None;
+        let mut started_at: Option<i64> = None;
+        let mut ended_at: Option<i64> = None;
 
         // Extract conversation ID
         let conv_id = val
@@ -349,7 +349,12 @@ impl ChatGptConnector {
                 // the file is re-indexed after new messages are added.
 
                 started_at = started_at.or(created_at);
-                ended_at = created_at.or(ended_at);
+                ended_at = match (ended_at, created_at) {
+                    (Some(curr), Some(ts)) => Some(curr.max(ts)),
+                    (None, Some(ts)) => Some(ts),
+                    (Some(curr), None) => Some(curr),
+                    (None, None) => None,
+                };
 
                 // Get model info
                 let model = msg
@@ -399,7 +404,12 @@ impl ChatGptConnector {
                 // File-level check is sufficient for incremental indexing.
 
                 started_at = started_at.or(created_at);
-                ended_at = created_at.or(ended_at);
+                ended_at = match (ended_at, created_at) {
+                    (Some(curr), Some(ts)) => Some(curr.max(ts)),
+                    (None, Some(ts)) => Some(ts),
+                    (Some(curr), None) => Some(curr),
+                    (None, None) => None,
+                };
 
                 messages.push(NormalizedMessage {
                     idx: messages.len() as i64,

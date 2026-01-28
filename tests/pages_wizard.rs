@@ -681,7 +681,9 @@ fn test_exclusion_set_with_real_conversation_ids() {
 
     // Get real conversation IDs from fixture
     let conn = Connection::open(&db_path).expect("Should open fixture database");
-    let mut stmt = conn.prepare("SELECT id FROM conversations LIMIT 5").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT id FROM conversations LIMIT 5")
+        .unwrap();
     let conv_ids: Vec<i64> = stmt
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -739,10 +741,12 @@ fn test_config_validation_scenarios() {
     let config: PagesConfig = serde_json::from_str(invalid_config).unwrap();
     let result = config.validate();
     assert!(!result.valid, "Should fail without i_understand_risks");
-    assert!(result
-        .errors
-        .iter()
-        .any(|e| e.contains("i_understand_risks")));
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.contains("i_understand_risks"))
+    );
 
     // Invalid: github without repo
     let invalid_github = r#"{

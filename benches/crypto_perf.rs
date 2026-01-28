@@ -18,7 +18,8 @@
 //! | Chunked encrypt 10MB | < 1s |
 
 use coding_agent_search::encryption::{
-    Argon2Params, aes_gcm_decrypt, aes_gcm_encrypt, argon2id_hash, hkdf_expand, hkdf_extract,
+    Argon2Params, aes_gcm_decrypt, aes_gcm_encrypt, argon2id_hash, hkdf_extract,
+    hkdf_extract_expand,
 };
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::Rng;
@@ -202,22 +203,20 @@ fn bench_hkdf_extract(c: &mut Criterion) {
     });
 }
 
-/// Benchmark HKDF expand operation with varying output lengths.
-fn bench_hkdf_expand(c: &mut Criterion) {
-    let ikm = random_bytes(32);
-    let salt = random_bytes(32);
-    let info = b"cass-benchmark-info";
+fn bench_hkdf_extract_expand(c: &mut Criterion) {
+    let ikm = [0u8; 32];
+    let salt = [0u8; 32];
+    let info = b"bench info";
+    let len = 32;
 
-    let mut group = c.benchmark_group("hkdf_expand");
+    let mut group = c.benchmark_group("hkdf_extract_expand");
+    group.throughput(Throughput::Bytes(len as u64));
 
-    for &len in &[32usize, 64, 128, 256] {
-        group.throughput(Throughput::Bytes(len as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(len), &len, |b, &len| {
-            b.iter(|| {
-                let _ = black_box(hkdf_expand(&ikm, &salt, info, len));
-            })
-        });
-    }
+    group.bench_function("hkdf_extract_expand_32", |b| {
+        b.iter(|| {
+            let _ = black_box(hkdf_extract_expand(&ikm, &salt, info, len));
+        })
+    });
 
     group.finish();
 }
@@ -297,7 +296,7 @@ criterion_group!(
     bench_aes_gcm_roundtrip
 );
 
-criterion_group!(hkdf_benches, bench_hkdf_extract, bench_hkdf_expand);
+criterion_group!(hkdf_benches, bench_hkdf_extract, bench_hkdf_extract_expand);
 
 criterion_group!(chunked_benches, bench_chunked_encrypt);
 

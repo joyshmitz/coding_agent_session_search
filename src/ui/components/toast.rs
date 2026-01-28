@@ -260,7 +260,8 @@ impl ToastManager {
     /// Calculate the render area for toasts given the full terminal area
     pub fn render_area(&self, full_area: Rect) -> Rect {
         let toast_width = 40.min(full_area.width.saturating_sub(4));
-        let toast_height = (self.max_visible as u16 * 3).min(full_area.height.saturating_sub(2));
+        let visible_count = self.visible().count();
+        let toast_height = (visible_count as u16 * 3).min(full_area.height.saturating_sub(2));
 
         let x = match self.position {
             ToastPosition::TopLeft | ToastPosition::BottomLeft => 2,

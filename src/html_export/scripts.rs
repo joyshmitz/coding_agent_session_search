@@ -193,7 +193,7 @@ const Search = {
         }
 
         this.matches = [];
-        const messages = $$('.message-content');
+        const messages = $$('.prose');
         messages.forEach((el) => {
             const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
             let node;
@@ -351,7 +351,7 @@ const WorldClass = {
     messages: [],
 
     init() {
-        this.messages = Array.from($$('.message'));
+        this.messages = Array.from($$('article[role="article"]'));
         this.createScrollProgress();
         this.createFloatingNav();
         this.createGradientMesh();
@@ -578,9 +578,10 @@ const WorldClass = {
         if (!toolbar) return;
 
         const shareBtn = document.createElement('button');
-        shareBtn.className = 'toolbar-btn share-btn';
+        shareBtn.className = 'flex items-center justify-center w-8 h-8 rounded border border-transparent text-text-secondary hover:bg-elevated hover:border-border hover:text-text transition-colors cursor-pointer';
         shareBtn.title = 'Share';
-        shareBtn.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16,6 12,2 8,6"/><line x1="12" y1="2" x2="12" y2="15"/></svg><span>Share</span>';
+        shareBtn.setAttribute('aria-label', 'Share');
+        shareBtn.innerHTML = '<svg class="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16,6 12,2 8,6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>';
         shareBtn.onclick = async () => {
             try {
                 await navigator.share({
@@ -614,7 +615,7 @@ function createRipple(event) {
 // Add ripple to touch devices
 if ('ontouchstart' in window) {
     document.addEventListener('DOMContentLoaded', () => {
-        $$('.toolbar-btn, .floating-btn').forEach(btn => {
+        $$('.toolbar button, .floating-btn').forEach(btn => {
             btn.addEventListener('touchstart', createRipple);
         });
     });

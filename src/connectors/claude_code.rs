@@ -95,13 +95,14 @@ impl Connector for ClaudeCodeConnector {
                 }
 
                 let mut messages = Vec::new();
-                let mut started_at = None;
-                let mut ended_at = None;
+                let mut started_at: Option<i64> = None;
+                let mut ended_at: Option<i64> = None;
                 // Track workspace from first entry's cwd field
                 let mut workspace: Option<PathBuf> = None;
                 let mut session_id: Option<String> = None;
                 let mut git_branch: Option<String> = None;
                 let mut content_string = String::new();
+                let mut json_title: Option<String> = None;
 
                 if ext == Some("jsonl") {
                     let file = std::fs::File::open(entry.path())
@@ -163,7 +164,13 @@ impl Connector for ClaudeCodeConnector {
                         // the file is re-indexed after new messages are added.
 
                         started_at = started_at.or(created);
-                        ended_at = created.or(ended_at);
+                        // Track the latest timestamp seen (robust against out-of-order logs)
+                        ended_at = match (ended_at, created) {
+                            (Some(curr), Some(ts)) => Some(curr.max(ts)),
+                            (None, Some(ts)) => Some(ts),
+                            (Some(curr), None) => Some(curr),
+                            (None, None) => None,
+                        };
 
                         // Role from message.role, top-level role, or entry type
                         let role = role_hint.or(entry_type).unwrap_or("agent");
@@ -224,6 +231,13 @@ impl Connector for ClaudeCodeConnector {
                             continue;
                         }
                     };
+
+                    // Extract title from root object if present
+                    json_title = val
+                        .get("title")
+                        .and_then(|t| t.as_str())
+                        .map(String::from);
+
                     if let Some(arr) = val.get("messages").and_then(|m| m.as_array()) {
                         for item in arr {
                             let role = item
@@ -242,7 +256,13 @@ impl Connector for ClaudeCodeConnector {
                             // File-level check is sufficient for incremental indexing.
 
                             started_at = started_at.or(created);
-                            ended_at = created.or(ended_at);
+                            // Track the latest timestamp seen
+                            ended_at = match (ended_at, created) {
+                                (Some(curr), Some(ts)) => Some(curr.max(ts)),
+                                (None, Some(ts)) => Some(ts),
+                                (Some(curr), None) => Some(curr),
+                                (None, None) => None,
+                            };
 
                             // Use flatten_content for consistent handling of both string and array content
                             let content_str = item
@@ -278,8 +298,8 @@ impl Connector for ClaudeCodeConnector {
                 }
                 tracing::debug!(path = %entry.path().display(), messages = messages.len(), "claude_code extracted messages");
 
-                // Extract title from first user message, truncated to reasonable length
-                let title = if ext == Some("jsonl") {
+                // Extract title: use explicit JSON title, or fallback to first user message
+                let title = json_title.or_else(|| {
                     messages
                         .iter()
                         .find(|m| m.role == "user")
@@ -300,21 +320,7 @@ impl Connector for ClaudeCodeConnector {
                                 .and_then(|n| n.to_str())
                                 .map(String::from)
                         })
-                } else {
-                    serde_json::from_str::<Value>(&content_string)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("title")
-                                .and_then(|t| t.as_str())
-                                .map(std::string::ToString::to_string)
-                        })
-                        .or_else(|| {
-                            messages
-                                .first()
-                                .and_then(|m| m.content.lines().next())
-                                .map(|s| s.chars().take(100).collect())
-                        })
-                };
+                });
 
                 convs.push(NormalizedConversation {
                     agent_slug: "claude_code".into(),

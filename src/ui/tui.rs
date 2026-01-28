@@ -47,7 +47,7 @@ use crate::ui::components::palette::{self, PaletteAction, PaletteState};
 use crate::ui::components::pills::{self, Pill};
 use crate::ui::components::theme::ThemePalette;
 use crate::ui::components::toast::{Toast, ToastManager, render_toasts};
-use crate::ui::components::widgets::{score_indicator, search_bar};
+use crate::ui::components::widgets::{centered_rect, centered_rect_fixed, score_indicator, search_bar};
 use crate::ui::data::{ConversationView, InputMode, load_conversation, role_style};
 use crate::ui::shortcuts;
 use crate::update_check::{
@@ -1061,61 +1061,7 @@ fn render_help_overlay(frame: &mut Frame, palette: ThemePalette, scroll: u16) {
     );
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Percentage((100 - percent_y) / 2),
-                Constraint::Percentage(percent_y),
-                Constraint::Percentage((100 - percent_y) / 2),
-            ]
-            .as_ref(),
-        )
-        .split(r);
 
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(
-            [
-                Constraint::Percentage((100 - percent_x) / 2),
-                Constraint::Percentage(percent_x),
-                Constraint::Percentage((100 - percent_x) / 2),
-            ]
-            .as_ref(),
-        )
-        .split(popup_layout[1]);
-
-    horizontal[1]
-}
-
-/// Create a centered popup with fixed dimensions.
-/// The popup is clamped to available terminal space and centered.
-fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
-    // Clamp dimensions to available space (leave margin for visual separation)
-    let actual_width = width.min(r.width.saturating_sub(4));
-    let actual_height = height.min(r.height.saturating_sub(2));
-
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(r.height.saturating_sub(actual_height) / 2),
-            Constraint::Length(actual_height),
-            Constraint::Length(r.height.saturating_sub(actual_height) / 2),
-        ])
-        .split(r);
-
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(r.width.saturating_sub(actual_width) / 2),
-            Constraint::Length(actual_width),
-            Constraint::Length(r.width.saturating_sub(actual_width) / 2),
-        ])
-        .split(popup_layout[1]);
-
-    horizontal[1]
-}
 
 /// Render parsed content lines from a conversation for the detail modal.
 /// Parses tool use, code blocks, and formats beautifully for human reading.

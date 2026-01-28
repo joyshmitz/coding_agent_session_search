@@ -1,6 +1,6 @@
 //! Premium UI widgets with world-class aesthetics.
 
-use ratatui::layout::Alignment;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -255,6 +255,64 @@ pub fn score_indicator(score: f32, palette: ThemePalette) -> Vec<Span<'static>> 
         ),
     ]
 }
+
+/// Calculate a centered rectangle with percentage dimensions.
+pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage(percent_y),
+                Constraint::Percentage((100 - percent_y) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(r);
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage(percent_x),
+                Constraint::Percentage((100 - percent_x) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(popup_layout[1]);
+
+    horizontal[1]
+}
+
+/// Create a centered popup with fixed dimensions.
+/// The popup is clamped to available terminal space and centered.
+pub fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
+    // Clamp dimensions to available space (leave margin for visual separation)
+    let actual_width = width.min(r.width.saturating_sub(4));
+    let actual_height = height.min(r.height.saturating_sub(2));
+
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(r.height.saturating_sub(actual_height) / 2),
+            Constraint::Length(actual_height),
+            Constraint::Length(r.height.saturating_sub(actual_height) / 2),
+        ])
+        .split(r);
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(r.width.saturating_sub(actual_width) / 2),
+            Constraint::Length(actual_width),
+            Constraint::Length(r.width.saturating_sub(actual_width) / 2),
+        ])
+        .split(popup_layout[1]);
+
+    horizontal[1]
+}
+
 
 #[cfg(test)]
 mod tests {

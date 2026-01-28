@@ -117,7 +117,13 @@ impl AiderConnector {
         Ok(NormalizedConversation {
             agent_slug: "aider".to_string(),
             external_id: Some(path.to_string_lossy().to_string()),
-            title: Some(format!("Aider Chat: {}", path.display())),
+            title: Some(format!(
+                "Aider Chat: {}",
+                path.parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+            )),
             workspace: path.parent().map(std::path::Path::to_path_buf),
             source_path: path.to_path_buf(),
             started_at: Some(ts),

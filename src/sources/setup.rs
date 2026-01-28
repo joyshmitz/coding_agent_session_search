@@ -29,7 +29,7 @@ use super::discover_ssh_hosts;
 use super::index::{IndexProgress, RemoteIndexer};
 use super::install::{InstallProgress, RemoteInstaller};
 use super::interactive::{confirm_action, run_host_selection};
-use super::probe::{CassStatus, HostProbeResult, probe_hosts_parallel};
+use super::probe::{CassStatus, HostProbeResult, deduplicate_probe_results, probe_hosts_parallel};
 
 /// Options for the setup wizard.
 #[derive(Debug, Clone)]
@@ -394,6 +394,9 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
             pb.finish_and_clear();
         }
 
+        // Deduplicate hosts that resolve to the same machine (multiple SSH aliases)
+        let (results, merged_aliases) = deduplicate_probe_results(results);
+
         let reachable = results.iter().filter(|p| p.reachable).count();
         let with_cass = results
             .iter()
@@ -409,6 +412,19 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
                 "{} reachable, {} with cass installed",
                 reachable, with_cass
             ));
+
+            // Show merged aliases if any
+            if !merged_aliases.is_empty() {
+                let total_merged: usize = merged_aliases.values().map(|v| v.len()).sum();
+                println!(
+                    "│ {} {} duplicate alias(es) merged (same machine):",
+                    "ℹ".blue(),
+                    total_merged
+                );
+                for (kept, aliases) in &merged_aliases {
+                    println!("│   {} ← {}", kept.bold(), aliases.join(", ").dimmed());
+                }
+            }
         }
 
         results

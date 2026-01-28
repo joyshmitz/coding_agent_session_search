@@ -1352,6 +1352,7 @@ mod tests {
             has_curl: true,
             has_wget: true,
             remote_home: remote_home.into(),
+            machine_id: None,
         }
     }
 

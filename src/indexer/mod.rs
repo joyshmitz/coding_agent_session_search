@@ -950,45 +950,8 @@ fn ingest_batch(
     force_tantivy_reindex: bool,
 ) -> Result<()> {
     // Use batched insert for better SQLite performance (single transaction)
+    // This also handles daily_stats updates incrementally via InsertOutcome deltas.
     persist::persist_conversations_batched(storage, t_index, convs, force_tantivy_reindex)?;
-
-    // Aggregate and update daily_stats in a single batch (kzxu fix)
-    // This prevents N×4 database writes by aggregating in memory first
-    if !convs.is_empty() {
-        let mut aggregator = StatsAggregator::new();
-
-        for conv in convs {
-            let day_id = conv
-                .started_at
-                .map(SqliteStorage::day_id_from_millis)
-                .unwrap_or(0);
-
-            // Extract provenance from metadata to correctly attribute daily stats
-            let source_id = conv
-                .metadata
-                .get("cass")
-                .and_then(|c| c.get("origin"))
-                .and_then(|o| o.get("source_id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(LOCAL_SOURCE_ID);
-
-            let message_count = conv.messages.len() as i64;
-            let total_chars: i64 = conv.messages.iter().map(|m| m.content.len() as i64).sum();
-
-            aggregator.record(
-                &conv.agent_slug,
-                source_id,
-                day_id,
-                message_count,
-                total_chars,
-            );
-        }
-
-        if !aggregator.is_empty() {
-            let entries = aggregator.expand();
-            storage.update_daily_stats_batched(&entries)?;
-        }
-    }
 
     // Update progress counter for all conversations at once
     if let Some(p) = progress {
@@ -1211,7 +1174,7 @@ fn reindex_paths(
         return Ok(());
     }
 
-    for (kind, root, ts) in triggers {
+    for (kind, root, min_ts, max_ts) in triggers {
         let conn = kind.create_connector();
         let detect = conn.detect();
         if !detect.detected && root.origin.source_id == "local" {
@@ -1235,7 +1198,8 @@ fn reindex_paths(
             guard
                 .get(&kind)
                 .copied()
-                .or_else(|| ts.map(|v| v.saturating_sub(1)))
+                // Use min_ts for scanning window start to capture oldest change in batch
+                .or_else(|| min_ts.map(|v| v.saturating_sub(1)))
                 .map(|v| v.saturating_sub(1))
         };
 
@@ -1292,11 +1256,12 @@ fn reindex_paths(
             storage.set_last_indexed_at(SqliteStorage::now_millis())?;
         }
 
-        if let Some(ts_val) = ts {
+        if let Some(ts_val) = max_ts {
             let mut guard = state
                 .lock()
                 .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
             let entry = guard.entry(kind).or_insert(ts_val);
+            // Use max_ts for state update (high water mark)
             *entry = (*entry).max(ts_val);
             save_watch_state(&opts.data_dir, &guard)?;
         }
@@ -1386,8 +1351,10 @@ fn save_watch_state(data_dir: &Path, state: &HashMap<ConnectorKind, i64>) -> Res
 fn classify_paths(
     paths: Vec<PathBuf>,
     roots: &[(ConnectorKind, ScanRoot)],
-) -> Vec<(ConnectorKind, ScanRoot, Option<i64>)> {
-    let mut batch_map: HashMap<(ConnectorKind, PathBuf), (ScanRoot, Option<i64>)> = HashMap::new();
+) -> Vec<(ConnectorKind, ScanRoot, Option<i64>, Option<i64>)> {
+    // Key -> (Root, MinTS, MaxTS)
+    let mut batch_map: HashMap<(ConnectorKind, PathBuf), (ScanRoot, Option<i64>, Option<i64>)> =
+        HashMap::new();
 
     for p in paths {
         if let Ok(meta) = std::fs::metadata(&p)
@@ -1400,12 +1367,20 @@ fn classify_paths(
             for (kind, root) in roots {
                 if p.starts_with(&root.path) {
                     let key = (*kind, root.path.clone());
-                    let entry = batch_map.entry(key).or_insert((root.clone(), None));
-                    // Update TS
+                    let entry = batch_map.entry(key).or_insert((root.clone(), None, None));
+
+                    // Update MinTS (for scan window start)
                     entry.1 = match (entry.1, ts) {
-                        (Some(prev), Some(cur)) => Some(prev.max(cur)),
+                        (Some(prev), Some(cur)) => Some(prev.min(cur)),
                         (None, Some(cur)) => Some(cur),
                         _ => entry.1,
+                    };
+
+                    // Update MaxTS (for state high-water mark)
+                    entry.2 = match (entry.2, ts) {
+                        (Some(prev), Some(cur)) => Some(prev.max(cur)),
+                        (None, Some(cur)) => Some(cur),
+                        _ => entry.2,
                     };
                 }
             }
@@ -1414,7 +1389,7 @@ fn classify_paths(
 
     batch_map
         .into_iter()
-        .map(|((kind, _), (root, ts))| (kind, root, ts))
+        .map(|((kind, _), (root, min_ts, max_ts))| (kind, root, min_ts, max_ts))
         .collect()
 }
 
@@ -2179,15 +2154,15 @@ mod tests {
         let paths = vec![codex.clone(), claude.clone(), aider, cursor, chatgpt];
         let classified = classify_paths(paths, &roots);
 
-        let kinds: std::collections::HashSet<_> = classified.iter().map(|(k, _, _)| *k).collect();
+        let kinds: std::collections::HashSet<_> = classified.iter().map(|(k, _, _, _)| *k).collect();
         assert!(kinds.contains(&ConnectorKind::Codex));
         assert!(kinds.contains(&ConnectorKind::Claude));
         assert!(kinds.contains(&ConnectorKind::Aider));
         assert!(kinds.contains(&ConnectorKind::Cursor));
         assert!(kinds.contains(&ConnectorKind::ChatGpt));
 
-        for (_, _, ts) in classified {
-            assert!(ts.is_some(), "mtime should be captured");
+        for (_, _, mtime, _) in classified {
+            assert!(mtime.is_some(), "mtime should be captured");
         }
     }
 

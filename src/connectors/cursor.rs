@@ -88,12 +88,29 @@ impl CursorConnector {
     /// Probes /mnt/c/Users/*/AppData/Roaming/Cursor/User
     #[cfg(target_os = "linux")]
     fn find_wsl_cursor_path() -> Option<PathBuf> {
-        let mnt_c = Path::new("/mnt/c/Users");
-        if !mnt_c.exists() {
+        let mnt_c_users = Path::new("/mnt/c/Users");
+        if !mnt_c_users.exists() {
             return None;
         }
 
-        for entry in std::fs::read_dir(mnt_c).ok()?.flatten() {
+        // Optimization: Try to get the Windows username directly to avoid scanning all users
+        if let Ok(output) = std::process::Command::new("cmd.exe")
+            .args(["/c", "echo %USERNAME%"])
+            .output()
+        {
+            let username = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !username.is_empty() {
+                let user_path = mnt_c_users.join(&username);
+                let cursor_path = user_path.join("AppData/Roaming/Cursor/User");
+                if cursor_path.exists() {
+                    return Some(cursor_path);
+                }
+            }
+        }
+
+        // Fallback: Scan directories if username detection failed
+        // Limit depth and skip system directories to avoid hangs
+        for entry in std::fs::read_dir(mnt_c_users).ok()?.flatten() {
             // Skip system directories
             let name = entry.file_name();
             let name_str = name.to_str().unwrap_or("");
@@ -101,14 +118,14 @@ impl CursorConnector {
                 || name_str == "Public"
                 || name_str == "All Users"
                 || name_str == "Default User"
+                || name_str.starts_with('.')
             {
                 continue;
             }
 
             let cursor_path = entry.path().join("AppData/Roaming/Cursor/User");
-            if cursor_path.join("globalStorage").exists()
-                || cursor_path.join("workspaceStorage").exists()
-            {
+            // Check existence without traversing deeper
+            if cursor_path.join("globalStorage").exists() {
                 tracing::debug!(
                     path = %cursor_path.display(),
                     "Found Windows Cursor installation via WSL"
@@ -166,12 +183,32 @@ impl CursorConnector {
     fn fetch_bubble_data_for_composer(conn: &Connection, composer_id: &str) -> BubbleDataMap {
         let mut bubble_map = BubbleDataMap::new();
 
-        // Only fetch bubbles for this specific composer
-        let pattern = format!("bubbleId:{}:%", composer_id);
-        let prefix_len = format!("bubbleId:{}:", composer_id).len();
+        // Optimization: Use range query instead of LIKE for prefix matching.
+        // This guarantees SQLite uses the index on the `key` column.
+        // Prefix: `bubbleId:{composerId}:`
+        // Range: >= prefix AND < prefix_next
+        let prefix = format!("bubbleId:{}:", composer_id);
 
-        if let Ok(mut stmt) = conn.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE ?") {
-            let rows = stmt.query_map([&pattern], |row| {
+        // Calculate the "next" prefix for the upper bound of the range.
+        // This is done by incrementing the last character of the prefix.
+        // e.g. "abc:" -> "abc;"
+        let mut limit = prefix.clone();
+        if let Some(last) = limit.pop() {
+            if let Some(next_char) = std::char::from_u32(last as u32 + 1) {
+                limit.push(next_char);
+            } else {
+                // Fallback for overflow (unlikely for valid keys): append max char
+                limit.push(last);
+                limit.push('\u{10FFFF}');
+            }
+        }
+
+        let prefix_len = prefix.len();
+
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?")
+        {
+            let rows = stmt.query_map([&prefix, &limit], |row| {
                 let key: String = row.get(0)?;
                 let value: String = row.get(1)?;
                 Ok((key, value))
@@ -475,9 +512,9 @@ impl CursorConnector {
         let safe_id = urlencoding::encode(&composer_id);
         let unique_source_path = db_path.join(safe_id.as_ref());
 
-        // Use lastUpdatedAt if available (most accurate), fall back to last message time, then createdAt
+        // Use lastUpdatedAt if available (most accurate), fall back to max message time, then createdAt
         let ended_at = last_updated_at
-            .or_else(|| messages.last().and_then(|m| m.created_at))
+            .or_else(|| messages.iter().filter_map(|m| m.created_at).max())
             .or(created_at);
 
         // Optimization: Skip conversations not modified since last scan
@@ -533,6 +570,8 @@ impl CursorConnector {
                         match t {
                             bubble_type::USER => "user",
                             bubble_type::ASSISTANT => "assistant",
+                            // Fallback for unknown numeric types (e.g. system messages, tools)
+                            // Default to "assistant" to preserve content visibility
                             _ => "assistant",
                         }
                         .to_string()

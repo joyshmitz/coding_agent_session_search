@@ -96,13 +96,14 @@ fn test_argon2_vectors() {
 fn test_hkdf_vectors() {
     let vectors: Vec<HkdfVector> = load_test_vectors("hkdf.yaml");
     for v in vectors {
-        let ikm = hex::decode(&v.ikm).unwrap();
-        let salt = hex::decode(&v.salt).unwrap();
-        let info = hex::decode(&v.info).unwrap();
-        let expected = hex::decode(&v.expected_okm).unwrap();
+        let ikm = hex::decode(v.ikm).unwrap();
+        let salt = hex::decode(v.salt).unwrap();
+        let info = hex::decode(v.info).unwrap();
+        let expected_okm = hex::decode(v.okm).unwrap();
 
-        let result = hkdf_expand(&ikm, &salt, &info, v.output_len).unwrap();
+        // This function performs both extract and expand
+        let result = hkdf_extract_expand(&ikm, &salt, &info, v.output_len).unwrap();
 
-        assert_eq!(result, expected, "HKDF mismatch for {}", v.name);
+        assert_eq!(result, expected_okm, "HKDF vector failed: {}", v.name);
     }
 }

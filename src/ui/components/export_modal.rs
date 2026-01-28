@@ -13,6 +13,7 @@ use ratatui::{
 use std::path::PathBuf;
 
 use super::theme::ThemePalette;
+use super::widgets::centered_rect_fixed;
 use crate::html_export::{
     ExportOptions, FilenameMetadata, FilenameOptions, generate_filepath, get_downloads_dir,
 };
@@ -94,8 +95,14 @@ pub struct ExportModalState {
     /// Currently focused field.
     pub focused: ExportField,
 
-    /// Output directory (defaults to Downloads).
+    /// Output directory (defaults to cwd).
     pub output_dir: PathBuf,
+
+    /// User is editing the output directory path.
+    pub output_dir_editing: bool,
+
+    /// Temporary edit buffer for output directory.
+    pub output_dir_buffer: String,
 
     /// Generated filename preview.
     pub filename_preview: String,
@@ -128,9 +135,13 @@ pub struct ExportModalState {
 
 impl Default for ExportModalState {
     fn default() -> Self {
+        let output_dir = get_downloads_dir();
+        let output_dir_buffer = output_dir.display().to_string();
         Self {
             focused: ExportField::default(),
-            output_dir: get_downloads_dir(),
+            output_dir,
+            output_dir_editing: false,
+            output_dir_buffer,
             filename_preview: String::new(),
             include_tools: true,
             encrypt: false,
@@ -206,8 +217,11 @@ impl ExportModalState {
             .map(|dt| dt.format("%b %d, %Y at %I:%M %p").to_string())
             .unwrap_or_else(|| "Unknown date".to_string());
 
+        let output_dir_buffer = downloads.display().to_string();
         Self {
             output_dir: downloads,
+            output_dir_editing: false,
+            output_dir_buffer,
             filename_preview,
             include_tools: true,
             encrypt: false,
@@ -234,9 +248,18 @@ impl ExportModalState {
         self.focused = self.focused.prev(self.encrypt);
     }
 
-    /// Toggle the current checkbox field.
+    /// Toggle the current checkbox field or start editing text fields.
     pub fn toggle_current(&mut self) {
         match self.focused {
+            ExportField::OutputDir => {
+                self.output_dir_editing = !self.output_dir_editing;
+                if self.output_dir_editing {
+                    self.output_dir_buffer = self.output_dir.display().to_string();
+                } else {
+                    // Commit the edit
+                    self.commit_output_dir();
+                }
+            }
             ExportField::IncludeTools => self.include_tools = !self.include_tools,
             ExportField::Encrypt => {
                 self.encrypt = !self.encrypt;
@@ -247,6 +270,35 @@ impl ExportModalState {
             ExportField::ShowTimestamps => self.show_timestamps = !self.show_timestamps,
             _ => {}
         }
+    }
+
+    /// Commit the output directory edit buffer.
+    fn commit_output_dir(&mut self) {
+        let path = PathBuf::from(&self.output_dir_buffer);
+        if path.is_dir() || !path.exists() {
+            self.output_dir = path;
+        }
+        self.output_dir_editing = false;
+    }
+
+    /// Add character to output directory buffer.
+    pub fn output_dir_push(&mut self, c: char) {
+        if self.focused == ExportField::OutputDir && self.output_dir_editing {
+            self.output_dir_buffer.push(c);
+        }
+    }
+
+    /// Remove last character from output directory buffer.
+    pub fn output_dir_pop(&mut self) {
+        if self.focused == ExportField::OutputDir && self.output_dir_editing {
+            self.output_dir_buffer.pop();
+        }
+    }
+
+    /// Check if currently editing a text field.
+    pub fn is_editing_text(&self) -> bool {
+        (self.focused == ExportField::OutputDir && self.output_dir_editing)
+            || self.focused == ExportField::Password
     }
 
     /// Toggle password visibility.
@@ -408,6 +460,7 @@ fn render_options_form(
     let option_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1), // Output directory
             Constraint::Length(1), // Include tools
             Constraint::Length(1), // Encrypt
             Constraint::Length(1), // Password (conditional)
@@ -416,13 +469,16 @@ fn render_options_form(
         ])
         .split(inner);
 
+    // Output directory input
+    render_output_dir_input(frame, state, option_chunks[0], palette);
+
     // Include tools checkbox
     render_checkbox(
         frame,
         "Include tool calls and outputs",
         state.include_tools,
         state.focused == ExportField::IncludeTools,
-        option_chunks[0],
+        option_chunks[1],
         palette,
     );
 
@@ -432,7 +488,7 @@ fn render_options_form(
         "Password protection",
         state.encrypt,
         state.focused == ExportField::Encrypt,
-        option_chunks[1],
+        option_chunks[2],
         palette,
     );
 
@@ -443,16 +499,16 @@ fn render_options_form(
             &state.password,
             state.password_visible,
             state.focused == ExportField::Password,
-            option_chunks[2],
+            option_chunks[3],
             palette,
         );
     }
 
     // Show timestamps checkbox
     let timestamps_row = if state.encrypt {
-        option_chunks[3]
+        option_chunks[4]
     } else {
-        option_chunks[2]
+        option_chunks[3]
     };
     render_checkbox(
         frame,
@@ -462,6 +518,59 @@ fn render_options_form(
         timestamps_row,
         palette,
     );
+}
+
+/// Render the output directory input field.
+fn render_output_dir_input(
+    frame: &mut Frame,
+    state: &ExportModalState,
+    area: Rect,
+    palette: ThemePalette,
+) {
+    let focused = state.focused == ExportField::OutputDir;
+    let editing = state.output_dir_editing;
+
+    let style = if focused {
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.fg)
+    };
+
+    let display_path = if editing {
+        &state.output_dir_buffer
+    } else {
+        &state.output_dir.display().to_string()
+    };
+
+    // Truncate long paths to fit
+    let max_path_len = area.width.saturating_sub(18) as usize;
+    let truncated_path = if display_path.len() > max_path_len {
+        format!(
+            "...{}",
+            &display_path[display_path.len().saturating_sub(max_path_len - 3)..]
+        )
+    } else {
+        display_path.to_string()
+    };
+
+    let cursor = if editing { "_" } else { "" };
+    let hint = if focused && !editing {
+        " (Enter to edit)"
+    } else if editing {
+        " (Enter to confirm)"
+    } else {
+        ""
+    };
+
+    let line = Line::from(vec![
+        Span::styled(" Output: ", style),
+        Span::styled(format!("{}{}", truncated_path, cursor), style),
+        Span::styled(hint, Style::default().fg(palette.hint)),
+    ]);
+
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Render a checkbox option.
@@ -637,31 +746,7 @@ fn render_footer(frame: &mut Frame, state: &ExportModalState, area: Rect, palett
     );
 }
 
-/// Create a centered rect with fixed dimensions.
-fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
-    let actual_width = width.min(r.width.saturating_sub(4));
-    let actual_height = height.min(r.height.saturating_sub(2));
 
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(r.height.saturating_sub(actual_height) / 2),
-            Constraint::Length(actual_height),
-            Constraint::Length(r.height.saturating_sub(actual_height) / 2),
-        ])
-        .split(r);
-
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(r.width.saturating_sub(actual_width) / 2),
-            Constraint::Length(actual_width),
-            Constraint::Length(r.width.saturating_sub(actual_width) / 2),
-        ])
-        .split(popup_layout[1]);
-
-    horizontal[1]
-}
 
 #[cfg(test)]
 mod tests {

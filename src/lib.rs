@@ -450,7 +450,7 @@ pub enum Commands {
         /// Path to session file
         session: PathBuf,
 
-        /// Output directory (default: downloads folder)
+        /// Output directory (default: current directory)
         #[arg(long)]
         output_dir: Option<PathBuf>,
 
@@ -9975,15 +9975,8 @@ fn run_export(
             if role == "user" {
                 let content = extract_text_content(msg);
                 if !content.is_empty() {
-                    session_title = Some(
-                        content
-                            .lines()
-                            .next()
-                            .unwrap_or("Untitled Session")
-                            .chars()
-                            .take(80)
-                            .collect(),
-                    );
+                    let first_line = content.lines().next().unwrap_or("Untitled Session");
+                    session_title = Some(smart_truncate(first_line, 80));
                     break;
                 }
             }
@@ -10214,26 +10207,19 @@ fn run_export_html(
             if role == "user" {
                 let content = extract_text_content(msg);
                 if !content.is_empty() {
-                    session_title = Some(
-                        content
-                            .lines()
-                            .next()
-                            .unwrap_or("Untitled Session")
-                            .chars()
-                            .take(80)
-                            .collect(),
-                    );
+                    let first_line = content.lines().next().unwrap_or("Untitled Session");
+                    session_title = Some(smart_truncate(first_line, 80));
                     break;
                 }
             }
         }
     }
 
-    // --- Convert to renderer::Message format ---
+    // --- Convert to renderer::Message format (filtering empty messages) ---
     let messages: Vec<Message> = raw_messages
         .iter()
         .enumerate()
-        .map(|(i, msg)| {
+        .filter_map(|(i, msg)| {
             let role = extract_role(msg);
             let content = extract_text_content(msg);
             let ts = msg.get("timestamp").and_then(|t| t.as_i64());
@@ -10248,14 +10234,34 @@ fn run_export_html(
                 None
             };
 
-            Message {
+            // If we have a tool_call, strip the redundant "[Tool: X]" prefix from content
+            // since the tool call details are shown separately in the HTML export
+            let content = if tool_call.is_some() {
+                strip_tool_marker(&content)
+            } else {
+                content
+            };
+
+            // Skip empty messages: no content AND no tool call AND unknown role
+            // This filters out malformed/empty entries that would look broken
+            if content.is_empty() && tool_call.is_none() && role == "unknown" {
+                return None;
+            }
+
+            // Also skip messages that are completely empty (no content, no tool call)
+            // but keep tool calls even if content is empty (shows the tool interaction)
+            if content.is_empty() && tool_call.is_none() {
+                return None;
+            }
+
+            Some(Message {
                 role,
                 content,
                 timestamp,
                 tool_call,
                 index: Some(i),
                 author: None,
-            }
+            })
         })
         .collect();
 
@@ -10511,7 +10517,8 @@ fn extract_tool_call(msg: &serde_json::Value) -> Option<html_export::ToolCall> {
             Some("error") => Some(html_export::ToolStatus::Error),
             Some("pending") => Some(html_export::ToolStatus::Pending),
             _ if tool_output.is_some() => Some(html_export::ToolStatus::Success),
-            _ => Some(html_export::ToolStatus::Pending),
+            // For exported conversations, don't show "pending" - just hide the status badge
+            _ => None,
         };
 
         return Some(html_export::ToolCall {
@@ -10547,7 +10554,9 @@ fn extract_tool_call(msg: &serde_json::Value) -> Option<html_export::ToolCall> {
                             name: name.to_string(),
                             input: input.unwrap_or_default(),
                             output: None,
-                            status: Some(html_export::ToolStatus::Pending),
+                            // For exported conversations, don't show "pending" for tool invocations
+                            // without explicit status - the output may be in a separate message
+                            status: None,
                         });
                     }
                     "tool_result" => {
@@ -10985,6 +10994,62 @@ fn extract_role(msg: &serde_json::Value) -> String {
         }
     }
     "unknown".to_string()
+}
+
+/// Strip redundant "[Tool: X]" markers from content when tool call is shown separately.
+///
+/// When a message has a tool_call object that's rendered as a collapsible section,
+/// including the "[Tool: X]" text in the content is redundant and looks bad.
+fn strip_tool_marker(content: &str) -> String {
+    let trimmed = content.trim();
+
+    // Check if content starts with "[Tool: X]" pattern
+    if trimmed.starts_with("[Tool:")
+        && let Some(close_idx) = trimmed.find(']')
+    {
+        // Get content after the tool marker
+        let after = trimmed[close_idx + 1..].trim();
+        if after.is_empty() {
+            // Entire content was just "[Tool: X]" - return empty
+            return String::new();
+        }
+        // Return the content after the marker
+        return after.to_string();
+    }
+
+    content.to_string()
+}
+
+/// Truncate a string smartly at word boundaries with ellipsis.
+///
+/// Returns the original string if it fits within max_len.
+/// Otherwise, truncates at the last word boundary before max_len and adds "…".
+fn smart_truncate(s: &str, max_len: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max_len {
+        return s.to_string();
+    }
+
+    // Find the last space before the limit
+    let char_indices: Vec<_> = s.char_indices().take(max_len).collect();
+    if char_indices.is_empty() {
+        return "…".to_string();
+    }
+
+    // Look for last word boundary (space)
+    let last_idx = char_indices.last().map(|(i, _)| *i).unwrap_or(0);
+    let truncated = &s[..=last_idx];
+
+    // Find last space to break at word boundary
+    if let Some(last_space) = truncated.rfind(|c: char| c.is_whitespace())
+        && last_space > max_len / 2
+    {
+        // Only break at word if we're not losing too much
+        return format!("{}…", truncated[..last_space].trim_end());
+    }
+
+    // No good word boundary, just truncate
+    format!("{}…", truncated.trim_end())
 }
 
 /// Show activity timeline for a time range

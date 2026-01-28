@@ -326,27 +326,13 @@ pub fn is_valid_filename(name: &str) -> bool {
 // Platform-specific downloads folder detection
 // ============================================================================
 
-/// Get the platform-specific downloads directory.
+/// Get the default export directory.
 ///
-/// Falls back through multiple strategies:
-/// 1. Platform downloads dir (XDG on Linux, known folder on Windows)
-/// 2. Home directory + "Downloads"
-/// 3. Current working directory
+/// Returns the current working directory as the default.
+/// This is more intuitive for CLI usage where exports should go
+/// where the user is working.
 pub fn get_downloads_dir() -> PathBuf {
-    // Primary: Platform-specific downloads
-    if let Some(downloads) = dirs::download_dir() {
-        return downloads;
-    }
-
-    // Fallback 1: Home + Downloads
-    if let Some(home) = dirs::home_dir() {
-        let fallback = home.join("Downloads");
-        if fallback.exists() {
-            return fallback;
-        }
-    }
-
-    // Fallback 2: Current directory
+    // Primary: Current working directory (most intuitive for CLI usage)
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 

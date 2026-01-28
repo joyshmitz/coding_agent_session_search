@@ -726,6 +726,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "unicode-normalization",
+ "unicode-width",
  "urlencoding",
  "vergen",
  "walkdir",

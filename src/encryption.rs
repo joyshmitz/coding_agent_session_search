@@ -101,7 +101,12 @@ pub fn argon2id_hash(
     Ok(output)
 }
 
-pub fn hkdf_expand(ikm: &[u8], salt: &[u8], info: &[u8], len: usize) -> Result<Vec<u8>, String> {
+pub fn hkdf_extract_expand(
+    ikm: &[u8],
+    salt: &[u8],
+    info: &[u8],
+    len: usize,
+) -> Result<Vec<u8>, String> {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = vec![0u8; len];
     hk.expand(info, &mut okm)
@@ -418,74 +423,74 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn hkdf_expand_produces_deterministic_output() {
+    fn hkdf_extract_expand_produces_deterministic_output() {
         let ikm = b"input key material";
         let salt = b"salt value";
         let info = b"context info";
 
-        let okm1 = hkdf_expand(ikm, salt, info, 32).unwrap();
-        let okm2 = hkdf_expand(ikm, salt, info, 32).unwrap();
+        let okm1 = hkdf_extract_expand(ikm, salt, info, 32).unwrap();
+        let okm2 = hkdf_extract_expand(ikm, salt, info, 32).unwrap();
 
         assert_eq!(okm1, okm2);
         assert_eq!(okm1.len(), 32);
     }
 
     #[test]
-    fn hkdf_expand_respects_output_length() {
+    fn hkdf_extract_expand_respects_output_length() {
         let ikm = b"input key material";
         let salt = b"salt value";
         let info = b"context info";
 
-        let okm_16 = hkdf_expand(ikm, salt, info, 16).unwrap();
-        let okm_64 = hkdf_expand(ikm, salt, info, 64).unwrap();
+        let okm_16 = hkdf_extract_expand(ikm, salt, info, 16).unwrap();
+        let okm_64 = hkdf_extract_expand(ikm, salt, info, 64).unwrap();
 
         assert_eq!(okm_16.len(), 16);
         assert_eq!(okm_64.len(), 64);
     }
 
     #[test]
-    fn hkdf_expand_different_info_produces_different_output() {
+    fn hkdf_extract_expand_different_info_produces_different_output() {
         let ikm = b"input key material";
         let salt = b"salt value";
 
-        let okm1 = hkdf_expand(ikm, salt, b"info1", 32).unwrap();
-        let okm2 = hkdf_expand(ikm, salt, b"info2", 32).unwrap();
+        let okm1 = hkdf_extract_expand(ikm, salt, b"info1", 32).unwrap();
+        let okm2 = hkdf_extract_expand(ikm, salt, b"info2", 32).unwrap();
 
         assert_ne!(okm1, okm2);
     }
 
     #[test]
-    fn hkdf_expand_different_salt_produces_different_output() {
+    fn hkdf_extract_expand_different_salt_produces_different_output() {
         let ikm = b"input key material";
         let info = b"context info";
 
-        let okm1 = hkdf_expand(ikm, b"salt1", info, 32).unwrap();
-        let okm2 = hkdf_expand(ikm, b"salt2", info, 32).unwrap();
+        let okm1 = hkdf_extract_expand(ikm, b"salt1", info, 32).unwrap();
+        let okm2 = hkdf_extract_expand(ikm, b"salt2", info, 32).unwrap();
 
         assert_ne!(okm1, okm2);
     }
 
     #[test]
-    fn hkdf_expand_empty_inputs() {
+    fn hkdf_extract_expand_empty_inputs() {
         let ikm = b"input key material";
 
         // Empty salt
-        let okm1 = hkdf_expand(ikm, b"", b"info", 32).unwrap();
+        let okm1 = hkdf_extract_expand(ikm, b"", b"info", 32).unwrap();
         assert_eq!(okm1.len(), 32);
 
         // Empty info
-        let okm2 = hkdf_expand(ikm, b"salt", b"", 32).unwrap();
+        let okm2 = hkdf_extract_expand(ikm, b"salt", b"", 32).unwrap();
         assert_eq!(okm2.len(), 32);
     }
 
     #[test]
-    fn hkdf_expand_too_long_output_fails() {
+    fn hkdf_extract_expand_too_long_output_fails() {
         let ikm = b"input key material";
         let salt = b"salt";
         let info = b"info";
 
         // HKDF-SHA256 max output is 255 * 32 = 8160 bytes
-        let result = hkdf_expand(ikm, salt, info, 8161);
+        let result = hkdf_extract_expand(ikm, salt, info, 8161);
         assert!(result.is_err());
     }
 
@@ -570,7 +575,7 @@ mod tests {
         let info = b"encryption_key";
 
         // Derive key using HKDF
-        let key = hkdf_expand(master_secret, salt, info, 32).unwrap();
+        let key = hkdf_extract_expand(master_secret, salt, info, 32).unwrap();
         assert_eq!(key.len(), 32);
 
         // Use derived key for encryption
@@ -592,7 +597,7 @@ mod tests {
 
         // Extract then expand (standard HKDF flow)
         let prk = hkdf_extract(salt, ikm);
-        let key = hkdf_expand(&prk, b"", info, 32).unwrap();
+        let key = hkdf_extract_expand(&prk, b"", info, 32).unwrap();
 
         assert_eq!(key.len(), 32);
 

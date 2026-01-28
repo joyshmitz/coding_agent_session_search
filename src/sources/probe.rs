@@ -169,6 +169,10 @@ pub struct SystemInfo {
     pub has_wget: bool,
     /// Remote home directory.
     pub remote_home: String,
+    /// Unique machine identifier (for deduplication of SSH aliases).
+    /// On Linux: /etc/machine-id, on macOS: IOPlatformUUID.
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 /// Resource information for installation feasibility.
@@ -209,21 +213,44 @@ if [ -f /etc/os-release ]; then
     echo "DISTRO=$PRETTY_NAME"
 fi
 
-# Cass status
+# Machine ID for deduplication of SSH aliases pointing to same host
+# Linux: /etc/machine-id, macOS: IOPlatformUUID
+if [ -f /etc/machine-id ]; then
+    MACHINE_ID=$(cat /etc/machine-id 2>/dev/null | tr -d '\n')
+    echo "MACHINE_ID=$MACHINE_ID"
+elif command -v ioreg &> /dev/null; then
+    MACHINE_ID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
+    echo "MACHINE_ID=$MACHINE_ID"
+fi
+
+# Cass status - check PATH and common install locations
+# Non-interactive SSH doesn't source .bashrc, so user bin dirs may not be in PATH
+CASS_BIN=""
 if command -v cass &> /dev/null; then
-    CASS_VER=$(cass --version 2>/dev/null | head -1 | awk '{print $2}')
+    CASS_BIN="cass"
+elif [ -x "$HOME/.cargo/bin/cass" ]; then
+    CASS_BIN="$HOME/.cargo/bin/cass"
+elif [ -x "$HOME/.local/bin/cass" ]; then
+    CASS_BIN="$HOME/.local/bin/cass"
+elif [ -x "/usr/local/bin/cass" ]; then
+    CASS_BIN="/usr/local/bin/cass"
+fi
+
+if [ -n "$CASS_BIN" ]; then
+    CASS_VER=$("$CASS_BIN" --version 2>/dev/null | head -1 | awk '{print $2}')
     echo "CASS_VERSION=$CASS_VER"
 
     # Get health status (JSON output)
-    HEALTH=$(cass health --json 2>/dev/null)
-    if [ $? -eq 0 ]; then
+    if "$CASS_BIN" health --json &>/dev/null; then
         echo "CASS_HEALTH=OK"
         # Try to get session count from stats
-        STATS=$(cass stats --json 2>/dev/null || echo '{}')
-        if [ $? -eq 0 ]; then
+        STATS=$("$CASS_BIN" stats --json 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$STATS" ]; then
             # Extract total conversations from JSON (allow whitespace/newlines)
-            SESSIONS=$(echo "$STATS" | tr -d '\n' | sed -n 's/.*"conversations"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p')
+            SESSIONS=$(echo "$STATS" | tr -d '\n' | sed -n 's/.*"conversations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
             echo "CASS_SESSIONS=${SESSIONS:-0}"
+        else
+            echo "CASS_SESSIONS=0"
         fi
     else
         echo "CASS_HEALTH=NOT_INDEXED"
@@ -232,9 +259,17 @@ else
     echo "CASS_VERSION=NOT_FOUND"
 fi
 
-# Tool availability
-command -v cargo &> /dev/null && echo "HAS_CARGO=1" || echo "HAS_CARGO=0"
-command -v cargo-binstall &> /dev/null && echo "HAS_BINSTALL=1" || echo "HAS_BINSTALL=0"
+# Tool availability - also check ~/.cargo/bin for non-interactive SSH sessions
+if command -v cargo &> /dev/null || [ -x "$HOME/.cargo/bin/cargo" ]; then
+    echo "HAS_CARGO=1"
+else
+    echo "HAS_CARGO=0"
+fi
+if command -v cargo-binstall &> /dev/null || [ -x "$HOME/.cargo/bin/cargo-binstall" ]; then
+    echo "HAS_BINSTALL=1"
+else
+    echo "HAS_BINSTALL=0"
+fi
 command -v curl &> /dev/null && echo "HAS_CURL=1" || echo "HAS_CURL=0"
 command -v wget &> /dev/null && echo "HAS_WGET=1" || echo "HAS_WGET=0"
 
@@ -445,6 +480,7 @@ fn parse_probe_output(host_name: &str, output: &str, connection_time_ms: u64) ->
         has_curl: values.get("HAS_CURL").map(|v| v == "1").unwrap_or(false),
         has_wget: values.get("HAS_WGET").map(|v| v == "1").unwrap_or(false),
         remote_home: values.get("HOME").cloned().unwrap_or_default(),
+        machine_id: values.get("MACHINE_ID").cloned().filter(|s| !s.is_empty()),
     });
 
     // Build ResourceInfo
@@ -627,6 +663,96 @@ impl ProbeCache {
         self.results
             .retain(|_, (_, ts)| ts.elapsed().as_secs() < self.ttl_secs);
     }
+}
+
+/// Deduplicate probe results that point to the same physical machine.
+///
+/// Multiple SSH aliases may point to the same machine. This function identifies
+/// duplicates using the machine_id from the probe and keeps only one entry per
+/// physical machine.
+///
+/// # Selection criteria (when duplicates found)
+/// 1. Prefer hosts with cass already installed
+/// 2. Prefer hosts with more sessions indexed
+/// 3. Otherwise, keep the first one alphabetically
+///
+/// # Returns
+/// A tuple of (deduplicated results, merged aliases map).
+/// The merged map contains: kept_host_name -> vec![merged_alias_names]
+pub fn deduplicate_probe_results(
+    results: Vec<HostProbeResult>,
+) -> (Vec<HostProbeResult>, HashMap<String, Vec<String>>) {
+    // Group by machine_id (skip hosts without machine_id - can't dedupe them)
+    let mut by_machine_id: HashMap<String, Vec<HostProbeResult>> = HashMap::new();
+    let mut no_machine_id: Vec<HostProbeResult> = Vec::new();
+
+    for result in results {
+        if let Some(ref machine_id) = result
+            .system_info
+            .as_ref()
+            .and_then(|s| s.machine_id.clone())
+        {
+            by_machine_id
+                .entry(machine_id.clone())
+                .or_default()
+                .push(result);
+        } else {
+            no_machine_id.push(result);
+        }
+    }
+
+    let mut deduplicated: Vec<HostProbeResult> = Vec::new();
+    let mut merged_aliases: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Process groups with machine_id
+    for (_machine_id, mut group) in by_machine_id {
+        if group.len() == 1 {
+            deduplicated.push(group.remove(0));
+        } else {
+            // Multiple aliases for same machine - pick the best one
+            group.sort_by(|a, b| {
+                // 1. Prefer installed cass
+                let a_installed = a.cass_status.is_installed();
+                let b_installed = b.cass_status.is_installed();
+                if a_installed != b_installed {
+                    return b_installed.cmp(&a_installed);
+                }
+
+                // 2. Prefer more sessions
+                let a_sessions = match &a.cass_status {
+                    CassStatus::Indexed { session_count, .. } => *session_count,
+                    _ => 0,
+                };
+                let b_sessions = match &b.cass_status {
+                    CassStatus::Indexed { session_count, .. } => *session_count,
+                    _ => 0,
+                };
+                if a_sessions != b_sessions {
+                    return b_sessions.cmp(&a_sessions);
+                }
+
+                // 3. Alphabetically by name
+                a.host_name.cmp(&b.host_name)
+            });
+
+            // Keep the first (best) one, record others as merged
+            let kept = group.remove(0);
+            let merged: Vec<String> = group.into_iter().map(|h| h.host_name).collect();
+
+            if !merged.is_empty() {
+                merged_aliases.insert(kept.host_name.clone(), merged);
+            }
+            deduplicated.push(kept);
+        }
+    }
+
+    // Add back hosts without machine_id
+    deduplicated.extend(no_machine_id);
+
+    // Sort final list by name for consistent ordering
+    deduplicated.sort_by(|a, b| a.host_name.cmp(&b.host_name));
+
+    (deduplicated, merged_aliases)
 }
 
 #[cfg(test)]
@@ -1000,5 +1126,192 @@ MEM_AVAIL_KB=4194304
             sys.has_curl || sys.has_wget,
             "system should have at least curl or wget"
         );
+    }
+
+    // =========================================================================
+    // Deduplication tests
+    // =========================================================================
+
+    fn make_probe_result(
+        name: &str,
+        machine_id: Option<&str>,
+        sessions: Option<u64>,
+    ) -> HostProbeResult {
+        HostProbeResult {
+            host_name: name.to_string(),
+            reachable: true,
+            connection_time_ms: 100,
+            cass_status: if let Some(s) = sessions {
+                CassStatus::Indexed {
+                    version: "0.1.50".into(),
+                    session_count: s,
+                    last_indexed: None,
+                }
+            } else {
+                CassStatus::NotFound
+            },
+            detected_agents: vec![],
+            system_info: Some(SystemInfo {
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                distro: Some("Ubuntu 25.10".into()),
+                has_cargo: true,
+                has_cargo_binstall: false,
+                has_curl: true,
+                has_wget: true,
+                remote_home: "/home/ubuntu".into(),
+                machine_id: machine_id.map(String::from),
+            }),
+            resources: Some(ResourceInfo {
+                disk_available_mb: 800_000,
+                memory_total_mb: 16_000,
+                memory_available_mb: 8_000,
+                can_compile: true,
+            }),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn test_deduplicate_no_duplicates() {
+        let results = vec![
+            make_probe_result("host1", Some("machine-1"), Some(100)),
+            make_probe_result("host2", Some("machine-2"), Some(200)),
+        ];
+
+        let (deduped, merged) = deduplicate_probe_results(results);
+
+        assert_eq!(deduped.len(), 2);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_deduplicate_same_machine() {
+        // Two SSH aliases for the same machine
+        let results = vec![
+            make_probe_result("jain", Some("abc123"), None),
+            make_probe_result("jain_ovh_box", Some("abc123"), None),
+        ];
+
+        let (deduped, merged) = deduplicate_probe_results(results);
+
+        assert_eq!(deduped.len(), 1);
+        // Should keep "jain" (alphabetically first since neither has cass)
+        assert_eq!(deduped[0].host_name, "jain");
+        assert_eq!(
+            merged.get("jain").unwrap(),
+            &vec!["jain_ovh_box".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_deduplicate_prefers_installed_cass() {
+        // Two aliases, one with cass installed
+        let results = vec![
+            make_probe_result("alias_a", Some("machine-x"), None), // no cass
+            make_probe_result("alias_b", Some("machine-x"), Some(500)), // has cass
+        ];
+
+        let (deduped, merged) = deduplicate_probe_results(results);
+
+        assert_eq!(deduped.len(), 1);
+        // Should keep alias_b because it has cass installed
+        assert_eq!(deduped[0].host_name, "alias_b");
+        assert!(merged.contains_key("alias_b"));
+    }
+
+    #[test]
+    fn test_deduplicate_prefers_more_sessions() {
+        // Both have cass, but different session counts
+        let results = vec![
+            make_probe_result("host_low", Some("machine-y"), Some(50)),
+            make_probe_result("host_high", Some("machine-y"), Some(500)),
+        ];
+
+        let (deduped, merged) = deduplicate_probe_results(results);
+
+        assert_eq!(deduped.len(), 1);
+        // Should keep host_high because it has more sessions
+        assert_eq!(deduped[0].host_name, "host_high");
+        // Verify the merge recorded the merged alias
+        assert!(merged.contains_key("host_high"));
+    }
+
+    #[test]
+    fn test_deduplicate_no_machine_id_not_merged() {
+        // Hosts without machine_id should not be merged
+        let results = vec![
+            make_probe_result("host1", None, Some(100)),
+            make_probe_result("host2", None, Some(200)),
+        ];
+
+        let (deduped, merged) = deduplicate_probe_results(results);
+
+        assert_eq!(deduped.len(), 2);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn test_deduplicate_mixed_with_and_without_machine_id() {
+        let results = vec![
+            make_probe_result("aliasA", Some("same-machine"), Some(100)),
+            make_probe_result("aliasB", Some("same-machine"), Some(50)),
+            make_probe_result("standalone", None, Some(75)),
+        ];
+
+        let (deduped, merged) = deduplicate_probe_results(results);
+
+        // 2 hosts: one from deduplication, one standalone
+        assert_eq!(deduped.len(), 2);
+        // aliasA should be kept (more sessions)
+        assert!(deduped.iter().any(|h| h.host_name == "aliasA"));
+        assert!(deduped.iter().any(|h| h.host_name == "standalone"));
+        assert_eq!(merged.len(), 1);
+    }
+
+    #[test]
+    fn test_deduplicate_three_aliases_same_machine() {
+        let results = vec![
+            make_probe_result("alias1", Some("same"), Some(100)),
+            make_probe_result("alias2", Some("same"), Some(200)),
+            make_probe_result("alias3", Some("same"), Some(150)),
+        ];
+
+        let (deduped, merged) = deduplicate_probe_results(results);
+
+        assert_eq!(deduped.len(), 1);
+        // alias2 has the most sessions
+        assert_eq!(deduped[0].host_name, "alias2");
+        // The merged list should contain the other two aliases
+        let merged_list = merged.get("alias2").unwrap();
+        assert_eq!(merged_list.len(), 2);
+        assert!(merged_list.contains(&"alias1".to_string()));
+        assert!(merged_list.contains(&"alias3".to_string()));
+    }
+
+    #[test]
+    fn real_probe_machine_id_present() {
+        // Test that the local probe script actually collects machine_id
+        let output = run_probe_script_locally();
+        let result = parse_probe_output("localhost", &output, 0);
+        let sys = result.system_info.as_ref().expect("system_info");
+
+        // On Linux or macOS, we should get a machine_id
+        // (this test may be skipped on unusual systems)
+        if sys.os == "linux" || sys.os == "darwin" {
+            assert!(
+                sys.machine_id.is_some(),
+                "machine_id should be present on {}",
+                sys.os
+            );
+            let mid = sys.machine_id.as_ref().unwrap();
+            assert!(!mid.is_empty(), "machine_id should not be empty");
+            // Machine IDs are typically 32+ hex chars or UUID format
+            assert!(
+                mid.len() >= 32,
+                "machine_id should be at least 32 chars, got: {}",
+                mid
+            );
+        }
     }
 }

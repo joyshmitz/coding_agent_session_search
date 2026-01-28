@@ -968,6 +968,7 @@ mod tests {
             has_curl: true,
             has_wget: false,
             remote_home: "/home/user".into(),
+            machine_id: None,
         }
     }
 
@@ -1308,6 +1309,7 @@ mod tests {
             has_curl: has("curl"),
             has_wget: has("wget"),
             remote_home: home,
+            machine_id: None, // Not needed in tests
         }
     }
 

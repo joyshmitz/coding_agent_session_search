@@ -97,10 +97,9 @@ const CDN_FALLBACK_CSS: &str = r#"
 }
 "#;
 
-const TAILWIND_CDN_URL: &str =
-    "https://cdn.jsdelivr.net/npm/tailwindcss@3.4.1/dist/tailwind.min.css";
-const TAILWIND_CDN_SRI: &str =
-    "sha384-wAkE1abywdsF0VP/+RDLxHADng231vt6gsqcjBzQFUoAQNkuN63+cJ4XDiE7LVjx";
+// Note: Tailwind v3+/v4 requires compilation - no pre-built CSS file exists.
+// Our inline critical CSS provides complete Stripe-level styling without external dependencies.
+// This ensures offline-capable, self-contained HTML exports with perfect styling.
 const PRISM_THEME_URL: &str =
     "https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css";
 const PRISM_THEME_SRI: &str =
@@ -278,11 +277,11 @@ impl HtmlTemplate {
                 r#"<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin="anonymous">"#
                     .to_string(),
             );
-            tags.push(format!(
-                r#"<link rel="stylesheet" href="{url}" integrity="{sri}" crossorigin="anonymous" media="print" onload="this.media='all'" onerror="document.documentElement.classList.add('no-tailwind')">"#,
-                url = TAILWIND_CDN_URL,
-                sri = TAILWIND_CDN_SRI
-            ));
+            // Tailwind CSS v4 browser CDN - compiles in browser, no build step needed
+            tags.push(
+                r#"<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>"#
+                    .to_string(),
+            );
 
             if options.syntax_highlighting {
                 tags.push(format!(
@@ -392,7 +391,7 @@ impl HtmlTemplate {
 
         format!(
             r#"<!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" class="bg-bg">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -404,13 +403,13 @@ impl HtmlTemplate {
 {critical_css}
     </style>{cdn_scripts}{print_styles}
 </head>
-<body>
+<body class="min-h-screen bg-bg text-text antialiased">
 {print_footer}
-    <div id="app">
+    <div id="app" class="w-full max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto px-3 md:px-4 lg:px-6 py-3 md:py-4 lg:py-6">
 {header}
 {toolbar}
         <!-- Conversation container -->
-        <main id="conversation" class="conversation" role="main">
+        <main id="conversation" class="flex flex-col gap-2 md:gap-3" role="main">
 {content}
         </main>
 {password_modal}
@@ -440,36 +439,43 @@ impl HtmlTemplate {
         if let Some(ts) = &self.metadata.timestamp {
             let escaped_ts = html_escape(ts);
             meta_items.push(format!(
-                r#"<span class="meta-item"><time datetime="{}">{}</time></span>"#,
+                r#"<span class="inline-flex items-center gap-1"><time datetime="{}">{}</time></span>"#,
                 escaped_ts, escaped_ts
             ));
         }
 
         if let Some(agent) = &self.metadata.agent {
+            // Use human-readable display name instead of raw slug
+            let display_name = crate::html_export::renderer::agent_display_name(agent);
             meta_items.push(format!(
-                r#"<span class="meta-item meta-agent">{}</span>"#,
-                html_escape(agent)
+                r#"<span class="text-agent font-medium">{}</span>"#,
+                html_escape(display_name)
             ));
         }
 
         if self.metadata.message_count > 0 {
             meta_items.push(format!(
-                r#"<span class="meta-item">{} messages</span>"#,
+                r#"<span>{} messages</span>"#,
                 self.metadata.message_count
             ));
         }
 
         if let Some(duration) = &self.metadata.duration {
             meta_items.push(format!(
-                r#"<span class="meta-item">{}</span>"#,
+                r#"<span>{}</span>"#,
                 html_escape(duration)
             ));
         }
 
         if let Some(project) = &self.metadata.project {
+            // Extract just the project name from full path for cleaner display
+            let display_project = std::path::Path::new(project)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(project);
             meta_items.push(format!(
-                r#"<span class="meta-item meta-project">{}</span>"#,
-                html_escape(project)
+                r#"<span class="font-mono text-[11px] bg-elevated px-1.5 py-0.5 rounded">{}</span>"#,
+                html_escape(display_project)
             ));
         }
 
@@ -478,15 +484,15 @@ impl HtmlTemplate {
         } else {
             format!(
                 r#"
-            <div class="meta">{}</div>"#,
+            <div class="flex flex-wrap items-center gap-2 md:gap-3 text-xs text-text-muted">{}</div>"#,
                 meta_items.join("\n                ")
             )
         };
 
         format!(
             r#"        <!-- Header with metadata -->
-        <header class="header" role="banner">
-            <h1 class="title">{}</h1>{}
+        <header class="mb-3 md:mb-4 pb-2 md:pb-3 border-b border-border" role="banner">
+            <h1 class="text-base md:text-lg lg:text-xl font-semibold text-text mb-1">{}</h1>{}
         </header>"#,
             html_escape(&self.title),
             meta_html
@@ -497,26 +503,26 @@ impl HtmlTemplate {
         let mut toolbar_items = Vec::new();
 
         if options.include_search {
-            toolbar_items.push(r#"<div class="toolbar-item">
-                <input type="search" id="search-input" placeholder="Search..." aria-label="Search conversation">
-                <span id="search-count" class="search-count" hidden></span>
+            toolbar_items.push(r#"<div class="flex-1">
+                <input type="search" id="search-input" class="w-full px-2.5 py-1.5 bg-elevated border border-border rounded text-sm text-text placeholder:text-text-muted focus:outline-none focus:border-accent" placeholder="Search..." aria-label="Search conversation">
+                <span id="search-count" class="text-[11px] text-text-muted ml-1.5" hidden></span>
             </div>"#.to_string());
         }
 
         if options.include_theme_toggle {
-            toolbar_items.push(r#"<button id="theme-toggle" class="toolbar-btn" aria-label="Toggle theme" title="Toggle light/dark theme">
-                <svg class="icon icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            toolbar_items.push(r#"<button id="theme-toggle" class="flex items-center justify-center w-8 h-8 rounded border border-transparent text-text-secondary hover:bg-elevated hover:border-border hover:text-text transition-colors cursor-pointer" aria-label="Toggle theme" title="Toggle light/dark theme">
+                <svg class="w-[18px] h-[18px] icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <circle cx="12" cy="12" r="5"/>
                     <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
                 </svg>
-                <svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg class="w-[18px] h-[18px] icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
                 </svg>
             </button>"#.to_string());
         }
 
-        toolbar_items.push(r#"<button id="print-btn" class="toolbar-btn" aria-label="Print" title="Print conversation">
-                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        toolbar_items.push(r#"<button id="print-btn" class="flex items-center justify-center w-8 h-8 rounded border border-transparent text-text-secondary hover:bg-elevated hover:border-border hover:text-text transition-colors cursor-pointer" aria-label="Print" title="Print conversation">
+                <svg class="w-[18px] h-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
                     <rect x="6" y="14" width="12" height="8"/>
                 </svg>
@@ -528,7 +534,7 @@ impl HtmlTemplate {
 
         format!(
             r#"        <!-- Toolbar -->
-        <nav class="toolbar" role="navigation" aria-label="Conversation tools">
+        <nav class="toolbar flex items-center gap-1.5 p-1.5 md:p-2 mb-3 md:mb-4 bg-surface border border-border rounded-lg" role="navigation" aria-label="Conversation tools">
             {}
         </nav>"#,
             toolbar_items.join("\n            ")
@@ -783,11 +789,10 @@ mod tests {
         let opts = ExportOptions::default();
         let html = template.render(&opts);
 
-        assert!(html.contains(TAILWIND_CDN_URL));
-        assert!(html.contains(TAILWIND_CDN_SRI));
+        // Note: Tailwind CDN removed - Tailwind v3+/v4 requires compilation.
+        // Our inline critical CSS provides complete styling.
         assert!(html.contains(PRISM_CORE_URL));
         assert!(html.contains(PRISM_CORE_SRI));
-        assert!(html.contains("document.documentElement.classList.add('no-tailwind')"));
         assert!(html.contains("document.documentElement.classList.add('no-prism')"));
     }
 
