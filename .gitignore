@@ -72,6 +72,8 @@ claude_subagents_*.html
 
 # Browser screenshots (ephemeral debug artifacts)
 Chrome_*.png
+Google Chrome_*.png
+*_screenshot*.png
 
 # HTML export drafts
 world_class_export.html

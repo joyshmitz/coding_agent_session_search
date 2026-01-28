@@ -671,15 +671,56 @@ const COMPONENT_STYLES: &str = r#"
 .message-header {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  justify-content: space-between;
+  gap: var(--space-3);
   margin-bottom: var(--space-3);
   padding-bottom: var(--space-2);
   border-bottom: 1px solid oklch(0.25 0.02 260 / 0.5);
 }
 
+.message-header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.message-header-right {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+/* Lucide SVG icon styling */
+.lucide-icon {
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.lucide-spin {
+  animation: lucide-spin 1s linear infinite;
+}
+
+@keyframes lucide-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .message-icon {
-  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   line-height: 1;
+}
+
+.message-icon .lucide-icon {
+  width: 16px;
+  height: 16px;
 }
 
 .message-author {
@@ -791,7 +832,15 @@ const COMPONENT_STYLES: &str = r#"
 }
 
 .tool-badge-icon {
-  font-size: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tool-badge-icon .lucide-icon {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2.5;
 }
 
 .tool-badge-name {
@@ -800,13 +849,17 @@ const COMPONENT_STYLES: &str = r#"
 }
 
 .tool-badge-status {
-  padding: 0.0625rem 0.375rem;
-  font-size: 0.5rem;
-  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.125rem;
   border-radius: 2px;
-  letter-spacing: 0.3px;
-  text-transform: uppercase;
   margin-left: 0.25rem;
+}
+
+.tool-badge-status .lucide-icon {
+  width: 10px;
+  height: 10px;
 }
 
 .tool-badge.tool-status-success { border-left: 2px solid var(--green); }
@@ -876,6 +929,18 @@ const COMPONENT_STYLES: &str = r#"
   border-bottom: 1px solid var(--border);
   font-weight: 600;
   color: var(--amber);
+}
+
+.tool-popover-header .lucide-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.tool-popover-header span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tool-popover-section {

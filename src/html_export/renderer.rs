@@ -136,11 +136,11 @@ impl ToolStatus {
         }
     }
 
-    fn icon(&self) -> &'static str {
+    fn icon_svg(&self) -> &'static str {
         match self {
-            ToolStatus::Success => "✓",
-            ToolStatus::Error => "✗",
-            ToolStatus::Pending => "⋯",
+            ToolStatus::Success => ICON_CHECK,
+            ToolStatus::Error => ICON_X,
+            ToolStatus::Pending => ICON_LOADER,
         }
     }
 
@@ -152,6 +152,58 @@ impl ToolStatus {
         }
     }
 }
+
+// ============================================
+// Lucide SVG Icons (16x16, stroke-width: 2)
+// ============================================
+
+/// User icon - for user messages
+const ICON_USER: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>"#;
+
+/// Bot icon - for assistant messages
+const ICON_BOT: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>"#;
+
+/// Wrench icon - for tool messages
+const ICON_WRENCH: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>"#;
+
+/// Settings icon - for system messages
+const ICON_SETTINGS: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>"#;
+
+/// Message square icon - fallback
+const ICON_MESSAGE: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>"#;
+
+/// Terminal icon - for bash/shell
+const ICON_TERMINAL: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>"#;
+
+/// File text icon - for read
+const ICON_FILE_TEXT: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>"#;
+
+/// Pencil icon - for write/edit
+const ICON_PENCIL: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>"#;
+
+/// Search icon - for glob/grep/search
+const ICON_SEARCH: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>"#;
+
+/// Globe icon - for web fetch
+const ICON_GLOBE: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>"#;
+
+/// Check icon - for success status
+const ICON_CHECK: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>"#;
+
+/// X icon - for error status
+const ICON_X: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>"#;
+
+/// Loader icon - for pending status
+const ICON_LOADER: &str = r#"<svg class="lucide-icon lucide-spin" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="m16.2 7.8 2.9-2.9"/><path d="M18 12h4"/><path d="m16.2 16.2 2.9 2.9"/><path d="M12 18v4"/><path d="m4.9 19.1 2.9-2.9"/><path d="M2 12h4"/><path d="m4.9 4.9 2.9 2.9"/></svg>"#;
+
+/// Mail icon - for MCP agent mail
+const ICON_MAIL: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>"#;
+
+/// Database icon - for data operations
+const ICON_DATABASE: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>"#;
+
+/// Sparkles icon - for AI/task operations
+const ICON_SPARKLES: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg>"#;
 
 /// Get the CSS class for an agent slug.
 ///
@@ -333,9 +385,10 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
             (String::new(), String::new())
         };
 
-    let tool_call_html = if options.show_tool_calls {
+    // Tool badges rendered as compact icons in header (upper-right)
+    let tool_badges_html = if options.show_tool_calls {
         if let Some(tc) = &message.tool_call {
-            render_tool_call(tc, options)
+            render_tool_badge(tc, options)
         } else {
             String::new()
         }
@@ -343,13 +396,13 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
         String::new()
     };
 
-    // Role icon for visual differentiation
+    // Role icon for visual differentiation - using Lucide SVG icons
     let role_icon = match message.role.as_str() {
-        "user" => "👤",
-        "assistant" | "agent" => "🤖",
-        "tool" => "🔧",
-        "system" => "⚙️",
-        _ => "💬",
+        "user" => ICON_USER,
+        "assistant" | "agent" => ICON_BOT,
+        "tool" => ICON_WRENCH,
+        "system" => ICON_SETTINGS,
+        _ => ICON_MESSAGE,
     };
 
     // Only render content div if there's actual content
@@ -370,11 +423,15 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     let rendered = format!(
         r#"            <article class="message {role_class}"{anchor} role="article" aria-label="{role} message">
                 <header class="message-header">
-                    <span class="message-icon" aria-hidden="true">{role_icon}</span>
-                    <span class="message-author">{author}</span>
-                    {timestamp}
+                    <div class="message-header-left">
+                        <span class="message-icon" aria-hidden="true">{role_icon}</span>
+                        <span class="message-author">{author}</span>
+                        {timestamp}
+                    </div>
+                    <div class="message-header-right">
+                        {tool_badges}
+                    </div>
                 </header>{content_section}
-                {tool_call}
             </article>"#,
         role_class = role_class,
         anchor = anchor_id,
@@ -383,7 +440,7 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
         author = author_display,
         timestamp = timestamp_html,
         content_section = content_section,
-        tool_call = tool_call_html,
+        tool_badges = tool_badges_html,
     );
 
     debug!(
@@ -554,39 +611,39 @@ fn render_links(text: &str) -> String {
     result
 }
 
-/// Render a tool call section.
-fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
+/// Render a compact tool badge with hover popover for the message header.
+fn render_tool_badge(tool_call: &ToolCall, options: &RenderOptions) -> String {
     let started = Instant::now();
     trace!(
         component = "renderer",
-        operation = "render_tool_call",
+        operation = "render_tool_badge",
         tool = tool_call.name.as_str(),
         input_len = tool_call.input.len(),
         output_len = tool_call.output.as_ref().map(|s| s.len()).unwrap_or(0),
-        "Rendering tool call"
+        "Rendering tool badge"
     );
 
-    // Status indicator - get CSS class and icon
-    let (status_class, status_icon, status_label) = tool_call
+    // Status indicator - get CSS class and SVG icon
+    let (status_class, status_icon_svg, status_label) = tool_call
         .status
         .as_ref()
-        .map(|s| (s.css_class(), s.icon(), s.label()))
+        .map(|s| (s.css_class(), s.icon_svg(), s.label()))
         .unwrap_or(("", "", ""));
 
     // Format input as pretty JSON if possible
     let formatted_input = format_json_or_raw(&tool_call.input);
 
-    // Tool icon based on name
+    // Tool icon based on name - using Lucide SVG icons
     let tool_icon = match tool_call.name.to_lowercase().as_str() {
-        "bash" | "shell" => "💻",
-        "read" | "read_file" => "📖",
-        "write" | "write_file" => "📝",
-        "edit" => "✏️",
-        "glob" | "find" => "🔍",
-        "grep" | "search" => "🔎",
-        "webfetch" | "fetch" | "http" => "🌐",
-        "websearch" => "🔍",
-        _ => "🔧",
+        "bash" | "shell" => ICON_TERMINAL,
+        "read" | "read_file" => ICON_FILE_TEXT,
+        "write" | "write_file" | "edit" => ICON_PENCIL,
+        "glob" | "find" | "grep" | "search" | "websearch" => ICON_SEARCH,
+        "webfetch" | "fetch" | "http" => ICON_GLOBE,
+        "task" => ICON_SPARKLES,
+        n if n.starts_with("mcp__mcp-agent-mail") => ICON_MAIL,
+        n if n.contains("sql") || n.contains("db") => ICON_DATABASE,
+        _ => ICON_WRENCH,
     };
 
     // Suppress unused warning for options - may be used for future customization
@@ -631,14 +688,14 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
         String::new()
     };
 
-    // Compact badge with hover popover
+    // Compact badge with hover popover - using SVG icons
     let rendered = format!(
         r#"<span class="tool-badge {status_class}" tabindex="0" role="button" aria-label="{name} tool call">
             <span class="tool-badge-icon">{icon}</span>
             <span class="tool-badge-name">{name}</span>
             {status_badge}
             <div class="tool-popover" role="tooltip">
-                <div class="tool-popover-header">{icon} {name} {status_badge}</div>
+                <div class="tool-popover-header">{icon} <span>{name}</span> {status_badge}</div>
                 {input}{output}
             </div>
         </span>"#,
@@ -646,7 +703,7 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
         name = html_escape(&tool_call.name),
         status_class = status_class,
         status_badge = if !status_label.is_empty() {
-            format!(r#"<span class="tool-badge-status {}">{}</span>"#, status_label, status_icon)
+            format!(r#"<span class="tool-badge-status {}">{}</span>"#, status_label, status_icon_svg)
         } else {
             String::new()
         },
@@ -656,7 +713,7 @@ fn render_tool_call(tool_call: &ToolCall, options: &RenderOptions) -> String {
 
     debug!(
         component = "renderer",
-        operation = "render_tool_call_complete",
+        operation = "render_tool_badge_complete",
         tool = tool_call.name.as_str(),
         duration_ms = started.elapsed().as_millis(),
         bytes = rendered.len(),
@@ -726,7 +783,8 @@ mod tests {
 
         assert!(html.contains("message-user"));
         assert!(html.contains("Hello, world!"));
-        assert!(html.contains("👤")); // User icon
+        assert!(html.contains("lucide-icon")); // SVG Lucide icon
+        assert!(html.contains("M19 21v-2")); // User icon path
     }
 
     #[test]
@@ -741,7 +799,7 @@ mod tests {
         assert!(html.contains("<pre>"));
         assert!(html.contains("language-rust"));
         assert!(html.contains("fn main()"));
-        assert!(html.contains("🤖")); // Assistant icon
+        assert!(html.contains("lucide-icon")); // SVG Lucide icon (bot)
     }
 
     #[test]
@@ -821,8 +879,9 @@ mod tests {
 
         let html = render_message(&msg, &RenderOptions::default()).unwrap();
         assert!(html.contains("tool-status-success"));
-        assert!(html.contains("✓")); // Success icon
-        assert!(html.contains("💻")); // Bash icon
+        assert!(html.contains("lucide-icon")); // SVG icon
+        assert!(html.contains("M20 6 9 17l-5-5")); // Check icon path (success)
+        assert!(html.contains("polyline points=\"4 17 10 11 4 5\"")); // Terminal icon path (bash)
     }
 
     #[test]
@@ -896,27 +955,34 @@ mod tests {
 
     #[test]
     fn test_tool_icons_for_different_tools() {
-        let tools_and_icons = vec![
-            ("Read", "📖"),
-            ("Write", "📝"),
-            ("Bash", "💻"),
-            ("Grep", "🔎"),
-            ("WebFetch", "🌐"),
+        // Check that different tools get appropriate Lucide SVG icons
+        let tools_and_svg_markers = vec![
+            ("Read", "M15 2H6a2 2 0 0 0-2 2v16"),       // FileText icon path
+            ("Write", "M21.174 6.812"),                  // Pencil icon path
+            ("Bash", "polyline points=\"4 17 10 11 4 5\""), // Terminal icon
+            ("Grep", "circle cx=\"11\" cy=\"11\" r=\"8\""), // Search icon
+            ("WebFetch", "circle cx=\"12\" cy=\"12\" r=\"10\""), // Globe icon
         ];
 
-        for (tool_name, expected_icon) in tools_and_icons {
+        for (tool_name, svg_marker) in tools_and_svg_markers {
             let tc = ToolCall {
                 name: tool_name.to_string(),
                 input: "{}".to_string(),
                 output: None,
                 status: None,
             };
-            let html = render_tool_call(&tc, &RenderOptions::default());
+            let html = render_tool_badge(&tc, &RenderOptions::default());
             assert!(
-                html.contains(expected_icon),
-                "Tool {} should have icon {}",
+                html.contains("lucide-icon"),
+                "Tool {} should have lucide-icon class",
+                tool_name
+            );
+            assert!(
+                html.contains(svg_marker),
+                "Tool {} should have SVG marker '{}', got: {}",
                 tool_name,
-                expected_icon
+                svg_marker,
+                html
             );
         }
     }
