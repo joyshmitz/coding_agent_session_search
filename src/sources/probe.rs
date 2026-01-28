@@ -981,13 +981,18 @@ MEM_AVAIL_KB=4194304
     /// Execute PROBE_SCRIPT on the local system via bash, returning stdout.
     fn run_probe_script_locally() -> String {
         use std::io::Write;
-        let mut child = Command::new("bash")
-            .arg("-s")
+        let mut cmd = Command::new("bash");
+        cmd.arg("-s")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("bash should be available");
+            .stderr(Stdio::piped());
+        // Ensure HOME is set for the probe script (may not be set in some test environments)
+        if std::env::var("HOME").is_err() {
+            if let Some(dirs) = directories::BaseDirs::new() {
+                cmd.env("HOME", dirs.home_dir());
+            }
+        }
+        let mut child = cmd.spawn().expect("bash should be available");
         if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(PROBE_SCRIPT.as_bytes())

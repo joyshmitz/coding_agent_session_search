@@ -484,15 +484,19 @@ impl HtmlTemplate {
         } else {
             format!(
                 r#"
-            <div class="header-meta">{}</div>"#,
-                meta_items.join("\n                ")
+                <div class="header-meta">{}</div>"#,
+                meta_items.join("\n                    ")
             )
         };
 
+        // Header with terminal-style traffic lights (via CSS ::before)
+        // The header-content div is offset to make room for the traffic lights
         format!(
-            r#"        <!-- Header with metadata -->
+            r#"        <!-- Header with terminal-style traffic lights -->
         <header class="header" role="banner">
-            <h1 class="header-title">{}</h1>{}
+            <div class="header-content">
+                <h1 class="header-title">{}</h1>{}
+            </div>
         </header>"#,
             html_escape(&self.title),
             meta_html

@@ -1298,7 +1298,11 @@ mod tests {
                 .map(|o| o.status.success())
                 .unwrap_or(false)
         };
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = std::env::var("HOME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| directories::BaseDirs::new().map(|d| d.home_dir().to_string_lossy().into_owned()))
+            .unwrap_or_default();
 
         SystemInfo {
             os,
