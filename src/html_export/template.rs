@@ -866,17 +866,18 @@ mod tests {
     #[test]
     fn test_export_messages_plain() {
         let exporter = HtmlExporter::with_options(ExportOptions::default());
-        let messages = vec![renderer::Message {
+        let message = renderer::Message {
             role: "user".to_string(),
             content: "Hello world".to_string(),
             timestamp: None,
             tool_call: None,
             index: None,
             author: None,
-        }];
+        };
+        let groups = vec![renderer::MessageGroup::user(message)];
 
         let html = exporter
-            .export_messages("Test Export", &messages, TemplateMetadata::default(), None)
+            .export_messages("Test Export", &groups, TemplateMetadata::default(), None)
             .expect("export");
 
         assert!(html.contains("Hello world"));
@@ -886,28 +887,28 @@ mod tests {
     #[test]
     fn test_export_logs_include_milestones() {
         let exporter = HtmlExporter::with_options(ExportOptions::default());
-        let messages = vec![
-            renderer::Message {
+        let groups = vec![
+            renderer::MessageGroup::user(renderer::Message {
                 role: "user".to_string(),
                 content: "Hello world".to_string(),
                 timestamp: None,
                 tool_call: None,
                 index: None,
                 author: None,
-            },
-            renderer::Message {
+            }),
+            renderer::MessageGroup::assistant(renderer::Message {
                 role: "assistant".to_string(),
                 content: "Response".to_string(),
                 timestamp: None,
                 tool_call: None,
                 index: None,
                 author: None,
-            },
+            }),
         ];
 
         let logs = capture_logs(|| {
             exporter
-                .export_messages("Test Export", &messages, TemplateMetadata::default(), None)
+                .export_messages("Test Export", &groups, TemplateMetadata::default(), None)
                 .expect("export");
         });
 
@@ -933,18 +934,18 @@ mod tests {
             encrypt: true,
             ..Default::default()
         });
-        let messages = vec![renderer::Message {
+        let groups = vec![renderer::MessageGroup::assistant(renderer::Message {
             role: "assistant".to_string(),
             content: "Secret".to_string(),
             timestamp: None,
             tool_call: None,
             index: None,
             author: None,
-        }];
+        })];
 
         let result = exporter.export_messages(
             "Encrypted Export",
-            &messages,
+            &groups,
             TemplateMetadata::default(),
             None,
         );
@@ -959,19 +960,19 @@ mod tests {
             encrypt: true,
             ..Default::default()
         });
-        let messages = vec![renderer::Message {
+        let groups = vec![renderer::MessageGroup::assistant(renderer::Message {
             role: "assistant".to_string(),
             content: "Top secret".to_string(),
             timestamp: None,
             tool_call: None,
             index: None,
             author: None,
-        }];
+        })];
 
         let html = exporter
             .export_messages(
                 "Encrypted Export",
-                &messages,
+                &groups,
                 TemplateMetadata::default(),
                 Some("password"),
             )
