@@ -70,10 +70,11 @@ pub fn render_breadcrumbs(
     // For this iteration, we'll render the text and return generic hit areas if needed,
     // or rely on the caller to handle general interaction.
     // However, to support "crumb choosers", we really want distinct zones.
-    // Let's approximate width based on char count.
+    // Let's approximate width based on display width (not just char count).
+    use unicode_width::UnicodeWidthStr;
 
     let mut current_x = area.x;
-    let measure_width = |s: &str| s.chars().count() as u16;
+    let measure_width = |s: &str| s.width() as u16;
 
     let agent_width = measure_width(&agent_text);
     rects.push((
