@@ -804,31 +804,40 @@ const COMPONENT_STYLES: &str = r#"
 .tool-badges {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1);
-  margin-top: var(--space-2);
+  align-items: center;
+  gap: 4px;
 }
 
 .tool-badge {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
-  padding: 0.1875rem 0.5rem;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
   font-size: 0.6875rem;
   font-family: 'JetBrains Mono', ui-monospace, monospace;
-  background: var(--secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px solid oklch(0.3 0.02 260 / 0.5);
+  border-radius: 6px;
   cursor: pointer;
   transition: all var(--transition-fast);
   white-space: nowrap;
+  color: var(--amber);
 }
 
 .tool-badge:hover,
 .tool-badge:focus {
+  background: oklch(0.78 0.16 75 / 0.15);
   border-color: var(--amber);
-  background: oklch(0.78 0.16 75 / 0.1);
+  transform: scale(1.1);
   outline: none;
+  box-shadow: var(--shadow-glow-amber);
+}
+
+.tool-badge:focus-visible {
+  box-shadow: 0 0 0 2px var(--primary);
 }
 
 .tool-badge-icon {
@@ -838,14 +847,16 @@ const COMPONENT_STYLES: &str = r#"
 }
 
 .tool-badge-icon .lucide-icon {
-  width: 12px;
-  height: 12px;
-  stroke-width: 2.5;
+  width: 14px;
+  height: 14px;
+  stroke-width: 2;
 }
 
 .tool-badge-name {
   font-weight: 600;
+  font-size: 0.625rem;
   color: var(--amber);
+  margin-left: 4px;
 }
 
 .tool-badge-status {
@@ -854,7 +865,7 @@ const COMPONENT_STYLES: &str = r#"
   justify-content: center;
   padding: 0.125rem;
   border-radius: 2px;
-  margin-left: 0.25rem;
+  margin-left: 2px;
 }
 
 .tool-badge-status .lucide-icon {
@@ -862,9 +873,13 @@ const COMPONENT_STYLES: &str = r#"
   height: 10px;
 }
 
-.tool-badge.tool-status-success { border-left: 2px solid var(--green); }
-.tool-badge.tool-status-error { border-left: 2px solid var(--red); }
-.tool-badge.tool-status-pending { border-left: 2px solid var(--amber); }
+/* Status-based badge styling with subtle left accent */
+.tool-badge.tool-status-success { border-color: var(--green); }
+.tool-badge.tool-status-error { border-color: var(--red); }
+.tool-badge.tool-status-pending { border-color: var(--amber); }
+
+.tool-badge.tool-status-success:hover { box-shadow: 0 4px 20px oklch(0.72 0.19 145 / 0.35); }
+.tool-badge.tool-status-error:hover { box-shadow: 0 4px 20px oklch(0.65 0.22 25 / 0.35); }
 
 .tool-badge-status.success {
   background: oklch(0.72 0.19 145 / 0.2);
@@ -879,45 +894,88 @@ const COMPONENT_STYLES: &str = r#"
   color: var(--amber);
 }
 
-/* Popover - shown on hover/focus */
+/* Overflow badge - "+X more" */
+.tool-badge.tool-overflow {
+  min-width: auto;
+  padding: 0 8px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--muted-foreground);
+  border-style: dashed;
+}
+
+.tool-badge.tool-overflow:hover {
+  color: var(--foreground);
+  border-style: solid;
+}
+
+/* Expanded state for overflow - show all badges */
+.message-header-right.expanded .tool-badge {
+  display: inline-flex;
+}
+
+.message-header-right.expanded .tool-overflow {
+  order: 999; /* Move to end */
+}
+
+/* Popover - Glassmorphic with fixed positioning */
 .tool-popover {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%) scale(0.95);
-  min-width: 320px;
-  max-width: 480px;
+  position: fixed;
+  z-index: 1000;
+  min-width: 280px;
+  max-width: 400px;
+  max-height: 300px;
+  overflow: auto;
   padding: var(--space-3);
-  background: var(--card);
-  border: 1px solid var(--border);
+  background: oklch(0.14 0.02 260 / 0.95);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid oklch(0.3 0.02 260 / 0.5);
   border-radius: var(--radius-lg);
-  box-shadow: 0 8px 32px oklch(0 0 0 / 0.4);
+  box-shadow: var(--shadow-xl), var(--shadow-glow-sm);
   opacity: 0;
   visibility: hidden;
+  transform: translateY(-4px);
   transition: all 0.15s ease-out;
-  z-index: 1000;
   pointer-events: none;
   text-align: left;
   white-space: normal;
 }
 
-.tool-badge:hover .tool-popover,
-.tool-badge:focus .tool-popover {
+.tool-popover.visible {
   opacity: 1;
   visibility: visible;
-  transform: translateX(-50%) scale(1);
+  transform: translateY(0);
   pointer-events: auto;
 }
 
-/* Arrow pointing down */
-.tool-popover::after {
+/* Light theme popover */
+[data-theme="light"] .tool-popover {
+  background: oklch(1 0 0 / 0.95);
+  border-color: var(--border);
+  box-shadow: 0 8px 32px oklch(0 0 0 / 0.15);
+}
+
+/* Arrow indicator (CSS-only, optional) */
+.tool-popover::before {
   content: '';
   position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 6px solid transparent;
-  border-top-color: var(--border);
+  top: -6px;
+  left: 20px;
+  width: 12px;
+  height: 12px;
+  background: inherit;
+  border: inherit;
+  border-right: none;
+  border-bottom: none;
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.tool-popover.popover-above::before {
+  top: auto;
+  bottom: -6px;
+  transform: rotate(225deg);
 }
 
 .tool-popover-header {
@@ -1158,6 +1216,15 @@ const COMPONENT_STYLES: &str = r#"
     --border: oklch(0.5 0.02 260);
     --muted-foreground: oklch(0.75 0.02 260);
   }
+  .tool-badge {
+    border-width: 2px;
+  }
+  .message {
+    border-width: 2px;
+  }
+  .tool-popover {
+    border-width: 2px;
+  }
 }
 
 /* ============================================
@@ -1289,6 +1356,53 @@ const COMPONENT_STYLES: &str = r#"
   /* Block-level code overflow */
   pre, code {
     max-width: 100%;
+  }
+
+  /* Tool badges - larger touch targets on mobile */
+  .tool-badge {
+    min-width: 32px;
+    height: 32px;
+  }
+
+  .tool-badges {
+    gap: 6px;
+  }
+
+  /* Mobile popover - bottom sheet style */
+  .tool-popover {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: auto;
+    max-width: 100%;
+    max-height: 60vh;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    padding: var(--space-4);
+    padding-bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+    transform: translateY(100%);
+  }
+
+  .tool-popover.visible {
+    transform: translateY(0);
+  }
+
+  /* Hide arrow on mobile */
+  .tool-popover::before {
+    display: none;
+  }
+
+  /* Add drag handle indicator */
+  .tool-popover::after {
+    content: '';
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 36px;
+    height: 4px;
+    background: oklch(0.4 0.02 260);
+    border-radius: 2px;
   }
 }
 

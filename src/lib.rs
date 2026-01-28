@@ -10983,7 +10983,7 @@ pub fn group_messages_for_export(
 #[cfg(test)]
 mod message_grouping_tests {
     use super::*;
-    use html_export::{Message, MessageGroup, MessageGroupType, ToolCall, ToolResult, ToolStatus};
+    use html_export::{Message, MessageGroupType, ToolCall, ToolStatus};
 
     // Helper to create a user message
     fn msg_user(content: &str) -> Message {
@@ -11119,7 +11119,7 @@ mod message_grouping_tests {
         ];
         let groups = group_messages_for_export(msgs);
         // First assistant group, then tool-only groups that get attached
-        assert!(groups.len() >= 1, "Should have at least one group");
+        assert!(!groups.is_empty(), "Should have at least one group");
     }
 
     // ========================================================================
@@ -11200,7 +11200,7 @@ mod message_grouping_tests {
         ];
         let groups = group_messages_for_export(msgs);
         // Should have user group, orphan tool result might be dropped or attached
-        assert!(groups.len() >= 1);
+        assert!(!groups.is_empty());
     }
 
     #[test]
@@ -11247,10 +11247,10 @@ mod message_grouping_tests {
         let groups = group_messages_for_export(msgs);
         assert_eq!(groups.len(), 1);
         // The tool result should be attached
-        if let Some(tc) = groups[0].tool_calls.first() {
-            if let Some(ref result) = tc.result {
-                assert_eq!(result.status, ToolStatus::Success);
-            }
+        if let Some(tc) = groups[0].tool_calls.first()
+            && let Some(ref result) = tc.result
+        {
+            assert_eq!(result.status, ToolStatus::Success);
         }
     }
 
