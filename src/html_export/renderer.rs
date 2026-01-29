@@ -870,7 +870,6 @@ fn render_single_tool_badge(tool: &ToolCallWithResult) -> String {
                 aria-expanded="false"
                 data-tool-name="{name}">
             <span class="tool-badge-icon">{icon}</span>
-            <span class="tool-badge-name">{name}</span>
             <span class="tool-badge-status">{status_icon}</span>
             <div class="tool-popover" role="tooltip">
                 <div class="tool-popover-header">{icon} <span>{name}</span> {status_badge}</div>
@@ -1165,7 +1164,6 @@ fn render_tool_badge(tool_call: &ToolCall, options: &RenderOptions) -> String {
     let rendered = format!(
         r#"<span class="tool-badge {status_class}" tabindex="0" role="button" aria-label="{name} tool call">
             <span class="tool-badge-icon">{icon}</span>
-            <span class="tool-badge-name">{name}</span>
             {status_badge}
             <div class="tool-popover" role="tooltip">
                 <div class="tool-popover-header">{icon} <span>{name}</span> {status_badge}</div>
@@ -1476,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_output_truncation_utf8_safe() {
+    fn test_tool_output_with_unicode_renders_safely() {
         // Create a very long tool output with multi-byte chars
         let long_output_with_unicode = "结果: ".repeat(5000); // Chinese characters
 
@@ -1494,13 +1492,13 @@ mod tests {
             author: None,
         };
 
-        // Should not panic even though we're truncating the long output
-        // The new badge format truncates at 500 chars with ellipsis
+        // Should not panic with long multi-byte output
         let html = render_message(&msg, &RenderOptions::default()).unwrap();
-        // Verify we have a tool badge (new compact format)
+        // Verify we have a tool badge with full content in popover
         assert!(html.contains("tool-badge"));
-        // Verify output was truncated (ends with ellipsis in popover)
-        assert!(html.contains("…"));
+        assert!(html.contains("tool-popover-section"));
+        // Full content is preserved (no truncation) — popovers scroll
+        assert!(html.contains("结果"));
     }
 
     #[test]
@@ -1812,15 +1810,16 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_badge_truncates_long_input() {
+    fn test_tool_badge_preserves_full_input_in_popover() {
         let long_input = r#"{"command": ""#.to_owned() + &"x".repeat(500) + r#""}"#;
         let mut call = test_tool_call("Bash");
         call.input = long_input;
         let tool = ToolCallWithResult::new(call);
         let html = render_single_tool_badge(&tool);
 
-        // Should contain truncated input with ellipsis
-        assert!(html.contains("..."));
+        // Inline popovers preserve full content (scrollable), no truncation
+        assert!(html.contains("tool-popover-section"));
+        assert!(html.contains(&"x".repeat(100))); // Full content present
     }
 
     #[test]
