@@ -350,16 +350,18 @@ const ToolPopovers = {
 
     initBadges() {
         $$('.tool-badge:not(.tool-overflow)').forEach(badge => {
-            const popover = badge.querySelector('.tool-popover');
+            // Helper to get popover - looks up fresh each time since popover may be built dynamically
+            const getPopover = () => badge.querySelector('.tool-popover');
 
             // Show on hover (desktop)
-            badge.addEventListener('mouseenter', () => this.show(badge, popover));
-            badge.addEventListener('mouseleave', () => this.hide(badge, popover));
+            badge.addEventListener('mouseenter', () => this.show(badge, getPopover()));
+            badge.addEventListener('mouseleave', () => this.hide(badge, getPopover()));
 
             // Show on focus (keyboard accessibility)
-            badge.addEventListener('focus', () => this.show(badge, popover));
+            badge.addEventListener('focus', () => this.show(badge, getPopover()));
             badge.addEventListener('blur', (e) => {
                 // Don't hide if focus moves within the popover
+                const popover = getPopover();
                 if (!popover || !popover.contains(e.relatedTarget)) {
                     this.hide(badge, popover);
                 }
@@ -369,16 +371,16 @@ const ToolPopovers = {
             badge.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                this.toggle(badge, popover);
+                this.toggle(badge, getPopover());
             });
 
             // Keyboard support
             badge.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    this.toggle(badge, popover);
+                    this.toggle(badge, getPopover());
                 } else if (e.key === 'Escape') {
-                    this.hide(badge, popover);
+                    this.hide(badge, getPopover());
                     badge.focus();
                 }
             });
@@ -498,39 +500,46 @@ const ToolPopovers = {
     },
 
     position(badge, popover) {
-        // Reset any previous positioning
-        popover.style.position = 'absolute';
-        popover.style.top = '';
-        popover.style.left = '';
-        popover.style.right = '';
-        popover.style.bottom = '';
+        // Skip positioning on mobile - CSS handles bottom sheet style
+        if (window.innerWidth < 768) {
+            return;
+        }
 
+        // Use fixed positioning relative to viewport
         const badgeRect = badge.getBoundingClientRect();
-        const popoverRect = popover.getBoundingClientRect();
         const viewportWidth = window.innerWidth;
         const viewportHeight = window.innerHeight;
-        const scrollY = window.scrollY;
-        const scrollX = window.scrollX;
         const margin = 8;
 
-        // Default: position below and align left edge
-        let top = badgeRect.bottom + margin + scrollY;
-        let left = badgeRect.left + scrollX;
+        // Measure popover dimensions (temporarily make visible for measurement)
+        popover.style.visibility = 'hidden';
+        popover.style.display = 'block';
+        const popoverRect = popover.getBoundingClientRect();
+        popover.style.display = '';
+        popover.style.visibility = '';
+
+        // Default: position below and align left edge with badge
+        let top = badgeRect.bottom + margin;
+        let left = badgeRect.left;
 
         // Flip up if would overflow bottom
-        if (badgeRect.bottom + popoverRect.height + margin > viewportHeight) {
-            top = badgeRect.top - popoverRect.height - margin + scrollY;
+        if (top + popoverRect.height > viewportHeight - margin) {
+            top = badgeRect.top - popoverRect.height - margin;
+            popover.classList.add('popover-above');
+        } else {
+            popover.classList.remove('popover-above');
         }
 
         // Flip to align right edge if would overflow right
         if (left + popoverRect.width > viewportWidth - margin) {
-            left = badgeRect.right - popoverRect.width + scrollX;
+            left = Math.max(margin, badgeRect.right - popoverRect.width);
         }
 
         // Ensure not off left edge
-        if (left < margin) {
-            left = margin;
-        }
+        left = Math.max(margin, left);
+
+        // Ensure not off top edge
+        top = Math.max(margin, top);
 
         popover.style.top = top + 'px';
         popover.style.left = left + 'px';
@@ -1140,7 +1149,7 @@ mod tests {
         assert!(bundle.inline_js.contains("addEventListener('blur'"));
 
         // Click support (mobile/touch)
-        assert!(bundle.inline_js.contains("this.toggle(badge, popover)"));
+        assert!(bundle.inline_js.contains("this.toggle(badge, getPopover())"));
 
         // Escape key support
         assert!(bundle.inline_js.contains("e.key === 'Escape'"));

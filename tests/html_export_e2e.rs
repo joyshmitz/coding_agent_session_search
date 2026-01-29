@@ -72,12 +72,6 @@ fn count_pattern(html: &str, pattern: &str) -> usize {
     re.find_iter(html).count()
 }
 
-/// Check if a pattern exists in HTML.
-fn has_pattern(html: &str, pattern: &str) -> bool {
-    let re = Regex::new(pattern).expect("valid regex");
-    re.is_match(html)
-}
-
 // ============================================================================
 // Structure Validation Tests
 // ============================================================================
@@ -121,11 +115,19 @@ fn test_tool_badges_in_header() {
         "HTML should contain tool-badge elements for tool calls"
     );
 
-    // Badges should be in the message header area
-    let header_with_badge = has_pattern(&html, r#"message-header.*tool-badge"#);
+    // Badges should be button elements (for accessibility)
+    let badge_buttons = html.contains("<button class=\"tool-badge");
     assert!(
-        header_with_badge || html.contains("tool-badges"),
-        "Tool badges should be in message headers"
+        badge_buttons,
+        "Tool badges should be button elements for keyboard accessibility"
+    );
+
+    // Badges should be inside message-header-right divs
+    let header_right_with_badges =
+        html.contains("message-header-right") && html.contains("tool-badge");
+    assert!(
+        header_right_with_badges,
+        "Tool badges should be in message-header-right sections"
     );
 }
 
