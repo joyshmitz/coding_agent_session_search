@@ -222,12 +222,18 @@ impl BookmarkStore {
 
     /// Search bookmarks by text (title, note, snippet)
     pub fn search(&self, query: &str) -> Result<Vec<Bookmark>> {
-        let pattern = format!("%{}%", query.to_lowercase());
+        // Escape SQL LIKE wildcards so they are matched literally
+        let escaped = query
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
 
         let mut stmt = self.conn.prepare(
             "SELECT id, title, source_path, line_number, agent, workspace, note, tags, created_at, updated_at, snippet
              FROM bookmarks
-             WHERE LOWER(title) LIKE ?1 OR LOWER(note) LIKE ?1 OR LOWER(snippet) LIKE ?1
+             WHERE LOWER(title) LIKE ?1 ESCAPE '\\' OR LOWER(note) LIKE ?1 ESCAPE '\\' OR LOWER(snippet) LIKE ?1 ESCAPE '\\'
              ORDER BY created_at DESC",
         )?;
 
@@ -371,10 +377,13 @@ CREATE INDEX IF NOT EXISTS idx_bookmarks_agent ON bookmarks(agent);
 ";
 
 fn current_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

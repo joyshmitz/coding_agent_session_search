@@ -650,7 +650,7 @@ pub fn file_modified_since(path: &std::path::Path, since_ts: Option<i64>) -> boo
                 .and_then(|m| m.modified())
                 .map(|mt| {
                     mt.duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| (d.as_millis() as i64) >= threshold)
+                        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX) >= threshold)
                         .unwrap_or(true) // On time error, process the file
                 })
                 .unwrap_or(true) // On metadata error, process the file

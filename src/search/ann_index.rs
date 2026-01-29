@@ -207,7 +207,7 @@ impl HnswIndex {
         // HNSW search returns neighbors sorted by distance (ascending).
         let neighbors: Vec<Neighbour> = self.hnsw.search(query, k, ef);
 
-        let search_time_us = start.elapsed().as_micros() as u64;
+        let search_time_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         // Convert to our result type.
         // DistDot uses 1 - dot_product, so lower distance = higher similarity.
@@ -285,8 +285,12 @@ impl HnswIndex {
         writer.write_all(&id_len.to_le_bytes())?;
         writer.write_all(id_bytes)?;
 
-        writer.write_all(&(self.dimension as u32).to_le_bytes())?;
-        writer.write_all(&(self.count as u32).to_le_bytes())?;
+        let dim_u32 = u32::try_from(self.dimension)
+            .map_err(|_| anyhow::anyhow!("dimension {} exceeds u32", self.dimension))?;
+        let count_u32 = u32::try_from(self.count)
+            .map_err(|_| anyhow::anyhow!("count {} exceeds u32", self.count))?;
+        writer.write_all(&dim_u32.to_le_bytes())?;
+        writer.write_all(&count_u32.to_le_bytes())?;
 
         // Serialize HNSW graph using hnsw_rs's file_dump.
         // It creates multiple files: basename.hnsw.graph and basename.hnsw.data
