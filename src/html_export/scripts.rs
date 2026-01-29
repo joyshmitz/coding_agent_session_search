@@ -159,6 +159,16 @@ const Search = {
         this.countEl = $('#search-count');
         if (!this.input) return;
 
+        if (!this.countEl && this.input.parentNode) {
+            const count = document.createElement('span');
+            count.id = 'search-count';
+            count.className = 'search-count';
+            count.hidden = true;
+            this.input.parentNode.appendChild(count);
+            this.countEl = count;
+        }
+        if (!this.countEl) return;
+
         this.input.addEventListener('input', () => this.search());
         this.input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
@@ -193,8 +203,11 @@ const Search = {
         }
 
         this.matches = [];
-        const messages = $$('.message-content');
-        messages.forEach((el) => {
+        let searchRoots = $$('.message');
+        if (!searchRoots || searchRoots.length === 0) {
+            searchRoots = $$('.message-content');
+        }
+        searchRoots.forEach((el) => {
             const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
             let node;
             while ((node = walker.nextNode())) {
@@ -350,6 +363,8 @@ const ToolPopovers = {
 
     initBadges() {
         $$('.tool-badge:not(.tool-overflow)').forEach(badge => {
+            if (badge.dataset.popoverBound === 'true') return;
+            badge.dataset.popoverBound = 'true';
             // Helper to get popover - looks up fresh each time since popover may be built dynamically
             const getPopover = () => badge.querySelector('.tool-popover');
 
@@ -436,6 +451,9 @@ const ToolPopovers = {
     hide(badge, popover) {
         if (popover) {
             popover.classList.remove('visible');
+            popover.style.position = '';
+            popover.style.top = '';
+            popover.style.left = '';
         }
         if (badge) {
             badge.setAttribute('aria-expanded', 'false');
@@ -504,6 +522,8 @@ const ToolPopovers = {
         if (window.innerWidth < 768) {
             return;
         }
+
+        popover.style.position = 'fixed';
 
         // Use fixed positioning relative to viewport
         const badgeRect = badge.getBoundingClientRect();
@@ -892,6 +912,12 @@ const Crypto = {
             if (typeof ToolPopovers !== 'undefined') {
                 ToolPopovers.init();
             }
+            if (typeof Search !== 'undefined') {
+                Search.init();
+            }
+            if (typeof WorldClass !== 'undefined') {
+                WorldClass.init();
+            }
 
         } catch (e) {
             this.errorEl.textContent = 'Decryption failed. Wrong password?';
@@ -915,24 +941,28 @@ fn generate_init_js(options: &ExportOptions) -> String {
     let mut inits = Vec::new();
 
     if options.include_search {
-        inits.push("Search.init();");
+        inits.push("try { Search.init(); } catch (e) { console.error('Search init failed', e); }");
     }
 
     if options.include_theme_toggle {
-        inits.push("Theme.init();");
+        inits.push("try { Theme.init(); } catch (e) { console.error('Theme init failed', e); }");
     }
 
     if options.show_tool_calls {
-        inits.push("ToolCalls.init();");
-        inits.push("ToolPopovers.init();");
+        inits.push(
+            "try { ToolCalls.init(); } catch (e) { console.error('ToolCalls init failed', e); }",
+        );
+        inits.push("try { ToolPopovers.init(); } catch (e) { console.error('ToolPopovers init failed', e); }");
     }
 
     if options.encrypt {
-        inits.push("Crypto.init();");
+        inits.push("try { Crypto.init(); } catch (e) { console.error('Crypto init failed', e); }");
     }
 
     // World-class UI/UX enhancements (always init)
-    inits.push("WorldClass.init();");
+    inits.push(
+        "try { WorldClass.init(); } catch (e) { console.error('WorldClass init failed', e); }",
+    );
 
     // Always add code block copy buttons and print button handler
     inits.push(r#"// Add copy buttons to code blocks
@@ -962,10 +992,16 @@ fn generate_init_js(options: &ExportOptions) -> String {
     });"#);
 
     format!(
-        r#"// Initialize on DOM ready
-document.addEventListener('DOMContentLoaded', () => {{
+        r#"// Initialize after DOM is ready (or immediately if already ready)
+const __cassInitAll = () => {{
     {}
-}});"#,
+}};
+
+if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', __cassInitAll);
+}} else {{
+    __cassInitAll();
+}}"#,
         inits.join("\n    ")
     )
 }
