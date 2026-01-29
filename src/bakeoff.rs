@@ -543,11 +543,15 @@ impl EvaluationHarness {
                     .map_err(|e| e.to_string())?;
                 query_latencies.push(start.elapsed());
             }
-            let avg_latency = query_latencies
-                .iter()
-                .map(|d| d.as_millis() as u64)
-                .sum::<u64>()
-                / query_latencies.len() as u64;
+            let avg_latency = if query_latencies.is_empty() {
+                0
+            } else {
+                query_latencies
+                    .iter()
+                    .map(|d| d.as_millis() as u64)
+                    .sum::<u64>()
+                    / query_latencies.len() as u64
+            };
             latencies.push(Duration::from_millis(avg_latency));
 
             // Rank documents by similarity
