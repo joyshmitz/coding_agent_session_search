@@ -196,6 +196,7 @@ const Search = {
 
     search() {
         this.clearHighlights();
+        $$('.message.search-hit').forEach((el) => el.classList.remove('search-hit'));
         const query = this.input.value.trim().toLowerCase();
         if (!query) {
             this.countEl.hidden = true;
@@ -203,11 +204,13 @@ const Search = {
         }
 
         this.matches = [];
+        const hitMessages = new Set();
         let searchRoots = $$('.message');
         if (!searchRoots || searchRoots.length === 0) {
             searchRoots = $$('.message-content');
         }
         searchRoots.forEach((el) => {
+            const messageEl = el.classList && el.classList.contains('message') ? el : el.closest('.message');
             const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
             let node;
             while ((node = walker.nextNode())) {
@@ -215,11 +218,13 @@ const Search = {
                 let index = text.indexOf(query);
                 while (index !== -1) {
                     this.matches.push({ node, index, length: query.length });
+                    if (messageEl) hitMessages.add(messageEl);
                     index = text.indexOf(query, index + 1);
                 }
             }
         });
 
+        hitMessages.forEach((el) => el.classList.add('search-hit'));
         this.highlightAll();
         this.updateCount();
 
