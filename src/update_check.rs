@@ -369,10 +369,13 @@ fn legacy_state_path() -> PathBuf {
 
 /// Current unix timestamp
 fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 // ============================================================================

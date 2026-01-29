@@ -1103,7 +1103,8 @@ impl SyncStatus {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis() as i64;
+            .as_millis();
+        let now = i64::try_from(now).unwrap_or(i64::MAX);
 
         let result = if report.all_succeeded {
             SyncResult::Success

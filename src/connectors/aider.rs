@@ -109,10 +109,13 @@ impl AiderConnector {
         }
 
         let mtime = fs::metadata(path)?.modified()?;
-        let ts = mtime
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let ts = i64::try_from(
+            mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
 
         Ok(NormalizedConversation {
             agent_slug: "aider".to_string(),
@@ -555,10 +558,13 @@ Second assistant response"#;
         assert!(conv.started_at.is_some());
         assert!(conv.ended_at.is_some());
         // Timestamp should be recent (within last minute)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
         assert!(conv.started_at.unwrap() > now - 60000);
     }
 

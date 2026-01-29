@@ -1343,7 +1343,7 @@ impl SqliteStorage {
     pub fn now_millis() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0)
     }
 
@@ -1632,7 +1632,7 @@ impl SqliteStorage {
         let tx = self.conn.transaction()?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
 
         // Clear existing stats

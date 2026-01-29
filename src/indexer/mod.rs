@@ -1364,7 +1364,7 @@ fn classify_paths(
             && let Ok(time) = meta.modified()
             && let Ok(dur) = time.duration_since(std::time::UNIX_EPOCH)
         {
-            let ts = Some(dur.as_millis() as i64);
+            let ts = Some(i64::try_from(dur.as_millis()).unwrap_or(i64::MAX));
 
             // Find ALL matching roots
             for (kind, root) in roots {
@@ -2351,11 +2351,13 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         // The since_ts filter compares message.createdAt > file_mtime - 1, so if
         // there's any delay between capturing 'now' and writing the file, the message
         // could be filtered out. Adding 10s buffer ensures the message is always included.
-        let now = std::time::SystemTime::now()
+        let now_u128 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_millis() as i64
-            + 10_000;
+            .as_millis();
+        let now = i64::try_from(now_u128)
+            .unwrap_or(i64::MAX)
+            .saturating_add(10_000);
         std::fs::write(
             &amp_file,
             format!(r#"{{"id":"tp","messages":[{{"role":"user","text":"p","createdAt":{now}}}]}}"#),
