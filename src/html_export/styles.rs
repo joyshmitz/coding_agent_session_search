@@ -662,6 +662,11 @@ const COMPONENT_STYLES: &str = r#"
   box-shadow: var(--shadow-md);
 }
 
+.message.search-hit {
+  border-color: var(--primary);
+  box-shadow: var(--shadow-md), var(--shadow-glow-sm);
+}
+
 /* Role-specific styling */
 .message-user {
   border-left-color: var(--green);
@@ -834,9 +839,9 @@ const COMPONENT_STYLES: &str = r#"
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 28px;
-  height: 28px;
-  padding: 0 6px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 4px;
   font-size: 0.6875rem;
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   background: transparent;
@@ -875,25 +880,21 @@ const COMPONENT_STYLES: &str = r#"
   stroke-width: 2;
 }
 
-.tool-badge-name {
-  font-weight: 600;
-  font-size: 0.625rem;
-  color: var(--amber);
-  margin-left: 4px;
-}
-
 .tool-badge-status {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0.125rem;
-  border-radius: 2px;
-  margin-left: 2px;
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  padding: 0;
 }
 
 .tool-badge-status .lucide-icon {
-  width: 10px;
-  height: 10px;
+  display: none;
 }
 
 /* Status-based badge styling with subtle left accent */
@@ -904,18 +905,9 @@ const COMPONENT_STYLES: &str = r#"
 .tool-badge.tool-status-success:hover { box-shadow: 0 4px 20px oklch(0.72 0.19 145 / 0.35); }
 .tool-badge.tool-status-error:hover { box-shadow: 0 4px 20px oklch(0.65 0.22 25 / 0.35); }
 
-.tool-badge-status.success {
-  background: oklch(0.72 0.19 145 / 0.2);
-  color: var(--green);
-}
-.tool-badge-status.error {
-  background: oklch(0.65 0.22 25 / 0.2);
-  color: var(--red);
-}
-.tool-badge-status.pending {
-  background: oklch(0.78 0.16 75 / 0.2);
-  color: var(--amber);
-}
+.tool-badge-status.success { background: oklch(0.72 0.19 145 / 0.8); }
+.tool-badge-status.error { background: oklch(0.65 0.22 25 / 0.85); }
+.tool-badge-status.pending { background: oklch(0.78 0.16 75 / 0.85); }
 
 /* Overflow badge - "+X more" */
 .tool-badge.tool-overflow {
@@ -1784,8 +1776,8 @@ mod tests {
 
         // Tool badge base styles
         assert!(bundle.critical_css.contains(".tool-badge"));
-        assert!(bundle.critical_css.contains("min-width: 28px"));
-        assert!(bundle.critical_css.contains("height: 28px"));
+        assert!(bundle.critical_css.contains("min-width: 24px"));
+        assert!(bundle.critical_css.contains("height: 24px"));
 
         // Status variants
         assert!(bundle.critical_css.contains(".tool-status-success"));
