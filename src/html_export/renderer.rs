@@ -156,14 +156,10 @@ impl ToolStatus {
 // ============================================
 // Message Grouping Types for Consolidated Rendering
 // ============================================
-// NOTE: These types are used by the message grouping algorithm (Task 1c6z)
-// and renderer updates (Task 27t2). Allow dead_code until integration.
-
 /// Type of message group for rendering decisions.
 ///
 /// Determines how a group of related messages should be styled and displayed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum MessageGroupType {
     /// User-initiated message (question, instruction, etc.)
     User,
@@ -175,7 +171,6 @@ pub enum MessageGroupType {
     ToolOnly,
 }
 
-#[allow(dead_code)]
 impl MessageGroupType {
     /// Get the CSS class for this group type.
     pub fn css_class(&self) -> &'static str {
@@ -203,7 +198,6 @@ impl MessageGroupType {
 /// Represents the output from a tool execution, paired with metadata
 /// for correlation and status tracking.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ToolResult {
     /// Tool name this result responds to.
     pub tool_name: String,
@@ -215,7 +209,6 @@ pub struct ToolResult {
     pub correlation_id: Option<String>,
 }
 
-#[allow(dead_code)]
 impl ToolResult {
     /// Create a new tool result.
     pub fn new(
@@ -248,7 +241,6 @@ impl ToolResult {
 /// Keeps a tool invocation together with its response, enabling
 /// consolidated rendering of the complete tool interaction.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ToolCallWithResult {
     /// The original tool call.
     pub call: ToolCall,
@@ -258,7 +250,6 @@ pub struct ToolCallWithResult {
     pub correlation_id: Option<String>,
 }
 
-#[allow(dead_code)]
 impl ToolCallWithResult {
     /// Create a new tool call without a result yet.
     pub fn new(call: ToolCall) -> Self {
@@ -308,7 +299,6 @@ impl ToolCallWithResult {
 /// This enables rendering an entire interaction as a cohesive block rather than
 /// separate messages.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct MessageGroup {
     /// Group type for rendering decisions.
     pub group_type: MessageGroupType,
@@ -322,7 +312,6 @@ pub struct MessageGroup {
     pub end_timestamp: Option<String>,
 }
 
-#[allow(dead_code)]
 impl MessageGroup {
     /// Create a new message group with a primary message.
     pub fn new(primary: Message, group_type: MessageGroupType) -> Self {
@@ -1160,7 +1149,7 @@ fn render_content(content: &str, _options: &RenderOptions) -> String {
 }
 
 /// Render a code block with optional syntax highlighting.
-#[allow(dead_code)]
+#[allow(dead_code)] // Used in tests; kept as utility for future non-markdown rendering paths
 fn render_code_block(content: &str, lang: &str, options: &RenderOptions) -> String {
     trace!(
         component = "renderer",
@@ -1191,7 +1180,7 @@ fn render_code_block(content: &str, lang: &str, options: &RenderOptions) -> Stri
 }
 
 /// Render inline code (backticks).
-#[allow(dead_code)]
+#[allow(dead_code)] // Used in tests; kept as utility for future non-markdown rendering paths
 fn render_inline_code(text: &str) -> String {
     let mut result = String::new();
     let chars = text.chars();
@@ -1230,7 +1219,7 @@ fn render_inline_code(text: &str) -> String {
 /// NOTE: This function expects already HTML-escaped text as input (from render_content).
 /// The URL is NOT re-escaped since it's already safe. The browser will decode HTML
 /// entities in href attributes after parsing, so `&amp;` becomes `&` in the actual URL.
-#[allow(dead_code)]
+#[allow(dead_code)] // Used in tests; kept as utility for future non-markdown rendering paths
 fn render_links(text: &str) -> String {
     // Simple URL detection - matches http:// and https://
     let mut result = String::new();
