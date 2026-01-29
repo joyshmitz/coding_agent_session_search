@@ -596,10 +596,11 @@ const WorldClass = {
         this.floatingNav = $('#floating-nav');
         this.initFloatingNav();
         this.initIntersectionObserver();
-        // Only bind once to avoid duplicates after decryption re-init
+        this.initMessageLinks();
+        // Bind document/window-level handlers only once to avoid duplicates
+        // after decryption re-init (these targets survive innerHTML replacement)
         if (!this._initialized) {
             this.initKeyboardNav();
-            this.initMessageLinks();
             this.initScrollHandler();
             this.initShareButton();
             this._initialized = true;
