@@ -3384,7 +3384,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  (global) --verbose/-v  Enable debug logs (overrides auto-quiet)".to_string(),
             "  Tip: `--robot-docs=<topic>` is normalized to `robot-docs <topic>`; globals can appear before/after subcommands.".to_string(),
             "  cass search <query> [OPTIONS]".to_string(),
-            "    --agent A         Filter by agent (codex, claude_code, gemini, opencode, amp, cline)".to_string(),
+            "    --agent A         Filter by agent (codex, claude_code, gemini, vibe, opencode, amp, cline)".to_string(),
             "    --workspace W     Filter by workspace path".to_string(),
             "    --limit N         Max results (default: 10)".to_string(),
             "    --offset N        Pagination offset (default: 0)".to_string(),
@@ -5820,6 +5820,7 @@ fn run_diag(
     let cline_path = config_dir.join("Code/User/globalStorage/saoudrizwan.claude-dev");
     let gemini_path = home.join(".gemini/tmp");
     let clawdbot_path = home.join(".clawdbot/sessions");
+    let vibe_path = home.join(".vibe/logs/session");
     let opencode_path = home.join(".opencode");
     let amp_path = config_dir.join("Code/User/globalStorage/sourcegraph.amp");
     let cursor_path = crate::connectors::cursor::CursorConnector::app_support_dir()
@@ -5833,6 +5834,7 @@ fn run_diag(
         ("cline", &cline_path, cline_path.exists()),
         ("gemini", &gemini_path, gemini_path.exists()),
         ("clawdbot", &clawdbot_path, clawdbot_path.exists()),
+        ("vibe", &vibe_path, vibe_path.exists()),
         ("opencode", &opencode_path, opencode_path.exists()),
         ("amp", &amp_path, amp_path.exists()),
         ("cursor", &cursor_path, cursor_path.exists()),
@@ -7871,6 +7873,7 @@ fn run_capabilities(json: bool) -> CliResult<()> {
             "claude_code".to_string(),
             "gemini".to_string(),
             "clawdbot".to_string(),
+            "vibe".to_string(),
             "opencode".to_string(),
             "amp".to_string(),
             "cline".to_string(),
@@ -10173,6 +10176,8 @@ fn run_export_html(
         agent_name = Some("cursor".to_string());
     } else if path_str.contains(".gemini") {
         agent_name = Some("gemini".to_string());
+    } else if path_str.contains(".vibe") {
+        agent_name = Some("vibe".to_string());
     }
 
     // Extract workspace from path

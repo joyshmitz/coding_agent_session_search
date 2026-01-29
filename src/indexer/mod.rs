@@ -18,6 +18,7 @@ use crate::connectors::{
     claude_code::ClaudeCodeConnector, clawdbot::ClawdbotConnector, cline::ClineConnector,
     codex::CodexConnector, cursor::CursorConnector, factory::FactoryConnector,
     gemini::GeminiConnector, opencode::OpenCodeConnector, pi_agent::PiAgentConnector,
+    vibe::VibeConnector,
 };
 use crate::search::tantivy::{TantivyIndex, index_dir, schema_hash_matches};
 use crate::search::vector_index::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_USER};
@@ -973,6 +974,7 @@ pub fn get_connector_factories() -> Vec<(&'static str, fn() -> Box<dyn Connector
         ("gemini", || Box::new(GeminiConnector::new())),
         ("claude", || Box::new(ClaudeCodeConnector::new())),
         ("clawdbot", || Box::new(ClawdbotConnector::new())),
+        ("vibe", || Box::new(VibeConnector::new())),
         ("opencode", || Box::new(OpenCodeConnector::new())),
         ("amp", || Box::new(AmpConnector::new())),
         ("aider", || Box::new(AiderConnector::new())),
@@ -1024,6 +1026,7 @@ impl ConnectorKind {
             "gemini" => Some(Self::Gemini),
             "claude" => Some(Self::Claude),
             "clawdbot" => Some(Self::Clawdbot),
+            "vibe" => Some(Self::Vibe),
             "amp" => Some(Self::Amp),
             "opencode" => Some(Self::OpenCode),
             "aider" => Some(Self::Aider),
@@ -1044,6 +1047,7 @@ impl ConnectorKind {
             Self::Gemini => Box::new(GeminiConnector::new()),
             Self::Claude => Box::new(ClaudeCodeConnector::new()),
             Self::Clawdbot => Box::new(ClawdbotConnector::new()),
+            Self::Vibe => Box::new(VibeConnector::new()),
             Self::Amp => Box::new(AmpConnector::new()),
             Self::OpenCode => Box::new(OpenCodeConnector::new()),
             Self::Aider => Box::new(AiderConnector::new()),
@@ -1294,6 +1298,8 @@ enum ConnectorKind {
     Claude,
     #[serde(rename = "cb", alias = "Clawdbot")]
     Clawdbot,
+    #[serde(rename = "vb", alias = "Vibe")]
+    Vibe,
     #[serde(rename = "am", alias = "Amp")]
     Amp,
     #[serde(rename = "oc", alias = "OpenCode")]
