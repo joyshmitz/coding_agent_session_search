@@ -32,7 +32,9 @@
 //!     "target": "local",
 //!     "output_dir": "./dist",
 //!     "repo": "my-archive",
-//!     "branch": "gh-pages"
+//!     "branch": "gh-pages",
+//!     "account_id": "env:CLOUDFLARE_ACCOUNT_ID",
+//!     "api_token": "env:CLOUDFLARE_API_TOKEN"
 //!   }
 //! }
 //! ```
@@ -438,7 +440,8 @@ impl PagesConfig {
             );
         }
 
-        if self.deployment.target.to_lowercase() == "cloudflare" {
+        let target = self.deployment.target.to_lowercase();
+        if target == "cloudflare" {
             let account_id_set = self.deployment.account_id.is_some();
             let api_token_set = self.deployment.api_token.is_some();
             if account_id_set ^ api_token_set {
@@ -447,6 +450,11 @@ impl PagesConfig {
                         .to_string(),
                 );
             }
+        } else if self.deployment.account_id.is_some() || self.deployment.api_token.is_some() {
+            warnings.push(
+                "deployment.account_id/api_token are set but deployment.target is not cloudflare; these values will be ignored."
+                    .to_string(),
+            );
         }
 
         // Validate time formats
