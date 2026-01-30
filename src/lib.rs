@@ -564,7 +564,7 @@ pub enum Commands {
         #[arg(long)]
         source: Option<String>,
     },
-    /// Export encrypted searchable archive for GitHub Pages (P4.1)
+    /// Export encrypted searchable archive for static hosting (P4.x)
     Pages {
         /// Export only (skip wizard and encryption) to specified directory
         #[arg(long)]
@@ -593,6 +593,26 @@ pub enum Commands {
         /// Path mode: relative (default), basename, full, hash
         #[arg(long, value_enum, default_value_t = crate::pages::export::PathMode::Relative)]
         path_mode: crate::pages::export::PathMode,
+
+        /// Deployment target: local, github, cloudflare
+        #[arg(long, value_enum)]
+        target: Option<PagesDeployTarget>,
+
+        /// Cloudflare project name (also used for GitHub repo name)
+        #[arg(long, alias = "repo")]
+        project: Option<String>,
+
+        /// Cloudflare production branch (default: main)
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Cloudflare account ID (or CLOUDFLARE_ACCOUNT_ID env)
+        #[arg(long)]
+        account_id: Option<String>,
+
+        /// Cloudflare API token (or CLOUDFLARE_API_TOKEN env)
+        #[arg(long)]
+        api_token: Option<String>,
 
         /// Dry run (don't write files)
         #[arg(long)]
@@ -1048,6 +1068,37 @@ pub enum TimelineGrouping {
     Day,
     /// No grouping (flat list)
     None,
+}
+
+/// Deployment target for pages export.
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum PagesDeployTarget {
+    /// Local export only
+    Local,
+    /// GitHub Pages deployment
+    #[value(name = "github")]
+    GitHub,
+    /// Cloudflare Pages deployment
+    #[value(name = "cloudflare")]
+    Cloudflare,
+}
+
+impl PagesDeployTarget {
+    fn to_wizard_target(self) -> crate::pages::wizard::DeployTarget {
+        match self {
+            PagesDeployTarget::GitHub => crate::pages::wizard::DeployTarget::GitHubPages,
+            PagesDeployTarget::Cloudflare => crate::pages::wizard::DeployTarget::CloudflarePages,
+            PagesDeployTarget::Local => crate::pages::wizard::DeployTarget::Local,
+        }
+    }
+
+    fn as_config_value(self) -> &'static str {
+        match self {
+            PagesDeployTarget::GitHub => "github",
+            PagesDeployTarget::Cloudflare => "cloudflare",
+            PagesDeployTarget::Local => "local",
+        }
+    }
 }
 
 /// Aggregation field types for --aggregate flag
@@ -2419,6 +2470,11 @@ async fn execute_cli(
                     since,
                     until,
                     path_mode,
+                    target,
+                    project,
+                    branch,
+                    account_id,
+                    api_token,
                     dry_run,
                     scan_secrets,
                     fail_on_secrets,
@@ -2456,6 +2512,22 @@ async fn execute_cli(
                             ),
                             retryable: false,
                         })?;
+
+                        if let Some(target) = target {
+                            pages_config.deployment.target = target.as_config_value().to_string();
+                        }
+                        if let Some(project) = project.as_ref() {
+                            pages_config.deployment.repo = Some(project.to_string());
+                        }
+                        if let Some(branch) = branch.as_ref() {
+                            pages_config.deployment.branch = Some(branch.to_string());
+                        }
+                        if let Some(account_id) = account_id.as_ref() {
+                            pages_config.deployment.account_id = Some(account_id.to_string());
+                        }
+                        if let Some(api_token) = api_token.as_ref() {
+                            pages_config.deployment.api_token = Some(api_token.to_string());
+                        }
 
                         // Resolve environment variables
                         pages_config.resolve_env_vars().map_err(|e| CliError {
@@ -2781,6 +2853,22 @@ async fn execute_cli(
                             retryable: false,
                         })?;
                     } else {
+                        if (account_id.is_some() && api_token.is_none())
+                            || (api_token.is_some() && account_id.is_none())
+                        {
+                            return Err(CliError {
+                                code: 2,
+                                kind: "pages",
+                                message: "Both --account-id and --api-token are required together"
+                                    .to_string(),
+                                hint: Some(
+                                    "Provide both flags (or use CLOUDFLARE_* env vars) when deploying to Cloudflare."
+                                        .to_string(),
+                                ),
+                                retryable: false,
+                            });
+                        }
+
                         // Wizard mode: pass flags
                         let mut wizard = crate::pages::wizard::PagesWizard::new();
                         if no_encryption {
@@ -2788,6 +2876,21 @@ async fn execute_cli(
                         }
                         if include_attachments {
                             wizard.set_include_attachments(true);
+                        }
+                        if let Some(target) = target {
+                            wizard.set_deploy_target(target.to_wizard_target());
+                        }
+                        if let Some(project) = project {
+                            wizard.set_repo_name(project);
+                        }
+                        if let Some(branch) = branch {
+                            wizard.set_cloudflare_branch(branch);
+                        }
+                        if let Some(account_id) = account_id {
+                            wizard.set_cloudflare_account_id(account_id);
+                        }
+                        if let Some(api_token) = api_token {
+                            wizard.set_cloudflare_api_token(api_token);
                         }
                         wizard.run().map_err(|e| CliError {
                             code: 9,
@@ -8392,19 +8495,26 @@ fn run_config_based_export(
                 .repo_name
                 .clone()
                 .unwrap_or_else(|| "cass-archive".to_string());
-            let branch = config
-                .deployment
-                .branch
+            let branch = wizard_state
+                .cloudflare_branch
                 .clone()
                 .unwrap_or_else(|| "main".to_string());
+            let account_id = wizard_state
+                .cloudflare_account_id
+                .clone()
+                .or_else(|| dotenvy::var("CLOUDFLARE_ACCOUNT_ID").ok());
+            let api_token = wizard_state
+                .cloudflare_api_token
+                .clone()
+                .or_else(|| dotenvy::var("CLOUDFLARE_API_TOKEN").ok());
             let deployer = crate::pages::deploy_cloudflare::CloudflareDeployer::new(
                 crate::pages::deploy_cloudflare::CloudflareConfig {
                     project_name: project_name.clone(),
                     custom_domain: None,
                     create_if_missing: true,
                     branch,
-                    account_id: dotenvy::var("CLOUDFLARE_ACCOUNT_ID").ok(),
-                    api_token: dotenvy::var("CLOUDFLARE_API_TOKEN").ok(),
+                    account_id,
+                    api_token,
                 },
             );
             Some(serde_json::to_value(

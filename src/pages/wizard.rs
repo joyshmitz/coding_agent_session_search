@@ -70,6 +70,9 @@ pub struct WizardState {
     pub target: DeployTarget,
     pub output_dir: PathBuf,
     pub repo_name: Option<String>,
+    pub cloudflare_branch: Option<String>,
+    pub cloudflare_account_id: Option<String>,
+    pub cloudflare_api_token: Option<String>,
 
     // Database path
     pub db_path: PathBuf,
@@ -118,6 +121,9 @@ impl Default for WizardState {
             target: DeployTarget::Local,
             output_dir: PathBuf::from("cass-export"),
             repo_name: None,
+            cloudflare_branch: None,
+            cloudflare_account_id: None,
+            cloudflare_api_token: None,
             db_path,
             exclusions: ExclusionSet::new(),
             last_summary: None,
@@ -161,6 +167,31 @@ impl PagesWizard {
     /// Set whether to include attachments in the export.
     pub fn set_include_attachments(&mut self, include: bool) {
         self.state.include_attachments = include;
+    }
+
+    /// Preselect a deployment target for the wizard.
+    pub fn set_deploy_target(&mut self, target: DeployTarget) {
+        self.state.target = target;
+    }
+
+    /// Prepopulate the repository/project name.
+    pub fn set_repo_name(&mut self, name: impl Into<String>) {
+        self.state.repo_name = Some(name.into());
+    }
+
+    /// Set Cloudflare deployment branch (defaults to "main" if unset).
+    pub fn set_cloudflare_branch(&mut self, branch: impl Into<String>) {
+        self.state.cloudflare_branch = Some(branch.into());
+    }
+
+    /// Set Cloudflare account ID for API-token auth.
+    pub fn set_cloudflare_account_id(&mut self, account_id: impl Into<String>) {
+        self.state.cloudflare_account_id = Some(account_id.into());
+    }
+
+    /// Set Cloudflare API token for API-token auth.
+    pub fn set_cloudflare_api_token(&mut self, api_token: impl Into<String>) {
+        self.state.cloudflare_api_token = Some(api_token.into());
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -610,9 +641,15 @@ impl PagesWizard {
             "Cloudflare Pages (requires wrangler CLI)",
         ];
 
+        let default_target = match self.state.target {
+            DeployTarget::GitHubPages => 1,
+            DeployTarget::CloudflarePages => 2,
+            DeployTarget::Local => 0,
+        };
+
         let target_selection = Select::with_theme(theme)
             .with_prompt("Where would you like to deploy?")
-            .default(0)
+            .default(default_target)
             .items(&targets)
             .interact()?;
 
@@ -633,7 +670,7 @@ impl PagesWizard {
         self.state.output_dir = PathBuf::from(
             Input::<String>::with_theme(theme)
                 .with_prompt("Output directory")
-                .default("cass-export".to_string())
+                .default(self.state.output_dir.to_string_lossy().to_string())
                 .interact_text()?,
         );
 
@@ -650,7 +687,7 @@ impl PagesWizard {
             self.state.repo_name = Some(
                 Input::<String>::with_theme(theme)
                     .with_prompt("Repository/project name")
-                    .default(default_repo)
+                    .default(self.state.repo_name.clone().unwrap_or(default_repo))
                     .interact_text()?,
             );
 
@@ -1921,13 +1958,28 @@ impl PagesWizard {
                     .unwrap_or_else(|| "cass-archive".to_string());
 
                 // Configure the deployer
+                let branch = self
+                    .state
+                    .cloudflare_branch
+                    .clone()
+                    .unwrap_or_else(|| "main".to_string());
+                let account_id = self
+                    .state
+                    .cloudflare_account_id
+                    .clone()
+                    .or_else(|| dotenvy::var("CLOUDFLARE_ACCOUNT_ID").ok());
+                let api_token = self
+                    .state
+                    .cloudflare_api_token
+                    .clone()
+                    .or_else(|| dotenvy::var("CLOUDFLARE_API_TOKEN").ok());
                 let deployer = CloudflareDeployer::new(CloudflareConfig {
                     project_name: project_name.clone(),
                     custom_domain: None,
                     create_if_missing: true,
-                    branch: "main".to_string(),
-                    account_id: dotenvy::var("CLOUDFLARE_ACCOUNT_ID").ok(),
-                    api_token: dotenvy::var("CLOUDFLARE_API_TOKEN").ok(),
+                    branch,
+                    account_id,
+                    api_token,
                 });
 
                 // Check prerequisites first

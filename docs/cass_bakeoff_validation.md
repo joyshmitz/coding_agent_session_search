@@ -104,3 +104,75 @@ MODE=semantic MODEL=minilm DAEMON=1 ./scripts/bakeoff/cass_validation_e2e.sh
   - ndcg_at_10 below threshold (0.0701 < 0.25)
   - latency_p95 above threshold (13155.56ms > 500.0ms)
 - Notes: reranker model not installed; rerank disabled for this run
+
+## Run 20260130T030942Z
+- Timestamp: 2026-01-30T03:10:05.196868Z
+- Model: auto
+- Mode: lexical
+- Rerank: False (reranker: None)
+- Daemon: False (no_daemon: False)
+- NDCG@10: 0.0
+- Latency p50: 339 ms
+- Latency p95: 432 ms
+- Eligible: False
+- Warnings:
+  - ndcg_at_10 below threshold (0.0000 < 0.25)
+  - cutoff exception: STRICT=0
+
+## Run 20260130T031632Z
+- Timestamp: 2026-01-30T03:16:52.362967Z
+- Model: auto
+- Mode: lexical
+- Rerank: False (reranker: None)
+- Daemon: False (no_daemon: False)
+- NDCG@10: 0.0
+- Latency p50: 928 ms
+- Latency p95: 1091 ms
+- Eligible: False
+- Warnings:
+  - ndcg_at_10 below threshold (0.0000 < 0.25)
+  - latency_p95 above threshold (1091.17ms > 500.0ms)
+  - cutoff exception: STRICT=0
+
+## Run 20260130T031904Z
+- Timestamp: 2026-01-30T03:19:27.285658Z
+- Model: auto
+- Mode: lexical
+- Rerank: False (reranker: None)
+- Daemon: False (no_daemon: False)
+- NDCG@10: 0.0
+- Latency p50: 810 ms
+- Latency p95: 884 ms
+- Eligible: False
+- Warnings:
+  - ndcg_at_10 below threshold (0.0000 < 0.25)
+  - latency_p95 above threshold (883.81ms > 500.0ms)
+  - cutoff exception: STRICT=0
+
+## Run 20260130T032108Z
+- Timestamp: 2026-01-30T03:21:24.076651Z
+- Model: auto
+- Mode: lexical
+- Rerank: False (reranker: None)
+- Daemon: False (no_daemon: False)
+- NDCG@10: 0.041154
+- Latency p50: 224 ms
+- Latency p95: 270 ms
+- Eligible: False
+- Warnings:
+  - ndcg_at_10 below threshold (0.0412 < 0.25)
+  - cutoff exception: STRICT=0
+
+## Run 20260130T032714Z
+- Timestamp: 2026-01-30T03:27:24.220879Z
+- Model: auto
+- Mode: semantic
+- Rerank: False (reranker: None)
+- Daemon: False (no_daemon: True)
+- NDCG@10: 0.117723
+- Latency p50: 255 ms
+- Latency p95: 454 ms
+- Eligible: False
+- Warnings:
+  - ndcg_at_10 below threshold (0.1177 < 0.25)
+  - cutoff exception: STRICT=0

@@ -41,6 +41,9 @@ fn test_wizard_state_default() {
     assert!(matches!(state.target, DeployTarget::Local));
     assert_eq!(state.output_dir, PathBuf::from("cass-export"));
     assert!(state.repo_name.is_none());
+    assert!(state.cloudflare_branch.is_none());
+    assert!(state.cloudflare_account_id.is_none());
+    assert!(state.cloudflare_api_token.is_none());
 
     // Default exclusions
     assert!(state.exclusions.excluded_conversations.is_empty());

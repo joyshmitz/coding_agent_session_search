@@ -128,6 +128,8 @@ pub struct ResolvedDeployment {
     pub output_dir: PathBuf,
     pub repo: Option<String>,
     pub branch: Option<String>,
+    pub account_id: Option<String>,
+    pub api_token_set: bool,
 }
 
 /// Root pages configuration.
@@ -269,13 +271,21 @@ pub struct DeploymentConfig {
     #[serde(default = "default_output_dir")]
     pub output_dir: String,
 
-    /// Repository name for GitHub Pages deployment.
+    /// Repository/project name for GitHub or Cloudflare Pages deployment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
 
     /// Branch for GitHub Pages deployment (default: gh-pages).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+
+    /// Cloudflare account ID (for API-token auth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+
+    /// Cloudflare API token (for API-token auth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
 }
 
 impl Default for DeploymentConfig {
@@ -285,6 +295,8 @@ impl Default for DeploymentConfig {
             output_dir: default_output_dir(),
             repo: None,
             branch: None,
+            account_id: None,
+            api_token: None,
         }
     }
 }
@@ -349,6 +361,24 @@ impl PagesConfig {
                 .map_err(|_| ConfigError::EnvVarNotFound(env_var.to_string()))?;
         }
 
+        if let Some(ref account_id) = self.deployment.account_id
+            && let Some(env_var) = account_id.strip_prefix("env:")
+        {
+            self.deployment.account_id = Some(
+                dotenvy::var(env_var)
+                    .map_err(|_| ConfigError::EnvVarNotFound(env_var.to_string()))?,
+            );
+        }
+
+        if let Some(ref api_token) = self.deployment.api_token
+            && let Some(env_var) = api_token.strip_prefix("env:")
+        {
+            self.deployment.api_token = Some(
+                dotenvy::var(env_var)
+                    .map_err(|_| ConfigError::EnvVarNotFound(env_var.to_string()))?,
+            );
+        }
+
         Ok(())
     }
 
@@ -404,6 +434,15 @@ impl PagesConfig {
             errors.push(
                 "deployment.repo is required when target is 'github'. \
                  Specify the repository name for GitHub Pages deployment."
+                    .to_string(),
+            );
+        }
+
+        let account_id_set = self.deployment.account_id.is_some();
+        let api_token_set = self.deployment.api_token.is_some();
+        if account_id_set ^ api_token_set {
+            errors.push(
+                "deployment.account_id and deployment.api_token must both be set for Cloudflare API-token auth (use env:VAR syntax if needed)."
                     .to_string(),
             );
         }
@@ -522,6 +561,8 @@ impl PagesConfig {
                 output_dir: PathBuf::from(&self.deployment.output_dir),
                 repo: self.deployment.repo.clone(),
                 branch: self.deployment.branch.clone(),
+                account_id: self.deployment.account_id.clone(),
+                api_token_set: self.deployment.api_token.is_some(),
             },
         }
     }
@@ -574,6 +615,9 @@ impl PagesConfig {
             no_encryption: self.encryption.no_encryption,
             unencrypted_confirmed: self.encryption.i_understand_risks,
             include_attachments: self.bundle.include_attachments,
+            cloudflare_branch: self.deployment.branch.clone(),
+            cloudflare_account_id: self.deployment.account_id.clone(),
+            cloudflare_api_token: self.deployment.api_token.clone(),
             final_site_dir: None,
         })
     }
@@ -629,7 +673,9 @@ pub fn example_config() -> &'static str {
     "target": "local",
     "output_dir": "./cass-export",
     "repo": null,
-    "branch": null
+    "branch": null,
+    "account_id": null,
+    "api_token": null
   }
 }"#
 }
@@ -710,6 +756,29 @@ mod tests {
     }
 
     #[test]
+    fn test_env_var_resolution_deployment_credentials() {
+        // SAFETY: This test runs in isolation and the env vars are cleaned up after use
+        unsafe {
+            std::env::set_var("TEST_CF_ACCOUNT_ID", "acc123");
+            std::env::set_var("TEST_CF_API_TOKEN", "token456");
+        }
+
+        let mut config = PagesConfig::default();
+        config.deployment.account_id = Some("env:TEST_CF_ACCOUNT_ID".to_string());
+        config.deployment.api_token = Some("env:TEST_CF_API_TOKEN".to_string());
+        config.resolve_env_vars().unwrap();
+
+        assert_eq!(config.deployment.account_id, Some("acc123".to_string()));
+        assert_eq!(config.deployment.api_token, Some("token456".to_string()));
+
+        // SAFETY: Cleanup of test env vars
+        unsafe {
+            std::env::remove_var("TEST_CF_ACCOUNT_ID");
+            std::env::remove_var("TEST_CF_API_TOKEN");
+        }
+    }
+
+    #[test]
     fn test_env_var_not_found() {
         let mut config = PagesConfig::default();
         config.encryption.password = Some("env:NONEXISTENT_VAR_12345".to_string());
@@ -735,6 +804,23 @@ mod tests {
         let result = config.validate();
         assert!(!result.valid);
         assert!(result.errors.iter().any(|e| e.contains("target")));
+    }
+
+    #[test]
+    fn test_validate_partial_cloudflare_credentials() {
+        let mut config = PagesConfig::default();
+        config.encryption.password = Some("test123".to_string());
+        config.deployment.target = "cloudflare".to_string();
+        config.deployment.account_id = Some("acc-only".to_string());
+
+        let result = config.validate();
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("account_id") && e.contains("api_token"))
+        );
     }
 
     #[test]

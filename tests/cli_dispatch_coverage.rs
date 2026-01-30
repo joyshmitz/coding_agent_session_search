@@ -569,7 +569,11 @@ fn pages_help_shows_options() {
         .stdout(contains("searchable archive"))
         .stdout(contains("--export-only"))
         .stdout(contains("--verify"))
-        .stdout(contains("--no-encryption"));
+        .stdout(contains("--no-encryption"))
+        .stdout(contains("--target"))
+        .stdout(contains("--project"))
+        .stdout(contains("--account-id"))
+        .stdout(contains("--api-token"));
 }
 
 #[test]

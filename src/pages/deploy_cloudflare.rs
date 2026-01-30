@@ -48,7 +48,7 @@ impl Prerequisites {
         }
         if !self.wrangler_authenticated && !self.api_credentials_present {
             missing.push(
-                "wrangler CLI not authenticated and no API token provided (set CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID)",
+                "wrangler CLI not authenticated and no API token provided (use --account-id/--api-token or set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN)",
             );
         }
         missing
@@ -164,14 +164,26 @@ impl CloudflareDeployer {
             (false, None)
         };
 
+        let account_id = self
+            .config
+            .account_id
+            .clone()
+            .or_else(|| dotenvy::var("CLOUDFLARE_ACCOUNT_ID").ok());
+        let api_token = self
+            .config
+            .api_token
+            .clone()
+            .or_else(|| dotenvy::var("CLOUDFLARE_API_TOKEN").ok());
+        let api_credentials_present = account_id.is_some() && api_token.is_some();
+
         let disk_space_mb = get_available_space_mb().unwrap_or(0);
 
         Ok(Prerequisites {
             wrangler_version,
             wrangler_authenticated,
             account_email,
-            api_credentials_present: false,
-            account_id: None,
+            api_credentials_present,
+            account_id,
             disk_space_mb,
         })
     }
@@ -181,6 +193,7 @@ impl CloudflareDeployer {
         let headers_content = r#"/*
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: require-corp
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none';
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: no-referrer
@@ -224,6 +237,19 @@ impl CloudflareDeployer {
         mut progress: impl FnMut(&str, &str),
     ) -> Result<DeployResult> {
         let bundle_dir = bundle_dir.as_ref();
+        let branch = self.config.branch.clone();
+        let account_id = self
+            .config
+            .account_id
+            .clone()
+            .or_else(|| dotenvy::var("CLOUDFLARE_ACCOUNT_ID").ok());
+        let api_token = self
+            .config
+            .api_token
+            .clone()
+            .or_else(|| dotenvy::var("CLOUDFLARE_API_TOKEN").ok());
+        let account_id_ref = account_id.as_deref();
+        let api_token_ref = api_token.as_deref();
 
         // Step 1: Check prerequisites
         progress("prereq", "Checking prerequisites...");
@@ -248,17 +274,28 @@ impl CloudflareDeployer {
         // Step 4: Create project if needed
         progress("project", "Checking Cloudflare Pages project...");
         if self.config.create_if_missing {
-            let exists = check_project_exists(&self.config.project_name);
+            let exists =
+                check_project_exists(&self.config.project_name, account_id_ref, api_token_ref);
             if !exists {
                 progress("create", "Creating new Pages project...");
-                create_project(&self.config.project_name)?;
+                create_project(
+                    &self.config.project_name,
+                    &branch,
+                    account_id_ref,
+                    api_token_ref,
+                )?;
             }
         }
 
         // Step 5: Deploy using wrangler
         progress("deploy", "Deploying to Cloudflare Pages...");
-        let (pages_url, deployment_id) =
-            deploy_with_wrangler(&deploy_dir, &self.config.project_name)?;
+        let (pages_url, deployment_id) = deploy_with_wrangler(
+            &deploy_dir,
+            &self.config.project_name,
+            &branch,
+            account_id_ref,
+            api_token_ref,
+        )?;
 
         // Step 6: Configure custom domain if specified
         if let Some(ref domain) = self.config.custom_domain {
@@ -266,7 +303,12 @@ impl CloudflareDeployer {
                 "domain",
                 &format!("Configuring custom domain: {}...", domain),
             );
-            configure_custom_domain(&self.config.project_name, domain)?;
+            configure_custom_domain(
+                &self.config.project_name,
+                domain,
+                account_id_ref,
+                api_token_ref,
+            )?;
         }
 
         progress("complete", "Deployment complete!");
@@ -298,6 +340,15 @@ fn create_temp_dir() -> Result<PathBuf> {
     let temp_dir = temp_base.join(dir_name);
     std::fs::create_dir_all(&temp_dir)?;
     Ok(temp_dir)
+}
+
+fn apply_api_credentials(cmd: &mut Command, account_id: Option<&str>, api_token: Option<&str>) {
+    if let Some(id) = account_id {
+        cmd.env("CLOUDFLARE_ACCOUNT_ID", id);
+    }
+    if let Some(token) = api_token {
+        cmd.env("CLOUDFLARE_API_TOKEN", token);
+    }
 }
 
 /// Get wrangler CLI version
@@ -364,10 +415,16 @@ fn get_available_space_mb() -> Option<u64> {
 }
 
 /// Check if Cloudflare Pages project exists
-fn check_project_exists(project_name: &str) -> bool {
-    Command::new("wrangler")
-        .args(["pages", "project", "list"])
-        .output()
+fn check_project_exists(
+    project_name: &str,
+    account_id: Option<&str>,
+    api_token: Option<&str>,
+) -> bool {
+    let mut cmd = Command::new("wrangler");
+    cmd.args(["pages", "project", "list"]);
+    apply_api_credentials(&mut cmd, account_id, api_token);
+
+    cmd.output()
         .map(|out| {
             if out.status.success() {
                 let stdout = String::from_utf8_lossy(&out.stdout);
@@ -380,16 +437,24 @@ fn check_project_exists(project_name: &str) -> bool {
 }
 
 /// Create a new Cloudflare Pages project
-fn create_project(project_name: &str) -> Result<()> {
-    let output = Command::new("wrangler")
-        .args([
-            "pages",
-            "project",
-            "create",
-            project_name,
-            "--production-branch",
-            "main",
-        ])
+fn create_project(
+    project_name: &str,
+    branch: &str,
+    account_id: Option<&str>,
+    api_token: Option<&str>,
+) -> Result<()> {
+    let mut cmd = Command::new("wrangler");
+    cmd.args([
+        "pages",
+        "project",
+        "create",
+        project_name,
+        "--production-branch",
+        branch,
+    ]);
+    apply_api_credentials(&mut cmd, account_id, api_token);
+
+    let output = cmd
         .output()
         .context("Failed to run wrangler pages project create")?;
 
@@ -438,20 +503,31 @@ where
 }
 
 /// Deploy using wrangler CLI with retry logic
-fn deploy_with_wrangler(deploy_dir: &Path, project_name: &str) -> Result<(String, String)> {
+fn deploy_with_wrangler(
+    deploy_dir: &Path,
+    project_name: &str,
+    branch: &str,
+    account_id: Option<&str>,
+    api_token: Option<&str>,
+) -> Result<(String, String)> {
     let deploy_dir_str = deploy_dir
         .to_str()
         .context("Invalid deploy directory path")?;
 
     retry_with_backoff("wrangler deploy", || {
-        let output = Command::new("wrangler")
-            .args([
-                "pages",
-                "deploy",
-                deploy_dir_str,
-                "--project-name",
-                project_name,
-            ])
+        let mut cmd = Command::new("wrangler");
+        cmd.args([
+            "pages",
+            "deploy",
+            deploy_dir_str,
+            "--project-name",
+            project_name,
+            "--branch",
+            branch,
+        ]);
+        apply_api_credentials(&mut cmd, account_id, api_token);
+
+        let output = cmd
             .output()
             .context("Failed to run wrangler pages deploy")?;
 
@@ -499,21 +575,28 @@ fn deploy_with_wrangler(deploy_dir: &Path, project_name: &str) -> Result<(String
 }
 
 /// Configure custom domain for project
-fn configure_custom_domain(project_name: &str, domain: &str) -> Result<()> {
+fn configure_custom_domain(
+    project_name: &str,
+    domain: &str,
+    account_id: Option<&str>,
+    api_token: Option<&str>,
+) -> Result<()> {
     // Note: Custom domain configuration typically requires manual setup
     // in the Cloudflare dashboard due to DNS verification requirements.
     // This is a best-effort attempt using wrangler.
 
-    let output = Command::new("wrangler")
-        .args([
-            "pages",
-            "project",
-            "edit",
-            project_name,
-            "--custom-domain",
-            domain,
-        ])
-        .output();
+    let mut cmd = Command::new("wrangler");
+    cmd.args([
+        "pages",
+        "project",
+        "edit",
+        project_name,
+        "--custom-domain",
+        domain,
+    ]);
+    apply_api_credentials(&mut cmd, account_id, api_token);
+
+    let output = cmd.output();
 
     match output {
         Ok(out) if out.status.success() => Ok(()),
