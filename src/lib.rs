@@ -664,6 +664,32 @@ pub enum Commands {
     /// Manage semantic search models
     #[command(subcommand)]
     Models(ModelsCommand),
+    /// Import data from external sources
+    #[command(subcommand)]
+    Import(ImportCommand),
+}
+
+/// Subcommands for importing external data
+#[derive(Subcommand, Debug, Clone)]
+pub enum ImportCommand {
+    /// Import ChatGPT web export (conversations.json)
+    ///
+    /// Splits the exported conversations.json into individual files that
+    /// the ChatGPT connector can index without encryption keys.
+    /// After importing, run `cass index` to index the conversations.
+    Chatgpt {
+        /// Path to conversations.json from ChatGPT web export
+        #[arg(value_hint = ValueHint::FilePath)]
+        path: PathBuf,
+
+        /// Output directory (default: ChatGPT app support dir on macOS, or ~/.local/share/cass/chatgpt/ on Linux)
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+    },
 }
 
 /// Subcommands for managing remote sources (P5.x)
@@ -2186,7 +2212,8 @@ async fn execute_cli(
         | Commands::Diag { .. }
         | Commands::Status { .. }
         | Commands::View { .. }
-        | Commands::Pages { .. } => {
+        | Commands::Pages { .. }
+        | Commands::Import(..) => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_writer(std::io::stderr)
@@ -2929,9 +2956,163 @@ async fn execute_cli(
                         })?;
                     result?;
                 }
+                Commands::Import(subcmd) => {
+                    handle_import(subcmd).await?;
+                }
                 _ => {}
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn handle_import(cmd: ImportCommand) -> CliResult<()> {
+    match cmd {
+        ImportCommand::Chatgpt {
+            path,
+            output_dir,
+            json,
+        } => import_chatgpt_export(&path, output_dir.as_deref(), json).await,
+    }
+}
+
+async fn import_chatgpt_export(
+    export_path: &Path,
+    output_dir: Option<&Path>,
+    json_output: bool,
+) -> CliResult<()> {
+    use std::io::Write;
+
+    // Validate export file exists
+    if !export_path.exists() {
+        return Err(CliError {
+            code: 1,
+            kind: "io_error",
+            message: format!("Export file not found: {}", export_path.display()),
+            hint: Some(
+                "Provide the path to conversations.json from ChatGPT web export \
+                 (Settings \u{2192} Data Controls \u{2192} Export)"
+                    .into(),
+            ),
+            retryable: false,
+        });
+    }
+
+    // Determine output directory
+    let base_dir = if let Some(dir) = output_dir {
+        dir.to_path_buf()
+    } else {
+        // Try macOS ChatGPT app support dir first
+        #[cfg(target_os = "macos")]
+        {
+            dirs::home_dir()
+                .map(|h| h.join("Library/Application Support/com.openai.chat"))
+                .unwrap_or_else(|| {
+                    dirs::data_local_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join("cass/chatgpt")
+                })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("cass/chatgpt")
+        }
+    };
+
+    let conv_dir = base_dir.join("conversations-web-export");
+    std::fs::create_dir_all(&conv_dir).map_err(|e| CliError {
+        code: 1,
+        kind: "io_error",
+        message: format!("Failed to create output directory: {e}"),
+        hint: None,
+        retryable: false,
+    })?;
+
+    // Read and parse export file
+    let content = std::fs::read_to_string(export_path).map_err(|e| CliError {
+        code: 1,
+        kind: "io_error",
+        message: format!("Failed to read export file: {e}"),
+        hint: None,
+        retryable: false,
+    })?;
+
+    let conversations: Vec<serde_json::Value> =
+        serde_json::from_str(&content).map_err(|e| CliError {
+            code: 1,
+            kind: "parse_error",
+            message: format!("Failed to parse conversations.json: {e}"),
+            hint: Some("Expected a JSON array of conversation objects".into()),
+            retryable: false,
+        })?;
+
+    let total = conversations.len();
+    let mut imported = 0u64;
+    let mut skipped = 0u64;
+
+    for (i, conv) in conversations.iter().enumerate() {
+        // Extract conversation ID
+        let conv_id = conv
+            .get("id")
+            .or_else(|| conv.get("conversation_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("conv-{i}"));
+
+        let filepath = conv_dir.join(format!("{conv_id}.json"));
+
+        // Idempotent: skip if already exists
+        if filepath.exists() {
+            skipped += 1;
+            continue;
+        }
+
+        // Write individual conversation file
+        let mut file = std::fs::File::create(&filepath).map_err(|e| CliError {
+            code: 1,
+            kind: "io_error",
+            message: format!("Failed to write {}: {e}", filepath.display()),
+            hint: None,
+            retryable: false,
+        })?;
+        serde_json::to_writer(&mut file, conv).map_err(|e| CliError {
+            code: 1,
+            kind: "io_error",
+            message: format!("Failed to serialize conversation: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+        file.flush().map_err(|e| CliError {
+            code: 1,
+            kind: "io_error",
+            message: format!("Failed to flush: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+
+        imported += 1;
+    }
+
+    if json_output {
+        let result = serde_json::json!({
+            "success": true,
+            "total": total,
+            "imported": imported,
+            "skipped": skipped,
+            "output_dir": conv_dir.display().to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    } else {
+        println!("Import complete!");
+        println!("  Total conversations: {total}");
+        println!("  Newly imported:      {imported}");
+        println!("  Skipped (existing):  {skipped}");
+        println!("  Output directory:    {}", conv_dir.display());
+        println!();
+        println!("Next step: Run `cass index` to index the conversations.");
     }
 
     Ok(())
@@ -2966,24 +3147,25 @@ fn state_meta_json(
 
     // Use LazyDb to get timing/logging for state snapshot DB access
     let lazy = crate::storage::sqlite::LazyDb::new(db_path.to_path_buf());
-    if allow_db_open && db_exists {
-        if let Ok(conn) = lazy.get("state-meta") {
-            db_opened = true;
-            conversation_count = conn
-                .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
-                .unwrap_or(0);
-            message_count = conn
-                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
-                .unwrap_or(0);
-            last_indexed_at = conn
-                .query_row(
-                    "SELECT value FROM meta WHERE key = 'last_indexed_at'",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )
-                .ok()
-                .and_then(|s| s.parse::<i64>().ok());
-        }
+    if allow_db_open
+        && db_exists
+        && let Ok(conn) = lazy.get("state-meta")
+    {
+        db_opened = true;
+        conversation_count = conn
+            .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+            .unwrap_or(0);
+        message_count = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap_or(0);
+        last_indexed_at = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'last_indexed_at'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok());
     }
 
     if last_indexed_at.is_none() && index_exists {
@@ -3143,6 +3325,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Sources(..)) => "sources".to_string(),
         Some(Commands::Models(..)) => "models".to_string(),
         Some(Commands::Pages { .. }) => "pages".to_string(),
+        Some(Commands::Import(..)) => "import".to_string(),
         None => "(default)".to_string(),
     }
 }
@@ -3183,6 +3366,9 @@ fn is_robot_mode(command: &Commands) -> bool {
             | SourcesCommand::Discover { json, .. }
             | SourcesCommand::Setup { json, .. } => *json,
             _ => false,
+        },
+        Commands::Import(cmd) => match cmd {
+            ImportCommand::Chatgpt { json, .. } => *json || env_robot_mode,
         },
         _ => false,
     }
