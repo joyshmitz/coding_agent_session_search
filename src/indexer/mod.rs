@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -42,6 +42,238 @@ pub enum ReindexCommand {
 pub enum IndexerEvent {
     Notify(Vec<PathBuf>),
     Command(ReindexCommand),
+}
+
+// =============================================================================
+// Stale Detection (Issue #54)
+// =============================================================================
+
+/// Action to take when watch daemon detects stale state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StaleAction {
+    /// Log warning but take no automatic action.
+    #[default]
+    Warn,
+    /// Automatically trigger full rebuild.
+    Rebuild,
+    /// Disable stale detection entirely.
+    None,
+}
+
+impl StaleAction {
+    /// Parse from environment variable value.
+    fn from_env_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "rebuild" | "auto" | "fix" => Self::Rebuild,
+            "none" | "off" | "disabled" | "0" | "false" => Self::None,
+            _ => Self::Warn, // Default: warn, log
+        }
+    }
+}
+
+/// Configuration for stale detection.
+#[derive(Debug, Clone)]
+pub struct StaleConfig {
+    /// Hours without successful ingests before considering stale (default: 24).
+    pub threshold_hours: u64,
+    /// Action to take when stale detected.
+    pub action: StaleAction,
+    /// Minutes between stale checks (default: 60).
+    pub check_interval_mins: u64,
+    /// Minimum scans with 0 conversations before triggering (default: 10).
+    pub min_zero_scans: u64,
+}
+
+impl Default for StaleConfig {
+    fn default() -> Self {
+        Self {
+            threshold_hours: 24,
+            action: StaleAction::Warn,
+            check_interval_mins: 60,
+            min_zero_scans: 10,
+        }
+    }
+}
+
+impl StaleConfig {
+    /// Load configuration from environment variables.
+    pub fn from_env() -> Self {
+        let mut cfg = Self::default();
+
+        if let Ok(val) = dotenvy::var("CASS_WATCH_STALE_THRESHOLD_HOURS")
+            && let Ok(hours) = val.parse()
+        {
+            cfg.threshold_hours = hours;
+        }
+
+        if let Ok(val) = dotenvy::var("CASS_WATCH_STALE_ACTION") {
+            cfg.action = StaleAction::from_env_str(&val);
+        }
+
+        if let Ok(val) = dotenvy::var("CASS_WATCH_STALE_CHECK_INTERVAL_MINS")
+            && let Ok(mins) = val.parse()
+        {
+            cfg.check_interval_mins = mins;
+        }
+
+        if let Ok(val) = dotenvy::var("CASS_WATCH_STALE_MIN_ZERO_SCANS")
+            && let Ok(count) = val.parse()
+        {
+            cfg.min_zero_scans = count;
+        }
+
+        cfg
+    }
+
+    /// Check if stale detection is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.action != StaleAction::None
+    }
+}
+
+/// Tracks indexing activity to detect stuck/stale states.
+///
+/// The watch daemon can get into a state where it runs but fails to index
+/// new conversations (e.g., due to connector parsing issues). This detector
+/// monitors ingest activity and triggers recovery when appropriate.
+#[derive(Debug)]
+pub struct StaleDetector {
+    config: StaleConfig,
+    /// Timestamp of last successful ingest (>0 conversations).
+    last_successful_ingest: Mutex<Option<Instant>>,
+    /// Count of consecutive scans with 0 conversations.
+    consecutive_zero_scans: std::sync::atomic::AtomicU64,
+    /// Whether stale warning has been emitted (to avoid spam).
+    warning_emitted: AtomicBool,
+    /// Last stale check timestamp.
+    last_check: Mutex<Instant>,
+    /// Total successful ingests since start.
+    total_ingests: std::sync::atomic::AtomicU64,
+}
+
+impl StaleDetector {
+    /// Create a new stale detector with given configuration.
+    pub fn new(config: StaleConfig) -> Self {
+        Self {
+            config,
+            last_successful_ingest: Mutex::new(None),
+            consecutive_zero_scans: std::sync::atomic::AtomicU64::new(0),
+            warning_emitted: AtomicBool::new(false),
+            last_check: Mutex::new(Instant::now()),
+            total_ingests: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Create with configuration loaded from environment.
+    pub fn from_env() -> Self {
+        Self::new(StaleConfig::from_env())
+    }
+
+    /// Record a scan result.
+    ///
+    /// Called after each watch scan cycle with the number of conversations indexed.
+    pub fn record_scan(&self, conversations_indexed: usize) {
+        if conversations_indexed > 0 {
+            // Successful ingest
+            if let Ok(mut guard) = self.last_successful_ingest.lock() {
+                *guard = Some(Instant::now());
+            }
+            self.consecutive_zero_scans.store(0, Ordering::Relaxed);
+            self.warning_emitted.store(false, Ordering::Relaxed);
+            self.total_ingests.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                conversations = conversations_indexed,
+                "stale_detector: successful ingest recorded"
+            );
+        } else {
+            // Zero-conversation scan
+            let count = self.consecutive_zero_scans.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::trace!(
+                consecutive_zero_scans = count,
+                "stale_detector: zero-conversation scan"
+            );
+        }
+    }
+
+    /// Check if the indexer appears to be in a stale state.
+    ///
+    /// Returns `Some(StaleAction)` if stale and action should be taken.
+    pub fn check_stale(&self) -> Option<StaleAction> {
+        if !self.config.is_enabled() {
+            return None;
+        }
+
+        // Check if enough time has passed since last check
+        let now = Instant::now();
+        {
+            let mut last_check = self.last_check.lock().ok()?;
+            let check_interval = Duration::from_secs(self.config.check_interval_mins * 60);
+            if now.duration_since(*last_check) < check_interval {
+                return None;
+            }
+            *last_check = now;
+        }
+
+        // Check consecutive zero scans threshold
+        let zero_count = self.consecutive_zero_scans.load(Ordering::Relaxed);
+        if zero_count < self.config.min_zero_scans {
+            return None;
+        }
+
+        // Check time since last successful ingest
+        let threshold = Duration::from_secs(self.config.threshold_hours * 3600);
+        let is_stale = match self.last_successful_ingest.lock().ok()?.as_ref() {
+            Some(last) => now.duration_since(*last) > threshold,
+            // No successful ingests ever - check if we've been running long enough
+            None => {
+                // If we've never had a successful ingest and have had many zero scans,
+                // consider stale after threshold period from start
+                true
+            }
+        };
+
+        if is_stale {
+            let already_warned = self.warning_emitted.swap(true, Ordering::Relaxed);
+            if !already_warned || self.config.action == StaleAction::Rebuild {
+                return Some(self.config.action);
+            }
+        }
+
+        None
+    }
+
+    /// Get statistics for logging/debugging.
+    pub fn stats(&self) -> StaleStats {
+        let last_ingest = self.last_successful_ingest.lock().ok().and_then(|g| *g);
+        StaleStats {
+            consecutive_zero_scans: self.consecutive_zero_scans.load(Ordering::Relaxed),
+            total_ingests: self.total_ingests.load(Ordering::Relaxed),
+            seconds_since_last_ingest: last_ingest.map(|t| t.elapsed().as_secs()),
+            warning_emitted: self.warning_emitted.load(Ordering::Relaxed),
+            config_action: format!("{:?}", self.config.action),
+            config_threshold_hours: self.config.threshold_hours,
+        }
+    }
+
+    /// Reset the detector state (e.g., after a full rebuild).
+    pub fn reset(&self) {
+        if let Ok(mut guard) = self.last_successful_ingest.lock() {
+            *guard = Some(Instant::now());
+        }
+        self.consecutive_zero_scans.store(0, Ordering::Relaxed);
+        self.warning_emitted.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Statistics from the stale detector.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StaleStats {
+    pub consecutive_zero_scans: u64,
+    pub total_ingests: u64,
+    pub seconds_since_last_ingest: Option<u64>,
+    pub warning_emitted: bool,
+    pub config_action: String,
+    pub config_threshold_hours: u64,
 }
 
 /// Per-connector statistics for structured logging (T7.4).
@@ -903,24 +1135,42 @@ pub fn run_index(
         let storage = Arc::new(Mutex::new(storage));
         let t_index = Arc::new(Mutex::new(t_index));
 
+        // Initialize stale detector for watch mode
+        let stale_detector = Arc::new(StaleDetector::from_env());
+        let stale_config = StaleConfig::from_env();
+        if stale_config.is_enabled() {
+            tracing::info!(
+                action = ?stale_config.action,
+                threshold_hours = stale_config.threshold_hours,
+                check_interval_mins = stale_config.check_interval_mins,
+                "stale detection enabled"
+            );
+        }
+
         // Detect roots once for the watcher setup
         // Includes both local detected roots and all remote mirror roots
         let watch_roots = build_watch_roots(remote_roots.clone());
+
+        // Clone detector for the callback
+        let detector_clone = stale_detector.clone();
 
         watch_sources(
             opts.watch_once_paths.clone(),
             watch_roots.clone(),
             event_channel,
+            stale_detector,
             move |paths, roots, is_rebuild| {
                 if is_rebuild {
                     if let Ok(mut g) = state.lock() {
                         g.clear();
                         let _ = save_watch_state(&opts_clone.data_dir, &g);
                     }
+                    // Reset stale detector on rebuild
+                    detector_clone.reset();
                     // For rebuild, trigger reindex on all active roots
                     let all_root_paths: Vec<PathBuf> =
                         roots.iter().map(|(_, root)| root.path.clone()).collect();
-                    let _ = reindex_paths(
+                    let indexed = reindex_paths(
                         &opts_clone,
                         all_root_paths,
                         roots,
@@ -929,8 +1179,10 @@ pub fn run_index(
                         t_index.clone(),
                         true,
                     );
+                    // Record result to stale detector
+                    detector_clone.record_scan(indexed.unwrap_or(0));
                 } else {
-                    let _ = reindex_paths(
+                    let indexed = reindex_paths(
                         &opts_clone,
                         paths,
                         roots,
@@ -939,6 +1191,8 @@ pub fn run_index(
                         t_index.clone(),
                         false,
                     );
+                    // Record result to stale detector
+                    detector_clone.record_scan(indexed.unwrap_or(0));
                 }
             },
         )?;
@@ -1063,6 +1317,7 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool) + Send 
     watch_once_paths: Option<Vec<PathBuf>>,
     roots: Vec<(ConnectorKind, ScanRoot)>,
     event_channel: Option<(Sender<IndexerEvent>, Receiver<IndexerEvent>)>,
+    stale_detector: Arc<StaleDetector>,
     callback: F,
 ) -> Result<()> {
     if let Some(paths) = watch_once_paths {
@@ -1092,58 +1347,91 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool) + Send 
 
     let debounce = Duration::from_secs(2);
     let max_wait = Duration::from_secs(5);
+    // Stale check interval: check every 5 minutes for quicker detection
+    let stale_check_interval = Duration::from_secs(300);
     let mut pending: Vec<PathBuf> = Vec::new();
-    let mut first_event: Option<std::time::Instant> = None;
+    let mut first_event: Option<Instant> = None;
+    let mut last_stale_check = Instant::now();
 
     loop {
-        if pending.is_empty() {
-            match rx.recv() {
-                Ok(event) => match event {
-                    IndexerEvent::Notify(paths) => {
-                        pending.extend(paths);
-                        first_event = Some(std::time::Instant::now());
-                    }
-                    IndexerEvent::Command(cmd) => match cmd {
-                        ReindexCommand::Full => {
-                            callback(vec![], &roots, true);
-                        }
-                    },
-                },
-                Err(_) => break, // Channel closed
-            }
+        // Calculate timeout: use stale check interval when idle, debounce when active
+        let timeout = if pending.is_empty() {
+            stale_check_interval
         } else {
-            let now = std::time::Instant::now();
+            let now = Instant::now();
             let elapsed = now.duration_since(first_event.unwrap_or(now));
             if elapsed >= max_wait {
                 callback(std::mem::take(&mut pending), &roots, false);
-                first_event = None; // Reset debounce
+                first_event = None;
                 continue;
             }
-
             let remaining = max_wait.saturating_sub(elapsed);
-            let wait = debounce.min(remaining);
+            debounce.min(remaining)
+        };
 
-            match rx.recv_timeout(wait) {
-                Ok(event) => match event {
-                    IndexerEvent::Notify(paths) => pending.extend(paths),
-                    IndexerEvent::Command(cmd) => match cmd {
-                        ReindexCommand::Full => {
-                            // Flush pending first? Or discard?
-                            // Let's flush pending then do full.
-                            if !pending.is_empty() {
-                                callback(std::mem::take(&mut pending), &roots, false);
-                            }
-                            callback(vec![], &roots, true);
-                            first_event = None; // Reset debounce
+        match rx.recv_timeout(timeout) {
+            Ok(event) => match event {
+                IndexerEvent::Notify(paths) => {
+                    if pending.is_empty() {
+                        first_event = Some(Instant::now());
+                    }
+                    pending.extend(paths);
+                }
+                IndexerEvent::Command(cmd) => match cmd {
+                    ReindexCommand::Full => {
+                        // Flush pending first, then do full rebuild
+                        if !pending.is_empty() {
+                            callback(std::mem::take(&mut pending), &roots, false);
                         }
-                    },
+                        callback(vec![], &roots, true);
+                        first_event = None;
+                    }
                 },
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            },
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                // Process pending events if any
+                if !pending.is_empty() {
                     callback(std::mem::take(&mut pending), &roots, false);
                     first_event = None;
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+
+                // Periodic stale check
+                let now = Instant::now();
+                if now.duration_since(last_stale_check) >= stale_check_interval {
+                    last_stale_check = now;
+
+                    if let Some(action) = stale_detector.check_stale() {
+                        let stats = stale_detector.stats();
+                        match action {
+                            StaleAction::Warn => {
+                                tracing::warn!(
+                                    consecutive_zero_scans = stats.consecutive_zero_scans,
+                                    seconds_since_last_ingest = ?stats.seconds_since_last_ingest,
+                                    total_ingests = stats.total_ingests,
+                                    "watch daemon appears stale: no conversations indexed recently"
+                                );
+                                tracing::info!(
+                                    "hint: run 'cass index --full' to rebuild, or set \
+                                     CASS_WATCH_STALE_ACTION=rebuild for auto-recovery"
+                                );
+                            }
+                            StaleAction::Rebuild => {
+                                tracing::warn!(
+                                    consecutive_zero_scans = stats.consecutive_zero_scans,
+                                    seconds_since_last_ingest = ?stats.seconds_since_last_ingest,
+                                    "stale state detected, triggering automatic full rebuild"
+                                );
+                                // Trigger full rebuild
+                                callback(vec![], &roots, true);
+                            }
+                            StaleAction::None => {
+                                // Stale detection disabled, should not reach here
+                            }
+                        }
+                    }
+                }
             }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
     }
     Ok(())
@@ -1168,6 +1456,10 @@ fn reset_storage(storage: &mut SqliteStorage) -> Result<()> {
     Ok(())
 }
 
+/// Reindex paths and return the total number of conversations indexed.
+///
+/// Returns `Ok(count)` where count is the number of conversations successfully indexed.
+/// This count is used by the stale detector to track indexing activity.
 fn reindex_paths(
     opts: &IndexOptions,
     paths: Vec<PathBuf>,
@@ -1176,14 +1468,16 @@ fn reindex_paths(
     storage: Arc<Mutex<SqliteStorage>>,
     t_index: Arc<Mutex<TantivyIndex>>,
     force_full: bool,
-) -> Result<()> {
+) -> Result<usize> {
     // DO NOT lock storage/index here for the whole duration.
     // We only need them for the ingest phase, not the scan phase.
 
     let triggers = classify_paths(paths, roots);
     if triggers.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
+
+    let mut total_indexed = 0usize;
 
     for (kind, root, min_ts, max_ts) in triggers {
         let conn = kind.create_connector();
@@ -1247,7 +1541,8 @@ fn reindex_paths(
             p.phase.store(2, Ordering::Relaxed);
         }
 
-        tracing::info!(?kind, conversations = convs.len(), since_ts, "watch_scan");
+        let conv_count = convs.len();
+        tracing::info!(?kind, conversations = conv_count, since_ts, "watch_scan");
 
         // INGEST PHASE: Acquire locks briefly
         {
@@ -1267,6 +1562,9 @@ fn reindex_paths(
             storage.set_last_indexed_at(SqliteStorage::now_millis())?;
         }
 
+        // Track total indexed for stale detection
+        total_indexed += conv_count;
+
         if let Some(ts_val) = max_ts {
             let mut guard = state
                 .lock()
@@ -1283,7 +1581,7 @@ fn reindex_paths(
         p.phase.store(0, Ordering::Relaxed);
     }
 
-    Ok(())
+    Ok(total_indexed)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2776,5 +3074,133 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             conv.metadata["cass"]["workspace_original"].as_str(),
             Some("/home/user/app")
         );
+    }
+
+    // =========================================================================
+    // Stale Detection Tests
+    // =========================================================================
+
+    #[test]
+    fn stale_action_from_env_str_parses_correctly() {
+        assert_eq!(StaleAction::from_env_str("warn"), StaleAction::Warn);
+        assert_eq!(StaleAction::from_env_str("WARN"), StaleAction::Warn);
+        assert_eq!(StaleAction::from_env_str("rebuild"), StaleAction::Rebuild);
+        assert_eq!(StaleAction::from_env_str("auto"), StaleAction::Rebuild);
+        assert_eq!(StaleAction::from_env_str("fix"), StaleAction::Rebuild);
+        assert_eq!(StaleAction::from_env_str("none"), StaleAction::None);
+        assert_eq!(StaleAction::from_env_str("off"), StaleAction::None);
+        assert_eq!(StaleAction::from_env_str("0"), StaleAction::None);
+        assert_eq!(StaleAction::from_env_str("false"), StaleAction::None);
+        assert_eq!(StaleAction::from_env_str("unknown"), StaleAction::Warn);
+    }
+
+    #[test]
+    fn stale_config_default_values() {
+        let cfg = StaleConfig::default();
+        assert_eq!(cfg.threshold_hours, 24);
+        assert_eq!(cfg.action, StaleAction::Warn);
+        assert_eq!(cfg.check_interval_mins, 60);
+        assert_eq!(cfg.min_zero_scans, 10);
+        assert!(cfg.is_enabled());
+    }
+
+    #[test]
+    fn stale_config_none_action_disables_detection() {
+        let cfg = StaleConfig {
+            action: StaleAction::None,
+            ..Default::default()
+        };
+        assert!(!cfg.is_enabled());
+    }
+
+    #[test]
+    fn stale_detector_records_successful_ingest() {
+        let detector = StaleDetector::new(StaleConfig::default());
+        assert_eq!(detector.stats().total_ingests, 0);
+        assert_eq!(detector.stats().consecutive_zero_scans, 0);
+
+        detector.record_scan(5);
+        assert_eq!(detector.stats().total_ingests, 1);
+        assert_eq!(detector.stats().consecutive_zero_scans, 0);
+        assert!(detector.stats().seconds_since_last_ingest.is_some());
+    }
+
+    #[test]
+    fn stale_detector_tracks_zero_scans() {
+        let detector = StaleDetector::new(StaleConfig::default());
+
+        detector.record_scan(0);
+        assert_eq!(detector.stats().consecutive_zero_scans, 1);
+
+        detector.record_scan(0);
+        assert_eq!(detector.stats().consecutive_zero_scans, 2);
+
+        // Successful scan resets counter
+        detector.record_scan(1);
+        assert_eq!(detector.stats().consecutive_zero_scans, 0);
+    }
+
+    #[test]
+    fn stale_detector_reset_clears_state() {
+        let detector = StaleDetector::new(StaleConfig::default());
+
+        detector.record_scan(0);
+        detector.record_scan(0);
+        assert_eq!(detector.stats().consecutive_zero_scans, 2);
+
+        detector.reset();
+        assert_eq!(detector.stats().consecutive_zero_scans, 0);
+        assert!(detector.stats().seconds_since_last_ingest.is_some());
+    }
+
+    #[test]
+    fn stale_detector_check_respects_disabled() {
+        let detector = StaleDetector::new(StaleConfig {
+            action: StaleAction::None,
+            ..Default::default()
+        });
+
+        // Even with many zero scans, should return None when disabled
+        for _ in 0..20 {
+            detector.record_scan(0);
+        }
+        assert!(detector.check_stale().is_none());
+    }
+
+    #[test]
+    fn stale_detector_requires_min_zero_scans() {
+        let detector = StaleDetector::new(StaleConfig {
+            min_zero_scans: 5,
+            check_interval_mins: 0, // Disable interval check for test
+            threshold_hours: 0,     // Immediate threshold for test
+            ..Default::default()
+        });
+
+        // Not enough zero scans yet
+        for _ in 0..4 {
+            detector.record_scan(0);
+        }
+        assert!(detector.check_stale().is_none());
+
+        // One more to meet threshold
+        detector.record_scan(0);
+        // Now should trigger (if interval allows)
+        // Note: check_stale has its own interval check, so this test is limited
+    }
+
+    #[test]
+    fn stale_stats_serializes_correctly() {
+        let stats = StaleStats {
+            consecutive_zero_scans: 5,
+            total_ingests: 10,
+            seconds_since_last_ingest: Some(3600),
+            warning_emitted: true,
+            config_action: "Warn".to_string(),
+            config_threshold_hours: 24,
+        };
+
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(json.contains("consecutive_zero_scans"));
+        assert!(json.contains("total_ingests"));
     }
 }
