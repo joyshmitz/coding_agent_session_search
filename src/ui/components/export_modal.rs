@@ -544,13 +544,16 @@ fn render_output_dir_input(
         &state.output_dir.display().to_string()
     };
 
-    // Truncate long paths to fit
+    // Truncate long paths to fit (char-safe, underflow-safe)
     let max_path_len = area.width.saturating_sub(18) as usize;
-    let truncated_path = if display_path.len() > max_path_len {
-        format!(
-            "...{}",
-            &display_path[display_path.len().saturating_sub(max_path_len - 3)..]
-        )
+    let truncated_path = if max_path_len < 4 {
+        // Too narrow to show anything meaningful
+        display_path.to_string()
+    } else if display_path.chars().count() > max_path_len {
+        let tail_len = max_path_len.saturating_sub(3);
+        let skip = display_path.chars().count().saturating_sub(tail_len);
+        let tail: String = display_path.chars().skip(skip).collect();
+        format!("...{tail}")
     } else {
         display_path.to_string()
     };

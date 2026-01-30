@@ -776,8 +776,9 @@ impl PagesWizard {
                     .iter()
                     .take(2)
                     .map(|t| {
-                        if t.len() > 30 {
-                            format!("{}...", &t[..27])
+                        if t.chars().count() > 30 {
+                            let truncated: String = t.chars().take(27).collect();
+                            format!("{truncated}...")
                         } else {
                             t.clone()
                         }

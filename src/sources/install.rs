@@ -245,18 +245,44 @@ impl RemoteInstaller {
     }
 
     /// Create an installer with a specific target version.
+    ///
+    /// Returns an error if the version string contains characters that are not
+    /// safe for shell interpolation (only alphanumeric, `.`, `-`, `+`, `_` allowed).
     pub fn with_version(
         host: impl Into<String>,
         system_info: SystemInfo,
         resources: ResourceInfo,
         version: impl Into<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, InstallError> {
+        let version = version.into();
+        Self::validate_shell_safe(&version, "version")?;
+        Ok(Self {
             host: host.into(),
             system_info,
             resources,
-            target_version: version.into(),
+            target_version: version,
+        })
+    }
+
+    /// Validate that a string is safe for shell interpolation.
+    ///
+    /// Prevents command injection by rejecting strings containing shell
+    /// metacharacters (quotes, backticks, semicolons, pipes, etc.).
+    fn validate_shell_safe(value: &str, field_name: &str) -> Result<(), InstallError> {
+        if value.is_empty() {
+            return Err(InstallError::VerificationFailed(format!(
+                "{field_name} must not be empty"
+            )));
         }
+        if !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+        {
+            return Err(InstallError::VerificationFailed(format!(
+                "{field_name} contains unsafe characters: only alphanumeric, '.', '-', '+', '_' are allowed"
+            )));
+        }
+        Ok(())
     }
 
     /// Get the host name.

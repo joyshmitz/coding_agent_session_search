@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -211,8 +211,13 @@ impl Connector for PiAgentConnector {
                         .map(String::from)
                 });
 
-            let content = fs::read_to_string(&file)
-                .with_context(|| format!("read pi-agent session {}", file.display()))?;
+            let content = match fs::read_to_string(&file) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(path = %file.display(), error = %e, "pi-agent: skipping unreadable session");
+                    continue;
+                }
+            };
 
             let mut messages = Vec::new();
             let mut started_at: Option<i64> = None;
@@ -1151,7 +1156,7 @@ mod tests {
     }
 
     #[test]
-    fn edge_invalid_utf8_causes_read_error() {
+    fn edge_invalid_utf8_skips_file() {
         let dir = TempDir::new().unwrap();
         let storage = create_pi_agent_storage(&dir);
         // Pi-Agent uses read_to_string which will fail on invalid UTF-8
@@ -1162,9 +1167,9 @@ mod tests {
 
         let connector = PiAgentConnector::new();
         let ctx = ScanContext::local_default(storage.clone(), None);
-        // read_to_string propagates the error via ?
-        let result = connector.scan(&ctx);
-        assert!(result.is_err());
+        // Invalid UTF-8 files are gracefully skipped (not fatal)
+        let result = connector.scan(&ctx).unwrap();
+        assert!(result.is_empty(), "invalid UTF-8 file should be skipped");
     }
 
     #[test]

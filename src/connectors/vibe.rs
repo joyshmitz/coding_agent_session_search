@@ -10,7 +10,7 @@ use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -178,8 +178,13 @@ impl Connector for VibeConnector {
                             .map(str::to_string)
                     });
 
-                let file_handle = fs::File::open(&file)
-                    .with_context(|| format!("open vibe session {}", file.display()))?;
+                let file_handle = match fs::File::open(&file) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::debug!(path = %file.display(), error = %e, "vibe: skipping unreadable session");
+                        continue;
+                    }
+                };
                 let reader = std::io::BufReader::new(file_handle);
 
                 let mut messages = Vec::new();

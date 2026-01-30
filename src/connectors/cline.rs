@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::connectors::{
@@ -134,8 +134,15 @@ impl Connector for ClineConnector {
                 continue;
             }
 
-            for entry in fs::read_dir(&root)? {
-                let entry = entry?;
+            let entries = match fs::read_dir(&root) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::debug!(path = %root.display(), error = %e, "cline: skipping unreadable directory");
+                    continue;
+                }
+            };
+            for entry in entries {
+                let Ok(entry) = entry else { continue };
                 let path = entry.path();
                 if !path.is_dir() {
                     continue;
@@ -170,8 +177,13 @@ impl Connector for ClineConnector {
                     continue;
                 }
 
-                let data = fs::read_to_string(&file)
-                    .with_context(|| format!("read {}", file.display()))?;
+                let data = match fs::read_to_string(&file) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::debug!(path = %file.display(), error = %e, "cline: skipping unreadable file");
+                        continue;
+                    }
+                };
                 let val: Value = match serde_json::from_str(&data) {
                     Ok(v) => v,
                     Err(e) => {
@@ -205,8 +217,8 @@ impl Connector for ClineConnector {
                             .get("content")
                             .or_else(|| item.get("text"))
                             .or_else(|| item.get("message"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                            .map(crate::connectors::flatten_content)
+                            .unwrap_or_default();
 
                         if content.trim().is_empty() {
                             continue;
@@ -217,7 +229,7 @@ impl Connector for ClineConnector {
                             role: role.to_string(),
                             author: None,
                             created_at: created,
-                            content: content.to_string(),
+                            content,
                             extra: item.clone(),
                             snippets: Vec::new(),
                         });

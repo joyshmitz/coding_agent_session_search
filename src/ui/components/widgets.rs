@@ -189,12 +189,14 @@ pub fn filter_chips(
     }
 
     if !workspaces.is_empty() {
-        // Truncate long workspace paths for chip display
+        // Truncate long workspace paths for chip display (char-safe slicing)
         let ws_display: Vec<String> = workspaces
             .iter()
             .map(|w| {
-                if w.len() > 20 {
-                    format!("…{}", &w[w.len().saturating_sub(18)..])
+                if w.chars().count() > 20 {
+                    let skip = w.chars().count().saturating_sub(18);
+                    let tail: String = w.chars().skip(skip).collect();
+                    format!("…{tail}")
                 } else {
                     w.clone()
                 }
@@ -258,13 +260,16 @@ pub fn score_indicator(score: f32, palette: ThemePalette) -> Vec<Span<'static>> 
 
 /// Calculate a centered rectangle with percentage dimensions.
 pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let py = percent_y.min(100);
+    let px = percent_x.min(100);
+
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Percentage((100 - percent_y) / 2),
-                Constraint::Percentage(percent_y),
-                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage((100 - py) / 2),
+                Constraint::Percentage(py),
+                Constraint::Percentage((100 - py) / 2),
             ]
             .as_ref(),
         )
@@ -274,9 +279,9 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .direction(Direction::Horizontal)
         .constraints(
             [
-                Constraint::Percentage((100 - percent_x) / 2),
-                Constraint::Percentage(percent_x),
-                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage((100 - px) / 2),
+                Constraint::Percentage(px),
+                Constraint::Percentage((100 - px) / 2),
             ]
             .as_ref(),
         )

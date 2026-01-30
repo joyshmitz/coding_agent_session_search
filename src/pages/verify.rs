@@ -994,9 +994,10 @@ fn print_check(name: &str, result: &CheckResult, verbose: bool) {
             println!("FAILED");
             println!("      {}", details);
         } else {
-            // Truncate long error messages
-            let display = if details.len() > 60 {
-                format!("{}...", &details[..60])
+            // Truncate long error messages (char-safe slicing)
+            let display = if details.chars().count() > 60 {
+                let truncated: String = details.chars().take(60).collect();
+                format!("{truncated}...")
             } else {
                 details.clone()
             };

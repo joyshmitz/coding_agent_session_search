@@ -341,7 +341,7 @@ impl ChatGptConnector {
                 let created_at = msg
                     .get("create_time")
                     .and_then(|v| v.as_f64())
-                    .map(|ts| (ts * 1000.0) as i64);
+                    .map(|ts| (ts * 1000.0).round() as i64);
 
                 // NOTE: Do NOT filter individual messages by timestamp here!
                 // The file-level check in file_modified_since() is sufficient.
