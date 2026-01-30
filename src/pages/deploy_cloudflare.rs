@@ -4,11 +4,21 @@
 //! Supports native COOP/COEP headers, no file size limits, and private repos.
 
 use anyhow::{Context, Result, bail};
+use base64::prelude::*;
+use blake3::Hasher;
+use mime_guess::MimeGuess;
+use reqwest::blocking::multipart::{Form, Part};
+use reqwest::blocking::Client;
+use reqwest::StatusCode;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use walkdir::WalkDir;
 
 /// Maximum number of retry attempts for network operations
 const MAX_RETRIES: u32 = 3;
@@ -36,17 +46,23 @@ pub struct Prerequisites {
 impl Prerequisites {
     /// Check if all prerequisites are met
     pub fn is_ready(&self) -> bool {
-        self.wrangler_version.is_some()
-            && (self.wrangler_authenticated || self.api_credentials_present)
+        self.api_credentials_present
+            || (self.wrangler_version.is_some() && self.wrangler_authenticated)
+            || (self.wrangler_version.is_some() && self.api_credentials_present)
     }
 
     /// Get a list of missing prerequisites
     pub fn missing(&self) -> Vec<&'static str> {
         let mut missing = Vec::new();
-        if self.wrangler_version.is_none() {
-            missing.push("wrangler CLI not installed (install with: npm install -g wrangler)");
+        if self.wrangler_version.is_none() && !self.api_credentials_present {
+            missing.push(
+                "wrangler CLI not installed and no API token provided (install wrangler or pass --account-id/--api-token)",
+            );
         }
-        if !self.wrangler_authenticated && !self.api_credentials_present {
+        if self.wrangler_version.is_some()
+            && !self.wrangler_authenticated
+            && !self.api_credentials_present
+        {
             missing.push(
                 "wrangler CLI not authenticated and no API token provided (use --account-id/--api-token or set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN)",
             );
@@ -259,6 +275,9 @@ impl CloudflareDeployer {
             let missing = prereqs.missing();
             bail!("Prerequisites not met:\n{}", missing.join("\n"));
         }
+        let can_use_wrangler = prereqs.wrangler_version.is_some()
+            && (prereqs.wrangler_authenticated || prereqs.api_credentials_present);
+        let can_use_api = prereqs.api_credentials_present;
 
         // Step 2: Copy bundle to temp directory and add Cloudflare files
         progress("prepare", "Preparing deployment...");
@@ -274,28 +293,57 @@ impl CloudflareDeployer {
         // Step 4: Create project if needed
         progress("project", "Checking Cloudflare Pages project...");
         if self.config.create_if_missing {
-            let exists =
-                check_project_exists(&self.config.project_name, account_id_ref, api_token_ref);
+            let exists = if can_use_wrangler {
+                check_project_exists(&self.config.project_name, account_id_ref, api_token_ref)
+            } else if let (Some(account_id), Some(api_token)) = (account_id_ref, api_token_ref) {
+                check_project_exists_api(
+                    &self.config.project_name,
+                    account_id,
+                    api_token,
+                )?
+            } else {
+                false
+            };
             if !exists {
                 progress("create", "Creating new Pages project...");
-                create_project(
-                    &self.config.project_name,
-                    &branch,
-                    account_id_ref,
-                    api_token_ref,
-                )?;
+                if can_use_wrangler {
+                    create_project(
+                        &self.config.project_name,
+                        &branch,
+                        account_id_ref,
+                        api_token_ref,
+                    )?;
+                } else if let (Some(account_id), Some(api_token)) = (account_id_ref, api_token_ref)
+                {
+                    create_project_api(&self.config.project_name, &branch, account_id, api_token)?;
+                } else {
+                    bail!("Cloudflare API credentials required to create project");
+                }
             }
         }
 
         // Step 5: Deploy using wrangler
         progress("deploy", "Deploying to Cloudflare Pages...");
-        let (pages_url, deployment_id) = deploy_with_wrangler(
-            &deploy_dir,
-            &self.config.project_name,
-            &branch,
-            account_id_ref,
-            api_token_ref,
-        )?;
+        let (pages_url, deployment_id) = if can_use_wrangler {
+            deploy_with_wrangler(
+                &deploy_dir,
+                &self.config.project_name,
+                &branch,
+                account_id_ref,
+                api_token_ref,
+            )?
+        } else if let (Some(account_id), Some(api_token)) = (account_id_ref, api_token_ref) {
+            deploy_with_api(
+                &deploy_dir,
+                &self.config.project_name,
+                &branch,
+                account_id,
+                api_token,
+                &mut progress,
+            )?
+        } else {
+            bail!("Cloudflare API credentials required for direct API deployment");
+        };
 
         // Step 6: Configure custom domain if specified
         if let Some(ref domain) = self.config.custom_domain {
