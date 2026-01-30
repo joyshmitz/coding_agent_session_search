@@ -42,6 +42,14 @@ pub struct LazyDb {
 /// RAII guard that dereferences to the inner `Connection`.
 pub struct LazyDbGuard<'a>(parking_lot::MutexGuard<'a, Option<Connection>>);
 
+impl std::fmt::Debug for LazyDbGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LazyDbGuard")
+            .field(&self.0.is_some())
+            .finish()
+    }
+}
+
 impl std::ops::Deref for LazyDbGuard<'_> {
     type Target = Connection;
     fn deref(&self) -> &Connection {
@@ -3185,5 +3193,90 @@ mod tests {
         assert_eq!(day100_all.3.session_count_delta, 2);
         assert_eq!(day100_all.3.message_count_delta, 8);
         assert_eq!(day100_all.3.total_chars_delta, 800);
+    }
+
+    // =========================================================================
+    // LazyDb tests (bd-1ueu)
+    // =========================================================================
+
+    #[test]
+    fn lazy_db_not_open_before_get() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("lazy_test.db");
+
+        // Create a real DB so the path exists
+        let _storage = SqliteStorage::open(&db_path).unwrap();
+
+        let lazy = LazyDb::new(db_path);
+        assert!(!lazy.is_open(), "LazyDb must not open on construction");
+    }
+
+    #[test]
+    fn lazy_db_opens_on_first_get() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("lazy_test.db");
+
+        // Create a real DB so the path exists
+        let _storage = SqliteStorage::open(&db_path).unwrap();
+        drop(_storage);
+
+        let lazy = LazyDb::new(db_path);
+        assert!(!lazy.is_open());
+
+        let conn = lazy.get("test").expect("should open successfully");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        drop(conn);
+
+        assert!(lazy.is_open(), "LazyDb must be open after get()");
+    }
+
+    #[test]
+    fn lazy_db_reuses_connection() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("lazy_test.db");
+        let _storage = SqliteStorage::open(&db_path).unwrap();
+        drop(_storage);
+
+        let lazy = LazyDb::new(db_path);
+
+        // First access opens
+        {
+            let conn = lazy.get("first").unwrap();
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS test_tbl (id INTEGER)")
+                .unwrap();
+        }
+
+        // Second access reuses (table still exists)
+        {
+            let conn = lazy.get("second").unwrap();
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM test_tbl", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
+
+    #[test]
+    fn lazy_db_not_found_error() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("nonexistent.db");
+
+        let lazy = LazyDb::new(db_path);
+        let result = lazy.get("test");
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), LazyDbError::NotFound(_)),
+            "should return NotFound for missing DB"
+        );
+    }
+
+    #[test]
+    fn lazy_db_path_accessor() {
+        let path = PathBuf::from("/tmp/test_lazy.db");
+        let lazy = LazyDb::new(path.clone());
+        assert_eq!(lazy.path(), path.as_path());
     }
 }
