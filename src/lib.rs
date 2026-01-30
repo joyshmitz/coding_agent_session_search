@@ -2529,6 +2529,24 @@ async fn execute_cli(
                             pages_config.deployment.api_token = Some(api_token.to_string());
                         }
 
+                        let target_name = pages_config.deployment.target.to_lowercase();
+                        let cf_creds_provided = pages_config.deployment.account_id.is_some()
+                            || pages_config.deployment.api_token.is_some();
+                        if cf_creds_provided && target_name != "cloudflare" {
+                            return Err(CliError {
+                                code: 2,
+                                kind: "pages",
+                                message: format!(
+                                    "Cloudflare credentials provided but deployment.target is '{target_name}'"
+                                ),
+                                hint: Some(
+                                    "Set deployment.target to \"cloudflare\" or remove Cloudflare credentials."
+                                        .to_string(),
+                                ),
+                                retryable: false,
+                            });
+                        }
+
                         // Resolve environment variables
                         pages_config.resolve_env_vars().map_err(|e| CliError {
                             code: 2,
@@ -2853,8 +2871,36 @@ async fn execute_cli(
                             retryable: false,
                         })?;
                     } else {
-                        if (account_id.is_some() && api_token.is_none())
-                            || (api_token.is_some() && account_id.is_none())
+                        let cf_creds_provided = account_id.is_some() || api_token.is_some();
+                        let target_is_cloudflare =
+                            matches!(target, Some(PagesDeployTarget::Cloudflare));
+                        let target_is_non_cloudflare = matches!(
+                            target,
+                            Some(PagesDeployTarget::GitHub | PagesDeployTarget::Local)
+                        );
+
+                        if target_is_non_cloudflare && cf_creds_provided {
+                            let target_label = match target {
+                                Some(PagesDeployTarget::GitHub) => "github",
+                                Some(PagesDeployTarget::Local) => "local",
+                                _ => "unknown",
+                            };
+                            return Err(CliError {
+                                code: 2,
+                                kind: "pages",
+                                message: format!(
+                                    "Cloudflare credentials provided but --target is {target_label}"
+                                ),
+                                hint: Some(
+                                    "Use --target cloudflare or remove --account-id/--api-token."
+                                        .to_string(),
+                                ),
+                                retryable: false,
+                            });
+                        }
+
+                        if (target_is_cloudflare || (target.is_none() && cf_creds_provided))
+                            && (account_id.is_some() ^ api_token.is_some())
                         {
                             return Err(CliError {
                                 code: 2,
@@ -2879,6 +2925,10 @@ async fn execute_cli(
                         }
                         if let Some(target) = target {
                             wizard.set_deploy_target(target.to_wizard_target());
+                        } else if cf_creds_provided {
+                            wizard.set_deploy_target(
+                                crate::pages::wizard::DeployTarget::CloudflarePages,
+                            );
                         }
                         if let Some(project) = project {
                             wizard.set_repo_name(project);
