@@ -3712,11 +3712,12 @@ pub fn run_tui(
                     {
                         cached_detail.as_ref().map(|(_, d)| d.clone())
                     } else {
-                        let loaded = if let Some(storage) = &db_reader {
-                            load_conversation(storage, &hit.source_path).ok().flatten()
-                        } else {
-                            None
-                        };
+                        let loaded =
+                            if let Some(storage) = ensure_db_reader(&mut db_reader, &db_path) {
+                                load_conversation(storage, &hit.source_path).ok().flatten()
+                            } else {
+                                None
+                            };
                         if let Some(d) = &loaded {
                             cached_detail = Some((hit.source_path.clone(), d.clone()));
                             detail_scroll = 0;
@@ -4273,8 +4274,10 @@ pub fn run_tui(
 
                 // Render autocomplete dropdown for Workspace Filter
                 if input_mode == InputMode::Workspace {
-                    let ws_suggestions =
-                        workspace_suggestions(&input_buffer, known_workspaces.as_deref().unwrap_or(&[]));
+                    let ws_suggestions = workspace_suggestions(
+                        &input_buffer,
+                        known_workspaces.as_deref().unwrap_or(&[]),
+                    );
                     if !ws_suggestions.is_empty() {
                         let area = Rect::new(
                             chunks[0].x + 14, // Align with " Filter: Workspace " prompt
@@ -5131,9 +5134,9 @@ pub fn run_tui(
                                 disable_raw_mode().ok();
                                 execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
                                     .ok();
+                                let db_ref = ensure_db_reader(&mut db_reader, &db_path);
                                 for hit in &selected_hits {
-                                    let path =
-                                        prepare_editor_path(&hit.source_path, db_reader.as_ref());
+                                    let path = prepare_editor_path(&hit.source_path, db_ref);
                                     let is_virtual = path != hit.source_path;
                                     let mut cmd = StdCommand::new(&editor_bin);
                                     cmd.args(&editor_args);
@@ -5499,7 +5502,8 @@ pub fn run_tui(
                         if let Some(pane) = panes.get(active_pane)
                             && let Some(hit) = pane.hits.get(pane.selected)
                         {
-                            let path = prepare_editor_path(&hit.source_path, db_reader.as_ref());
+                            let db_ref = ensure_db_reader(&mut db_reader, &db_path);
+                            let path = prepare_editor_path(&hit.source_path, db_ref);
                             let is_virtual = path != hit.source_path;
 
                             // Determine editor: $EDITOR, $VISUAL, or fallback chain
@@ -6352,9 +6356,9 @@ pub fn run_tui(
                                 disable_raw_mode().ok();
                                 execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
                                     .ok();
+                                let db_ref = ensure_db_reader(&mut db_reader, &db_path);
                                 for hit in &selected_hits {
-                                    let path =
-                                        prepare_editor_path(&hit.source_path, db_reader.as_ref());
+                                    let path = prepare_editor_path(&hit.source_path, db_ref);
                                     let is_virtual = path != hit.source_path;
                                     let mut cmd = StdCommand::new(&editor_bin);
                                     cmd.args(&editor_args);
@@ -6537,7 +6541,9 @@ pub fn run_tui(
                             if source_filter_menu_open {
                                 source_filter_menu_selection = 0;
                                 // Discover available source IDs from database
-                                available_source_ids = if let Some(ref reader) = db_reader {
+                                available_source_ids = if let Some(reader) =
+                                    ensure_db_reader(&mut db_reader, &db_path)
+                                {
                                     reader.get_source_ids().unwrap_or_default()
                                 } else {
                                     Vec::new()
@@ -7036,6 +7042,11 @@ pub fn run_tui(
                                     if let Some(last) = filters.workspaces.iter().next() {
                                         input_buffer = last.clone();
                                     }
+                                    ensure_known_workspaces(
+                                        &mut db_reader,
+                                        &db_path,
+                                        &mut known_workspaces,
+                                    );
                                     status = "Edit workspace filter (Enter apply, Esc cancel)"
                                         .to_string();
                                     continue;
