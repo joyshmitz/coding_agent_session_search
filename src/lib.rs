@@ -2938,7 +2938,13 @@ async fn execute_cli(
 }
 
 /// Compute lightweight state snapshot (index/db freshness) for robot meta and state command reuse
-fn state_meta_json(data_dir: &Path, db_path: &Path, stale_threshold: u64) -> serde_json::Value {
+fn state_meta_json(
+    data_dir: &Path,
+    db_path: &Path,
+    stale_threshold: u64,
+    allow_db_open: bool,
+) -> serde_json::Value {
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // Use the actual versioned index path (index/v4, not tantivy_index)
@@ -2956,11 +2962,13 @@ fn state_meta_json(data_dir: &Path, db_path: &Path, stale_threshold: u64) -> ser
     let mut conversation_count: i64 = 0;
     let mut message_count: i64 = 0;
     let mut last_indexed_at: Option<i64> = None;
+    let mut db_opened = false;
 
     // Use LazyDb to get timing/logging for state snapshot DB access
     let lazy = crate::storage::sqlite::LazyDb::new(db_path.to_path_buf());
-    if db_exists {
+    if allow_db_open && db_exists {
         if let Ok(conn) = lazy.get("state-meta") {
+            db_opened = true;
             conversation_count = conn
                 .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
                 .unwrap_or(0);
@@ -2976,6 +2984,20 @@ fn state_meta_json(data_dir: &Path, db_path: &Path, stale_threshold: u64) -> ser
                 .ok()
                 .and_then(|s| s.parse::<i64>().ok());
         }
+    }
+
+    if last_indexed_at.is_none() && index_exists {
+        let meta_path = index_path.join("meta.json");
+        let probe_path = if meta_path.exists() {
+            meta_path
+        } else {
+            index_path.clone()
+        };
+        last_indexed_at = fs::metadata(&probe_path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64);
     }
 
     let pending_sessions = if watch_state_path.exists() {
@@ -3017,6 +3039,7 @@ fn state_meta_json(data_dir: &Path, db_path: &Path, stale_threshold: u64) -> ser
         },
         "database": {
             "exists": db_exists,
+            "opened": db_opened,
             "conversations": conversation_count,
             "messages": message_count
         },
@@ -4522,6 +4545,7 @@ fn run_cli_search(
             &data_dir,
             &db_path,
             DEFAULT_STALE_THRESHOLD_SECS,
+            true,
         ))
     } else {
         None
@@ -5692,7 +5716,7 @@ fn run_stats(
                 "oldest": oldest.and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
                 "newest": newest.and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
             },
-            "db_path": db_path.display().to_string(),
+            "db_path": lazy.path().display().to_string(),
         });
 
         // Add source filter info if specified (P3.7)
@@ -5727,7 +5751,7 @@ fn run_stats(
     };
     println!("{title}");
     println!("{}", "=".repeat(title.len()));
-    println!("Database: {}", db_path.display());
+    println!("Database: {}", lazy.path().display());
     println!();
 
     // Show by_source breakdown if requested (P3.7)
@@ -6221,7 +6245,7 @@ fn run_health(
     let start = Instant::now();
     let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
-    let state = state_meta_json(&data_dir, &db_path, stale_threshold);
+    let state = state_meta_json(&data_dir, &db_path, stale_threshold, false);
 
     let index_exists = state
         .get("index")

@@ -790,7 +790,6 @@ impl SqliteStorage {
 // -------------------------------------------------------------------------
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 /// Cache for agent and workspace IDs during batch indexing.
 ///
