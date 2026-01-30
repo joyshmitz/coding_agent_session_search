@@ -7212,6 +7212,80 @@ fn run_doctor(
                         ),
                         false
                     );
+
+                    // Check for FTS table (fts_messages) - this can be missing if table was
+                    // dropped after migrations completed
+                    let fts_exists = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fts_messages'",
+                            [],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .unwrap_or(0)
+                        > 0;
+
+                    if fts_exists {
+                        add_check!(
+                            "fts_table",
+                            "pass",
+                            "FTS search table (fts_messages) exists",
+                            false
+                        );
+                    } else {
+                        // FTS table missing - attempt to recreate it if --fix is set
+                        if fix {
+                            let create_result = conn.execute_batch(
+                                r#"
+                                CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
+                                    content,
+                                    title,
+                                    agent,
+                                    workspace,
+                                    source_path,
+                                    created_at UNINDEXED,
+                                    message_id UNINDEXED,
+                                    tokenize='porter'
+                                );
+                                INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+                                SELECT m.content, m.title, a.name, w.name, m.source_path, m.created_at, m.id
+                                FROM messages m
+                                LEFT JOIN agents a ON m.agent_id = a.id
+                                LEFT JOIN workspaces w ON m.workspace_id = w.id
+                                WHERE m.content IS NOT NULL;
+                                "#,
+                            );
+                            match create_result {
+                                Ok(_) => {
+                                    checks.push(Check {
+                                        name: "fts_table".to_string(),
+                                        status: "pass".to_string(),
+                                        message: "FTS search table (fts_messages) recreated".to_string(),
+                                        fix_available: true,
+                                        fix_applied: true,
+                                    });
+                                    auto_fix_actions.push("Recreated missing FTS search table".to_string());
+                                    auto_fix_applied = true;
+                                }
+                                Err(e) => {
+                                    add_check!(
+                                        "fts_table",
+                                        "fail",
+                                        format!("FTS table missing and recreation failed: {}", e),
+                                        true
+                                    );
+                                    needs_rebuild = true;
+                                }
+                            }
+                        } else {
+                            add_check!(
+                                "fts_table",
+                                "fail",
+                                "FTS search table (fts_messages) missing - run with --fix to recreate",
+                                true
+                            );
+                            needs_rebuild = true;
+                        }
+                    }
                 } else {
                     add_check!("database", "fail", "Database query failed", true);
                     needs_rebuild = true;
