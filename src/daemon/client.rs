@@ -16,9 +16,10 @@ use parking_lot::Mutex;
 use tracing::{debug, info};
 
 use super::protocol::{
-    ErrorCode, FramedMessage, HealthStatus, PROTOCOL_VERSION, Request, Response, decode_message,
-    default_socket_path, encode_message,
+    EmbeddingJobInfo, ErrorCode, FramedMessage, HealthStatus, PROTOCOL_VERSION, Request, Response,
+    decode_message, default_socket_path, encode_message,
 };
+use super::worker::EmbeddingJobConfig;
 use crate::search::daemon_client::{DaemonClient, DaemonError};
 
 /// Configuration for the daemon client.
@@ -331,6 +332,57 @@ impl UdsDaemonClient {
                 *self.connection.lock() = None;
                 Ok(())
             }
+            other => Err(DaemonError::Failed(format!(
+                "unexpected response: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Submit a background embedding job to the daemon.
+    pub fn submit_embedding_job(&self, config: EmbeddingJobConfig) -> Result<String, DaemonError> {
+        let response = self.send_request(Request::SubmitEmbeddingJob {
+            db_path: config.db_path,
+            index_path: config.index_path,
+            two_tier: config.two_tier,
+            fast_model: config.fast_model,
+            quality_model: config.quality_model,
+        })?;
+        match response {
+            Response::JobSubmitted { job_id, .. } => Ok(job_id),
+            other => Err(DaemonError::Failed(format!(
+                "unexpected response: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Query the status of embedding jobs for a database.
+    pub fn embedding_job_status(&self, db_path: &str) -> Result<EmbeddingJobInfo, DaemonError> {
+        let response = self.send_request(Request::EmbeddingJobStatus {
+            db_path: db_path.to_string(),
+        })?;
+        match response {
+            Response::JobStatus(info) => Ok(info),
+            other => Err(DaemonError::Failed(format!(
+                "unexpected response: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Cancel embedding jobs for a database.
+    pub fn cancel_embedding_job(
+        &self,
+        db_path: &str,
+        model_id: Option<&str>,
+    ) -> Result<usize, DaemonError> {
+        let response = self.send_request(Request::CancelEmbeddingJob {
+            db_path: db_path.to_string(),
+            model_id: model_id.map(|s| s.to_string()),
+        })?;
+        match response {
+            Response::JobCancelled { cancelled, .. } => Ok(cancelled),
             other => Err(DaemonError::Failed(format!(
                 "unexpected response: {:?}",
                 other

@@ -7260,11 +7260,13 @@ fn run_doctor(
                                     checks.push(Check {
                                         name: "fts_table".to_string(),
                                         status: "pass".to_string(),
-                                        message: "FTS search table (fts_messages) recreated".to_string(),
+                                        message: "FTS search table (fts_messages) recreated"
+                                            .to_string(),
                                         fix_available: true,
                                         fix_applied: true,
                                     });
-                                    auto_fix_actions.push("Recreated missing FTS search table".to_string());
+                                    auto_fix_actions
+                                        .push("Recreated missing FTS search table".to_string());
                                     auto_fix_applied = true;
                                 }
                                 Err(e) => {

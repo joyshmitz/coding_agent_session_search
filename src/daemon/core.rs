@@ -15,11 +15,12 @@ use tracing::{debug, error, info, warn};
 
 use super::models::ModelManager;
 use super::protocol::{
-    EmbedResponse, ErrorCode, ErrorResponse, FramedMessage, HealthStatus, ModelInfo,
-    PROTOCOL_VERSION, Request, RerankResponse, Response, StatusResponse, decode_message,
-    default_socket_path, encode_message,
+    EmbedResponse, EmbeddingJobDetail, EmbeddingJobInfo, ErrorCode, ErrorResponse, FramedMessage,
+    HealthStatus, ModelInfo, PROTOCOL_VERSION, Request, RerankResponse, Response, StatusResponse,
+    decode_message, default_socket_path, encode_message,
 };
 use super::resource::ResourceMonitor;
+use super::worker::{EmbeddingJobConfig, EmbeddingWorker, EmbeddingWorkerHandle};
 
 /// Configuration for the daemon server.
 #[derive(Debug, Clone)]
@@ -113,6 +114,7 @@ pub struct ModelDaemon {
     active_connections: AtomicU64,
     shutdown: AtomicBool,
     last_activity: RwLock<Instant>,
+    worker_handle: parking_lot::Mutex<Option<EmbeddingWorkerHandle>>,
 }
 
 impl ModelDaemon {
@@ -127,6 +129,7 @@ impl ModelDaemon {
             active_connections: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             last_activity: RwLock::new(Instant::now()),
+            worker_handle: parking_lot::Mutex::new(None),
         }
     }
 
@@ -154,6 +157,17 @@ impl ModelDaemon {
     /// Update last activity timestamp.
     fn touch_activity(&self) {
         *self.last_activity.write() = Instant::now();
+    }
+
+    /// Initialize the background embedding worker thread.
+    fn init_worker(&self) {
+        let (worker, handle) = EmbeddingWorker::new();
+        std::thread::Builder::new()
+            .name("embedding-worker".into())
+            .spawn(move || worker.run())
+            .expect("failed to spawn embedding worker thread");
+        *self.worker_handle.lock() = Some(handle);
+        info!("Embedding worker initialized");
     }
 
     /// Start the daemon server.
@@ -190,6 +204,9 @@ impl ModelDaemon {
             warn!(error = %e, "Failed to pre-warm reranker");
         }
         info!("Model pre-warming complete");
+
+        // Start background embedding worker
+        self.init_worker();
 
         loop {
             // Check for shutdown
@@ -236,6 +253,13 @@ impl ModelDaemon {
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
+        }
+
+        // Shutdown embedding worker
+        if let Some(handle) = self.worker_handle.lock().take()
+            && let Err(e) = handle.shutdown()
+        {
+            warn!(error = %e, "Failed to send shutdown to embedding worker");
         }
 
         // Cleanup
@@ -403,6 +427,108 @@ impl ModelDaemon {
                     memory_bytes: self.resources.memory_usage(),
                     total_requests: self.total_requests.load(Ordering::Relaxed),
                 })
+            }
+
+            Request::SubmitEmbeddingJob {
+                db_path,
+                index_path,
+                two_tier,
+                fast_model,
+                quality_model,
+            } => {
+                let config = EmbeddingJobConfig {
+                    db_path,
+                    index_path,
+                    two_tier,
+                    fast_model,
+                    quality_model,
+                };
+                let guard = self.worker_handle.lock();
+                match guard.as_ref() {
+                    Some(handle) => match handle.submit(config) {
+                        Ok(()) => Response::JobSubmitted {
+                            job_id: request_id.clone(),
+                            message: "embedding job submitted".to_string(),
+                        },
+                        Err(e) => Response::Error(ErrorResponse {
+                            code: ErrorCode::Internal,
+                            message: format!("failed to submit job: {e}"),
+                            retryable: true,
+                            retry_after_ms: Some(1000),
+                        }),
+                    },
+                    None => Response::Error(ErrorResponse {
+                        code: ErrorCode::Internal,
+                        message: "embedding worker not initialized".to_string(),
+                        retryable: true,
+                        retry_after_ms: Some(1000),
+                    }),
+                }
+            }
+
+            Request::EmbeddingJobStatus { db_path } => {
+                match crate::storage::sqlite::SqliteStorage::open(std::path::Path::new(&db_path)) {
+                    Ok(storage) => match storage.get_embedding_jobs(&db_path) {
+                        Ok(rows) => {
+                            let jobs = rows
+                                .into_iter()
+                                .map(|r| EmbeddingJobDetail {
+                                    job_id: r.id,
+                                    model_id: r.model_id,
+                                    status: r.status,
+                                    total_docs: r.total_docs,
+                                    completed_docs: r.completed_docs,
+                                    error_message: r.error_message,
+                                })
+                                .collect();
+                            Response::JobStatus(EmbeddingJobInfo { jobs })
+                        }
+                        Err(e) => Response::Error(ErrorResponse {
+                            code: ErrorCode::Internal,
+                            message: format!("failed to query jobs: {e}"),
+                            retryable: false,
+                            retry_after_ms: None,
+                        }),
+                    },
+                    Err(e) => Response::Error(ErrorResponse {
+                        code: ErrorCode::Internal,
+                        message: format!("failed to open database: {e}"),
+                        retryable: false,
+                        retry_after_ms: None,
+                    }),
+                }
+            }
+
+            Request::CancelEmbeddingJob { db_path, model_id } => {
+                // Send cancel to worker
+                let guard = self.worker_handle.lock();
+                if let Some(handle) = guard.as_ref() {
+                    let _ = handle.cancel(db_path.clone(), model_id.clone());
+                }
+
+                // Also cancel in database
+                match crate::storage::sqlite::SqliteStorage::open(std::path::Path::new(&db_path)) {
+                    Ok(storage) => {
+                        match storage.cancel_embedding_jobs(&db_path, model_id.as_deref()) {
+                            Ok(count) => Response::JobCancelled {
+                                cancelled: count,
+                                message: format!("cancelled {count} job(s)"),
+                            },
+                            Err(e) => Response::Error(ErrorResponse {
+                                code: ErrorCode::Internal,
+                                message: format!("failed to cancel jobs: {e}"),
+                                retryable: false,
+                                retry_after_ms: None,
+                            }),
+                        }
+                    }
+                    Err(e) => Response::Error(ErrorResponse {
+                        code: ErrorCode::Internal,
+                        message: format!("failed to open database: {e}"),
+                        retryable: false,
+                        retry_after_ms: None,
+                    }),
+                }
             }
 
             Request::Shutdown => {

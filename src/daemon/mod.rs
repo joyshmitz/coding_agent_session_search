@@ -46,6 +46,7 @@ pub mod core;
 pub mod models;
 pub mod protocol;
 pub mod resource;
+pub mod worker;
 
 // Re-export key types for convenience
 pub use client::{DaemonClientConfig, UdsDaemonClient};
@@ -53,3 +54,4 @@ pub use core::{DaemonConfig, ModelDaemon};
 pub use models::ModelManager;
 pub use protocol::{PROTOCOL_VERSION, Request, Response, default_socket_path};
 pub use resource::ResourceMonitor;
+pub use worker::{EmbeddingJobConfig, EmbeddingWorkerHandle};

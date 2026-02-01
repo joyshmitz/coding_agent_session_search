@@ -51,6 +51,24 @@ pub enum Request {
     /// Get daemon status and loaded models.
     Status,
 
+    /// Submit a background embedding job.
+    SubmitEmbeddingJob {
+        db_path: String,
+        index_path: String,
+        two_tier: bool,
+        fast_model: Option<String>,
+        quality_model: Option<String>,
+    },
+
+    /// Query embedding job status.
+    EmbeddingJobStatus { db_path: String },
+
+    /// Cancel embedding jobs.
+    CancelEmbeddingJob {
+        db_path: String,
+        model_id: Option<String>,
+    },
+
     /// Request graceful shutdown.
     Shutdown,
 }
@@ -69,6 +87,15 @@ pub enum Response {
 
     /// Status response with daemon info.
     Status(StatusResponse),
+
+    /// Embedding job submitted.
+    JobSubmitted { job_id: String, message: String },
+
+    /// Embedding job status.
+    JobStatus(EmbeddingJobInfo),
+
+    /// Embedding jobs cancelled.
+    JobCancelled { cancelled: usize, message: String },
 
     /// Shutdown acknowledgement.
     Shutdown { message: String },
@@ -174,6 +201,23 @@ pub enum ErrorCode {
     ModelLoadFailed,
     /// Protocol version mismatch.
     VersionMismatch,
+}
+
+/// Status information for embedding jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingJobInfo {
+    pub jobs: Vec<EmbeddingJobDetail>,
+}
+
+/// Detail for a single embedding job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingJobDetail {
+    pub job_id: i64,
+    pub model_id: String,
+    pub status: String,
+    pub total_docs: i64,
+    pub completed_docs: i64,
+    pub error_message: Option<String>,
 }
 
 /// Framed message wrapper for length-prefixed protocol.

@@ -327,7 +327,7 @@ pub fn cleanup_old_backups(db_path: &Path, keep_count: usize) -> Result<(), std:
 }
 
 /// Public schema version constant for external checks.
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 /// Result of checking schema compatibility.
 #[derive(Debug, Clone)]
@@ -402,7 +402,7 @@ fn check_schema_compatibility(path: &Path) -> std::result::Result<SchemaCheck, r
     }
 }
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 const MIGRATION_V1: &str = r"
 PRAGMA foreign_keys = ON;
@@ -623,6 +623,43 @@ CREATE TABLE IF NOT EXISTS daily_stats (
 CREATE INDEX IF NOT EXISTS idx_daily_stats_agent ON daily_stats(agent_slug, day_id);
 CREATE INDEX IF NOT EXISTS idx_daily_stats_source ON daily_stats(source_id, day_id);
 ";
+
+const MIGRATION_V9: &str = r"
+-- Background embedding jobs tracking table
+CREATE TABLE IF NOT EXISTS embedding_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    db_path TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    total_docs INTEGER NOT NULL DEFAULT 0,
+    completed_docs INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at TEXT,
+    completed_at TEXT
+);
+
+-- Only one pending or running job per (db_path, model_id) at a time.
+-- Multiple completed/failed/cancelled jobs are allowed for history.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_embedding_jobs_active
+ON embedding_jobs(db_path, model_id)
+WHERE status IN ('pending', 'running');
+";
+
+/// Row from the embedding_jobs table.
+#[derive(Debug, Clone)]
+pub struct EmbeddingJobRow {
+    pub id: i64,
+    pub db_path: String,
+    pub model_id: String,
+    pub status: String,
+    pub total_docs: i64,
+    pub completed_docs: i64,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
 
 pub struct SqliteStorage {
     conn: Connection,
@@ -1395,6 +1432,109 @@ impl SqliteStorage {
         Ok(out)
     }
 
+    /// Insert or update an embedding job, returning the job ID.
+    pub fn upsert_embedding_job(
+        &self,
+        db_path: &str,
+        model_id: &str,
+        total_docs: i64,
+    ) -> Result<i64> {
+        // Cancel any existing pending/running jobs for this db_path+model_id
+        self.conn.execute(
+            "UPDATE embedding_jobs SET status = 'cancelled', completed_at = datetime('now')
+             WHERE db_path = ?1 AND model_id = ?2 AND status IN ('pending', 'running')",
+            params![db_path, model_id],
+        )?;
+        self.conn.execute(
+            "INSERT INTO embedding_jobs (db_path, model_id, status, total_docs)
+             VALUES (?1, ?2, 'pending', ?3)",
+            params![db_path, model_id, total_docs],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Mark an embedding job as running.
+    pub fn start_embedding_job(&self, job_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE embedding_jobs SET status = 'running', started_at = datetime('now') WHERE id = ?1",
+            params![job_id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark an embedding job as completed.
+    pub fn complete_embedding_job(&self, job_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE embedding_jobs SET status = 'completed', completed_at = datetime('now') WHERE id = ?1",
+            params![job_id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark an embedding job as failed with an error message.
+    pub fn fail_embedding_job(&self, job_id: i64, error: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE embedding_jobs SET status = 'failed', error_message = ?2, completed_at = datetime('now') WHERE id = ?1",
+            params![job_id, error],
+        )?;
+        Ok(())
+    }
+
+    /// Cancel pending/running embedding jobs for a db_path, optionally filtered by model_id.
+    pub fn cancel_embedding_jobs(&self, db_path: &str, model_id: Option<&str>) -> Result<usize> {
+        let count = if let Some(mid) = model_id {
+            self.conn.execute(
+                "UPDATE embedding_jobs SET status = 'cancelled', completed_at = datetime('now')
+                 WHERE db_path = ?1 AND model_id = ?2 AND status IN ('pending', 'running')",
+                params![db_path, mid],
+            )?
+        } else {
+            self.conn.execute(
+                "UPDATE embedding_jobs SET status = 'cancelled', completed_at = datetime('now')
+                 WHERE db_path = ?1 AND status IN ('pending', 'running')",
+                params![db_path],
+            )?
+        };
+        Ok(count)
+    }
+
+    /// Update the progress of an embedding job.
+    pub fn update_job_progress(&self, job_id: i64, completed_docs: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE embedding_jobs SET completed_docs = ?2 WHERE id = ?1",
+            params![job_id, completed_docs],
+        )?;
+        Ok(())
+    }
+
+    /// Get all embedding jobs for a given db_path.
+    pub fn get_embedding_jobs(&self, db_path: &str) -> Result<Vec<EmbeddingJobRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, db_path, model_id, status, total_docs, completed_docs,
+                    error_message, created_at, started_at, completed_at
+             FROM embedding_jobs WHERE db_path = ?1 ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map(params![db_path], |row| {
+            Ok(EmbeddingJobRow {
+                id: row.get(0)?,
+                db_path: row.get(1)?,
+                model_id: row.get(2)?,
+                status: row.get(3)?,
+                total_docs: row.get(4)?,
+                completed_docs: row.get(5)?,
+                error_message: row.get(6)?,
+                created_at: row.get(7)?,
+                started_at: row.get(8)?,
+                completed_at: row.get(9)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     pub fn rebuild_fts(&mut self) -> Result<()> {
         self.conn.execute("DELETE FROM fts_messages", [])?;
         self.conn.execute_batch(
@@ -2140,6 +2280,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
             tx.execute_batch(MIGRATION_V8)?;
+            tx.execute_batch(MIGRATION_V9)?;
         }
         1 => {
             tx.execute_batch(MIGRATION_V2)?;
@@ -2149,6 +2290,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
             tx.execute_batch(MIGRATION_V8)?;
+            tx.execute_batch(MIGRATION_V9)?;
         }
         2 => {
             tx.execute_batch(MIGRATION_V3)?;
@@ -2157,6 +2299,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
             tx.execute_batch(MIGRATION_V8)?;
+            tx.execute_batch(MIGRATION_V9)?;
         }
         3 => {
             tx.execute_batch(MIGRATION_V4)?;
@@ -2164,24 +2307,32 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
             tx.execute_batch(MIGRATION_V8)?;
+            tx.execute_batch(MIGRATION_V9)?;
         }
         4 => {
             tx.execute_batch(MIGRATION_V5)?;
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
             tx.execute_batch(MIGRATION_V8)?;
+            tx.execute_batch(MIGRATION_V9)?;
         }
         5 => {
             tx.execute_batch(MIGRATION_V6)?;
             tx.execute_batch(MIGRATION_V7)?;
             tx.execute_batch(MIGRATION_V8)?;
+            tx.execute_batch(MIGRATION_V9)?;
         }
         6 => {
             tx.execute_batch(MIGRATION_V7)?;
             tx.execute_batch(MIGRATION_V8)?;
+            tx.execute_batch(MIGRATION_V9)?;
         }
         7 => {
             tx.execute_batch(MIGRATION_V8)?;
+            tx.execute_batch(MIGRATION_V9)?;
+        }
+        8 => {
+            tx.execute_batch(MIGRATION_V9)?;
         }
         v => return Err(anyhow!("unsupported schema version {v}")),
     }
