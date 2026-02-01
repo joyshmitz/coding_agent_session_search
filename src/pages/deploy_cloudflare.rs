@@ -1180,7 +1180,9 @@ mod tests {
 
         assert!(!prereqs.is_ready());
         let missing = prereqs.missing();
-        assert_eq!(missing.len(), 2);
+        // When wrangler is not installed and no API creds, there's 1 missing item
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].contains("wrangler CLI not installed"));
     }
 
     #[test]
