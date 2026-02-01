@@ -5,6 +5,118 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.64] - 2026-02-01
+
+### Added
+
+#### New Agent Connectors
+- **ClawdBot Connector**: Full support for ClawdBot sessions (`~/.clawdbot/sessions/`)
+- **Vibe Connector**: Support for Vibe (Mistral) agent logs (`~/.vibe/logs/session/*/messages.jsonl`)
+
+#### ChatGPT Web Export Import
+- **`cass import chatgpt` Command**: Import conversations from ChatGPT web export (Settings → Data Controls → Export)
+- **Auto-Detection**: Automatically detects output directory (macOS ChatGPT app support or `~/.local/share/cass/chatgpt/` on Linux)
+- **Idempotent Import**: Skips conversations already imported, reports total/imported/skipped counts
+
+#### Watch Daemon Stale Detection (Issue #54)
+- **Stale Detection System**: Monitors watch daemon for stuck states where indexing stops working
+- **Configurable Thresholds**: `CASS_WATCH_STALE_THRESHOLD_HOURS` (default: 24), `CASS_WATCH_STALE_CHECK_INTERVAL_MINS` (default: 60)
+- **Recovery Actions**: Configurable via `CASS_WATCH_STALE_ACTION` (warn|rebuild|none)
+- **Activity Tracking**: Tracks last successful ingest timestamp and consecutive zero-conversation scans
+
+#### Cloudflare Pages Direct API Upload
+- **Wrangler-Free Deployment**: Deploy to Cloudflare Pages via direct API upload without wrangler CLI
+- **Blake3 Hashing**: Uses Blake3 for manifest hashes as required by Cloudflare
+- **MIME Detection**: Automatic content-type detection for asset uploads
+- **CLI Flags**: `--target cloudflare`, `--project`, `--account-id`, `--api-token`, `--branch` for non-interactive deployment
+
+#### LazyDb for Startup Performance
+- **Deferred SQLite Connection**: `LazyDb` struct delays database open until first actual query
+- **RAII Guard Pattern**: `LazyDbGuard` with `Deref<Target=Connection>` for ergonomic usage
+- **Health Command Optimization**: `cass health` runs without opening database, using index meta.json mtime
+- **Lazy TUI Loading**: Detail pane and workspace filters load on-demand
+
+#### Two-Tier Progressive Search
+- **Fast Initial Results**: Returns lexical results immediately while semantic search runs in background
+- **Progressive Enhancement**: Semantic results merge in as they complete
+- **Configurable Tiers**: Control timeout and result merging behavior
+
+#### Daemon Module with Resource Monitoring
+- **Complete Daemon Implementation**: Unix domain socket-based warm model daemon
+- **Resource Monitoring**: Memory tracking and CPU usage estimation
+- **Graceful Shutdown**: Clean termination with fallback to direct inference
+
+#### Embedder & Reranker Registries
+- **Model Bake-Off Framework**: Evaluation harness for comparing embedding and reranking models
+- **Embedder Selection**: Multiple bake-off eligible embedding models in registry
+- **Reranker Registry**: Cross-encoder reranking model selection for improved result quality
+- **EMBEDDER Environment Variable**: Override default embedder for semantic indexing
+
+#### HTML Export Redesign (Epic)
+- **Message Grouping**: Consolidated rendering with `MessageGroup` types for related messages
+- **Tool Badge Popovers**: Compact tool call badges with inline popover details (no expandable details)
+- **Search Highlighting**: Matching messages glow during in-document search
+- **Terminal Noir Theme**: Premium glassmorphism-inspired dark theme with CSS variables
+- **Typography Upgrade**: Improved fonts, spacing, and fallbacks for offline viewing
+
+#### Doctor Command Enhancement
+- **FTS5 Table Detection**: Detects missing `fts_messages` FTS5 virtual table (#17)
+- **FTS5 Recreation**: `cass doctor --fix` recreates and repopulates FTS table from messages
+- **Graceful Degradation**: Provides actionable hint when FTS table is missing
+
+#### Testing Infrastructure Expansion
+- **Performance Metrics Collection**: Baseline tracking with regression detection in E2E tests
+- **Failure State Dump**: Comprehensive debugging artifacts on E2E test failures
+- **E2E Logging Compliance**: CI validation that all E2E tests use standardized logging
+- **Beads Test Fixtures**: Dedicated fixture directory for issue tracker testing
+
+### Changed
+
+#### Performance Improvements
+- **Lazy Database Opening**: Startup cost reduced for commands that may never query the DB
+- **Deterministic Sorting**: Use `total_cmp` and tie-break by index for reproducible search results
+- **Connection Optimization**: Daemon UDS client connection clone optimization
+- **Sorted Alias Output**: Merged aliases sorted for deterministic output
+
+#### CLI Improvements
+- **Unicode Breadcrumb Width**: Use unicode display width for accurate breadcrumb measurement
+- **Boolean Query Parsing**: Correct handling of NOT + OR operator combinations
+- **Wildcard Regex Anchoring**: Test assertions updated for trailing `$` anchor in regex queries
+
+### Fixed
+
+#### Critical Fixes
+- **Windows Compatibility**: Daemon module gated behind `#[cfg(unix)]` to allow Windows compilation
+- **FTS5 Missing Table**: Doctor command detects and recreates missing FTS search table (#17)
+- **Cloudflare Credential Validation**: Only validate Cloudflare credentials when target is cloudflare
+- **u32 Truncation**: Use `try_from` for u32 casts to avoid silent truncation on large values
+
+#### HTML Export Fixes
+- **Popover Positioning**: Improved popover positioning and test robustness
+- **JS Initialization**: Hardened JavaScript initialization and search/popover behavior
+- **Animation Fallbacks**: Color and animation CSS fallbacks for Terminal Noir theme
+- **Dead Code Removal**: Removed unused glassmorphism code
+
+#### Search Fixes
+- **Deterministic Sort Order**: Use `total_cmp` and tie-break by index for reproducible results
+- **Index Reader Reload**: Force initial reload on Manual policy prevents stale results
+- **Query Parser**: Fixed boolean query parsing for complex NOT + OR combinations
+
+#### Safety Hardening
+- **Bounds Checking**: Added bounds checking and removed unwrap panics in dot product calculations
+- **Arithmetic Operations**: Hardened arithmetic to prevent division by zero in bakeoff latency
+- **SQL LIKE Escaping**: Safe escaping and integer casts in SQL queries
+- **Socket Path Sanitization**: Sanitize Unix socket paths in daemon module
+- **dotenvy Usage**: Use `dotenvy::var` instead of `std::env::var` for CASS_TRACE_ID
+
+#### Connector & Installer Fixes
+- **Path Mapping Separators**: Preserve path separator in directory path mappings for cross-platform sync
+- **Remote Installer Alignment**: Match GitHub release asset naming conventions
+- **Probe Version Extraction**: Handle cass binary found but version extraction failed
+- **Gemini Path Detection**: Simplified path end detection logic
+
+---
+
 ## [0.1.63] - 2026-01-27
 
 ### Added
