@@ -1,6 +1,7 @@
 pub mod bakeoff;
 pub mod bookmarks;
 pub mod connectors;
+#[cfg(unix)]
 pub mod daemon;
 pub mod encryption;
 pub mod export;
