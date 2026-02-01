@@ -85,7 +85,8 @@ ensure_rust() {
     info "Skipping rustup install (RUSTUP_INIT_SKIP set)"
     return 0
   fi
-  if command -v cargo >/dev/null 2>&1 && rustc --version 2>/dev/null | grep -qE '1\.(8[5-9]|9[0-9]|[1-9][0-9]{2,})'; then return 0; fi
+  # Require Rust 1.85+ (edition 2024 support) or any future major version (2.x+)
+  if command -v cargo >/dev/null 2>&1 && rustc --version 2>/dev/null | grep -qE 'rustc ([2-9]+|1\.(8[5-9]|9[0-9]|[1-9][0-9]{2,}))\.'; then return 0; fi
   if [ "$EASY" -ne 1 ]; then
     if [ -t 0 ]; then
       echo -n "Install Rust stable via rustup? (y/N): "
