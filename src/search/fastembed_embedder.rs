@@ -100,9 +100,6 @@ impl FastEmbedder {
     pub fn model_dir_for(data_dir: &Path, embedder_name: &str) -> Option<PathBuf> {
         let dir_name = match embedder_name {
             "minilm" => MINILM_DIR_NAME,
-            "embeddinggemma" => "embeddinggemma-300m",
-            "qwen3-embed" => "Qwen3-Embedding-0.6B",
-            "modernbert-embed" => "ModernBERT-embed-large",
             "snowflake-arctic-s" => "snowflake-arctic-embed-s",
             "nomic-embed" => "nomic-embed-text-v1.5",
             _ => return None,
@@ -117,24 +114,6 @@ impl FastEmbedder {
                 embedder_id: "minilm-384".to_string(),
                 model_id: "all-minilm-l6-v2".to_string(),
                 dimension: 384,
-                pooling: Pooling::Mean,
-            }),
-            "embeddinggemma" => Some(OnnxEmbedderConfig {
-                embedder_id: "embeddinggemma-256".to_string(),
-                model_id: "embeddinggemma-300m".to_string(),
-                dimension: 256,
-                pooling: Pooling::Mean,
-            }),
-            "qwen3-embed" => Some(OnnxEmbedderConfig {
-                embedder_id: "qwen3-embed-1024".to_string(),
-                model_id: "Qwen3-Embedding-0.6B".to_string(),
-                dimension: 1024,
-                pooling: Pooling::Mean,
-            }),
-            "modernbert-embed" => Some(OnnxEmbedderConfig {
-                embedder_id: "modernbert-embed-768".to_string(),
-                model_id: "ModernBERT-embed-large".to_string(),
-                dimension: 768,
                 pooling: Pooling::Mean,
             }),
             "snowflake-arctic-s" => Some(OnnxEmbedderConfig {
