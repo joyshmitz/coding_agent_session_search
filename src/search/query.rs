@@ -1032,8 +1032,10 @@ pub fn rrf_fuse_hits(
         return Vec::new();
     }
 
-    let mut scores: HashMap<SearchHitKey, HybridScore> = HashMap::new();
-    let mut hits: HashMap<SearchHitKey, SearchHit> = HashMap::new();
+    // Pre-allocate capacity to avoid rehashing. Worst case: no overlap between lists.
+    let capacity = lexical.len() + semantic.len();
+    let mut scores: HashMap<SearchHitKey, HybridScore> = HashMap::with_capacity(capacity);
+    let mut hits: HashMap<SearchHitKey, SearchHit> = HashMap::with_capacity(capacity);
 
     for (rank, hit) in lexical.iter().enumerate() {
         let key = SearchHitKey::from_hit(hit);
@@ -1076,7 +1078,7 @@ pub fn rrf_fuse_hits(
 
     // Deduplicate by content hash to ensure diversity
     // Key: (source_id, content_hash) -> seen
-    let mut seen_content: HashSet<(String, u64)> = HashSet::new();
+    let mut seen_content: HashSet<(String, u64)> = HashSet::with_capacity(fused.len());
     let mut unique_fused = Vec::with_capacity(fused.len());
 
     for entry in fused {
