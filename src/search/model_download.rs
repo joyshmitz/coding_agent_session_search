@@ -362,37 +362,42 @@ impl ModelManifest {
     /// Dimension: 384
     /// Small, fast model with MiniLM-compatible dimension.
     ///
-    /// Note: Checksums are placeholders until model is downloaded and verified.
+    /// Verified: 2026-02-02 - All checksums verified from HuggingFace.
     pub fn snowflake_arctic_s() -> Self {
         Self {
             id: "snowflake-arctic-embed-s".into(),
             repo: "Snowflake/snowflake-arctic-embed-s".into(),
-            revision: "main".into(),
+            revision: "e596f507467533e48a2e17c007f0e1dacc837b33".into(),
             files: vec![
                 ModelFile {
-                    name: "model.onnx".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 110_000_000, // ~110MB estimated
+                    name: "onnx/model.onnx".into(),
+                    sha256: "579c1f1778a0993eb0d2a1403340ffb491c769247fb46acc4f5cf8ac5b89c1e1"
+                        .into(),
+                    size: 133_093_492,
                 },
                 ModelFile {
                     name: "tokenizer.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500_000,
+                    sha256: "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854"
+                        .into(),
+                    size: 711_649,
                 },
                 ModelFile {
                     name: "config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 1000,
+                    sha256: "4e519aa92ec40943356032afe458c8829d70c5766b109e4a57490b82f72dcfb7"
+                        .into(),
+                    size: 703,
                 },
                 ModelFile {
                     name: "special_tokens_map.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
+                    sha256: "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a"
+                        .into(),
+                    size: 695,
                 },
                 ModelFile {
                     name: "tokenizer_config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
+                    sha256: "9ca59277519f6e3692c8685e26b94d4afca2d5438deff66483db495e48735810"
+                        .into(),
+                    size: 1_433,
                 },
             ],
             license: "Apache-2.0".into(),
@@ -405,37 +410,42 @@ impl ModelManifest {
     /// Dimension: 768
     /// Long context support with Matryoshka embedding capability.
     ///
-    /// Note: Checksums are placeholders until model is downloaded and verified.
+    /// Verified: 2026-02-02 - All checksums verified from HuggingFace.
     pub fn nomic_embed() -> Self {
         Self {
             id: "nomic-embed-text-v1.5".into(),
             repo: "nomic-ai/nomic-embed-text-v1.5".into(),
-            revision: "main".into(),
+            revision: "e5cf08aadaa33385f5990def41f7a23405aec398".into(),
             files: vec![
                 ModelFile {
-                    name: "model.onnx".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 280_000_000, // ~280MB estimated
+                    name: "onnx/model.onnx".into(),
+                    sha256: "147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965"
+                        .into(),
+                    size: 547_310_275,
                 },
                 ModelFile {
                     name: "tokenizer.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500_000,
+                    sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+                        .into(),
+                    size: 711_396,
                 },
                 ModelFile {
                     name: "config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 1000,
+                    sha256: "0168e0883705b0bf8f2b381e10f45a9f3e1ef4b13869b43c160e4c8a70ddf442"
+                        .into(),
+                    size: 2_331,
                 },
                 ModelFile {
                     name: "special_tokens_map.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
+                    sha256: "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a"
+                        .into(),
+                    size: 695,
                 },
                 ModelFile {
                     name: "tokenizer_config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
+                    sha256: "d7e0000bcc80134debd2222220427e6bf5fa20a669f40a0d0d1409cc18e0a9bc"
+                        .into(),
+                    size: 1_191,
                 },
             ],
             license: "Apache-2.0".into(),
@@ -445,36 +455,44 @@ impl ModelManifest {
     // ==================== Reranker Models ====================
 
     /// MS MARCO MiniLM reranker manifest (baseline for bake-off).
+    ///
+    /// Verified: 2026-02-02 - All checksums verified from HuggingFace.
+    /// Note: Repo is ms-marco-MiniLM-L6-v2 (no hyphen between L and 6).
     pub fn msmarco_reranker() -> Self {
         Self {
-            id: "ms-marco-MiniLM-L-6-v2".into(),
-            repo: "cross-encoder/ms-marco-MiniLM-L-6-v2".into(),
-            revision: "main".into(),
+            id: "ms-marco-MiniLM-L6-v2".into(),
+            repo: "cross-encoder/ms-marco-MiniLM-L6-v2".into(),
+            revision: "c5ee24cb16019beea0893ab7796b1df96625c6b8".into(),
             files: vec![
                 ModelFile {
                     name: "onnx/model.onnx".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 90_000_000,
+                    sha256: "5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a"
+                        .into(),
+                    size: 91_011_230,
                 },
                 ModelFile {
                     name: "tokenizer.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500_000,
+                    sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+                        .into(),
+                    size: 711_396,
                 },
                 ModelFile {
                     name: "config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 1000,
+                    sha256: "380e02c93f431831be65d99a4e7e5f67c133985bf2e77d9d4eba46847190bacc"
+                        .into(),
+                    size: 794,
                 },
                 ModelFile {
                     name: "special_tokens_map.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
+                    sha256: "3c3507f36dff57bce437223db3b3081d1e2b52ec3e56ee55438193ecb2c94dd6"
+                        .into(),
+                    size: 132,
                 },
                 ModelFile {
                     name: "tokenizer_config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
+                    sha256: "a5c2e5a7b1a29a0702cd28c08a399b5ecc110c263009d17f7e3b415f25905fd8"
+                        .into(),
+                    size: 1_330,
                 },
             ],
             license: "Apache-2.0".into(),
@@ -528,37 +546,42 @@ impl ModelManifest {
     /// Released: 2025-11-20
     /// Fast, optimized for English.
     ///
-    /// Note: Checksums are placeholders until model is downloaded and verified.
+    /// Verified: 2026-02-02 - All checksums verified from HuggingFace.
     pub fn jina_reranker_turbo() -> Self {
         Self {
             id: "jina-reranker-v1-turbo-en".into(),
             repo: "jinaai/jina-reranker-v1-turbo-en".into(),
-            revision: "main".into(),
+            revision: "b8c14f4e723d9e0aab4732a7b7b93741eeeb77c2".into(),
             files: vec![
                 ModelFile {
-                    name: "model.onnx".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 140_000_000, // ~140MB estimated
+                    name: "onnx/model.onnx".into(),
+                    sha256: "c1296c66c119de645fa9cdee536d8637740efe85224cfa270281e50f213aa565"
+                        .into(),
+                    size: 151_296_975,
                 },
                 ModelFile {
                     name: "tokenizer.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500_000,
+                    sha256: "0046da43cc8c424b317f56b092b0512aaaa65c4f925d2f16af9d9eeb4d0ef902"
+                        .into(),
+                    size: 2_030_772,
                 },
                 ModelFile {
                     name: "config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 1000,
+                    sha256: "e050ff6a15ae9295e84882fa0e98051bd8754856cd5201395ebf00ce9f2d609b"
+                        .into(),
+                    size: 1_206,
                 },
                 ModelFile {
                     name: "special_tokens_map.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
+                    sha256: "06e405a36dfe4b9604f484f6a1e619af1a7f7d09e34a8555eb0b77b66318067f"
+                        .into(),
+                    size: 280,
                 },
                 ModelFile {
                     name: "tokenizer_config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
+                    sha256: "d291c6652d96d56ffdbcf1ea19d9bae5ed79003f7648c627e725a619227ce8fa"
+                        .into(),
+                    size: 1_215,
                 },
             ],
             license: "Apache-2.0".into(),
@@ -1497,14 +1520,32 @@ mod tests {
 
     #[test]
     fn test_bakeoff_candidates_separation() {
-        // All bake-off candidates should have placeholder checksums currently
         let pending = ModelManifest::bakeoff_candidates_pending();
         let ready = ModelManifest::bakeoff_candidates_ready();
 
-        // Currently all bake-off models are pending (none have real checksums)
-        assert!(!pending.is_empty());
-        // When models get verified, they'll move to the ready list
-        assert!(ready.is_empty()); // All bake-off candidates have placeholders
+        // Some models are now verified and production-ready
+        // Ready: snowflake_arctic_s, nomic_embed, jina_reranker_turbo
+        // Pending: embeddinggemma, qwen3, modernbert, bge_reranker_v2, jina_reranker_v2
+        assert!(!pending.is_empty(), "Should have some pending models");
+        assert!(!ready.is_empty(), "Should have some ready models");
+
+        // Verify specific models are in the right category
+        assert!(
+            ready.iter().any(|m| m.id == "snowflake-arctic-embed-s"),
+            "Snowflake should be ready"
+        );
+        assert!(
+            ready.iter().any(|m| m.id == "nomic-embed-text-v1.5"),
+            "Nomic should be ready"
+        );
+        assert!(
+            ready.iter().any(|m| m.id == "jina-reranker-v1-turbo-en"),
+            "Jina Turbo should be ready"
+        );
+        assert!(
+            pending.iter().any(|m| m.id == "embeddinggemma-300m"),
+            "EmbeddingGemma should be pending"
+        );
 
         // Total should equal all candidates
         let all = ModelManifest::bakeoff_candidates();
