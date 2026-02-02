@@ -198,7 +198,8 @@ impl EncryptionEngine {
 
     /// Add a recovery secret slot using HKDF-SHA256
     pub fn add_recovery_slot(&mut self, secret: &[u8]) -> Result<u8> {
-        let slot_id = self.key_slots.len() as u8;
+        let slot_id = u8::try_from(self.key_slots.len())
+            .map_err(|_| anyhow::anyhow!("maximum of 256 key slots exceeded"))?;
 
         // Generate salt
         let mut salt = [0u8; 16];

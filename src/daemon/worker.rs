@@ -245,8 +245,11 @@ impl EmbeddingWorker {
             let hash = content_hash(&canonical);
             let role = role_code_from_str(&msg.role).unwrap_or(0);
 
+            // Use safe conversion for message_id (consistent with storage pattern)
+            let message_id = u64::try_from(msg.message_id).unwrap_or(0);
+
             // Check if this document is unchanged - skip re-embedding if hash matches
-            if let Some(existing_hash) = existing_hashes.get(&(msg.message_id as u64))
+            if let Some(existing_hash) = existing_hashes.get(&message_id)
                 && *existing_hash == hash
             {
                 skipped_count += 1;
@@ -255,7 +258,6 @@ impl EmbeddingWorker {
             }
 
             // Use saturating casts to handle edge cases gracefully
-            let message_id = u64::try_from(msg.message_id).unwrap_or(0);
             let agent_id = u32::try_from(msg.agent_id).unwrap_or(0);
             let workspace_id = u32::try_from(msg.workspace_id.unwrap_or(0)).unwrap_or(0);
 
