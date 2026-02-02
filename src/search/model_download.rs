@@ -227,135 +227,6 @@ impl ModelManifest {
     // These models were released after 2025-11-01 and are candidates for
     // the CPU-optimized embedding bake-off.
 
-    /// Google EmbeddingGemma 300M manifest.
-    ///
-    /// Released: 2025-12-15
-    /// Dimension: 256
-    /// Best-in-class performance for its size on MTEB.
-    ///
-    /// Note: Checksums are placeholders until model is downloaded and verified.
-    pub fn embeddinggemma() -> Self {
-        Self {
-            id: "embeddinggemma-300m".into(),
-            repo: "google/embeddinggemma-300m".into(),
-            revision: "main".into(), // TODO: Pin to specific revision after verification
-            files: vec![
-                ModelFile {
-                    name: "model.onnx".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 600_000_000, // ~600MB estimated
-                },
-                ModelFile {
-                    name: "tokenizer.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500_000,
-                },
-                ModelFile {
-                    name: "config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 1000,
-                },
-                ModelFile {
-                    name: "special_tokens_map.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
-                },
-                ModelFile {
-                    name: "tokenizer_config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
-                },
-            ],
-            license: "Apache-2.0".into(),
-        }
-    }
-
-    /// Qwen3-Embedding 0.6B manifest.
-    ///
-    /// Released: 2025-11-20
-    /// Dimension: 1024
-    /// High-quality embeddings with Qwen3 architecture.
-    ///
-    /// Note: Checksums are placeholders until model is downloaded and verified.
-    pub fn qwen3_embedding() -> Self {
-        Self {
-            id: "Qwen3-Embedding-0.6B".into(),
-            repo: "Alibaba-NLP/Qwen3-Embedding-0.6B".into(),
-            revision: "main".into(),
-            files: vec![
-                ModelFile {
-                    name: "model.onnx".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 1_200_000_000, // ~1.2GB estimated
-                },
-                ModelFile {
-                    name: "tokenizer.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 2_000_000,
-                },
-                ModelFile {
-                    name: "config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 1000,
-                },
-                ModelFile {
-                    name: "special_tokens_map.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
-                },
-                ModelFile {
-                    name: "tokenizer_config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
-                },
-            ],
-            license: "Apache-2.0".into(),
-        }
-    }
-
-    /// ModernBERT-embed-large manifest.
-    ///
-    /// Released: 2025-12-01
-    /// Dimension: 768
-    /// Modern BERT variant with rotary position embeddings.
-    ///
-    /// Note: Checksums are placeholders until model is downloaded and verified.
-    pub fn modernbert_embed() -> Self {
-        Self {
-            id: "ModernBERT-embed-large".into(),
-            repo: "lightonai/ModernBERT-embed-large".into(),
-            revision: "main".into(),
-            files: vec![
-                ModelFile {
-                    name: "model.onnx".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 400_000_000, // ~400MB estimated
-                },
-                ModelFile {
-                    name: "tokenizer.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500_000,
-                },
-                ModelFile {
-                    name: "config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 1000,
-                },
-                ModelFile {
-                    name: "special_tokens_map.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
-                },
-                ModelFile {
-                    name: "tokenizer_config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
-                },
-            ],
-            license: "MIT".into(),
-        }
-    }
-
     /// Snowflake Arctic Embed S manifest.
     ///
     /// Released: 2025-11-10
@@ -499,48 +370,6 @@ impl ModelManifest {
         }
     }
 
-    /// BGE Reranker v2 M3 manifest.
-    ///
-    /// Released: 2025-11-15
-    /// Updated BGE model with improved quality.
-    ///
-    /// Note: Checksums are placeholders until model is downloaded and verified.
-    pub fn bge_reranker_v2() -> Self {
-        Self {
-            id: "bge-reranker-v2-m3".into(),
-            repo: "BAAI/bge-reranker-v2-m3".into(),
-            revision: "main".into(),
-            files: vec![
-                ModelFile {
-                    name: "model.onnx".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 560_000_000, // ~560MB estimated
-                },
-                ModelFile {
-                    name: "tokenizer.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500_000,
-                },
-                ModelFile {
-                    name: "config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 1000,
-                },
-                ModelFile {
-                    name: "special_tokens_map.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
-                },
-                ModelFile {
-                    name: "tokenizer_config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
-                },
-            ],
-            license: "MIT".into(),
-        }
-    }
-
     /// Jina Reranker v1 Turbo EN manifest.
     ///
     /// Released: 2025-11-20
@@ -588,57 +417,12 @@ impl ModelManifest {
         }
     }
 
-    /// Jina Reranker v2 Base Multilingual manifest.
-    ///
-    /// Released: 2025-12-01
-    /// Multilingual support.
-    ///
-    /// Note: Checksums are placeholders until model is downloaded and verified.
-    pub fn jina_reranker_v2() -> Self {
-        Self {
-            id: "jina-reranker-v2-base-multilingual".into(),
-            repo: "jinaai/jina-reranker-v2-base-multilingual".into(),
-            revision: "main".into(),
-            files: vec![
-                ModelFile {
-                    name: "model.onnx".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 280_000_000, // ~280MB estimated
-                },
-                ModelFile {
-                    name: "tokenizer.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500_000,
-                },
-                ModelFile {
-                    name: "config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 1000,
-                },
-                ModelFile {
-                    name: "special_tokens_map.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
-                },
-                ModelFile {
-                    name: "tokenizer_config.json".into(),
-                    sha256: "PLACEHOLDER_VERIFY_AFTER_DOWNLOAD".into(),
-                    size: 500,
-                },
-            ],
-            license: "Apache-2.0".into(),
-        }
-    }
-
     // ==================== Lookup Functions ====================
 
     /// Get manifest by embedder name.
     pub fn for_embedder(name: &str) -> Option<Self> {
         match name {
             "minilm" => Some(Self::minilm_v2()),
-            "embeddinggemma" => Some(Self::embeddinggemma()),
-            "qwen3-embed" => Some(Self::qwen3_embedding()),
-            "modernbert-embed" => Some(Self::modernbert_embed()),
             "snowflake-arctic-s" => Some(Self::snowflake_arctic_s()),
             "nomic-embed" => Some(Self::nomic_embed()),
             _ => None,
@@ -649,60 +433,32 @@ impl ModelManifest {
     pub fn for_reranker(name: &str) -> Option<Self> {
         match name {
             "ms-marco" => Some(Self::msmarco_reranker()),
-            "bge-reranker-v2" => Some(Self::bge_reranker_v2()),
             "jina-reranker-turbo" => Some(Self::jina_reranker_turbo()),
-            "jina-reranker-v2" => Some(Self::jina_reranker_v2()),
             _ => None,
         }
     }
 
     /// Get all bake-off eligible embedder manifests.
+    ///
+    /// All models are verified with pinned revisions and SHA256 checksums.
     pub fn bakeoff_embedder_candidates() -> Vec<Self> {
-        vec![
-            Self::embeddinggemma(),
-            Self::qwen3_embedding(),
-            Self::modernbert_embed(),
-            Self::snowflake_arctic_s(),
-            Self::nomic_embed(),
-        ]
+        vec![Self::snowflake_arctic_s(), Self::nomic_embed()]
     }
 
     /// Get all bake-off eligible reranker manifests.
+    ///
+    /// All models are verified with pinned revisions and SHA256 checksums.
     pub fn bakeoff_reranker_candidates() -> Vec<Self> {
-        vec![
-            Self::bge_reranker_v2(),
-            Self::jina_reranker_turbo(),
-            Self::jina_reranker_v2(),
-        ]
+        vec![Self::jina_reranker_turbo()]
     }
 
     /// Get all bake-off eligible model manifests (embedders + rerankers).
+    ///
+    /// All models are verified with pinned revisions and SHA256 checksums.
     pub fn bakeoff_candidates() -> Vec<Self> {
         let mut candidates = Self::bakeoff_embedder_candidates();
         candidates.extend(Self::bakeoff_reranker_candidates());
         candidates
-    }
-
-    /// Get only production-ready bake-off candidates.
-    ///
-    /// These are models that have verified checksums and pinned revisions,
-    /// and can be safely downloaded and used.
-    pub fn bakeoff_candidates_ready() -> Vec<Self> {
-        Self::bakeoff_candidates()
-            .into_iter()
-            .filter(|m| m.is_production_ready())
-            .collect()
-    }
-
-    /// Get bake-off candidates that are NOT production-ready.
-    ///
-    /// These models have placeholder checksums or unpinned revisions and
-    /// cannot be downloaded until they are properly verified.
-    pub fn bakeoff_candidates_pending() -> Vec<Self> {
-        Self::bakeoff_candidates()
-            .into_iter()
-            .filter(|m| !m.is_production_ready())
-            .collect()
     }
 
     /// Total size of all files in bytes.
@@ -1503,53 +1259,45 @@ mod tests {
     }
 
     #[test]
-    fn test_manifest_not_production_ready_bakeoff() {
-        // Bake-off candidates should NOT be production-ready (placeholder checksums)
-        let manifest = ModelManifest::embeddinggemma();
-        assert!(!manifest.has_verified_checksums());
-        assert!(!manifest.has_pinned_revision());
-        assert!(!manifest.is_production_ready());
+    fn test_all_bakeoff_candidates_production_ready() {
+        // All bake-off candidates should be production-ready (verified checksums)
+        let candidates = ModelManifest::bakeoff_candidates();
 
-        // Check that at least one file has the placeholder
-        let has_placeholder = manifest
-            .files
-            .iter()
-            .any(|f| f.sha256 == super::PLACEHOLDER_CHECKSUM);
-        assert!(has_placeholder);
-    }
+        // Should have 3 verified models: snowflake, nomic, jina-turbo
+        assert_eq!(candidates.len(), 3, "Expected 3 bake-off candidates");
 
-    #[test]
-    fn test_bakeoff_candidates_separation() {
-        let pending = ModelManifest::bakeoff_candidates_pending();
-        let ready = ModelManifest::bakeoff_candidates_ready();
+        // All should be production-ready
+        for manifest in &candidates {
+            assert!(
+                manifest.is_production_ready(),
+                "Model {} should be production-ready",
+                manifest.id
+            );
+            assert!(
+                manifest.has_verified_checksums(),
+                "Model {} should have verified checksums",
+                manifest.id
+            );
+            assert!(
+                manifest.has_pinned_revision(),
+                "Model {} should have pinned revision",
+                manifest.id
+            );
+        }
 
-        // Some models are now verified and production-ready
-        // Ready: snowflake_arctic_s, nomic_embed, jina_reranker_turbo
-        // Pending: embeddinggemma, qwen3, modernbert, bge_reranker_v2, jina_reranker_v2
-        assert!(!pending.is_empty(), "Should have some pending models");
-        assert!(!ready.is_empty(), "Should have some ready models");
-
-        // Verify specific models are in the right category
+        // Verify specific models are present
         assert!(
-            ready.iter().any(|m| m.id == "snowflake-arctic-embed-s"),
-            "Snowflake should be ready"
+            candidates.iter().any(|m| m.id == "snowflake-arctic-embed-s"),
+            "Snowflake should be in candidates"
         );
         assert!(
-            ready.iter().any(|m| m.id == "nomic-embed-text-v1.5"),
-            "Nomic should be ready"
+            candidates.iter().any(|m| m.id == "nomic-embed-text-v1.5"),
+            "Nomic should be in candidates"
         );
         assert!(
-            ready.iter().any(|m| m.id == "jina-reranker-v1-turbo-en"),
-            "Jina Turbo should be ready"
+            candidates.iter().any(|m| m.id == "jina-reranker-v1-turbo-en"),
+            "Jina Turbo should be in candidates"
         );
-        assert!(
-            pending.iter().any(|m| m.id == "embeddinggemma-300m"),
-            "EmbeddingGemma should be pending"
-        );
-
-        // Total should equal all candidates
-        let all = ModelManifest::bakeoff_candidates();
-        assert_eq!(pending.len() + ready.len(), all.len());
     }
 
     #[test]

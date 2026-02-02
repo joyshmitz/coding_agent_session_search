@@ -104,9 +104,6 @@ impl RegisteredEmbedder {
         // Map embedder names to their model directory names
         let dir_name = match self.name {
             "minilm" => "all-MiniLM-L6-v2",
-            "embeddinggemma" => "embeddinggemma-300m",
-            "qwen3-embed" => "Qwen3-Embedding-0.6B",
-            "modernbert-embed" => "ModernBERT-embed-large",
             "snowflake-arctic-s" => "snowflake-arctic-embed-s",
             "nomic-embed" => "nomic-embed-text-v1.5",
             _ => return None,
@@ -184,43 +181,7 @@ pub static EMBEDDERS: &[RegisteredEmbedder] = &[
         size_bytes: 90_000_000,
         is_baseline: true,
     },
-    // === Bake-off Eligible Models (released >= 2025-11-01) ===
-    RegisteredEmbedder {
-        name: "embeddinggemma",
-        id: "embeddinggemma-256",
-        dimension: 256,
-        is_semantic: true,
-        description: "Google EmbeddingGemma 300M - best-in-class for size, MTEB leader",
-        requires_model_files: true,
-        release_date: "2025-09-04",
-        huggingface_id: "onnx-community/embeddinggemma-300m-ONNX",
-        size_bytes: 600_000_000,
-        is_baseline: false,
-    },
-    RegisteredEmbedder {
-        name: "qwen3-embed",
-        id: "qwen3-embed-1024",
-        dimension: 1024,
-        is_semantic: true,
-        description: "Qwen3-Embedding 0.6B - Qwen3 architecture, high quality",
-        requires_model_files: true,
-        release_date: "2025-11-20",
-        huggingface_id: "Alibaba-NLP/Qwen3-Embedding-0.6B",
-        size_bytes: 1_200_000_000,
-        is_baseline: false,
-    },
-    RegisteredEmbedder {
-        name: "modernbert-embed",
-        id: "modernbert-embed-768",
-        dimension: 768,
-        is_semantic: true,
-        description: "ModernBERT-embed-large - Modern BERT with rotary embeddings",
-        requires_model_files: true,
-        release_date: "2025-12-01",
-        huggingface_id: "lightonai/ModernBERT-embed-large",
-        size_bytes: 400_000_000,
-        is_baseline: false,
-    },
+    // === Bake-off Eligible Models (released >= 2025-11-01, verified checksums) ===
     RegisteredEmbedder {
         name: "snowflake-arctic-s",
         id: "snowflake-arctic-s-384",
@@ -406,8 +367,7 @@ fn load_embedder_by_name(data_dir: &Path, name: &str) -> EmbedderResult<Arc<dyn 
             Ok(Arc::new(embedder))
         }
         // All ONNX-based embedders (baseline and bake-off candidates)
-        "minilm" | "embeddinggemma" | "qwen3-embed" | "modernbert-embed" | "snowflake-arctic-s"
-        | "nomic-embed" => {
+        "minilm" | "snowflake-arctic-s" | "nomic-embed" => {
             let embedder = FastEmbedder::load_by_name(data_dir, name)?;
             Ok(Arc::new(embedder))
         }
@@ -571,11 +531,11 @@ mod tests {
         let registry = EmbedderRegistry::new(tmp.path());
 
         let eligible = registry.bakeoff_eligible();
-        // Should have at least 4 eligible models (qwen3, modernbert, snowflake, nomic)
-        // Note: embeddinggemma was released 2025-09-04, before the 2025-11-01 cutoff
-        assert!(
-            eligible.len() >= 4,
-            "Expected at least 4 eligible models, got {}",
+        // Should have exactly 2 eligible models: snowflake, nomic
+        assert_eq!(
+            eligible.len(),
+            2,
+            "Expected 2 eligible models, got {}",
             eligible.len()
         );
 
@@ -591,10 +551,14 @@ mod tests {
             "hash should not be in eligible list"
         );
 
-        // embeddinggemma should NOT be eligible (released before cutoff)
+        // Verify the correct models are in the eligible list
         assert!(
-            !eligible.iter().any(|e| e.name == "embeddinggemma"),
-            "embeddinggemma should not be in eligible list (released before cutoff)"
+            eligible.iter().any(|e| e.name == "snowflake-arctic-s"),
+            "snowflake should be in eligible list"
+        );
+        assert!(
+            eligible.iter().any(|e| e.name == "nomic-embed"),
+            "nomic should be in eligible list"
         );
     }
 
@@ -656,22 +620,21 @@ mod tests {
         let tmp = tempdir().unwrap();
         let registry = EmbedderRegistry::new(tmp.path());
 
-        // Check modernbert (eligible candidate)
-        let modernbert = registry.get("modernbert-embed").unwrap();
-        assert!(modernbert.is_bakeoff_eligible());
-        let metadata = modernbert.to_model_metadata();
+        // Check snowflake (eligible candidate, same dimension as minilm)
+        let snowflake = registry.get("snowflake-arctic-s").unwrap();
+        assert!(snowflake.is_bakeoff_eligible());
+        let metadata = snowflake.to_model_metadata();
+        assert!(!metadata.is_baseline);
+        assert!(metadata.is_eligible());
+        assert_eq!(metadata.dimension, Some(384));
+
+        // Check nomic (eligible candidate)
+        let nomic = registry.get("nomic-embed").unwrap();
+        assert!(nomic.is_bakeoff_eligible());
+        let metadata = nomic.to_model_metadata();
         assert!(!metadata.is_baseline);
         assert!(metadata.is_eligible());
         assert_eq!(metadata.dimension, Some(768));
-
-        // Check snowflake (same dimension as minilm)
-        let snowflake = registry.get("snowflake-arctic-s").unwrap();
-        assert!(snowflake.is_bakeoff_eligible());
-        assert_eq!(snowflake.dimension, 384);
-
-        // embeddinggemma is NOT eligible (released 2025-09-04, before cutoff)
-        let gemma = registry.get("embeddinggemma").unwrap();
-        assert!(!gemma.is_bakeoff_eligible());
     }
 
     #[test]
