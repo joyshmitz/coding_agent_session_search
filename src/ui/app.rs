@@ -36,7 +36,7 @@ use crate::search::query::{QuerySuggestion, SearchFilters, SearchHit, SearchMode
 use crate::sources::provenance::SourceFilter;
 use crate::storage::sqlite::SqliteStorage;
 use crate::ui::components::export_modal::{ExportModalState, ExportProgress};
-use crate::ui::components::palette::PaletteState;
+use crate::ui::components::palette::{PaletteAction, PaletteState, default_actions};
 use crate::ui::components::pills::Pill;
 use crate::ui::components::toast::ToastManager;
 use crate::ui::data::{ConversationView, InputMode};
@@ -367,7 +367,7 @@ impl Default for CassApp {
             show_bulk_modal: false,
             show_consent_dialog: false,
             source_filter_menu_open: false,
-            palette_state: PaletteState::new(Vec::new()),
+            palette_state: PaletteState::new(default_actions()),
             toast_manager: ToastManager::default(),
             reveal_anim_start: None,
             focus_flash_until: None,
@@ -569,6 +569,135 @@ impl CassApp {
             Paragraph::new("Select a result to preview context and metadata.")
                 .style(text_muted_style)
                 .render(inner, frame);
+        }
+    }
+
+    /// Render the command palette overlay centered on screen.
+    fn render_palette_overlay(
+        &self,
+        frame: &mut super::ftui_adapter::Frame,
+        area: Rect,
+        styles: &StyleContext,
+    ) {
+        // Palette dimensions: 60 cols or 80% of width, 16 rows or 60% of height.
+        let pal_w = (area.width * 4 / 5).clamp(30, 60);
+        let pal_h = (area.height * 3 / 5).clamp(8, 20);
+        let pal_x = area.x + (area.width.saturating_sub(pal_w)) / 2;
+        let pal_y = area.y + (area.height.saturating_sub(pal_h)) / 2;
+        let pal_area = Rect::new(pal_x, pal_y, pal_w, pal_h);
+
+        let palette_bg = styles.style(style_system::STYLE_PANE_BASE);
+        let border_style = styles.style(style_system::STYLE_PANE_FOCUSED);
+        let text_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
+        let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
+
+        // Clear the area and draw the outer block.
+        Block::new().style(palette_bg).render(pal_area, frame);
+        let outer = Block::new()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title("Command Palette (Ctrl+P)")
+            .title_alignment(Alignment::Left)
+            .style(border_style);
+        let inner = outer.inner(pal_area);
+        outer.render(pal_area, frame);
+
+        if inner.is_empty() {
+            return;
+        }
+
+        // Split inner into input (1 row) + separator (1 row) + list (rest).
+        let input_area = Rect::new(inner.x, inner.y, inner.width, 1);
+        let list_y = inner.y + 2;
+        let list_h = inner.height.saturating_sub(2);
+
+        // Render query input.
+        let query_display = if self.palette_state.query.is_empty() {
+            "Type to filter..."
+        } else {
+            self.palette_state.query.as_str()
+        };
+        let query_style = if self.palette_state.query.is_empty() {
+            muted_style
+        } else {
+            text_style
+        };
+        Paragraph::new(query_display)
+            .style(query_style)
+            .render(input_area, frame);
+
+        // Render separator line.
+        if inner.height > 2 {
+            let sep = "\u{2500}".repeat(inner.width as usize);
+            Paragraph::new(&*sep)
+                .style(muted_style)
+                .render(Rect::new(inner.x, inner.y + 1, inner.width, 1), frame);
+        }
+
+        // Render filtered action list.
+        let visible_count = list_h as usize;
+        let selected = self.palette_state.selected;
+        // Scroll the list so the selection is always visible.
+        let scroll_offset = if selected >= visible_count {
+            selected - visible_count + 1
+        } else {
+            0
+        };
+
+        let selected_style = styles.style(style_system::STYLE_RESULT_ROW_SELECTED);
+
+        for (i, item) in self
+            .palette_state
+            .filtered
+            .iter()
+            .skip(scroll_offset)
+            .take(visible_count)
+            .enumerate()
+        {
+            let row_y = list_y + i as u16;
+            if row_y >= pal_area.y + pal_area.height {
+                break;
+            }
+            let row_area = Rect::new(inner.x, row_y, inner.width, 1);
+            let abs_idx = scroll_offset + i;
+            let is_selected = abs_idx == selected;
+
+            // Format: "  label                    hint" or "➜ label ... hint"
+            let prefix = if is_selected { "\u{279c} " } else { "  " };
+            let hint_len = item.hint.len();
+            let label_max = (inner.width as usize).saturating_sub(prefix.len() + hint_len + 2);
+            let label = if item.label.len() > label_max {
+                &item.label[..label_max]
+            } else {
+                &item.label
+            };
+            let padding = inner
+                .width
+                .saturating_sub(prefix.len() as u16 + label.len() as u16 + hint_len as u16);
+            let line = format!(
+                "{prefix}{label}{:>pad$}",
+                item.hint,
+                pad = padding as usize + hint_len
+            );
+
+            let row_style = if is_selected {
+                selected_style
+            } else {
+                text_style
+            };
+            Paragraph::new(&*line)
+                .style(row_style)
+                .render(row_area, frame);
+        }
+
+        // Show count at bottom if items overflow.
+        let total = self.palette_state.filtered.len();
+        if total > visible_count && list_h > 0 {
+            let count_text = format!(" {total} actions");
+            let count_area = Rect::new(inner.x, pal_area.y + pal_area.height - 1, inner.width, 1);
+            Paragraph::new(&*count_text)
+                .style(muted_style)
+                .render(count_area, frame);
         }
     }
 }
@@ -1598,9 +1727,65 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::PaletteActionExecuted => {
+                let action = self
+                    .palette_state
+                    .filtered
+                    .get(self.palette_state.selected)
+                    .map(|item| item.action.clone());
                 self.palette_state.open = false;
-                // TODO: dispatch the selected palette action
-                ftui::Cmd::none()
+                match action {
+                    Some(PaletteAction::ToggleTheme) => ftui::Cmd::msg(CassMsg::ThemeToggled),
+                    Some(PaletteAction::ToggleDensity) => {
+                        ftui::Cmd::msg(CassMsg::DensityModeCycled)
+                    }
+                    Some(PaletteAction::ToggleHelpStrip) => ftui::Cmd::msg(CassMsg::HelpPinToggled),
+                    Some(PaletteAction::OpenUpdateBanner) => {
+                        // TODO: show update assistant UI
+                        ftui::Cmd::none()
+                    }
+                    Some(PaletteAction::FilterAgent) => {
+                        ftui::Cmd::msg(CassMsg::InputModeEntered(InputMode::Agent))
+                    }
+                    Some(PaletteAction::FilterWorkspace) => {
+                        ftui::Cmd::msg(CassMsg::InputModeEntered(InputMode::Workspace))
+                    }
+                    Some(PaletteAction::FilterToday) => {
+                        let now = chrono::Utc::now().timestamp();
+                        let start_of_day = now - (now % 86400);
+                        ftui::Cmd::msg(CassMsg::FilterTimeSet {
+                            from: Some(start_of_day),
+                            to: None,
+                        })
+                    }
+                    Some(PaletteAction::FilterWeek) => {
+                        let now = chrono::Utc::now().timestamp();
+                        let week_ago = now - (7 * 86400);
+                        ftui::Cmd::msg(CassMsg::FilterTimeSet {
+                            from: Some(week_ago),
+                            to: None,
+                        })
+                    }
+                    Some(PaletteAction::FilterCustomDate) => {
+                        ftui::Cmd::msg(CassMsg::InputModeEntered(InputMode::CreatedFrom))
+                    }
+                    Some(PaletteAction::OpenSavedViews) => {
+                        // TODO: show saved views picker
+                        ftui::Cmd::none()
+                    }
+                    Some(PaletteAction::SaveViewSlot(slot)) => {
+                        ftui::Cmd::msg(CassMsg::ViewSaved(slot))
+                    }
+                    Some(PaletteAction::LoadViewSlot(slot)) => {
+                        ftui::Cmd::msg(CassMsg::ViewLoaded(slot))
+                    }
+                    Some(PaletteAction::OpenBulkActions) => {
+                        ftui::Cmd::msg(CassMsg::BulkActionsOpened)
+                    }
+                    Some(PaletteAction::ReloadIndex) => {
+                        ftui::Cmd::msg(CassMsg::IndexRefreshRequested)
+                    }
+                    None => ftui::Cmd::none(),
+                }
             }
 
             // -- Help overlay -------------------------------------------------
@@ -2110,6 +2295,11 @@ impl super::ftui_adapter::Model for CassApp {
         Paragraph::new(&*status_line)
             .style(text_muted_style)
             .render(vertical[2], frame);
+
+        // ── Command palette overlay ──────────────────────────────────
+        if self.palette_state.open {
+            self.render_palette_overlay(frame, area, &styles);
+        }
     }
 }
 
@@ -2265,5 +2455,200 @@ mod tests {
             encrypted: false,
             message_count: 10,
         };
+    }
+
+    use crate::ui::ftui_adapter::Model;
+
+    /// Extract the inner message from a Cmd::Msg, if present.
+    fn extract_msg(cmd: ftui::Cmd<CassMsg>) -> Option<CassMsg> {
+        match cmd {
+            ftui::Cmd::Msg(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    // ==================== Command palette tests ====================
+
+    #[test]
+    fn palette_state_initialized_with_default_actions() {
+        let app = CassApp::default();
+        assert!(
+            !app.palette_state.all_actions.is_empty(),
+            "palette should be initialized with actions"
+        );
+        // Should have at least the core 12 base actions + 18 slot actions = 30
+        assert!(app.palette_state.all_actions.len() >= 30);
+    }
+
+    #[test]
+    fn palette_state_not_open_by_default() {
+        let app = CassApp::default();
+        assert!(!app.palette_state.open);
+    }
+
+    #[test]
+    fn palette_open_sets_state() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.palette_state.open);
+        assert!(app.palette_state.query.is_empty());
+        assert_eq!(app.palette_state.selected, 0);
+        assert_eq!(
+            app.palette_state.filtered.len(),
+            app.palette_state.all_actions.len()
+        );
+    }
+
+    #[test]
+    fn palette_close_clears_open() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.palette_state.open);
+        let _ = app.update(CassMsg::PaletteClosed);
+        assert!(!app.palette_state.open);
+    }
+
+    #[test]
+    fn palette_query_filters_actions() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let total = app.palette_state.filtered.len();
+        let _ = app.update(CassMsg::PaletteQueryChanged("theme".into()));
+        assert!(app.palette_state.filtered.len() < total);
+        assert!(
+            app.palette_state
+                .filtered
+                .iter()
+                .any(|i| i.label.to_lowercase().contains("theme"))
+        );
+    }
+
+    #[test]
+    fn palette_selection_wraps() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let len = app.palette_state.filtered.len();
+        // Move past end -> wraps
+        let _ = app.update(CassMsg::PaletteSelectionMoved {
+            delta: len as i32 + 1,
+        });
+        assert!(app.palette_state.selected < len);
+    }
+
+    #[test]
+    fn palette_execute_theme_toggles_dark() {
+        let mut app = CassApp::default();
+        assert!(app.theme_dark);
+
+        // Open palette and select "Toggle theme" (first action)
+        let _ = app.update(CassMsg::PaletteOpened);
+        app.palette_state.selected = 0;
+        // Verify first action is ToggleTheme
+        assert!(matches!(
+            app.palette_state.filtered[0].action,
+            PaletteAction::ToggleTheme
+        ));
+
+        // Execute it - should produce ThemeToggled cmd
+        let cmd = app.update(CassMsg::PaletteActionExecuted);
+        assert!(!app.palette_state.open, "palette should close on execute");
+        // The returned Cmd contains CassMsg::ThemeToggled; process it
+        if let Some(msg) = extract_msg(cmd) {
+            let _ = app.update(msg);
+        }
+        assert!(!app.theme_dark, "theme should have toggled to light");
+    }
+
+    #[test]
+    fn palette_execute_density_cycles() {
+        let mut app = CassApp::default();
+        assert_eq!(app.density_mode, DensityMode::Cozy);
+
+        let _ = app.update(CassMsg::PaletteOpened);
+        // Find density action
+        let idx = app
+            .palette_state
+            .filtered
+            .iter()
+            .position(|i| matches!(i.action, PaletteAction::ToggleDensity))
+            .expect("density action should exist");
+        app.palette_state.selected = idx;
+        let cmd = app.update(CassMsg::PaletteActionExecuted);
+        if let Some(msg) = extract_msg(cmd) {
+            let _ = app.update(msg);
+        }
+        assert_eq!(app.density_mode, DensityMode::Spacious);
+    }
+
+    #[test]
+    fn palette_execute_reload_index() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let idx = app
+            .palette_state
+            .filtered
+            .iter()
+            .position(|i| matches!(i.action, PaletteAction::ReloadIndex))
+            .expect("reload action should exist");
+        app.palette_state.selected = idx;
+        let cmd = app.update(CassMsg::PaletteActionExecuted);
+        // Should produce IndexRefreshRequested
+        assert!(!app.palette_state.open);
+        // cmd should contain a message (IndexRefreshRequested)
+        assert!(extract_msg(cmd).is_some());
+    }
+
+    #[test]
+    fn palette_escape_closes_before_quit() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.palette_state.open);
+        // ESC should close palette, not quit
+        let _ = app.update(CassMsg::QuitRequested);
+        assert!(!app.palette_state.open);
+    }
+
+    #[test]
+    fn palette_hints_use_shortcut_constants() {
+        let app = CassApp::default();
+        // The Toggle theme action should have the F2 shortcut as hint
+        let theme_action = app
+            .palette_state
+            .all_actions
+            .iter()
+            .find(|i| matches!(i.action, PaletteAction::ToggleTheme))
+            .expect("theme action should exist");
+        assert_eq!(theme_action.hint, "F2");
+
+        // Filter agent should have F3
+        let filter_action = app
+            .palette_state
+            .all_actions
+            .iter()
+            .find(|i| matches!(i.action, PaletteAction::FilterAgent))
+            .expect("filter agent should exist");
+        assert_eq!(filter_action.hint, "F3");
+    }
+
+    #[test]
+    fn palette_save_view_slot_dispatches() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        // Find SaveViewSlot(1)
+        let idx = app
+            .palette_state
+            .filtered
+            .iter()
+            .position(|i| matches!(i.action, PaletteAction::SaveViewSlot(1)))
+            .expect("save slot 1 should exist");
+        app.palette_state.selected = idx;
+        let cmd = app.update(CassMsg::PaletteActionExecuted);
+        if let Some(msg) = extract_msg(cmd) {
+            let _ = app.update(msg);
+        }
+        assert!(
+            app.saved_views.iter().any(|v| v.slot == 1),
+            "slot 1 should be saved"
+        );
     }
 }

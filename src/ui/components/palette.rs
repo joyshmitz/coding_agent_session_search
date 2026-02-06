@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 use crate::ui::components::theme::ThemePalette;
+use crate::ui::shortcuts;
 
 /// Action identifiers the palette can emit. These map to app-level commands.
 #[derive(Clone, Debug)]
@@ -155,23 +156,19 @@ fn list_state(selected: usize) -> ratatui::widgets::ListState {
     s
 }
 
-/// Prebuilt action catalog to wire in tui.rs.
+/// Prebuilt action catalog with keyboard shortcut hints from [`shortcuts`].
 pub fn default_actions() -> Vec<PaletteItem> {
     let mut items = vec![
-        item(
-            PaletteAction::ToggleTheme,
-            "Toggle theme",
-            "Switch light/dark",
-        ),
+        item(PaletteAction::ToggleTheme, "Toggle theme", shortcuts::THEME),
         item(
             PaletteAction::ToggleDensity,
             "Toggle density",
-            "Compact/Cozy/Spacious",
+            shortcuts::DENSITY,
         ),
         item(
             PaletteAction::ToggleHelpStrip,
             "Toggle help strip",
-            "Pin/unpin contextual help",
+            shortcuts::HELP,
         ),
         item(
             PaletteAction::OpenUpdateBanner,
@@ -181,12 +178,12 @@ pub fn default_actions() -> Vec<PaletteItem> {
         item(
             PaletteAction::FilterAgent,
             "Filter: agent",
-            "Set agent filter",
+            shortcuts::FILTER_AGENT,
         ),
         item(
             PaletteAction::FilterWorkspace,
             "Filter: workspace",
-            "Set workspace filter",
+            shortcuts::FILTER_WORKSPACE,
         ),
         item(
             PaletteAction::FilterToday,
@@ -201,17 +198,17 @@ pub fn default_actions() -> Vec<PaletteItem> {
         item(
             PaletteAction::FilterCustomDate,
             "Filter: date range",
-            "Prompt for since/until",
+            shortcuts::FILTER_DATE_FROM,
         ),
         item(
             PaletteAction::OpenBulkActions,
             "Bulk actions",
-            "Open bulk menu on selection",
+            shortcuts::BULK_MENU,
         ),
         item(
             PaletteAction::ReloadIndex,
             "Reload index/view",
-            "Refresh reader",
+            shortcuts::REFRESH,
         ),
         item(
             PaletteAction::OpenSavedViews,
@@ -224,12 +221,12 @@ pub fn default_actions() -> Vec<PaletteItem> {
         items.push(item(
             PaletteAction::SaveViewSlot(slot),
             format!("Save view to slot {slot}"),
-            "Ctrl+<n>",
+            format!("Ctrl+{slot}"),
         ));
         items.push(item(
             PaletteAction::LoadViewSlot(slot),
             format!("Load view from slot {slot}"),
-            "Shift+<n>",
+            format!("Shift+{slot}"),
         ));
     }
     items
