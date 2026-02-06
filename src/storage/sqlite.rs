@@ -5081,6 +5081,7 @@ mod tests {
         let mut stmt = conn
             .prepare("SELECT hour_id, day_id, role, content_tokens_est, has_plan, api_data_source, model_family, model_tier, provider FROM message_metrics ORDER BY message_id")
             .unwrap();
+        #[allow(clippy::type_complexity)]
         let rows: Vec<(i64, i64, String, i64, i64, String, String, String, String)> = stmt
             .query_map([], |row| {
                 Ok((

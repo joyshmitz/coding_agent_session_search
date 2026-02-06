@@ -688,6 +688,21 @@ pub enum Commands {
     /// Import data from external sources
     #[command(subcommand)]
     Import(ImportCommand),
+    /// Token usage, cost, tool, and model analytics
+    ///
+    /// Subcommands: status, tokens, tools, models, cost, rebuild, validate.
+    /// All subcommands share time-range, dimensional, and output flags.
+    ///
+    /// # Examples
+    ///
+    /// ```bash
+    /// cass analytics status --json
+    /// cass analytics tokens --days 7 --group-by day --json
+    /// cass analytics cost --agent claude --since 2026-01-01 --json
+    /// cass analytics rebuild --json
+    /// ```
+    #[command(subcommand)]
+    Analytics(AnalyticsCommand),
 }
 
 /// Subcommands for importing external data
@@ -988,6 +1003,136 @@ pub enum MappingsAction {
     },
 }
 
+/// Time bucketing for analytics aggregation.
+#[derive(Copy, Clone, Debug, Default, ValueEnum, PartialEq, Eq)]
+pub enum AnalyticsBucketing {
+    /// Group by hour
+    Hour,
+    /// Group by day
+    #[default]
+    Day,
+    /// Group by week (ISO weeks)
+    Week,
+    /// Group by calendar month
+    Month,
+}
+
+impl std::fmt::Display for AnalyticsBucketing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hour => write!(f, "hour"),
+            Self::Day => write!(f, "day"),
+            Self::Week => write!(f, "week"),
+            Self::Month => write!(f, "month"),
+        }
+    }
+}
+
+/// Subcommands for analytics (token usage, cost, tool, and model breakdowns).
+///
+/// All subcommands share time-range, dimensional-filter, and output flags
+/// via clap's `flatten` on [`AnalyticsCommon`].
+#[derive(Subcommand, Debug, Clone)]
+pub enum AnalyticsCommand {
+    /// Summary of analytics data health: row counts, freshness, coverage, drift warnings
+    Status {
+        #[command(flatten)]
+        common: AnalyticsCommon,
+    },
+    /// Token usage over time, with dimensional breakdowns
+    Tokens {
+        #[command(flatten)]
+        common: AnalyticsCommon,
+        /// Time bucket for aggregation
+        #[arg(long, value_enum, default_value_t = AnalyticsBucketing::Day)]
+        group_by: AnalyticsBucketing,
+    },
+    /// Per-tool invocation counts and derived metrics
+    Tools {
+        #[command(flatten)]
+        common: AnalyticsCommon,
+        /// Time bucket for aggregation
+        #[arg(long, value_enum, default_value_t = AnalyticsBucketing::Day)]
+        group_by: AnalyticsBucketing,
+    },
+    /// Top models by usage and coverage statistics
+    #[command(name = "models")]
+    AnalyticsModels {
+        #[command(flatten)]
+        common: AnalyticsCommon,
+        /// Time bucket for aggregation
+        #[arg(long, value_enum, default_value_t = AnalyticsBucketing::Day)]
+        group_by: AnalyticsBucketing,
+    },
+    /// USD cost estimates with pricing coverage
+    Cost {
+        #[command(flatten)]
+        common: AnalyticsCommon,
+        /// Time bucket for aggregation
+        #[arg(long, value_enum, default_value_t = AnalyticsBucketing::Day)]
+        group_by: AnalyticsBucketing,
+    },
+    /// Rebuild / backfill analytics rollup tables with progress output
+    Rebuild {
+        #[command(flatten)]
+        common: AnalyticsCommon,
+        /// Force full rebuild even if rollups appear fresh
+        #[arg(long)]
+        force: bool,
+    },
+    /// Check rollup invariants and detect drift between raw data and aggregates
+    Validate {
+        #[command(flatten)]
+        common: AnalyticsCommon,
+        /// Attempt automatic repair of detected drift
+        #[arg(long)]
+        fix: bool,
+    },
+}
+
+/// Shared flags for all analytics subcommands.
+///
+/// Provides a single, reusable argument model so every analytics
+/// command has identical time-range, dimensional-filter, and output
+/// behavior.
+#[derive(Debug, Clone, clap::Args)]
+pub struct AnalyticsCommon {
+    // ---- Time range ----
+    /// Filter to entries since ISO date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Filter to entries until ISO date
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Filter to last N days
+    #[arg(long)]
+    pub days: Option<u32>,
+
+    // ---- Dimensional filters ----
+    /// Filter by agent slug (can be specified multiple times)
+    #[arg(long)]
+    pub agent: Vec<String>,
+
+    /// Filter by workspace path (can be specified multiple times)
+    #[arg(long)]
+    pub workspace: Vec<String>,
+
+    /// Filter by source: 'local', 'remote', 'all', or a specific hostname
+    #[arg(long)]
+    pub source: Option<String>,
+
+    // ---- Output ----
+    /// Output as JSON (robot-safe)
+    #[arg(long, visible_alias = "robot")]
+    pub json: bool,
+
+    /// Override data dir
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum ColorPref {
     Auto,
@@ -1015,6 +1160,7 @@ pub enum RobotTopic {
     Contracts,
     Wrap,
     Sources,
+    Analytics,
 }
 
 /// Output format for robot/automation mode
@@ -2139,6 +2285,64 @@ pub async fn run_with_parsed(parsed: ParsedCli) -> CliResult<()> {
     result
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiRuntime {
+    Legacy,
+    Ftui,
+}
+
+fn is_ftui_runtime_value(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("ftui")
+        || value.eq_ignore_ascii_case("frankentui")
+        || value == "1"
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+}
+
+fn parse_tui_runtime(runtime_env: Option<&str>, once: bool) -> TuiRuntime {
+    if runtime_env.is_some_and(is_ftui_runtime_value) && !once {
+        TuiRuntime::Ftui
+    } else {
+        TuiRuntime::Legacy
+    }
+}
+
+#[cfg(test)]
+mod tui_runtime_tests {
+    use super::{TuiRuntime, parse_tui_runtime};
+
+    #[test]
+    fn parse_tui_runtime_defaults_to_legacy() {
+        assert_eq!(parse_tui_runtime(None, false), TuiRuntime::Legacy);
+    }
+
+    #[test]
+    fn parse_tui_runtime_accepts_ftui_aliases() {
+        assert_eq!(parse_tui_runtime(Some("ftui"), false), TuiRuntime::Ftui);
+        assert_eq!(
+            parse_tui_runtime(Some("FrankenTUI"), false),
+            TuiRuntime::Ftui
+        );
+        assert_eq!(parse_tui_runtime(Some("true"), false), TuiRuntime::Ftui);
+        assert_eq!(parse_tui_runtime(Some("1"), false), TuiRuntime::Ftui);
+    }
+
+    #[test]
+    fn parse_tui_runtime_falls_back_for_once_mode() {
+        assert_eq!(parse_tui_runtime(Some("ftui"), true), TuiRuntime::Legacy);
+    }
+
+    #[test]
+    fn parse_tui_runtime_ignores_unknown_values() {
+        assert_eq!(parse_tui_runtime(Some("legacy"), false), TuiRuntime::Legacy);
+        assert_eq!(
+            parse_tui_runtime(Some("something-else"), false),
+            TuiRuntime::Legacy
+        );
+    }
+}
+
 async fn execute_cli(
     cli: &Cli,
     wrap: WrapConfig,
@@ -2217,44 +2421,47 @@ async fn execute_cli(
                     hint: None,
                     retryable: false,
                 })?;
-
             if let Commands::Tui {
-                once: false,
-                reset_state,
-                data_dir,
-                ..
-            } = command.clone()
-            {
-                let bg_data_dir = log_dir.clone();
-                let bg_db = cli.db.clone();
-                // Create shared progress tracker
-                let progress = std::sync::Arc::new(indexer::IndexingProgress::default());
-                spawn_background_indexer(bg_data_dir, bg_db, Some(progress.clone()));
-
-                ui::tui::run_tui(data_dir, false, reset_state, Some(progress), None).map_err(
-                    |e| CliError {
-                        code: 9,
-                        kind: "tui",
-                        message: format!("tui failed: {e}"),
-                        hint: None,
-                        retryable: false,
-                    },
-                )?;
-            } else if let Commands::Tui {
                 once,
                 reset_state,
                 data_dir,
                 ..
             } = command.clone()
             {
-                ui::tui::run_tui(data_dir, once, reset_state, None, None).map_err(|e| {
-                    CliError {
-                        code: 9,
-                        kind: "tui",
-                        message: format!("tui failed: {e}"),
-                        hint: None,
-                        retryable: false,
+                let runtime_env = dotenvy::var("CASS_TUI_RUNTIME").ok();
+                let requested_ftui = runtime_env.as_deref().is_some_and(is_ftui_runtime_value);
+                let runtime = parse_tui_runtime(runtime_env.as_deref(), once);
+                info!(?runtime, once, "selected tui runtime");
+
+                if requested_ftui && once {
+                    info!(
+                        "CASS_TUI_RUNTIME requested ftui with --once; using legacy headless path"
+                    );
+                }
+
+                let legacy_progress = if !once && matches!(runtime, TuiRuntime::Legacy) {
+                    let bg_data_dir = log_dir.clone();
+                    let bg_db = cli.db.clone();
+                    let progress = std::sync::Arc::new(indexer::IndexingProgress::default());
+                    spawn_background_indexer(bg_data_dir, bg_db, Some(progress.clone()));
+                    Some(progress)
+                } else {
+                    None
+                };
+
+                let run_result = match runtime {
+                    TuiRuntime::Ftui => ui::app::run_tui_ftui(),
+                    TuiRuntime::Legacy => {
+                        ui::tui::run_tui(data_dir, once, reset_state, legacy_progress, None)
                     }
+                };
+
+                run_result.map_err(|e| CliError {
+                    code: 9,
+                    kind: "tui",
+                    message: format!("tui failed: {e}"),
+                    hint: None,
+                    retryable: false,
                 })?;
             }
         }
@@ -2265,7 +2472,8 @@ async fn execute_cli(
         | Commands::Status { .. }
         | Commands::View { .. }
         | Commands::Pages { .. }
-        | Commands::Import(..) => {
+        | Commands::Import(..)
+        | Commands::Analytics(..) => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_writer(std::io::stderr)
@@ -2956,6 +3164,9 @@ async fn execute_cli(
                         })?;
                     }
                 }
+                Commands::Analytics(subcmd) => {
+                    run_analytics(subcmd, cli.db.clone())?;
+                }
                 _ => {}
             }
         }
@@ -3133,6 +3344,969 @@ async fn handle_import(cmd: ImportCommand) -> CliResult<()> {
             json,
         } => import_chatgpt_export(&path, output_dir.as_deref(), json).await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Analytics command dispatch (br-z9fse.3.1)
+// ---------------------------------------------------------------------------
+
+/// Dispatch analytics subcommands.
+///
+/// Each arm validates its inputs and emits a deterministic JSON envelope on
+/// success:
+///
+/// ```json
+/// { "command": "analytics/<sub>", "data": { ... }, "_meta": { "elapsed_ms": N } }
+/// ```
+///
+/// Implementation of the actual data queries is deferred to child beads;
+/// these stubs return a well-formed "not yet implemented" response so
+/// downstream consumers can parse the envelope immediately.
+fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>) -> CliResult<()> {
+    use std::time::Instant;
+
+    let start = Instant::now();
+
+    // Extract the common args and subcommand label from the variant.
+    let (label, common) = match &cmd {
+        AnalyticsCommand::Status { common } => ("status", common),
+        AnalyticsCommand::Tokens { common, .. } => ("tokens", common),
+        AnalyticsCommand::Tools { common, .. } => ("tools", common),
+        AnalyticsCommand::AnalyticsModels { common, .. } => ("models", common),
+        AnalyticsCommand::Cost { common, .. } => ("cost", common),
+        AnalyticsCommand::Rebuild { common, .. } => ("rebuild", common),
+        AnalyticsCommand::Validate { common, .. } => ("validate", common),
+    };
+
+    let json_mode = common.json;
+
+    // Build a summary of the active filters for _meta.
+    let filters = analytics_build_filters(common);
+
+    // Dispatch to per-subcommand implementation.
+    let data = match &cmd {
+        AnalyticsCommand::Status { common } => run_analytics_status(common, db_path.as_ref())?,
+        AnalyticsCommand::Tokens { common, group_by } => {
+            run_analytics_tokens(common, *group_by, db_path.as_ref())?
+        }
+        AnalyticsCommand::Rebuild { common, force } => {
+            run_analytics_rebuild(common, *force, db_path.as_ref())?
+        }
+        _ => analytics_stub_data(label),
+    };
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+
+    let envelope = serde_json::json!({
+        "command": format!("analytics/{label}"),
+        "data": data,
+        "_meta": {
+            "elapsed_ms": elapsed_ms,
+            "filters_applied": filters,
+            "data_dir": common.data_dir.as_ref().map(|p| p.display().to_string()),
+        }
+    });
+
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).unwrap_or_default()
+        );
+    } else {
+        use colored::Colorize;
+        let heading = match &cmd {
+            AnalyticsCommand::Status { .. }
+            | AnalyticsCommand::Tokens { .. }
+            | AnalyticsCommand::Rebuild { .. } => format!(
+                "{} analytics {}",
+                "cass".cyan().bold(),
+                label.yellow().bold()
+            ),
+            _ => format!(
+                "{} analytics {} {}",
+                "cass".cyan().bold(),
+                label.yellow().bold(),
+                "(stub — data queries not yet wired)".dimmed()
+            ),
+        };
+        eprintln!("{heading}");
+        if !filters.is_empty() {
+            eprintln!("  filters: {}", filters.join(", ").dimmed());
+        }
+        eprintln!("  elapsed: {elapsed_ms}ms");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).unwrap_or_default()
+        );
+    }
+
+    Ok(())
+}
+
+/// Collect active filter descriptions for `_meta.filters_applied`.
+fn analytics_build_filters(common: &AnalyticsCommon) -> Vec<String> {
+    let mut f = Vec::new();
+    if common.since.is_some() {
+        f.push(format!("since={}", common.since.as_deref().unwrap_or("")));
+    }
+    if common.until.is_some() {
+        f.push(format!("until={}", common.until.as_deref().unwrap_or("")));
+    }
+    if let Some(d) = common.days {
+        f.push(format!("days={d}"));
+    }
+    for a in &common.agent {
+        f.push(format!("agent={a}"));
+    }
+    for w in &common.workspace {
+        f.push(format!("workspace={w}"));
+    }
+    if let Some(s) = &common.source {
+        f.push(format!("source={s}"));
+    }
+    f
+}
+
+/// Placeholder data for not-yet-implemented subcommands.
+fn analytics_stub_data(label: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "not_implemented",
+        "message": format!("analytics {label} is scaffolded but data queries are not yet wired")
+    })
+}
+
+// ---------------------------------------------------------------------------
+// analytics status (br-z9fse.3.2)
+// ---------------------------------------------------------------------------
+
+/// Table-level stats returned by a single COUNT/MIN/MAX query.
+#[derive(Debug, Default)]
+struct AnalyticsTableStats {
+    row_count: i64,
+    min_day: Option<i64>,
+    max_day: Option<i64>,
+    last_updated: Option<i64>,
+}
+
+/// Run `cass analytics status` — analytics health/quality endpoint.
+fn run_analytics_status(
+    common: &AnalyticsCommon,
+    db_path_override: Option<&PathBuf>,
+) -> CliResult<serde_json::Value> {
+    let lazy =
+        crate::storage::sqlite::LazyDb::from_overrides(&common.data_dir, db_path_override.cloned());
+    let conn = lazy.get("analytics-status").map_err(lazy_db_to_cli_error)?;
+
+    // ------------------------------------------------------------------
+    // 1. Check which analytics tables actually exist (schema may not have
+    //    been migrated yet).
+    // ------------------------------------------------------------------
+    let table_exists = |name: &str| -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            [name],
+            |_| Ok(()),
+        )
+        .is_ok()
+    };
+
+    let has_message_metrics = table_exists("message_metrics");
+    let has_usage_hourly = table_exists("usage_hourly");
+    let has_usage_daily = table_exists("usage_daily");
+    let has_token_usage = table_exists("token_usage");
+    let has_token_daily_stats = table_exists("token_daily_stats");
+
+    // ------------------------------------------------------------------
+    // 2. Gather per-table row counts and coverage range.
+    // ------------------------------------------------------------------
+    let query_table_stats = |table: &str,
+                             day_col: &str,
+                             updated_col: Option<&str>|
+     -> AnalyticsTableStats {
+        if !table_exists(table) {
+            return AnalyticsTableStats::default();
+        }
+        let sql = match updated_col {
+            Some(uc) => {
+                format!("SELECT COUNT(*), MIN({day_col}), MAX({day_col}), MAX({uc}) FROM {table}")
+            }
+            None => format!("SELECT COUNT(*), MIN({day_col}), MAX({day_col}), NULL FROM {table}"),
+        };
+        conn.query_row(&sql, [], |row| {
+            Ok(AnalyticsTableStats {
+                row_count: row.get::<_, i64>(0).unwrap_or(0),
+                min_day: row.get::<_, Option<i64>>(1).unwrap_or(None),
+                max_day: row.get::<_, Option<i64>>(2).unwrap_or(None),
+                last_updated: row.get::<_, Option<i64>>(3).unwrap_or(None),
+            })
+        })
+        .unwrap_or_default()
+    };
+
+    let mm = query_table_stats("message_metrics", "day_id", None);
+    let uh = query_table_stats("usage_hourly", "hour_id", Some("last_updated"));
+    let ud = query_table_stats("usage_daily", "day_id", Some("last_updated"));
+    let tu = query_table_stats("token_usage", "day_id", None);
+    let tds = query_table_stats("token_daily_stats", "day_id", Some("last_updated"));
+
+    // ------------------------------------------------------------------
+    // 3. Coverage diagnostics (Track A: message_metrics pipeline).
+    // ------------------------------------------------------------------
+    let total_messages: i64 = conn
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    let api_coverage_pct = if has_message_metrics && mm.row_count > 0 {
+        let api_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_metrics WHERE api_data_source = 'api'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if mm.row_count > 0 {
+            (api_count as f64 / mm.row_count as f64) * 100.0
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    let model_coverage_pct = if has_token_usage && tu.row_count > 0 {
+        let with_model: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM token_usage WHERE model_name IS NOT NULL AND model_name != ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        (with_model as f64 / tu.row_count as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let estimate_only_pct = if has_token_usage && tu.row_count > 0 {
+        let estimates: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM token_usage WHERE data_source = 'estimated'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        (estimates as f64 / tu.row_count as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let mm_coverage_pct = if total_messages > 0 {
+        (mm.row_count as f64 / total_messages as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // ------------------------------------------------------------------
+    // 4. Drift detection between Track A and Track B.
+    // ------------------------------------------------------------------
+    let mut drift_signals: Vec<serde_json::Value> = Vec::new();
+
+    // Staleness threshold: 24 hours in epoch-seconds.
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let stale_threshold_secs: i64 = 86400;
+
+    let track_a_fresh = uh
+        .last_updated
+        .is_some_and(|t| (now_epoch - t).abs() < stale_threshold_secs);
+    let track_b_fresh = tds
+        .last_updated
+        .is_some_and(|t| (now_epoch - t).abs() < stale_threshold_secs);
+
+    // One track fresh while the other is stale.
+    if track_a_fresh && !track_b_fresh && has_token_daily_stats {
+        drift_signals.push(serde_json::json!({
+            "signal": "track_freshness_mismatch",
+            "detail": "Track A (usage_hourly/daily) is fresh but Track B (token_daily_stats) is stale",
+            "severity": "warning"
+        }));
+    }
+    if track_b_fresh && !track_a_fresh && has_usage_hourly {
+        drift_signals.push(serde_json::json!({
+            "signal": "track_freshness_mismatch",
+            "detail": "Track B (token_daily_stats) is fresh but Track A (usage_hourly/daily) is stale",
+            "severity": "warning"
+        }));
+    }
+
+    // message_metrics populated but rollups empty.
+    if mm.row_count > 0 && uh.row_count == 0 && has_usage_hourly {
+        drift_signals.push(serde_json::json!({
+            "signal": "missing_rollups",
+            "detail": "message_metrics has data but usage_hourly is empty — rebuild needed",
+            "severity": "error"
+        }));
+    }
+    if mm.row_count > 0 && ud.row_count == 0 && has_usage_daily {
+        drift_signals.push(serde_json::json!({
+            "signal": "missing_rollups",
+            "detail": "message_metrics has data but usage_daily is empty — rebuild needed",
+            "severity": "error"
+        }));
+    }
+    if tu.row_count > 0 && tds.row_count == 0 && has_token_daily_stats {
+        drift_signals.push(serde_json::json!({
+            "signal": "missing_rollups",
+            "detail": "token_usage has data but token_daily_stats is empty — rebuild needed",
+            "severity": "error"
+        }));
+    }
+
+    // No analytics data at all while messages exist.
+    if total_messages > 100 && mm.row_count == 0 && tu.row_count == 0 {
+        drift_signals.push(serde_json::json!({
+            "signal": "no_analytics_data",
+            "detail": format!("{total_messages} messages indexed but no analytics computed"),
+            "severity": "error"
+        }));
+    }
+
+    // ------------------------------------------------------------------
+    // 5. Recommended action.
+    // ------------------------------------------------------------------
+    let has_error_drift = drift_signals
+        .iter()
+        .any(|s| s.get("severity").and_then(|v| v.as_str()) == Some("error"));
+    let has_warning_drift = drift_signals
+        .iter()
+        .any(|s| s.get("severity").and_then(|v| v.as_str()) == Some("warning"));
+
+    let recommended_action = if has_error_drift {
+        if mm.row_count == 0 && tu.row_count == 0 {
+            "rebuild_all"
+        } else if mm.row_count > 0 && (uh.row_count == 0 || ud.row_count == 0) {
+            "rebuild_track_a"
+        } else if tu.row_count > 0 && tds.row_count == 0 {
+            "rebuild_track_b"
+        } else {
+            "rebuild_all"
+        }
+    } else if has_warning_drift {
+        if track_a_fresh && !track_b_fresh {
+            "rebuild_track_b"
+        } else if track_b_fresh && !track_a_fresh {
+            "rebuild_track_a"
+        } else {
+            "none"
+        }
+    } else {
+        "none"
+    };
+
+    // ------------------------------------------------------------------
+    // 6. Assemble response.
+    // ------------------------------------------------------------------
+    let table_json = |name: &str, exists: bool, stats: &AnalyticsTableStats| -> serde_json::Value {
+        serde_json::json!({
+            "table": name,
+            "exists": exists,
+            "row_count": stats.row_count,
+            "min_day_id": stats.min_day,
+            "max_day_id": stats.max_day,
+            "last_updated": stats.last_updated,
+        })
+    };
+
+    Ok(serde_json::json!({
+        "tables": [
+            table_json("message_metrics", has_message_metrics, &mm),
+            table_json("usage_hourly", has_usage_hourly, &uh),
+            table_json("usage_daily", has_usage_daily, &ud),
+            table_json("token_usage", has_token_usage, &tu),
+            table_json("token_daily_stats", has_token_daily_stats, &tds),
+        ],
+        "coverage": {
+            "total_messages": total_messages,
+            "message_metrics_coverage_pct": (mm_coverage_pct * 100.0).round() / 100.0,
+            "api_token_coverage_pct": (api_coverage_pct * 100.0).round() / 100.0,
+            "model_name_coverage_pct": (model_coverage_pct * 100.0).round() / 100.0,
+            "estimate_only_pct": (estimate_only_pct * 100.0).round() / 100.0,
+        },
+        "drift": {
+            "signals": drift_signals,
+            "track_a_fresh": track_a_fresh,
+            "track_b_fresh": track_b_fresh,
+        },
+        "recommended_action": recommended_action,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// analytics tokens (br-z9fse.3.3)
+// ---------------------------------------------------------------------------
+
+/// Resolve the time-range from AnalyticsCommon into an inclusive (min, max)
+/// range of day_ids.  Returns `(None, None)` when no time filter is active.
+fn analytics_resolve_day_range(common: &AnalyticsCommon) -> (Option<i64>, Option<i64>) {
+    use crate::storage::sqlite::SqliteStorage;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let since_ms: Option<i64> = if let Some(d) = common.days {
+        Some(now_ms - (d as i64) * 86_400_000)
+    } else {
+        common.since.as_deref().and_then(parse_datetime_str)
+    };
+
+    let until_ms: Option<i64> = common.until.as_deref().and_then(parse_datetime_str);
+
+    let min_day = since_ms.map(SqliteStorage::day_id_from_millis);
+    let max_day = until_ms.map(SqliteStorage::day_id_from_millis);
+
+    (min_day, max_day)
+}
+
+/// Resolve hour_id range from AnalyticsCommon.
+fn analytics_resolve_hour_range(common: &AnalyticsCommon) -> (Option<i64>, Option<i64>) {
+    use crate::storage::sqlite::SqliteStorage;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let since_ms: Option<i64> = if let Some(d) = common.days {
+        Some(now_ms - (d as i64) * 86_400_000)
+    } else {
+        common.since.as_deref().and_then(parse_datetime_str)
+    };
+
+    let until_ms: Option<i64> = common.until.as_deref().and_then(parse_datetime_str);
+
+    let min_hour = since_ms.map(SqliteStorage::hour_id_from_millis);
+    let max_hour = until_ms.map(SqliteStorage::hour_id_from_millis);
+
+    (min_hour, max_hour)
+}
+
+/// Build a SQL WHERE clause fragment and parameters for dimensional filters.
+/// Returns (clause_fragments, param_values) where each fragment is like
+/// "agent_slug = ?N" and param_values are the corresponding bind values.
+fn analytics_build_where_parts(common: &AnalyticsCommon) -> (Vec<String>, Vec<String>) {
+    let mut parts = Vec::new();
+    let mut params = Vec::new();
+
+    // Agent filters — multiple agents are OR'd together.
+    if !common.agent.is_empty() {
+        let placeholders: Vec<String> = common
+            .agent
+            .iter()
+            .map(|a| {
+                params.push(a.clone());
+                format!("?{}", params.len())
+            })
+            .collect();
+        parts.push(format!("agent_slug IN ({})", placeholders.join(", ")));
+    }
+
+    // Source filter.
+    if let Some(src) = &common.source {
+        match src.as_str() {
+            "all" => {} // no filter
+            "local" => {
+                params.push("local".into());
+                parts.push(format!("source_id = ?{}", params.len()));
+            }
+            "remote" => {
+                params.push("local".into());
+                parts.push(format!("source_id != ?{}", params.len()));
+            }
+            specific => {
+                params.push(specific.into());
+                parts.push(format!("source_id = ?{}", params.len()));
+            }
+        }
+    }
+
+    // NOTE: workspace filter requires resolving path -> workspace_id via a
+    // lookup table.  For v1 we skip workspace filtering in the rollup query
+    // since workspace_id is an opaque integer; this will be wired when the
+    // workspace lookup helper is exposed.
+
+    (parts, params)
+}
+
+/// Format a day_id as an ISO date string (YYYY-MM-DD).
+fn day_id_to_iso(day_id: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    let ms = crate::storage::sqlite::SqliteStorage::millis_from_day_id(day_id);
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| format!("day:{day_id}"))
+}
+
+/// Format an hour_id as an ISO datetime string (YYYY-MM-DDTHH:00Z).
+fn hour_id_to_iso(hour_id: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    let ms = crate::storage::sqlite::SqliteStorage::millis_from_hour_id(hour_id);
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%dT%H:00Z").to_string())
+        .unwrap_or_else(|| format!("hour:{hour_id}"))
+}
+
+/// Compute the ISO week key (YYYY-Www) from a day_id.
+fn day_id_to_iso_week(day_id: i64) -> String {
+    use chrono::{Datelike, TimeZone, Utc};
+    let ms = crate::storage::sqlite::SqliteStorage::millis_from_day_id(day_id);
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .map(|dt| {
+            let iso = dt.iso_week();
+            format!("{}-W{:02}", iso.year(), iso.week())
+        })
+        .unwrap_or_else(|| format!("day:{day_id}"))
+}
+
+/// Compute the month key (YYYY-MM) from a day_id.
+fn day_id_to_month(day_id: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    let ms = crate::storage::sqlite::SqliteStorage::millis_from_day_id(day_id);
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .map(|dt| dt.format("%Y-%m").to_string())
+        .unwrap_or_else(|| format!("day:{day_id}"))
+}
+
+/// A single bucket of aggregated token metrics.
+#[derive(Debug, Default)]
+struct TokenBucketRow {
+    message_count: i64,
+    user_message_count: i64,
+    assistant_message_count: i64,
+    tool_call_count: i64,
+    plan_message_count: i64,
+    api_coverage_message_count: i64,
+    content_tokens_est_total: i64,
+    content_tokens_est_user: i64,
+    content_tokens_est_assistant: i64,
+    api_tokens_total: i64,
+    api_input_tokens_total: i64,
+    api_output_tokens_total: i64,
+    api_cache_read_tokens_total: i64,
+    api_cache_creation_tokens_total: i64,
+    api_thinking_tokens_total: i64,
+}
+
+impl TokenBucketRow {
+    fn to_json(&self, bucket_key: &str) -> serde_json::Value {
+        let api_coverage_pct = if self.message_count > 0 {
+            (self.api_coverage_message_count as f64 / self.message_count as f64) * 100.0
+        } else {
+            0.0
+        };
+        let api_tokens_per_assistant = if self.assistant_message_count > 0 {
+            Some(self.api_tokens_total as f64 / self.assistant_message_count as f64)
+        } else {
+            None
+        };
+        let content_tokens_per_user = if self.user_message_count > 0 {
+            Some(self.content_tokens_est_total as f64 / self.user_message_count as f64)
+        } else {
+            None
+        };
+        let tool_calls_per_1k_api = if self.api_tokens_total > 0 {
+            Some(self.tool_call_count as f64 / (self.api_tokens_total as f64 / 1000.0))
+        } else {
+            None
+        };
+        let tool_calls_per_1k_content = if self.content_tokens_est_total > 0 {
+            Some(self.tool_call_count as f64 / (self.content_tokens_est_total as f64 / 1000.0))
+        } else {
+            None
+        };
+        let plan_message_pct = if self.message_count > 0 {
+            Some((self.plan_message_count as f64 / self.message_count as f64) * 100.0)
+        } else {
+            None
+        };
+
+        serde_json::json!({
+            "bucket": bucket_key,
+            "counts": {
+                "message_count": self.message_count,
+                "user_message_count": self.user_message_count,
+                "assistant_message_count": self.assistant_message_count,
+                "tool_call_count": self.tool_call_count,
+                "plan_message_count": self.plan_message_count,
+            },
+            "content_tokens": {
+                "est_total": self.content_tokens_est_total,
+                "est_user": self.content_tokens_est_user,
+                "est_assistant": self.content_tokens_est_assistant,
+            },
+            "api_tokens": {
+                "total": self.api_tokens_total,
+                "input": self.api_input_tokens_total,
+                "output": self.api_output_tokens_total,
+                "cache_read": self.api_cache_read_tokens_total,
+                "cache_creation": self.api_cache_creation_tokens_total,
+                "thinking": self.api_thinking_tokens_total,
+            },
+            "coverage": {
+                "api_coverage_message_count": self.api_coverage_message_count,
+                "api_coverage_pct": (api_coverage_pct * 100.0).round() / 100.0,
+            },
+            "derived": {
+                "api_tokens_per_assistant_msg": api_tokens_per_assistant,
+                "content_tokens_per_user_msg": content_tokens_per_user,
+                "tool_calls_per_1k_api_tokens": tool_calls_per_1k_api,
+                "tool_calls_per_1k_content_tokens": tool_calls_per_1k_content,
+                "plan_message_pct": plan_message_pct,
+            },
+        })
+    }
+
+    /// Accumulate another bucket row into this one (for week/month merging).
+    fn merge(&mut self, other: &TokenBucketRow) {
+        self.message_count += other.message_count;
+        self.user_message_count += other.user_message_count;
+        self.assistant_message_count += other.assistant_message_count;
+        self.tool_call_count += other.tool_call_count;
+        self.plan_message_count += other.plan_message_count;
+        self.api_coverage_message_count += other.api_coverage_message_count;
+        self.content_tokens_est_total += other.content_tokens_est_total;
+        self.content_tokens_est_user += other.content_tokens_est_user;
+        self.content_tokens_est_assistant += other.content_tokens_est_assistant;
+        self.api_tokens_total += other.api_tokens_total;
+        self.api_input_tokens_total += other.api_input_tokens_total;
+        self.api_output_tokens_total += other.api_output_tokens_total;
+        self.api_cache_read_tokens_total += other.api_cache_read_tokens_total;
+        self.api_cache_creation_tokens_total += other.api_cache_creation_tokens_total;
+        self.api_thinking_tokens_total += other.api_thinking_tokens_total;
+    }
+}
+
+/// Run `cass analytics tokens` — time-series token/usage analytics.
+fn run_analytics_tokens(
+    common: &AnalyticsCommon,
+    group_by: AnalyticsBucketing,
+    db_path_override: Option<&PathBuf>,
+) -> CliResult<serde_json::Value> {
+    use std::collections::BTreeMap;
+
+    let lazy =
+        crate::storage::sqlite::LazyDb::from_overrides(&common.data_dir, db_path_override.cloned());
+    let conn = lazy.get("analytics-tokens").map_err(lazy_db_to_cli_error)?;
+
+    let query_start = std::time::Instant::now();
+
+    // Choose source table and bucket column based on group_by.
+    // Hour → usage_hourly; Day/Week/Month → usage_daily.
+    let (table, bucket_col, use_rollups) = match group_by {
+        AnalyticsBucketing::Hour => ("usage_hourly", "hour_id", true),
+        _ => ("usage_daily", "day_id", true),
+    };
+
+    // Check that the source table exists.
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if !table_exists {
+        let empty_totals = TokenBucketRow::default();
+        return Ok(serde_json::json!({
+            "buckets": [],
+            "totals": empty_totals.to_json("all"),
+            "bucket_count": 0,
+            "warning": format!("Table '{}' does not exist — run 'cass analytics rebuild' first", table),
+            "_meta": {
+                "elapsed_ms": query_start.elapsed().as_millis() as u64,
+                "path": "none",
+                "source_table": table,
+                "group_by": group_by.to_string(),
+                "rows_read": 0,
+            }
+        }));
+    }
+
+    // Build WHERE clause from time range + dimensional filters.
+    let (day_min, day_max) = analytics_resolve_day_range(common);
+    let (hour_min, hour_max) = analytics_resolve_hour_range(common);
+
+    let (dim_parts, dim_params) = analytics_build_where_parts(common);
+
+    let mut where_parts = dim_parts;
+    let mut bind_values = dim_params;
+
+    // Add time range filter.
+    match group_by {
+        AnalyticsBucketing::Hour => {
+            if let Some(min) = hour_min {
+                bind_values.push(min.to_string());
+                where_parts.push(format!("{bucket_col} >= ?{}", bind_values.len()));
+            }
+            if let Some(max) = hour_max {
+                bind_values.push(max.to_string());
+                where_parts.push(format!("{bucket_col} <= ?{}", bind_values.len()));
+            }
+        }
+        _ => {
+            if let Some(min) = day_min {
+                bind_values.push(min.to_string());
+                where_parts.push(format!("{bucket_col} >= ?{}", bind_values.len()));
+            }
+            if let Some(max) = day_max {
+                bind_values.push(max.to_string());
+                where_parts.push(format!("{bucket_col} <= ?{}", bind_values.len()));
+            }
+        }
+    }
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+
+    // Query: aggregate across all dimension keys per time bucket.
+    let sql = format!(
+        "SELECT {bucket_col},
+                SUM(message_count),
+                SUM(user_message_count),
+                SUM(assistant_message_count),
+                SUM(tool_call_count),
+                SUM(plan_message_count),
+                SUM(api_coverage_message_count),
+                SUM(content_tokens_est_total),
+                SUM(content_tokens_est_user),
+                SUM(content_tokens_est_assistant),
+                SUM(api_tokens_total),
+                SUM(api_input_tokens_total),
+                SUM(api_output_tokens_total),
+                SUM(api_cache_read_tokens_total),
+                SUM(api_cache_creation_tokens_total),
+                SUM(api_thinking_tokens_total)
+         FROM {table}
+         {where_clause}
+         GROUP BY {bucket_col}
+         ORDER BY {bucket_col}"
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| CliError {
+        code: 9,
+        kind: "db-error",
+        message: format!("Failed to prepare analytics query: {e}"),
+        hint: Some("Check that the analytics tables exist and are not corrupt.".into()),
+        retryable: false,
+    })?;
+
+    // Bind parameters: rusqlite uses 1-indexed params.
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let rows_result = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,  // bucket_id
+                row.get::<_, i64>(1)?,  // message_count
+                row.get::<_, i64>(2)?,  // user_message_count
+                row.get::<_, i64>(3)?,  // assistant_message_count
+                row.get::<_, i64>(4)?,  // tool_call_count
+                row.get::<_, i64>(5)?,  // plan_message_count
+                row.get::<_, i64>(6)?,  // api_coverage_message_count
+                row.get::<_, i64>(7)?,  // content_tokens_est_total
+                row.get::<_, i64>(8)?,  // content_tokens_est_user
+                row.get::<_, i64>(9)?,  // content_tokens_est_assistant
+                row.get::<_, i64>(10)?, // api_tokens_total
+                row.get::<_, i64>(11)?, // api_input_tokens_total
+                row.get::<_, i64>(12)?, // api_output_tokens_total
+                row.get::<_, i64>(13)?, // api_cache_read_tokens_total
+                row.get::<_, i64>(14)?, // api_cache_creation_tokens_total
+                row.get::<_, i64>(15)?, // api_thinking_tokens_total
+            ))
+        })
+        .map_err(|e| CliError {
+            code: 9,
+            kind: "db-error",
+            message: format!("Analytics query failed: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+
+    // Collect raw rows keyed by bucket_id.
+    let mut raw_buckets: Vec<(i64, TokenBucketRow)> = Vec::new();
+    for row in rows_result {
+        let r = row.map_err(|e| CliError {
+            code: 9,
+            kind: "db-error",
+            message: format!("Row read error: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+        raw_buckets.push((
+            r.0,
+            TokenBucketRow {
+                message_count: r.1,
+                user_message_count: r.2,
+                assistant_message_count: r.3,
+                tool_call_count: r.4,
+                plan_message_count: r.5,
+                api_coverage_message_count: r.6,
+                content_tokens_est_total: r.7,
+                content_tokens_est_user: r.8,
+                content_tokens_est_assistant: r.9,
+                api_tokens_total: r.10,
+                api_input_tokens_total: r.11,
+                api_output_tokens_total: r.12,
+                api_cache_read_tokens_total: r.13,
+                api_cache_creation_tokens_total: r.14,
+                api_thinking_tokens_total: r.15,
+            },
+        ));
+    }
+
+    // Re-bucket by week or month if needed.
+    let final_buckets: Vec<(String, TokenBucketRow)> = match group_by {
+        AnalyticsBucketing::Hour => raw_buckets
+            .into_iter()
+            .map(|(id, row)| (hour_id_to_iso(id), row))
+            .collect(),
+        AnalyticsBucketing::Day => raw_buckets
+            .into_iter()
+            .map(|(id, row)| (day_id_to_iso(id), row))
+            .collect(),
+        AnalyticsBucketing::Week => {
+            let mut merged: BTreeMap<String, TokenBucketRow> = BTreeMap::new();
+            for (day_id, row) in raw_buckets {
+                let key = day_id_to_iso_week(day_id);
+                merged.entry(key).or_default().merge(&row);
+            }
+            merged.into_iter().collect()
+        }
+        AnalyticsBucketing::Month => {
+            let mut merged: BTreeMap<String, TokenBucketRow> = BTreeMap::new();
+            for (day_id, row) in raw_buckets {
+                let key = day_id_to_month(day_id);
+                merged.entry(key).or_default().merge(&row);
+            }
+            merged.into_iter().collect()
+        }
+    };
+
+    // Compute totals across all buckets.
+    let mut totals = TokenBucketRow::default();
+    for (_, row) in &final_buckets {
+        totals.merge(row);
+    }
+
+    let bucket_json: Vec<serde_json::Value> = final_buckets
+        .iter()
+        .map(|(key, row)| row.to_json(key))
+        .collect();
+
+    let elapsed_ms = query_start.elapsed().as_millis() as u64;
+    let rows_read = bucket_json.len();
+
+    Ok(serde_json::json!({
+        "buckets": bucket_json,
+        "totals": totals.to_json("all"),
+        "bucket_count": rows_read,
+        "_meta": {
+            "elapsed_ms": elapsed_ms,
+            "path": if use_rollups { "rollup" } else { "slow" },
+            "group_by": group_by.to_string(),
+            "source_table": table,
+            "rows_read": rows_read,
+        }
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// analytics rebuild (br-z9fse.3.4)
+// ---------------------------------------------------------------------------
+
+/// Run `cass analytics rebuild` — rebuild analytics rollup tables.
+///
+/// Currently rebuilds Track A (message_metrics + usage_hourly + usage_daily).
+/// Track B rebuild will be wired when z9fse.13 lands.
+fn run_analytics_rebuild(
+    common: &AnalyticsCommon,
+    _force: bool,
+    db_path_override: Option<&PathBuf>,
+) -> CliResult<serde_json::Value> {
+    use crate::storage::sqlite::SqliteStorage;
+
+    let data_dir = common.data_dir.clone().unwrap_or_else(default_data_dir);
+    let db_path = db_path_override
+        .cloned()
+        .unwrap_or_else(|| data_dir.join("agent_search.db"));
+
+    if !db_path.exists() {
+        return Err(CliError {
+            code: 3,
+            kind: "missing-db",
+            message: format!(
+                "Database not found at {}. Run 'cass index --full' first.",
+                db_path.display()
+            ),
+            hint: Some("Run 'cass index --full' to create the database.".into()),
+            retryable: false,
+        });
+    }
+
+    // Progress diagnostics go to stderr.
+    eprintln!("Rebuilding analytics (Track A)...");
+
+    let mut storage = SqliteStorage::open(&db_path).map_err(|e| CliError {
+        code: 9,
+        kind: "db-error",
+        message: format!("Failed to open database: {e}"),
+        hint: None,
+        retryable: false,
+    })?;
+
+    let result = storage.rebuild_analytics().map_err(|e| CliError {
+        code: 9,
+        kind: "rebuild-error",
+        message: format!("Analytics rebuild failed: {e}"),
+        hint: Some("Check database integrity with 'cass health --json'.".into()),
+        retryable: true,
+    })?;
+
+    eprintln!(
+        "Rebuild complete: {} message_metrics, {} hourly, {} daily rows in {}ms ({:.0} msg/sec)",
+        result.message_metrics_rows,
+        result.usage_hourly_rows,
+        result.usage_daily_rows,
+        result.elapsed_ms,
+        result.messages_per_sec
+    );
+
+    Ok(serde_json::json!({
+        "track": "a",
+        "tracks_rebuilt": ["a"],
+        "track_a": {
+            "message_metrics_rows": result.message_metrics_rows,
+            "usage_hourly_rows": result.usage_hourly_rows,
+            "usage_daily_rows": result.usage_daily_rows,
+            "usage_models_daily_rows": result.usage_models_daily_rows,
+            "elapsed_ms": result.elapsed_ms,
+            "rows_per_sec": result.messages_per_sec,
+        },
+        "overall_elapsed_ms": result.elapsed_ms,
+    }))
 }
 
 async fn import_chatgpt_export(
@@ -3484,6 +4658,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Models(..)) => "models".to_string(),
         Some(Commands::Pages { .. }) => "pages".to_string(),
         Some(Commands::Import(..)) => "import".to_string(),
+        Some(Commands::Analytics(..)) => "analytics".to_string(),
         None => "(default)".to_string(),
     }
 }
@@ -3528,6 +4703,18 @@ fn is_robot_mode(command: &Commands) -> bool {
         Commands::Import(cmd) => match cmd {
             ImportCommand::Chatgpt { json, .. } => *json || env_robot_mode,
         },
+        Commands::Analytics(cmd) => {
+            let json = match cmd {
+                AnalyticsCommand::Status { common, .. }
+                | AnalyticsCommand::Tokens { common, .. }
+                | AnalyticsCommand::Tools { common, .. }
+                | AnalyticsCommand::AnalyticsModels { common, .. }
+                | AnalyticsCommand::Cost { common, .. }
+                | AnalyticsCommand::Rebuild { common, .. }
+                | AnalyticsCommand::Validate { common, .. } => common.json,
+            };
+            json || env_robot_mode
+        }
         _ => false,
     }
 }
@@ -3979,6 +5166,51 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass sources sync         Sync data from sources".to_string(),
             "  cass sources discover     Just discover hosts (no setup)".to_string(),
             "  cass sources add          Manually add a source".to_string(),
+        ],
+        RobotTopic::Analytics => vec![
+            "analytics:".to_string(),
+            String::new(),
+            "# cass analytics — Token, Cost, Tool, and Model Analytics".to_string(),
+            String::new(),
+            "## Subcommands".to_string(),
+            "  status    Row counts, freshness, coverage, drift warnings".to_string(),
+            "  tokens    Token usage over time with dimensional breakdowns".to_string(),
+            "  tools     Per-tool invocation counts and derived metrics".to_string(),
+            "  models    Top models by usage and coverage statistics".to_string(),
+            "  cost      USD cost estimates with pricing coverage".to_string(),
+            "  rebuild   Rebuild/backfill rollup tables with progress output".to_string(),
+            "  validate  Check rollup invariants and detect data drift".to_string(),
+            String::new(),
+            "## Shared Flags (all subcommands)".to_string(),
+            "  --since <ISO>        Filter from date (YYYY-MM-DD or full timestamp)".to_string(),
+            "  --until <ISO>        Filter to date".to_string(),
+            "  --days <N>           Filter to last N days".to_string(),
+            "  --agent <slug>       Filter by agent (repeatable)".to_string(),
+            "  --workspace <path>   Filter by workspace (repeatable)".to_string(),
+            "  --source <name>      Filter by source ('local', 'remote', hostname)".to_string(),
+            "  --json / --robot     Machine-readable JSON output".to_string(),
+            "  --data-dir <path>    Override data directory".to_string(),
+            String::new(),
+            "## Bucketed Subcommands (tokens, tools, models, cost)".to_string(),
+            "  --group-by <bucket>  hour | day (default) | week | month".to_string(),
+            String::new(),
+            "## Examples".to_string(),
+            "  cass analytics status --json".to_string(),
+            "  cass analytics tokens --days 7 --group-by day --json".to_string(),
+            "  cass analytics cost --agent claude --since 2026-01-01 --json".to_string(),
+            "  cass analytics models --group-by week --json".to_string(),
+            "  cass analytics tools --workspace /data/myproject --json".to_string(),
+            "  cass analytics rebuild --force --json".to_string(),
+            "  cass analytics validate --fix --json".to_string(),
+            String::new(),
+            "## Output Contract".to_string(),
+            "  stdout = JSON data only (in --json mode)".to_string(),
+            "  stderr = human diagnostics".to_string(),
+            "  exit 0 = success".to_string(),
+            String::new(),
+            "## JSON Envelope".to_string(),
+            "  All subcommands return: { \"command\": \"analytics/<sub>\", \"data\": {...}, \"_meta\": {...} }".to_string(),
+            "  _meta includes: elapsed_ms, filters_applied, data_dir".to_string(),
         ],
     };
 
