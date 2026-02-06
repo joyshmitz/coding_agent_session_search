@@ -27,6 +27,11 @@ pub const SCOPE_AGENT: &str = "Shift+F3";
 pub const SCOPE_WORKSPACE: &str = "Shift+F4";
 pub const CYCLE_TIME_PRESETS: &str = "Shift+F5";
 
+// Command palette
+pub const PALETTE: &str = "Ctrl+P";
+pub const DENSITY: &str = "Ctrl+D";
+pub const BORDERS: &str = "Ctrl+B";
+
 // Actions
 pub const COPY: &str = "y";
 pub const BULK_MENU: &str = "A";
