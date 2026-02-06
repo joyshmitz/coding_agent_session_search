@@ -118,6 +118,7 @@ vergen = { version = "*", default-features = false, features = ["build", "cargo"
 assert_cmd = "*"
 predicates = "*"
 insta = { version = "*", features = ["yaml", "json"] }
+ftui-harness = { git = "https://github.com/Dicklesworthstone/frankentui", rev = "f0ad8a6d9b016ce6a000dc5e1461e1411aee1441", version = "*" }
 criterion = "*"
 once_cell = "*"
 serial_test = "*"
