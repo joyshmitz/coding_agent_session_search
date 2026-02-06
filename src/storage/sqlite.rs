@@ -408,7 +408,7 @@ fn check_schema_compatibility(path: &Path) -> std::result::Result<SchemaCheck, r
     }
 }
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 const MIGRATION_V1: &str = r"
 PRAGMA foreign_keys = ON;
@@ -892,6 +892,64 @@ CREATE TABLE IF NOT EXISTS usage_daily (
 CREATE INDEX IF NOT EXISTS idx_ud_agent ON usage_daily(agent_slug, day_id);
 CREATE INDEX IF NOT EXISTS idx_ud_workspace ON usage_daily(workspace_id, day_id);
 CREATE INDEX IF NOT EXISTS idx_ud_source ON usage_daily(source_id, day_id);
+";
+
+const MIGRATION_V12: &str = r"
+-- Add model dimensions to message_metrics for model-aware Track A analytics.
+ALTER TABLE message_metrics ADD COLUMN model_name TEXT;
+ALTER TABLE message_metrics ADD COLUMN model_family TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE message_metrics ADD COLUMN model_tier TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE message_metrics ADD COLUMN provider TEXT NOT NULL DEFAULT 'unknown';
+
+CREATE INDEX IF NOT EXISTS idx_mm_model_family_day ON message_metrics(model_family, day_id);
+CREATE INDEX IF NOT EXISTS idx_mm_provider_day ON message_metrics(provider, day_id);
+
+-- Daily model rollups for fast model-oriented analytics queries.
+CREATE TABLE IF NOT EXISTS usage_models_daily (
+    day_id INTEGER NOT NULL,
+    agent_slug TEXT NOT NULL,
+    workspace_id INTEGER NOT NULL DEFAULT 0,
+    source_id TEXT NOT NULL DEFAULT 'local',
+    model_family TEXT NOT NULL DEFAULT 'unknown',
+    model_tier TEXT NOT NULL DEFAULT 'unknown',
+
+    -- Counts
+    message_count INTEGER NOT NULL DEFAULT 0,
+    user_message_count INTEGER NOT NULL DEFAULT 0,
+    assistant_message_count INTEGER NOT NULL DEFAULT 0,
+    tool_call_count INTEGER NOT NULL DEFAULT 0,
+    plan_message_count INTEGER NOT NULL DEFAULT 0,
+    api_coverage_message_count INTEGER NOT NULL DEFAULT 0,
+
+    -- Content-estimated tokens
+    content_tokens_est_total INTEGER NOT NULL DEFAULT 0,
+    content_tokens_est_user INTEGER NOT NULL DEFAULT 0,
+    content_tokens_est_assistant INTEGER NOT NULL DEFAULT 0,
+
+    -- API tokens
+    api_tokens_total INTEGER NOT NULL DEFAULT 0,
+    api_input_tokens_total INTEGER NOT NULL DEFAULT 0,
+    api_output_tokens_total INTEGER NOT NULL DEFAULT 0,
+    api_cache_read_tokens_total INTEGER NOT NULL DEFAULT 0,
+    api_cache_creation_tokens_total INTEGER NOT NULL DEFAULT 0,
+    api_thinking_tokens_total INTEGER NOT NULL DEFAULT 0,
+
+    last_updated INTEGER NOT NULL DEFAULT 0,
+
+    PRIMARY KEY (
+        day_id,
+        agent_slug,
+        workspace_id,
+        source_id,
+        model_family,
+        model_tier
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_umd_model_day ON usage_models_daily(model_family, day_id);
+CREATE INDEX IF NOT EXISTS idx_umd_agent_day ON usage_models_daily(agent_slug, day_id);
+CREATE INDEX IF NOT EXISTS idx_umd_workspace_day ON usage_models_daily(workspace_id, day_id);
+CREATE INDEX IF NOT EXISTS idx_umd_source_day ON usage_models_daily(source_id, day_id);
 ";
 
 /// Row from the embedding_jobs table.
@@ -1540,6 +1598,10 @@ pub struct MessageMetricsEntry {
     pub role: String,
     pub content_chars: i64,
     pub content_tokens_est: i64,
+    pub model_name: Option<String>,
+    pub model_family: String,
+    pub model_tier: String,
+    pub provider: String,
     pub api_input_tokens: Option<i64>,
     pub api_output_tokens: Option<i64>,
     pub api_cache_read_tokens: Option<i64>,
@@ -1560,6 +1622,7 @@ pub struct MessageMetricsEntry {
 pub struct AnalyticsRollupAggregator {
     hourly: HashMap<(i64, String, i64, String), UsageRollupDelta>,
     daily: HashMap<(i64, String, i64, String), UsageRollupDelta>,
+    models_daily: HashMap<(i64, String, i64, String, String, String), UsageRollupDelta>,
 }
 
 impl AnalyticsRollupAggregator {
@@ -1615,10 +1678,43 @@ impl AnalyticsRollupAggregator {
             d.api_cache_creation_tokens_total += entry.api_cache_creation_tokens.unwrap_or(0);
             d.api_thinking_tokens_total += entry.api_thinking_tokens.unwrap_or(0);
         }
+
+        let model_key = (
+            entry.day_id,
+            entry.agent_slug.clone(),
+            entry.workspace_id,
+            entry.source_id.clone(),
+            entry.model_family.clone(),
+            entry.model_tier.clone(),
+        );
+        let d = self.models_daily.entry(model_key).or_default();
+        d.message_count += 1;
+        if is_user {
+            d.user_message_count += 1;
+            d.content_tokens_est_user += content_est;
+        }
+        if is_assistant {
+            d.assistant_message_count += 1;
+            d.content_tokens_est_assistant += content_est;
+        }
+        d.tool_call_count += entry.tool_call_count;
+        if entry.has_plan {
+            d.plan_message_count += 1;
+        }
+        if is_api {
+            d.api_coverage_message_count += 1;
+        }
+        d.content_tokens_est_total += content_est;
+        d.api_tokens_total += api_total;
+        d.api_input_tokens_total += entry.api_input_tokens.unwrap_or(0);
+        d.api_output_tokens_total += entry.api_output_tokens.unwrap_or(0);
+        d.api_cache_read_tokens_total += entry.api_cache_read_tokens.unwrap_or(0);
+        d.api_cache_creation_tokens_total += entry.api_cache_creation_tokens.unwrap_or(0);
+        d.api_thinking_tokens_total += entry.api_thinking_tokens.unwrap_or(0);
     }
 
     pub fn is_empty(&self) -> bool {
-        self.hourly.is_empty() && self.daily.is_empty()
+        self.hourly.is_empty() && self.daily.is_empty() && self.models_daily.is_empty()
     }
 
     pub fn hourly_entry_count(&self) -> usize {
@@ -1627,6 +1723,10 @@ impl AnalyticsRollupAggregator {
 
     pub fn daily_entry_count(&self) -> usize {
         self.daily.len()
+    }
+
+    pub fn models_daily_entry_count(&self) -> usize {
+        self.models_daily.len()
     }
 }
 
@@ -1900,6 +2000,15 @@ impl SqliteStorage {
                         .as_ref()
                         .map(|i| i.family.clone())
                         .unwrap_or_else(|| "unknown".into());
+                    let model_tier = model_info
+                        .as_ref()
+                        .map(|i| i.tier.clone())
+                        .unwrap_or_else(|| "unknown".into());
+                    let provider = usage
+                        .provider
+                        .clone()
+                        .or_else(|| model_info.as_ref().map(|i| i.provider.clone()))
+                        .unwrap_or_else(|| "unknown".into());
 
                     if model_family != "unknown" {
                         session_model_family = model_family.clone();
@@ -1934,10 +2043,10 @@ impl SqliteStorage {
                         timestamp_ms: msg_ts,
                         day_id: msg_day_id,
                         model_name: usage.model_name.clone(),
-                        model_family: Some(model_family),
-                        model_tier: model_info.as_ref().map(|i| i.tier.clone()),
+                        model_family: Some(model_family.clone()),
+                        model_tier: Some(model_tier.clone()),
                         service_tier: usage.service_tier.clone(),
-                        provider: usage.provider.clone(),
+                        provider: Some(provider.clone()),
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
                         cache_read_tokens: usage.cache_read_tokens,
@@ -1964,6 +2073,10 @@ impl SqliteStorage {
                         role: role_s,
                         content_chars,
                         content_tokens_est,
+                        model_name: usage.model_name.clone(),
+                        model_family: model_family.clone(),
+                        model_tier: model_tier.clone(),
+                        provider,
                         api_input_tokens: usage.input_tokens,
                         api_output_tokens: usage.output_tokens,
                         api_cache_read_tokens: usage.cache_read_tokens,
@@ -2063,13 +2176,15 @@ impl SqliteStorage {
 
         // Flush usage_hourly + usage_daily rollups
         if !rollup_agg.is_empty() {
-            let (hourly, daily) = flush_analytics_rollups_in_tx(&tx, &rollup_agg)?;
+            let (hourly, daily, models_daily) = flush_analytics_rollups_in_tx(&tx, &rollup_agg)?;
             tracing::debug!(
                 target: "cass::perf::usage_rollups",
                 hourly_buckets = rollup_agg.hourly_entry_count(),
                 daily_buckets = rollup_agg.daily_entry_count(),
+                models_daily_buckets = rollup_agg.models_daily_entry_count(),
                 hourly_affected = hourly,
                 daily_affected = daily,
+                models_daily_affected = models_daily,
                 "batched_usage_rollups_complete"
             );
         }
@@ -2694,7 +2809,7 @@ impl SqliteStorage {
     /// messages in the database. Does NOT re-parse raw agent session files.
     ///
     /// Algorithm:
-    /// 1. Clear message_metrics, usage_hourly, usage_daily in a transaction
+    /// 1. Clear message_metrics, usage_hourly, usage_daily, usage_models_daily in a transaction
     /// 2. Stream messages joined with conversation/agent dims in chunks
     /// 3. For each message, call extract_tokens_for_agent and build MessageMetricsEntry
     /// 4. Batch insert message_metrics rows
@@ -2720,6 +2835,7 @@ impl SqliteStorage {
         tx.execute("DELETE FROM message_metrics", [])?;
         tx.execute("DELETE FROM usage_hourly", [])?;
         tx.execute("DELETE FROM usage_daily", [])?;
+        tx.execute("DELETE FROM usage_models_daily", [])?;
 
         // Step 2: Stream messages in chunks, extract metrics, batch insert
         const CHUNK_SIZE: i64 = 10_000;
@@ -2821,6 +2937,23 @@ impl SqliteStorage {
                     .unwrap_or(serde_json::Value::Null);
                 let usage =
                     crate::connectors::extract_tokens_for_agent(agent_slug, &extra, content, role);
+                let model_info = usage
+                    .model_name
+                    .as_deref()
+                    .map(crate::connectors::normalize_model);
+                let model_family = model_info
+                    .as_ref()
+                    .map(|i| i.family.clone())
+                    .unwrap_or_else(|| "unknown".into());
+                let model_tier = model_info
+                    .as_ref()
+                    .map(|i| i.tier.clone())
+                    .unwrap_or_else(|| "unknown".into());
+                let provider = usage
+                    .provider
+                    .clone()
+                    .or_else(|| model_info.as_ref().map(|i| i.provider.clone()))
+                    .unwrap_or_else(|| "unknown".into());
 
                 entries.push(MessageMetricsEntry {
                     message_id: *msg_id,
@@ -2833,6 +2966,10 @@ impl SqliteStorage {
                     role: role.clone(),
                     content_chars,
                     content_tokens_est,
+                    model_name: usage.model_name.clone(),
+                    model_family,
+                    model_tier,
+                    provider,
                     api_input_tokens: usage.input_tokens,
                     api_output_tokens: usage.output_tokens,
                     api_cache_read_tokens: usage.cache_read_tokens,
@@ -2937,6 +3074,52 @@ impl SqliteStorage {
             [],
         )?;
 
+        let models_daily_rows = tx.execute(
+            &format!(
+                "INSERT INTO usage_models_daily (
+                    day_id, agent_slug, workspace_id, source_id, model_family, model_tier,
+                    message_count, user_message_count, assistant_message_count,
+                    tool_call_count, plan_message_count, api_coverage_message_count,
+                    content_tokens_est_total, content_tokens_est_user, content_tokens_est_assistant,
+                    api_tokens_total, api_input_tokens_total, api_output_tokens_total,
+                    api_cache_read_tokens_total, api_cache_creation_tokens_total,
+                    api_thinking_tokens_total, last_updated
+                )
+                SELECT
+                    day_id,
+                    agent_slug,
+                    workspace_id,
+                    source_id,
+                    COALESCE(NULLIF(model_family, ''), 'unknown'),
+                    COALESCE(NULLIF(model_tier, ''), 'unknown'),
+                    COUNT(*),
+                    SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN role IN ('assistant', 'agent') THEN 1 ELSE 0 END),
+                    SUM(tool_call_count),
+                    SUM(has_plan),
+                    SUM(CASE WHEN api_data_source = 'api' THEN 1 ELSE 0 END),
+                    SUM(content_tokens_est),
+                    SUM(CASE WHEN role = 'user' THEN content_tokens_est ELSE 0 END),
+                    SUM(CASE WHEN role IN ('assistant', 'agent') THEN content_tokens_est ELSE 0 END),
+                    SUM(COALESCE(api_input_tokens, 0) + COALESCE(api_output_tokens, 0) + COALESCE(api_cache_read_tokens, 0) + COALESCE(api_cache_creation_tokens, 0) + COALESCE(api_thinking_tokens, 0)),
+                    SUM(COALESCE(api_input_tokens, 0)),
+                    SUM(COALESCE(api_output_tokens, 0)),
+                    SUM(COALESCE(api_cache_read_tokens, 0)),
+                    SUM(COALESCE(api_cache_creation_tokens, 0)),
+                    SUM(COALESCE(api_thinking_tokens, 0)),
+                    {now_ms}
+                FROM message_metrics
+                GROUP BY
+                    day_id,
+                    agent_slug,
+                    workspace_id,
+                    source_id,
+                    COALESCE(NULLIF(model_family, ''), 'unknown'),
+                    COALESCE(NULLIF(model_tier, ''), 'unknown')"
+            ),
+            [],
+        )?;
+
         tx.commit()?;
 
         let elapsed = start.elapsed();
@@ -2952,6 +3135,7 @@ impl SqliteStorage {
             message_metrics_rows = total_inserted,
             usage_hourly_rows = hourly_rows,
             usage_daily_rows = daily_rows,
+            usage_models_daily_rows = models_daily_rows,
             elapsed_ms,
             messages_per_sec = format!("{:.0}", msgs_per_sec),
             "analytics_rebuild_complete"
@@ -2961,6 +3145,7 @@ impl SqliteStorage {
             message_metrics_rows: total_inserted,
             usage_hourly_rows: hourly_rows,
             usage_daily_rows: daily_rows,
+            usage_models_daily_rows: models_daily_rows,
             elapsed_ms,
             messages_per_sec: msgs_per_sec,
         })
@@ -3224,6 +3409,7 @@ pub struct AnalyticsRebuildResult {
     pub message_metrics_rows: usize,
     pub usage_hourly_rows: usize,
     pub usage_daily_rows: usize,
+    pub usage_models_daily_rows: usize,
     pub elapsed_ms: u64,
     pub messages_per_sec: f64,
 }
@@ -3388,6 +3574,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V9)?;
             tx.execute_batch(MIGRATION_V10)?;
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
         }
         1 => {
             tx.execute_batch(MIGRATION_V2)?;
@@ -3400,6 +3587,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V9)?;
             tx.execute_batch(MIGRATION_V10)?;
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
         }
         2 => {
             tx.execute_batch(MIGRATION_V3)?;
@@ -3411,6 +3599,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V9)?;
             tx.execute_batch(MIGRATION_V10)?;
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
         }
         3 => {
             tx.execute_batch(MIGRATION_V4)?;
@@ -3421,6 +3610,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V9)?;
             tx.execute_batch(MIGRATION_V10)?;
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
         }
         4 => {
             tx.execute_batch(MIGRATION_V5)?;
@@ -3430,6 +3620,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V9)?;
             tx.execute_batch(MIGRATION_V10)?;
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
         }
         5 => {
             tx.execute_batch(MIGRATION_V6)?;
@@ -3438,6 +3629,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V9)?;
             tx.execute_batch(MIGRATION_V10)?;
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
         }
         6 => {
             tx.execute_batch(MIGRATION_V7)?;
@@ -3445,24 +3637,32 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V9)?;
             tx.execute_batch(MIGRATION_V10)?;
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
         }
         7 => {
             tx.execute_batch(MIGRATION_V8)?;
             tx.execute_batch(MIGRATION_V9)?;
             tx.execute_batch(MIGRATION_V10)?;
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
         }
         8 => {
             tx.execute_batch(MIGRATION_V9)?;
             tx.execute_batch(MIGRATION_V10)?;
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
         }
         9 => {
             tx.execute_batch(MIGRATION_V10)?;
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
         }
         10 => {
             tx.execute_batch(MIGRATION_V11)?;
+            tx.execute_batch(MIGRATION_V12)?;
+        }
+        11 => {
+            tx.execute_batch(MIGRATION_V12)?;
         }
         v => return Err(anyhow!("unsupported schema version {v}")),
     }
@@ -4069,13 +4269,13 @@ fn insert_message_metrics_batched_in_tx(
         return Ok(0);
     }
 
-    // 20 columns per row → ~49 rows max, use 35 for safety
-    const BATCH_SIZE: usize = 35;
+    // 24 columns per row → ~41 rows max, use 30 for safety
+    const BATCH_SIZE: usize = 30;
     let mut total_inserted = 0;
 
     for chunk in entries.chunks(BATCH_SIZE) {
         let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -4084,6 +4284,7 @@ fn insert_message_metrics_batched_in_tx(
                 message_id, created_at_ms, hour_id, day_id,
                 agent_slug, workspace_id, source_id, role,
                 content_chars, content_tokens_est,
+                model_name, model_family, model_tier, provider,
                 api_input_tokens, api_output_tokens, api_cache_read_tokens,
                 api_cache_creation_tokens, api_thinking_tokens,
                 api_service_tier, api_data_source,
@@ -4093,7 +4294,7 @@ fn insert_message_metrics_batched_in_tx(
             placeholders
         );
 
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 21);
+        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 24);
         for e in chunk {
             params_vec.push(e.message_id.into());
             params_vec.push(e.created_at_ms.into());
@@ -4105,6 +4306,15 @@ fn insert_message_metrics_batched_in_tx(
             params_vec.push(e.role.clone().into());
             params_vec.push(e.content_chars.into());
             params_vec.push(e.content_tokens_est.into());
+            params_vec.push(
+                e.model_name
+                    .clone()
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(e.model_family.clone().into());
+            params_vec.push(e.model_tier.clone().into());
+            params_vec.push(e.provider.clone().into());
             params_vec.push(
                 e.api_input_tokens
                     .map(|v| v.into())
@@ -4153,13 +4363,14 @@ fn insert_message_metrics_batched_in_tx(
 fn flush_analytics_rollups_in_tx(
     tx: &Transaction<'_>,
     agg: &AnalyticsRollupAggregator,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize, usize)> {
     let now = SqliteStorage::now_millis();
 
     let hourly_affected = flush_rollup_table(tx, "usage_hourly", "hour_id", &agg.hourly, now)?;
     let daily_affected = flush_rollup_table(tx, "usage_daily", "day_id", &agg.daily, now)?;
+    let models_daily_affected = flush_model_daily_rollup_table(tx, &agg.models_daily, now)?;
 
-    Ok((hourly_affected, daily_affected))
+    Ok((hourly_affected, daily_affected, models_daily_affected))
 }
 
 /// Flush one rollup table (shared logic for hourly + daily).
@@ -4222,6 +4433,89 @@ fn flush_rollup_table(
             params_vec.push(agent.clone().into());
             params_vec.push((*workspace_id).into());
             params_vec.push(source.clone().into());
+            params_vec.push(d.message_count.into());
+            params_vec.push(d.user_message_count.into());
+            params_vec.push(d.assistant_message_count.into());
+            params_vec.push(d.tool_call_count.into());
+            params_vec.push(d.plan_message_count.into());
+            params_vec.push(d.api_coverage_message_count.into());
+            params_vec.push(d.content_tokens_est_total.into());
+            params_vec.push(d.content_tokens_est_user.into());
+            params_vec.push(d.content_tokens_est_assistant.into());
+            params_vec.push(d.api_tokens_total.into());
+            params_vec.push(d.api_input_tokens_total.into());
+            params_vec.push(d.api_output_tokens_total.into());
+            params_vec.push(d.api_cache_read_tokens_total.into());
+            params_vec.push(d.api_cache_creation_tokens_total.into());
+            params_vec.push(d.api_thinking_tokens_total.into());
+            params_vec.push(now.into());
+        }
+
+        total_affected += tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
+    }
+
+    Ok(total_affected)
+}
+
+fn flush_model_daily_rollup_table(
+    tx: &Transaction<'_>,
+    deltas: &HashMap<(i64, String, i64, String, String, String), UsageRollupDelta>,
+    now: i64,
+) -> Result<usize> {
+    if deltas.is_empty() {
+        return Ok(0);
+    }
+
+    // 22 params per row, keep conservative batch size.
+    const BATCH_SIZE: usize = 25;
+    let mut total_affected = 0;
+
+    let entries: Vec<_> = deltas.iter().collect();
+
+    for chunk in entries.chunks(BATCH_SIZE) {
+        let placeholders: String = (0..chunk.len())
+            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "INSERT INTO usage_models_daily (
+                day_id, agent_slug, workspace_id, source_id, model_family, model_tier,
+                message_count, user_message_count, assistant_message_count,
+                tool_call_count, plan_message_count, api_coverage_message_count,
+                content_tokens_est_total, content_tokens_est_user, content_tokens_est_assistant,
+                api_tokens_total, api_input_tokens_total, api_output_tokens_total,
+                api_cache_read_tokens_total, api_cache_creation_tokens_total,
+                api_thinking_tokens_total, last_updated
+            )
+            VALUES {placeholders}
+            ON CONFLICT(day_id, agent_slug, workspace_id, source_id, model_family, model_tier) DO UPDATE SET
+                message_count = message_count + excluded.message_count,
+                user_message_count = user_message_count + excluded.user_message_count,
+                assistant_message_count = assistant_message_count + excluded.assistant_message_count,
+                tool_call_count = tool_call_count + excluded.tool_call_count,
+                plan_message_count = plan_message_count + excluded.plan_message_count,
+                api_coverage_message_count = api_coverage_message_count + excluded.api_coverage_message_count,
+                content_tokens_est_total = content_tokens_est_total + excluded.content_tokens_est_total,
+                content_tokens_est_user = content_tokens_est_user + excluded.content_tokens_est_user,
+                content_tokens_est_assistant = content_tokens_est_assistant + excluded.content_tokens_est_assistant,
+                api_tokens_total = api_tokens_total + excluded.api_tokens_total,
+                api_input_tokens_total = api_input_tokens_total + excluded.api_input_tokens_total,
+                api_output_tokens_total = api_output_tokens_total + excluded.api_output_tokens_total,
+                api_cache_read_tokens_total = api_cache_read_tokens_total + excluded.api_cache_read_tokens_total,
+                api_cache_creation_tokens_total = api_cache_creation_tokens_total + excluded.api_cache_creation_tokens_total,
+                api_thinking_tokens_total = api_thinking_tokens_total + excluded.api_thinking_tokens_total,
+                last_updated = excluded.last_updated"
+        );
+
+        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 22);
+        for &((day_id, agent, workspace_id, source, model_family, model_tier), d) in chunk {
+            params_vec.push((*day_id).into());
+            params_vec.push(agent.clone().into());
+            params_vec.push((*workspace_id).into());
+            params_vec.push(source.clone().into());
+            params_vec.push(model_family.clone().into());
+            params_vec.push(model_tier.clone().into());
             params_vec.push(d.message_count.into());
             params_vec.push(d.user_message_count.into());
             params_vec.push(d.assistant_message_count.into());
@@ -4460,18 +4754,18 @@ mod tests {
     }
 
     // =========================================================================
-    // V11 Analytics schema smoke test (bead z9fse.1)
+    // V12 Analytics schema smoke test (bead z9fse.11)
     // =========================================================================
 
     #[test]
-    fn migration_v11_creates_analytics_tables() {
+    fn migration_v12_creates_analytics_tables() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let storage = SqliteStorage::open(&db_path).unwrap();
 
-        // Schema version should be 11
+        // Schema version should be 12
         let version = storage.schema_version().unwrap();
-        assert_eq!(version, 11, "Schema version must be 11 after migration");
+        assert_eq!(version, 12, "Schema version must be 12 after migration");
 
         let conn = storage.raw();
 
@@ -4504,6 +4798,10 @@ mod tests {
             "hour_id",
             "day_id",
             "content_tokens_est",
+            "model_name",
+            "model_family",
+            "model_tier",
+            "provider",
             "api_input_tokens",
             "has_plan",
             "agent_slug",
@@ -4545,6 +4843,22 @@ mod tests {
             );
         }
 
+        // Verify usage_models_daily table
+        let umd_cols = col_names(conn, "usage_models_daily");
+        for expected in &[
+            "day_id",
+            "model_family",
+            "model_tier",
+            "message_count",
+            "api_tokens_total",
+            "api_coverage_message_count",
+        ] {
+            assert!(
+                umd_cols.contains(&expected.to_string()),
+                "usage_models_daily missing column: {expected}"
+            );
+        }
+
         // Verify indexes on message_metrics
         let mm_idxs = idx_names(conn, "message_metrics");
         assert!(
@@ -4554,6 +4868,12 @@ mod tests {
         assert!(
             mm_idxs.iter().any(|n| n.contains("idx_mm_agent_day")),
             "message_metrics must have agent+day index"
+        );
+        assert!(
+            mm_idxs
+                .iter()
+                .any(|n| n.contains("idx_mm_model_family_day")),
+            "message_metrics must have model_family+day index"
         );
 
         // Verify indexes on usage_hourly
@@ -4568,6 +4888,13 @@ mod tests {
         assert!(
             ud_idxs.iter().any(|n| n.contains("idx_ud_agent")),
             "usage_daily must have agent index"
+        );
+
+        // Verify indexes on usage_models_daily
+        let umd_idxs = idx_names(conn, "usage_models_daily");
+        assert!(
+            umd_idxs.iter().any(|n| n.contains("idx_umd_model_day")),
+            "usage_models_daily must have model+day index"
         );
     }
 
@@ -4590,7 +4917,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_v11_from_v10() {
+    fn migration_v12_from_v10() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
 
@@ -4627,21 +4954,21 @@ mod tests {
             tx.commit().unwrap();
         }
 
-        // Now open with SqliteStorage — should auto-migrate to v11
+        // Now open with SqliteStorage — should auto-migrate to v12
         let storage = SqliteStorage::open(&db_path).unwrap();
         let version = storage.schema_version().unwrap();
-        assert_eq!(version, 11, "Should have migrated from v10 to v11");
+        assert_eq!(version, 12, "Should have migrated from v10 to v12");
 
         // Verify new tables exist
         let count: i64 = storage
             .raw()
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('message_metrics', 'usage_hourly', 'usage_daily')",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('message_metrics', 'usage_hourly', 'usage_daily', 'usage_models_daily')",
                 [],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap();
-        assert_eq!(count, 3, "All 3 new analytics tables should exist");
+        assert_eq!(count, 4, "All 4 analytics tables should exist");
     }
 
     // =========================================================================
@@ -4752,9 +5079,9 @@ mod tests {
 
         // Verify hour_id and day_id are correct
         let mut stmt = conn
-            .prepare("SELECT hour_id, day_id, role, content_tokens_est, has_plan, api_data_source FROM message_metrics ORDER BY message_id")
+            .prepare("SELECT hour_id, day_id, role, content_tokens_est, has_plan, api_data_source, model_family, model_tier, provider FROM message_metrics ORDER BY message_id")
             .unwrap();
-        let rows: Vec<(i64, i64, String, i64, i64, String)> = stmt
+        let rows: Vec<(i64, i64, String, i64, i64, String, String, String, String)> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get(0)?,
@@ -4763,6 +5090,9 @@ mod tests {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
                 ))
             })
             .unwrap()
@@ -4788,6 +5118,10 @@ mod tests {
         // First and third (user) messages should be estimated
         assert_eq!(rows[0].5, "estimated");
         assert_eq!(rows[2].5, "estimated");
+        assert_eq!(rows[1].6, "claude");
+        assert_eq!(rows[1].7, "opus");
+        assert_eq!(rows[1].8, "anthropic");
+        assert_eq!(rows[0].6, "unknown");
         // content_tokens_est = chars / 4
         let user_chars = "Hello, can you help me with a plan?".len() as i64;
         assert_eq!(rows[0].3, user_chars / 4);
@@ -4855,6 +5189,41 @@ mod tests {
         assert_eq!(
             mm_total_content_est, ud_content_est,
             "Daily rollup content_tokens_est_total must equal SUM of message_metrics"
+        );
+
+        // Verify model rollup rows
+        let (claude_msg, claude_user, claude_asst, claude_api_total, claude_api_cov): (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT message_count, user_message_count, assistant_message_count, api_tokens_total, api_coverage_message_count
+                 FROM usage_models_daily
+                 WHERE day_id = ? AND model_family = 'claude' AND model_tier = 'opus'",
+                params![expected_day],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(claude_msg, 1);
+        assert_eq!(claude_user, 0);
+        assert_eq!(claude_asst, 1);
+        assert_eq!(claude_api_total, 380);
+        assert_eq!(claude_api_cov, 1);
+
+        let unknown_msg: i64 = conn
+            .query_row(
+                "SELECT message_count FROM usage_models_daily
+                 WHERE day_id = ? AND model_family = 'unknown' AND model_tier = 'unknown'",
+                params![expected_day],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unknown_msg, 2,
+            "user messages should land in unknown model bucket"
         );
     }
 
@@ -4973,6 +5342,11 @@ mod tests {
         let orig_daily: i64 = conn
             .query_row("SELECT COUNT(*) FROM usage_daily", [], |row| row.get(0))
             .unwrap();
+        let orig_models_daily: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_models_daily", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         let orig_api_input: i64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(api_input_tokens), 0) FROM message_metrics WHERE api_data_source = 'api'",
@@ -4984,11 +5358,13 @@ mod tests {
         assert_eq!(orig_mm, 3);
         assert!(orig_hourly > 0);
         assert!(orig_daily > 0);
+        assert!(orig_models_daily > 0);
 
         // Destroy analytics tables (simulate corruption)
         conn.execute("DELETE FROM message_metrics", []).unwrap();
         conn.execute("DELETE FROM usage_hourly", []).unwrap();
         conn.execute("DELETE FROM usage_daily", []).unwrap();
+        conn.execute("DELETE FROM usage_models_daily", []).unwrap();
 
         // Verify they're empty
         let zero: i64 = conn
@@ -5002,6 +5378,7 @@ mod tests {
         assert_eq!(result.message_metrics_rows, 3);
         assert!(result.usage_hourly_rows > 0);
         assert!(result.usage_daily_rows > 0);
+        assert!(result.usage_models_daily_rows > 0);
         assert!(
             result.elapsed_ms < 10_000,
             "Rebuild should be fast for 3 msgs"
@@ -5029,6 +5406,16 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM usage_daily", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rebuilt_daily, orig_daily, "Rebuilt daily rows should match");
+
+        let rebuilt_models_daily: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_models_daily", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            rebuilt_models_daily, orig_models_daily,
+            "Rebuilt model rollup rows should match"
+        );
 
         // Verify API token data preserved through rebuild
         let rebuilt_api_input: i64 = conn
