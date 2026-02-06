@@ -149,7 +149,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -160,7 +160,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -697,6 +697,8 @@ dependencies = [
  "dotenvy",
  "fastembed",
  "flate2",
+ "ftui",
+ "ftui-extras",
  "fxhash",
  "glob",
  "half",
@@ -771,7 +773,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1253,7 +1255,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1369,7 +1371,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1579,6 +1581,140 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "ftui"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentui?rev=f0ad8a6d9b016ce6a000dc5e1461e1411aee1441#f0ad8a6d9b016ce6a000dc5e1461e1411aee1441"
+dependencies = [
+ "ftui-core",
+ "ftui-extras",
+ "ftui-layout",
+ "ftui-render",
+ "ftui-runtime",
+ "ftui-style",
+ "ftui-text",
+ "ftui-widgets",
+]
+
+[[package]]
+name = "ftui-core"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentui?rev=f0ad8a6d9b016ce6a000dc5e1461e1411aee1441#f0ad8a6d9b016ce6a000dc5e1461e1411aee1441"
+dependencies = [
+ "bitflags 2.10.0",
+ "crossterm",
+ "signal-hook 0.4.3",
+ "unicode-display-width",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "ftui-extras"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentui?rev=f0ad8a6d9b016ce6a000dc5e1461e1411aee1441#f0ad8a6d9b016ce6a000dc5e1461e1411aee1441"
+dependencies = [
+ "base64 0.22.1",
+ "ftui-core",
+ "ftui-render",
+ "ftui-runtime",
+ "ftui-style",
+ "ftui-text",
+ "ftui-widgets",
+ "math-text-transform",
+ "pulldown-cmark",
+ "serde_json",
+ "unicode-display-width",
+ "unicode-segmentation",
+ "unicodeit",
+]
+
+[[package]]
+name = "ftui-i18n"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentui?rev=f0ad8a6d9b016ce6a000dc5e1461e1411aee1441#f0ad8a6d9b016ce6a000dc5e1461e1411aee1441"
+
+[[package]]
+name = "ftui-layout"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentui?rev=f0ad8a6d9b016ce6a000dc5e1461e1411aee1441#f0ad8a6d9b016ce6a000dc5e1461e1411aee1441"
+dependencies = [
+ "ftui-core",
+ "rustc-hash",
+]
+
+[[package]]
+name = "ftui-render"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentui?rev=f0ad8a6d9b016ce6a000dc5e1461e1411aee1441#f0ad8a6d9b016ce6a000dc5e1461e1411aee1441"
+dependencies = [
+ "bitflags 2.10.0",
+ "ftui-core",
+ "memchr",
+ "smallvec",
+ "unicode-display-width",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "ftui-runtime"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentui?rev=f0ad8a6d9b016ce6a000dc5e1461e1411aee1441#f0ad8a6d9b016ce6a000dc5e1461e1411aee1441"
+dependencies = [
+ "crossterm",
+ "ftui-core",
+ "ftui-i18n",
+ "ftui-layout",
+ "ftui-render",
+ "ftui-style",
+ "ftui-text",
+ "tracing",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "ftui-style"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentui?rev=f0ad8a6d9b016ce6a000dc5e1461e1411aee1441#f0ad8a6d9b016ce6a000dc5e1461e1411aee1441"
+dependencies = [
+ "ftui-render",
+ "tracing",
+]
+
+[[package]]
+name = "ftui-text"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentui?rev=f0ad8a6d9b016ce6a000dc5e1461e1411aee1441#f0ad8a6d9b016ce6a000dc5e1461e1411aee1441"
+dependencies = [
+ "ftui-core",
+ "ftui-layout",
+ "ftui-render",
+ "ftui-style",
+ "lru 0.16.3",
+ "ropey",
+ "rustc-hash",
+ "smallvec",
+ "tracing",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "ftui-widgets"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentui?rev=f0ad8a6d9b016ce6a000dc5e1461e1411aee1441#f0ad8a6d9b016ce6a000dc5e1461e1411aee1441"
+dependencies = [
+ "bitflags 2.10.0",
+ "ftui-core",
+ "ftui-layout",
+ "ftui-render",
+ "ftui-style",
+ "ftui-text",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2352,7 +2488,7 @@ dependencies = [
  "gix-fs",
  "libc",
  "parking_lot",
- "signal-hook 0.4.2",
+ "signal-hook 0.4.3",
  "signal-hook-registry",
  "tempfile",
 ]
@@ -3005,7 +3141,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3323,6 +3459,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "math-text-transform"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0b94e989ffe85172727d00fb39360f801db7d70d8357c8d018ca9b155d86d83"
+
+[[package]]
 name = "matrixmultiply"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3594,7 +3736,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4641,6 +4783,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88f8660c1ff60292143c98d08fc6e2f654d722db50410e3f3797d40baaf9d8f3"
 
 [[package]]
+name = "ropey"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93411e420bcd1a75ddd1dc3caf18c23155eda2c090631a85af21ba19e97093b5"
+dependencies = [
+ "smallvec",
+ "str_indices",
+]
+
+[[package]]
 name = "rsqlite-vfs"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4700,7 +4852,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4757,7 +4909,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5064,9 +5216,9 @@ dependencies = [
 
 [[package]]
 name = "signal-hook"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e772e5ae4e7b3ee5244e46c83bd9c97d2ee93211c61b808acb1dfbf4a0af8f76"
+checksum = "3b57709da74f9ff9f4a27dce9526eec25ca8407c45a7887243b031a58935fb8e"
 dependencies = [
  "libc",
  "signal-hook-registry",
@@ -5200,6 +5352,12 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "str_indices"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
 name = "strsim"
@@ -5467,7 +5625,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5960,6 +6118,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7eec5d1121208364f6793f7d2e222bf75a915c19557537745b195b253dd64217"
 
 [[package]]
+name = "unicode-display-width"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a43273b656140aa2bb8e65351fe87c255f0eca706b2538a9bd4a590a3490bf3"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6011,6 +6178,18 @@ name = "unicode_categories"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
+
+[[package]]
+name = "unicodeit"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1069c222ea63347e2e59763aa12d32c9c6a4e595931c7724a769f6a75bfbc553"
+dependencies = [
+ "aho-corasick",
+ "cfg-if",
+ "memchr",
+ "regex",
+]
 
 [[package]]
 name = "unit-prefix"
@@ -6446,7 +6625,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
