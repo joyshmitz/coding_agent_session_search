@@ -41,11 +41,16 @@ use crate::ui::components::pills::Pill;
 use crate::ui::components::toast::ToastManager;
 use crate::ui::data::{ConversationView, InputMode};
 use crate::update_check::UpdateInfo;
+use ftui::widgets::Widget;
+use ftui::widgets::block::{Alignment, Block};
+use ftui::widgets::borders::{BorderType, Borders};
+use ftui::widgets::paragraph::Paragraph;
 
 // ---------------------------------------------------------------------------
 // Re-export ftui primitives through the adapter
 // ---------------------------------------------------------------------------
-use super::ftui_adapter::Rect;
+use super::ftui_adapter::{Constraint, Flex, Rect};
+use super::style_system::{self, StyleContext, StyleOptions, UiThemePreset};
 
 // =========================================================================
 // Enums (ported from tui.rs, canonical for ftui)
@@ -105,6 +110,41 @@ pub enum FocusRegion {
     #[default]
     Results,
     Detail,
+}
+
+/// Responsive layout breakpoint based on terminal width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutBreakpoint {
+    /// <100 cols: single pane with tab switching
+    Narrow,
+    /// 100-159 cols: stacked results/detail with adjustable ratio
+    Medium,
+    /// >=160 cols: side-by-side results + detail panes
+    Wide,
+}
+
+impl LayoutBreakpoint {
+    /// Classify from terminal width.
+    pub fn from_width(cols: u16) -> Self {
+        if cols >= 160 {
+            Self::Wide
+        } else if cols >= 100 {
+            Self::Medium
+        } else {
+            Self::Narrow
+        }
+    }
+}
+
+impl DensityMode {
+    /// Lines per result row for this density.
+    pub fn row_height(self) -> u16 {
+        match self {
+            Self::Compact => 1,
+            Self::Cozy => 2,
+            Self::Spacious => 3,
+        }
+    }
 }
 
 /// Inline find state within the detail pane.
@@ -211,6 +251,10 @@ pub struct CassApp {
     // -- Display & theming ------------------------------------------------
     /// Whether dark theme is active.
     pub theme_dark: bool,
+    /// Active ftui theme preset.
+    pub theme_preset: UiThemePreset,
+    /// Runtime style options derived from environment + user toggles.
+    pub style_options: StyleOptions,
     /// Whether fancy (rounded) borders are enabled.
     pub fancy_borders: bool,
     /// Visual density mode.
@@ -310,6 +354,8 @@ impl Default for CassApp {
             modal_scroll: 0,
             cached_detail: None,
             theme_dark: true,
+            theme_preset: UiThemePreset::Dark,
+            style_options: StyleOptions::from_env(),
             fancy_borders: true,
             density_mode: DensityMode::default(),
             peek_window_saved: None,
@@ -336,6 +382,193 @@ impl Default for CassApp {
             db_reader: None,
             known_workspaces: None,
             status: String::new(),
+        }
+    }
+}
+
+impl CassApp {
+    fn resolved_style_context(&self) -> StyleContext {
+        let mut options = self.style_options;
+        options.preset = self.theme_preset;
+        options.dark_mode = self.theme_dark;
+        StyleContext::from_options(options)
+    }
+
+    fn selected_hit(&self) -> Option<&SearchHit> {
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            return pane.hits.get(pane.selected);
+        }
+        self.results.first()
+    }
+
+    /// Render the results list pane with density-aware row heights.
+    #[allow(clippy::too_many_arguments)]
+    fn render_results_pane(
+        &self,
+        frame: &mut super::ftui_adapter::Frame,
+        area: Rect,
+        hits: &[SearchHit],
+        selected_idx: usize,
+        row_h: u16,
+        border_type: BorderType,
+        styles: &StyleContext,
+        pane_style: ftui::Style,
+        pane_focused_style: ftui::Style,
+        row_style: ftui::Style,
+        row_alt_style: ftui::Style,
+        row_selected_style: ftui::Style,
+        text_muted_style: ftui::Style,
+    ) {
+        let results_title = format!("Results ({})", hits.len());
+        let results_block = Block::new()
+            .borders(Borders::ALL)
+            .border_type(border_type)
+            .title(&results_title)
+            .title_alignment(Alignment::Left)
+            .style(if self.focus_region == FocusRegion::Results {
+                pane_focused_style
+            } else {
+                pane_style
+            });
+        let inner = results_block.inner(area);
+        results_block.render(area, frame);
+
+        if inner.is_empty() {
+            return;
+        }
+
+        if hits.is_empty() {
+            Paragraph::new("No results yet. Type a query and press Enter.")
+                .style(text_muted_style)
+                .render(inner, frame);
+            return;
+        }
+
+        // Density-aware row rendering
+        let visible_rows = (inner.height / row_h) as usize;
+        let max_rows = visible_rows.min(hits.len());
+
+        for (row, hit) in hits.iter().enumerate().take(max_rows) {
+            let location = if let Some(line) = hit.line_number {
+                format!("{}:{line}", hit.source_path)
+            } else {
+                hit.source_path.clone()
+            };
+            let title = if hit.title.trim().is_empty() {
+                "<untitled>"
+            } else {
+                hit.title.trim()
+            };
+
+            let style = if row == selected_idx {
+                row_selected_style
+            } else if row.is_multiple_of(2) {
+                row_style
+            } else {
+                row_alt_style
+            };
+
+            let row_area = Rect::new(inner.x, inner.y + (row as u16) * row_h, inner.width, row_h);
+
+            match self.density_mode {
+                DensityMode::Compact => {
+                    // Single line: number + title + location
+                    let row_text = format!("{:>2}. {} [{}]", row + 1, title, location);
+                    Paragraph::new(&*row_text)
+                        .style(style)
+                        .render(row_area, frame);
+                }
+                DensityMode::Cozy => {
+                    // Two lines: title on first, metadata on second
+                    let line1 = format!("{:>2}. {}", row + 1, title);
+                    let line2 = format!("    {} | {:.1}", location, hit.score);
+                    let text = format!("{line1}\n{line2}");
+                    Paragraph::new(&*text).style(style).render(row_area, frame);
+                }
+                DensityMode::Spacious => {
+                    // Three lines: title, snippet preview, metadata
+                    let line1 = format!("{:>2}. {}", row + 1, title);
+                    let snippet_preview = hit
+                        .snippet
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("");
+                    let snip = if snippet_preview.len() > inner.width as usize - 4 {
+                        &snippet_preview[..inner.width as usize - 7]
+                    } else {
+                        snippet_preview
+                    };
+                    let line2 = format!("    {snip}");
+                    let line3 = format!("    {} | {} | {:.1}", hit.agent, location, hit.score);
+                    let text = format!("{line1}\n{line2}\n{line3}");
+                    Paragraph::new(&*text).style(style).render(row_area, frame);
+                }
+            }
+        }
+
+        // Render role gutter markers if a11y mode is on
+        if styles.options.a11y {
+            let marker = styles.role_markers.assistant;
+            if !marker.is_empty() && inner.width > 4 {
+                let marker_area = Rect::new(inner.x, inner.y, 3, inner.height);
+                Paragraph::new(marker)
+                    .style(styles.style(style_system::STYLE_ROLE_GUTTER_ASSISTANT))
+                    .render(marker_area, frame);
+            }
+        }
+    }
+
+    /// Render the detail/preview pane.
+    #[allow(clippy::too_many_arguments)]
+    fn render_detail_pane(
+        &self,
+        frame: &mut super::ftui_adapter::Frame,
+        area: Rect,
+        border_type: BorderType,
+        styles: &StyleContext,
+        pane_style: ftui::Style,
+        pane_focused_style: ftui::Style,
+        text_muted_style: ftui::Style,
+    ) {
+        let tab_label = match self.detail_tab {
+            DetailTab::Messages => "Detail [Messages]",
+            DetailTab::Snippets => "Detail [Snippets]",
+            DetailTab::Raw => "Detail [Raw]",
+        };
+        let detail_block = Block::new()
+            .borders(Borders::ALL)
+            .border_type(border_type)
+            .title(tab_label)
+            .title_alignment(Alignment::Left)
+            .style(if self.focus_region == FocusRegion::Detail {
+                pane_focused_style
+            } else {
+                pane_style
+            });
+        let inner = detail_block.inner(area);
+        detail_block.render(area, frame);
+
+        if inner.is_empty() {
+            return;
+        }
+
+        if let Some(hit) = self.selected_hit() {
+            let preview = hit
+                .snippet
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("<no snippet available>");
+            let detail_line = format!(
+                "{}\n\nagent={} workspace={}\nscore={:.3}",
+                preview, hit.agent, hit.workspace, hit.score
+            );
+            Paragraph::new(&*detail_line)
+                .style(styles.style(style_system::STYLE_TEXT_PRIMARY))
+                .render(inner, frame);
+        } else {
+            Paragraph::new("Select a result to preview context and metadata.")
+                .style(text_muted_style)
+                .render(inner, frame);
         }
     }
 }
@@ -1069,6 +1302,13 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::ThemeToggled => {
                 self.theme_dark = !self.theme_dark;
+                self.theme_preset = if self.theme_dark {
+                    UiThemePreset::Dark
+                } else {
+                    UiThemePreset::Light
+                };
+                self.style_options.dark_mode = self.theme_dark;
+                self.style_options.preset = self.theme_preset;
                 self.dirty_since = Some(Instant::now());
                 ftui::Cmd::none()
             }
@@ -1541,6 +1781,13 @@ impl super::ftui_adapter::Model for CassApp {
                 self.ranking_mode = state.ranking_mode;
                 self.context_window = state.context_window;
                 self.theme_dark = state.theme_dark;
+                self.theme_preset = if self.theme_dark {
+                    UiThemePreset::Dark
+                } else {
+                    UiThemePreset::Light
+                };
+                self.style_options.dark_mode = self.theme_dark;
+                self.style_options.preset = self.theme_preset;
                 self.density_mode = state.density_mode;
                 self.per_pane_limit = state.per_pane_limit;
                 self.query_history = state.query_history;
@@ -1662,11 +1909,207 @@ impl super::ftui_adapter::Model for CassApp {
     }
 
     fn view(&self, frame: &mut super::ftui_adapter::Frame) {
-        // Temporary compile-safe placeholder while the ftui view layer is
-        // under active migration. A follow-up bead will replace this with
-        // concrete widget rendering using stable ftui APIs.
-        let _ = self;
-        let _ = frame;
+        let area = Rect::from_size(frame.buffer.width(), frame.buffer.height());
+        if area.is_empty() {
+            return;
+        }
+
+        let breakpoint = LayoutBreakpoint::from_width(area.width);
+        let border_type = if self.fancy_borders {
+            BorderType::Rounded
+        } else {
+            BorderType::Square
+        };
+        let row_h = self.density_mode.row_height();
+
+        let styles = self.resolved_style_context();
+        let root_style = styles.style(style_system::STYLE_APP_ROOT);
+        let pane_style = styles.style(style_system::STYLE_PANE_BASE);
+        let pane_focused_style = styles.style(style_system::STYLE_PANE_FOCUSED);
+        let row_style = styles.style(style_system::STYLE_RESULT_ROW);
+        let row_alt_style = styles.style(style_system::STYLE_RESULT_ROW_ALT);
+        let row_selected_style = styles.style(style_system::STYLE_RESULT_ROW_SELECTED);
+        let text_muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
+
+        // Paint root background across the entire terminal.
+        Block::new().style(root_style).render(area, frame);
+
+        // ── Main vertical split: search bar | content | status ──────────
+        let vertical = Flex::vertical()
+            .constraints([
+                Constraint::Fixed(3), // Search bar
+                Constraint::Min(4),   // Content area (results + detail)
+                Constraint::Fixed(1), // Status footer
+            ])
+            .split(area);
+
+        // ── Search bar ──────────────────────────────────────────────────
+        let query_title = format!(
+            "cass | {} | {:?}/{:?}",
+            self.theme_preset.name(),
+            self.search_mode,
+            self.match_mode
+        );
+        let query_block = Block::new()
+            .borders(Borders::ALL)
+            .border_type(border_type)
+            .title(&query_title)
+            .title_alignment(Alignment::Left)
+            .style(if self.focus_region == FocusRegion::Results {
+                pane_focused_style
+            } else {
+                pane_style
+            });
+        let query_inner = query_block.inner(vertical[0]);
+        query_block.render(vertical[0], frame);
+        if !query_inner.is_empty() {
+            let query_line = if self.query.is_empty() {
+                "<type to search>"
+            } else {
+                self.query.as_str()
+            };
+            let query_style = if self.query.is_empty() {
+                text_muted_style
+            } else {
+                styles.style(style_system::STYLE_TEXT_PRIMARY)
+            };
+            Paragraph::new(query_line)
+                .style(query_style)
+                .render(query_inner, frame);
+        }
+
+        // ── Content area: responsive layout ─────────────────────────────
+        let content_area = vertical[1];
+
+        let (hits, selected_idx) = if let Some(pane) = self.panes.get(self.active_pane) {
+            (&pane.hits[..], pane.selected)
+        } else {
+            (&self.results[..], 0)
+        };
+
+        match breakpoint {
+            LayoutBreakpoint::Wide => {
+                // Side-by-side: results (60%) | detail (40%)
+                let panes = Flex::horizontal()
+                    .constraints([Constraint::Percentage(60.0), Constraint::Percentage(40.0)])
+                    .gap(0)
+                    .split(content_area);
+                self.render_results_pane(
+                    frame,
+                    panes[0],
+                    hits,
+                    selected_idx,
+                    row_h,
+                    border_type,
+                    &styles,
+                    pane_style,
+                    pane_focused_style,
+                    row_style,
+                    row_alt_style,
+                    row_selected_style,
+                    text_muted_style,
+                );
+                self.render_detail_pane(
+                    frame,
+                    panes[1],
+                    border_type,
+                    &styles,
+                    pane_style,
+                    pane_focused_style,
+                    text_muted_style,
+                );
+            }
+            LayoutBreakpoint::Medium => {
+                // Side-by-side but with flexible ratio
+                let panes = Flex::horizontal()
+                    .constraints([Constraint::Min(40), Constraint::Min(32)])
+                    .gap(0)
+                    .split(content_area);
+                self.render_results_pane(
+                    frame,
+                    panes[0],
+                    hits,
+                    selected_idx,
+                    row_h,
+                    border_type,
+                    &styles,
+                    pane_style,
+                    pane_focused_style,
+                    row_style,
+                    row_alt_style,
+                    row_selected_style,
+                    text_muted_style,
+                );
+                self.render_detail_pane(
+                    frame,
+                    panes[1],
+                    border_type,
+                    &styles,
+                    pane_style,
+                    pane_focused_style,
+                    text_muted_style,
+                );
+            }
+            LayoutBreakpoint::Narrow => {
+                // Single pane: show whichever has focus
+                match self.focus_region {
+                    FocusRegion::Results => {
+                        self.render_results_pane(
+                            frame,
+                            content_area,
+                            hits,
+                            selected_idx,
+                            row_h,
+                            border_type,
+                            &styles,
+                            pane_style,
+                            pane_focused_style,
+                            row_style,
+                            row_alt_style,
+                            row_selected_style,
+                            text_muted_style,
+                        );
+                    }
+                    FocusRegion::Detail => {
+                        self.render_detail_pane(
+                            frame,
+                            content_area,
+                            border_type,
+                            &styles,
+                            pane_style,
+                            pane_focused_style,
+                            text_muted_style,
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── Status footer ───────────────────────────────────────────────
+        let bp_label = match breakpoint {
+            LayoutBreakpoint::Narrow => "narrow",
+            LayoutBreakpoint::Medium => "med",
+            LayoutBreakpoint::Wide => "wide",
+        };
+        let density_label = match self.density_mode {
+            DensityMode::Compact => "compact",
+            DensityMode::Cozy => "cozy",
+            DensityMode::Spacious => "spacious",
+        };
+        let status_line = if self.status.is_empty() {
+            format!(
+                " {} hits | {} | {} | {:?} | F2=theme D=density Ctrl+B=borders",
+                hits.len(),
+                bp_label,
+                density_label,
+                styles.options.color_profile
+            )
+        } else {
+            format!(" {}", self.status)
+        };
+        Paragraph::new(&*status_line)
+            .style(text_muted_style)
+            .render(vertical[2], frame);
     }
 }
 
@@ -1712,6 +2155,7 @@ mod tests {
         assert_eq!(app.context_window, ContextWindow::Medium);
         assert_eq!(app.density_mode, DensityMode::Cozy);
         assert!(app.theme_dark);
+        assert_eq!(app.theme_preset, UiThemePreset::Dark);
         assert!(app.fancy_borders);
         assert!(!app.show_help);
         assert!(!app.show_detail_modal);
