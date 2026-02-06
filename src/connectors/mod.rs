@@ -837,16 +837,17 @@ impl ExtractedTokenUsage {
     pub fn total_tokens(&self) -> Option<i64> {
         let mut total: i64 = 0;
         let mut has_any = false;
-        for val in [
+        for v in [
             self.input_tokens,
             self.output_tokens,
             self.cache_read_tokens,
             self.cache_creation_tokens,
-        ] {
-            if let Some(v) = val {
-                total = total.saturating_add(v);
-                has_any = true;
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            total = total.saturating_add(v);
+            has_any = true;
         }
         if has_any { Some(total) } else { None }
     }
@@ -901,10 +902,7 @@ pub fn normalize_model(raw: &str) -> ModelInfo {
 
     // GPT models: gpt-4o, gpt-4-turbo, gpt-4.1
     if lower.starts_with("gpt") {
-        let tier = lower
-            .strip_prefix("gpt-")
-            .unwrap_or(&lower)
-            .to_string();
+        let tier = lower.strip_prefix("gpt-").unwrap_or(&lower).to_string();
         return ModelInfo {
             family: "gpt".into(),
             tier,
@@ -950,80 +948,101 @@ pub fn normalize_model(raw: &str) -> ModelInfo {
 /// }}}
 /// ```
 pub fn extract_claude_code_tokens(extra: &serde_json::Value) -> ExtractedTokenUsage {
-    let mut usage = ExtractedTokenUsage::default();
-
-    // Model name from message.model
-    usage.model_name = extra
+    let model_name = extra
         .pointer("/message/model")
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    if let Some(ref name) = usage.model_name {
-        let info = normalize_model(name);
-        usage.provider = Some(info.provider);
-    }
+    let provider = model_name
+        .as_deref()
+        .map(|name| normalize_model(name).provider);
 
-    // Token counts from message.usage
-    if let Some(u) = extra.pointer("/message/usage") {
-        usage.input_tokens = u.get("input_tokens").and_then(|v| v.as_i64());
-        usage.output_tokens = u.get("output_tokens").and_then(|v| v.as_i64());
-        usage.cache_read_tokens = u
-            .get("cache_read_input_tokens")
-            .and_then(|v| v.as_i64());
-        usage.cache_creation_tokens = u
-            .get("cache_creation_input_tokens")
-            .and_then(|v| v.as_i64());
-        usage.service_tier = u
-            .get("service_tier")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+    let u = extra.pointer("/message/usage");
+    let input_tokens = u
+        .and_then(|u| u.get("input_tokens"))
+        .and_then(|v| v.as_i64());
+    let output_tokens = u
+        .and_then(|u| u.get("output_tokens"))
+        .and_then(|v| v.as_i64());
+    let cache_read_tokens = u
+        .and_then(|u| u.get("cache_read_input_tokens"))
+        .and_then(|v| v.as_i64());
+    let cache_creation_tokens = u
+        .and_then(|u| u.get("cache_creation_input_tokens"))
+        .and_then(|v| v.as_i64());
+    let service_tier = u
+        .and_then(|u| u.get("service_tier"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
-        if usage.has_token_data() {
-            usage.data_source = TokenDataSource::Api;
-        }
-    }
+    let has_api_data = input_tokens.is_some()
+        || output_tokens.is_some()
+        || cache_read_tokens.is_some()
+        || cache_creation_tokens.is_some();
 
     // Count tool_use blocks in message.content array
-    if let Some(content_arr) = extra.pointer("/message/content").and_then(|v| v.as_array()) {
-        let tool_count = content_arr
-            .iter()
-            .filter(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-            .count() as u32;
-        if tool_count > 0 {
-            usage.has_tool_calls = true;
-            usage.tool_call_count = tool_count;
-        }
-    }
+    let (has_tool_calls, tool_call_count) =
+        if let Some(content_arr) = extra.pointer("/message/content").and_then(|v| v.as_array()) {
+            let count = content_arr
+                .iter()
+                .filter(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                .count() as u32;
+            (count > 0, count)
+        } else {
+            (false, 0)
+        };
 
-    usage
+    ExtractedTokenUsage {
+        model_name,
+        provider,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+        thinking_tokens: None,
+        service_tier,
+        has_tool_calls,
+        tool_call_count,
+        data_source: if has_api_data {
+            TokenDataSource::Api
+        } else {
+            TokenDataSource::Estimated
+        },
+    }
 }
 
 /// Extract token usage from a Codex message's raw data.
 pub fn extract_codex_tokens(extra: &serde_json::Value) -> ExtractedTokenUsage {
-    let mut usage = ExtractedTokenUsage::default();
+    let mut output_tokens = None;
+    let mut data_source = TokenDataSource::Estimated;
 
     // Codex event_msg with token_count payload
-    if extra.get("type").and_then(|v| v.as_str()) == Some("event_msg") {
-        if let Some(payload) = extra.get("payload") {
-            if payload.get("type").and_then(|v| v.as_str()) == Some("token_count") {
-                usage.output_tokens = payload.get("tokens").and_then(|v| v.as_i64());
-                usage.data_source = TokenDataSource::Api;
-            }
-        }
+    if extra.get("type").and_then(|v| v.as_str()) == Some("event_msg")
+        && let Some(payload) = extra.get("payload")
+        && payload.get("type").and_then(|v| v.as_str()) == Some("token_count")
+    {
+        output_tokens = payload.get("tokens").and_then(|v| v.as_i64());
+        data_source = TokenDataSource::Api;
     }
 
     // Codex response_item may have model info
-    if let Some(model) = extra
+    let model_name = extra
         .get("model")
         .or_else(|| extra.pointer("/response/model"))
         .and_then(|v| v.as_str())
-    {
-        usage.model_name = Some(model.to_string());
-        let info = normalize_model(model);
-        usage.provider = Some(info.provider);
-    }
+        .map(String::from);
 
-    usage
+    let provider = model_name
+        .as_deref()
+        .map(|name| normalize_model(name).provider);
+
+    ExtractedTokenUsage {
+        model_name,
+        provider,
+        output_tokens,
+        data_source,
+        ..Default::default()
+    }
 }
 
 /// Estimate tokens from content length for agents that don't provide token data.
@@ -1061,9 +1080,7 @@ pub fn extract_tokens_for_agent(
         "codex" => extract_codex_tokens(extra),
         // Agents that may have model names but no token counts
         "cursor" | "pi_agent" | "factory" | "opencode" | "gemini" => {
-            let mut usage = ExtractedTokenUsage::default();
-            // Try to extract model name from common locations
-            usage.model_name = extra
+            let model_name = extra
                 .get("model")
                 .or_else(|| extra.pointer("/message/model"))
                 .or_else(|| extra.pointer("/modelConfig/modelName"))
@@ -1071,11 +1088,14 @@ pub fn extract_tokens_for_agent(
                 .or_else(|| extra.get("modelID"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            if let Some(ref name) = usage.model_name {
-                let info = normalize_model(name);
-                usage.provider = Some(info.provider);
+            let provider = model_name
+                .as_deref()
+                .map(|name| normalize_model(name).provider);
+            ExtractedTokenUsage {
+                model_name,
+                provider,
+                ..Default::default()
             }
-            usage
         }
         // All other agents: no token data available, skip extraction
         _ => ExtractedTokenUsage::default(),
@@ -1994,7 +2014,8 @@ mod tests {
 
     #[test]
     fn estimate_tokens_assistant_message() {
-        let usage = estimate_tokens_from_content("Here is my response to your question.", "assistant");
+        let usage =
+            estimate_tokens_from_content("Here is my response to your question.", "assistant");
         assert!(usage.input_tokens.is_none());
         assert!(usage.output_tokens.unwrap() > 0);
         assert_eq!(usage.data_source, TokenDataSource::Estimated);

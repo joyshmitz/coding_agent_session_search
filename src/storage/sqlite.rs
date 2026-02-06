@@ -1263,6 +1263,7 @@ impl TokenStatsAggregator {
     }
 
     /// Record a single message's token contribution.
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
         agent_slug: &str,
@@ -3254,22 +3255,79 @@ fn insert_token_usage_batched_in_tx(
             params_vec.push(e.message_id.into());
             params_vec.push(e.conversation_id.into());
             params_vec.push(e.agent_id.into());
-            params_vec.push(e.workspace_id.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(
+                e.workspace_id
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
             params_vec.push(e.source_id.clone().into());
             params_vec.push(e.timestamp_ms.into());
             params_vec.push(e.day_id.into());
-            params_vec.push(e.model_name.clone().map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.model_family.clone().map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.model_tier.clone().map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.service_tier.clone().map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.provider.clone().map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.input_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.output_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.cache_read_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.cache_creation_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.thinking_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.total_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
-            params_vec.push(e.estimated_cost_usd.map(|v| rusqlite::types::Value::Real(v)).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(
+                e.model_name
+                    .clone()
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.model_family
+                    .clone()
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.model_tier
+                    .clone()
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.service_tier
+                    .clone()
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.provider
+                    .clone()
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.input_tokens
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.output_tokens
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.cache_read_tokens
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.cache_creation_tokens
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.thinking_tokens
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.total_tokens
+                    .map(|v| v.into())
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            params_vec.push(
+                e.estimated_cost_usd
+                    .map(rusqlite::types::Value::Real)
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
             params_vec.push(e.role.clone().into());
             params_vec.push(e.content_chars.into());
             params_vec.push((e.has_tool_calls as i64).into());

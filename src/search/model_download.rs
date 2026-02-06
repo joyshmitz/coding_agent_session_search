@@ -1287,7 +1287,9 @@ mod tests {
 
         // Verify specific models are present
         assert!(
-            candidates.iter().any(|m| m.id == "snowflake-arctic-embed-s"),
+            candidates
+                .iter()
+                .any(|m| m.id == "snowflake-arctic-embed-s"),
             "Snowflake should be in candidates"
         );
         assert!(
@@ -1295,7 +1297,9 @@ mod tests {
             "Nomic should be in candidates"
         );
         assert!(
-            candidates.iter().any(|m| m.id == "jina-reranker-v1-turbo-en"),
+            candidates
+                .iter()
+                .any(|m| m.id == "jina-reranker-v1-turbo-en"),
             "Jina Turbo should be in candidates"
         );
     }
