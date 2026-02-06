@@ -9,7 +9,9 @@
 
 ## Executive Summary
 
-Add a **token + usage analytics pipeline** to `cass` that can answer questions like:
+`cass` already has the core of a **token + usage analytics pipeline** implemented (fact tables + rollups + ingest + rebuild). The remaining work is to make it coherent, queryable (robot-first CLI + shared query library), and richer across dimensions (models/tools/cost/plan attribution) without sacrificing performance.
+
+The analytics system should answer questions like:
 
 - Total tokens per **hour/day/week/month** (historical)
 - Breakdowns across **agent types** (codex, claude_code, gemini, cursor, etc.)
@@ -29,6 +31,30 @@ The core idea is:
 4. Prefer **API-provided token usage** when available (e.g., Claude Code usage blocks), otherwise fall back to a deterministic estimate (existing `~chars/4` heuristic) while tracking quality explicitly.
 
 No UI work in this plan; focus is compute + storage.
+
+## Status Update (As Of 2026-02-06)
+
+### Already Implemented In Code (DONE)
+- Token extraction utilities exist in `src/connectors/mod.rs`: `extract_tokens_for_agent()` + per-agent extractors + `normalize_model()`.
+- Track A analytics tables (schema v11) exist and are populated by live ingest:
+  - `message_metrics` (fact table)
+  - `usage_hourly`, `usage_daily` (rollups)
+- Track B analytics tables (schema v10) exist and are populated by live ingest:
+  - `token_usage` (per-message ledger)
+  - `token_daily_stats` (daily rollups)
+  - `model_pricing` (seeded)
+  - conversation summary columns in `conversations` are updated from `token_usage`
+- Live ingest plumbing populates both tracks in `SqliteStorage::insert_conversations_batched`.
+- Rebuild/backfill exists: `SqliteStorage::rebuild_analytics()` rebuilds Track A.
+- Tests already exist for schema/ingest/rebuild correctness (see `src/storage/sqlite.rs` test module).
+
+### Remaining Work (OPEN)
+- Coherency: rebuild/backfill must cover Track B too (or explicitly deprecate it) so drift cannot happen.
+- Query surface: shared `crate::analytics` query library + robot-first CLI (`cass analytics … --json`).
+- Dimensions: model-aware rollups for Track A; per-tool-name detail + rollups.
+- Coverage improvements: Codex `token_count` wiring.
+- Cost estimation: compute USD from `model_pricing` and expose coverage diagnostics.
+- Validation/perf guardrails: fast invariants + drift detection + throughput budgets.
 
 ## 1. Existing Code + Why This Is Straightforward
 
@@ -50,11 +76,12 @@ Key facts from the current architecture:
   - `estimate_tokens_from_content(content, role)` does the deterministic `chars/4` fallback
   - `extract_tokens_for_agent(agent_slug, extra, content, role)` dispatches + preserves model/provider + tool counts
 
-So we do not need to invent extraction; we need to:
+So we do not need to invent extraction; the main remaining engineering work is:
 
-- Persist extracted usage in SQLite
-- Add time-bucketed rollups for fast analytics queries
-- Fix ingestion gaps (Codex token_count events are currently skipped by the Codex connector)
+- Make Track A + Track B **coherent** under rebuild/backfill (no drift)
+- Add a shared analytics query library + robot-first CLI surface
+- Expand dimensions (models/tools) with rollups so queries stay O(#buckets)
+- Fix ingestion gaps (Codex token_count events coverage)
 
 Note: existing `daily_stats` buckets message counts by **conversation started_at** (because it is updated at conversation insert/append time).
 For token analytics, we want buckets by **message timestamps** (created_at) so multi-day sessions attribute usage to the correct day/hour.
@@ -102,132 +129,73 @@ Optional expansion dims (phase 2+):
 - `model` (raw model string) and normalized (provider/family/tier)
 - `tool_name` (bash/read/etc) for tool-call analytics
 
-## 3. Storage Plan (SQLite)
+## 3. Storage & Schema (SQLite)
 
-### 3.1 New Tables
+### 3.1 Current Schema (Implemented)
 
-Add narrow analytics tables designed for cheap range scans and aggregation.
+The DB currently contains **two analytics tracks** (both populated by live ingest):
 
-#### 3.1.1 `dim_model` (optional but recommended)
+**Track A (schema v11): general message analytics**
+- `message_metrics` (fact table; one row per message_id)
+  - Dimensions: time buckets (hour/day), agent_slug, workspace_id, source_id, role
+  - Metrics: content token estimate + API token components (when available) + tool_call_count + has_plan
+- `usage_hourly`, `usage_daily` (rollups keyed by `(bucket, agent_slug, workspace_id, source_id)`)
+  - Metrics: counts + content-est totals + API totals + coverage counts + plan_message_count
 
-Purpose: de-duplicate model strings and enable stable grouping.
+**Track B (schema v10): ledger + model/cost oriented**
+- `token_usage` (per-message ledger keyed by message_id)
+  - Adds: model_name/provider/service_tier, normalized model_family/model_tier, and a placeholder `estimated_cost_usd`
+- `token_daily_stats` (daily rollups keyed by `(day_id, agent_slug, source_id, model_family)`)
+- `model_pricing` (pattern table seeded with pricing rows)
+- conversation token summary columns in `conversations` are updated from `token_usage`
 
-Schema sketch:
+### 3.2 Planned Schema Extensions (Next)
 
-- `id INTEGER PRIMARY KEY`
-- `raw TEXT NOT NULL UNIQUE` (e.g., `claude-sonnet-4-5-20250929`)
-- `provider TEXT NOT NULL` (anthropic/openai/google/unknown)
-- `family TEXT NOT NULL` (claude/gpt/gemini/unknown)
-- `tier TEXT NOT NULL` (sonnet/opus/flash/o3/etc)
+These additions keep queries fast without scanning raw message content.
 
-Populate via `connectors::normalize_model(raw)`.
+**Tools (z9fse.6)**
+- `tool_calls_detail`: per tool invocation (message_id + tool_name + buckets + dims)
+  - Privacy constraint: do not store tool args by default.
+- `tool_usage_hourly` / `tool_usage_daily`: rollups keyed by `(bucket, agent_slug, workspace_id, source_id, tool_name)`
+  - Metrics: invocation_count, message_count_with_tool, api/content token totals attributed to tool-invoking messages, coverage counts.
 
-If we want to keep v1 simpler, we can store `model_raw` directly in message metrics and add `dim_model` later.
+**Models in Track A (z9fse.11)**
+- Extend `message_metrics` with model fields:
+  - `model_name`, `model_family`, `model_tier`, `provider`
+- Add model rollups (do not change existing usage_* PKs):
+  - `usage_models_daily` (and optionally hourly) keyed by `(bucket, agent_slug, workspace_id, source_id, model_family, model_tier)`
 
-#### 3.1.2 `message_metrics`
+**Cost (z9fse.10)**
+- Compute `token_usage.estimated_cost_usd` from `model_pricing` (effective-date aware + deterministic pattern selection).
+- Sum into `token_daily_stats.estimated_cost_usd` and `conversations.estimated_cost_usd`.
+- Optional (later): add `usd_est_total` columns to Track A rollups (usage_* / tool_* / model_* rollups) so tokens + USD can be queried through one contract.
 
-One row per message id. This is the *analytics source-of-truth* (analogous to “events”).
+### 3.3 Why Fact Tables + Rollups?
 
-Core columns:
-
-- keys / dims:
-  - `message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE`
-  - `created_at_ms INTEGER NOT NULL` (fallback to conversation started_at if message ts missing)
-  - `hour_id INTEGER NOT NULL`
-  - `day_id INTEGER NOT NULL`
-  - `agent_slug TEXT NOT NULL`
-  - `workspace_id INTEGER NOT NULL` (0 = unknown)
-  - `source_id TEXT NOT NULL` (e.g., local, work-laptop)
-  - `role TEXT NOT NULL` (user/assistant/tool/system/other)
-  - `model_id INTEGER` (nullable, if using dim_model)
-
-- content-size metrics:
-  - `content_chars INTEGER NOT NULL`
-  - `content_tokens_est INTEGER NOT NULL` (chars/4)
-
-- API usage metrics (nullable):
-  - `api_input_tokens INTEGER`
-  - `api_output_tokens INTEGER`
-  - `api_cache_read_tokens INTEGER`
-  - `api_cache_creation_tokens INTEGER`
-  - `api_thinking_tokens INTEGER`
-  - `api_service_tier TEXT`
-  - `api_data_source TEXT NOT NULL` (`api` or `estimated`)
-    - Note: `api_data_source=estimated` means “no API usage found”, but we still have content estimate.
-
-- tool / plan flags (phase 1 should at least include the counts we already extract):
-  - `tool_call_count INTEGER NOT NULL`
-  - `has_tool_calls INTEGER NOT NULL` (0/1)
-  - `has_plan INTEGER NOT NULL` (0/1) (computed by a cheap heuristic)
-
-Implementation note: keep this table `WITHOUT ROWID` if we make the PK composite; since it’s keyed by `message_id` only, regular table is fine.
-
-#### 3.1.3 `usage_hourly` rollup
-
-Keyed by `(hour_id, agent_slug, workspace_id, source_id)` with sums + counts.
-
-Suggested columns (start minimal, add more as needed):
-
-- keys:
-  - `hour_id INTEGER NOT NULL`
-  - `agent_slug TEXT NOT NULL`
-  - `workspace_id INTEGER NOT NULL`
-  - `source_id TEXT NOT NULL`
-
-- counts:
-  - `message_count INTEGER NOT NULL`
-  - `user_message_count INTEGER NOT NULL`
-  - `assistant_message_count INTEGER NOT NULL`
-  - `tool_call_count INTEGER NOT NULL`
-  - `api_coverage_message_count INTEGER NOT NULL` (messages with api_* present)
-
-- content-estimated tokens:
-  - `content_tokens_est_total INTEGER NOT NULL`
-  - `content_tokens_est_user INTEGER NOT NULL`
-  - `content_tokens_est_assistant INTEGER NOT NULL`
-
-- API tokens:
-  - `api_tokens_total INTEGER NOT NULL`
-  - `api_input_tokens_total INTEGER NOT NULL`
-  - `api_output_tokens_total INTEGER NOT NULL`
-  - `api_cache_read_tokens_total INTEGER NOT NULL`
-  - `api_cache_creation_tokens_total INTEGER NOT NULL`
-
-Primary key:
-
-- `PRIMARY KEY (hour_id, agent_slug, workspace_id, source_id)`
-
-Indexes:
-
-- `(agent_slug, hour_id)`
-- `(workspace_id, hour_id)`
-- `(source_id, hour_id)`
-
-#### 3.1.4 `usage_daily` rollup
-
-Same as hourly but keyed by `day_id`. This makes week/month trivial and avoids summing 24x rows for daily.
-
-Primary key:
-
-- `PRIMARY KEY (day_id, agent_slug, workspace_id, source_id)`
-
-### 3.2 Why Both Fact Table + Rollups?
-
-- `message_metrics` allows:
-  - rebuilding rollups cheaply without touching giant message content
-  - debugging correctness (sample a day/hour and verify rollup equals sum of events)
-  - adding new rollups/metrics later without re-parsing source agent logs
-- `usage_hourly` / `usage_daily` gives:
+- Fact tables (`message_metrics`, `token_usage`, `tool_calls_detail`) allow:
+  - rebuilding rollups without touching huge content blobs
+  - correctness debugging (sum-of-facts == rollup invariants)
+  - adding new rollups later without re-parsing agent logs
+- Rollups (`usage_*`, `token_daily_stats`, tool/model rollups) enable:
   - time-series queries in O(#buckets) with tiny rows
-  - fast top-N breakdowns without scanning millions of messages
+  - top-N breakdowns without scanning millions of messages
 
-### 3.3 Storage Efficiency Notes
+### 3.4 Storage Efficiency Notes
 
 - Keep analytics tables narrow: avoid JSON blobs.
-- Prefer ints, small text dims, and surrogate ids for models if needed.
-- Consider `STRICT` tables if SQLite version supports it (optional).
+- Prefer ints + small text dims; add surrogate keys only if a dimension explodes.
+- Avoid row explosion by adding **separate** rollup tables (tools/models) instead of mutating existing primary keys.
+- All derived tables must be rebuildable (see coherency plan in z9fse.13).
 
 ## 4. Ingestion Plan (Live, Incremental, Ultra Efficient)
+
+**Status**: Track A + Track B analytics ingestion is already implemented in `SqliteStorage::insert_conversations_batched`.
+
+Remaining ingest work is connector/dimension enrichment:
+- Codex `token_count` wiring (better API coverage)
+- per-tool-name extraction + rollups
+- Track A model rollups
+- cost estimation (USD) computation
 
 ### 4.1 Where To Hook In
 
@@ -237,7 +205,7 @@ All messages flow through SQLite insert points:
 - `SqliteStorage::append_messages` (existing conversation, new messages appended)
 - `SqliteStorage::insert_conversations_batched` / `insert_conversation_in_tx_batched` (fast path used by indexer)
 
-We should update the batched path first, since that’s the primary ingestion path.
+The batched path is the primary ingestion path and should remain the single place we extend analytics extraction/dims so we do not drift across codepaths.
 
 ### 4.2 Metric Extraction Per Inserted Message
 
@@ -272,12 +240,10 @@ Do NOT upsert per message. Instead:
 - While inserting a batch of messages, accumulate deltas in a `HashMap<(bucket_id, agent_slug, workspace_id, source_id), DeltaStruct>`
 - At the end of the transaction, flush to `usage_hourly` and `usage_daily` via **multi-value INSERT with ON CONFLICT DO UPDATE**.
 
-This matches existing performance patterns:
-
-- `batch_insert_fts_messages` already does multi-value insert with fallback.
-- `daily_stats` update path already has a batched aggregator (`StatsAggregator`).
-
-We should mirror that design for token usage.
+This is already the core pattern used in the code today:
+- `AnalyticsRollupAggregator` (usage_hourly/usage_daily)
+- `TokenStatsAggregator` (token_daily_stats)
+- batch inserts for fact rows (`message_metrics`, `token_usage`)
 
 ### 4.4 “All” Rows vs Group-By
 
@@ -308,6 +274,10 @@ Plan:
 
 This avoids polluting the searchable message stream with token-only synthetic messages.
 
+Important operational note:
+- Because token_count events have historically been dropped by the connector, old indexed Codex sessions in SQLite generally cannot be “fixed” by analytics rebuild alone.
+- The backfill path is: re-index Codex sources (so assistant messages get updated `extra_*`), then rebuild analytics.
+
 ### 5.2 Tool calls and tool results (cross-agent)
 
 We want “tokens per tool call” and “tool call counts by tool name”.
@@ -324,71 +294,73 @@ Phase 1:
 Phase 2+:
 
 - Extend extractors for other connectors (Codex tool_call events, Cursor tool calls, etc.)
-- Add optional `tool_usage_hourly(tool_name, ...)` table if we want per-tool breakdowns without scanning `message_metrics`.
+- Implement per-tool-name storage + rollups (z9fse.6): `tool_calls_detail` + `tool_usage_hourly`/`tool_usage_daily`, so tool queries are served from rollups (no full scans).
 
 ## 6. Backfill / Rebuild Strategy (Historical)
 
 We need historical tokens across all existing indexed data.
 
-### 6.1 Migration + “cold start”
+**Status (today)**:
+- Track A rebuild exists: `SqliteStorage::rebuild_analytics()` rebuilds `message_metrics` + `usage_*`.
+- Track B rebuild is missing, but ingest writes `token_usage` + `token_daily_stats` and updates conversation summary columns.
+- Coherency work (track-selectable rebuild + drift detection) is tracked in **z9fse.13**.
 
-On DB migrate to new schema version:
+### 6.1 Rebuild Principles
+- Analytics tables are **derived**; rebuild must never touch source session files.
+- Rebuild is explicit (do not auto-run on startup).
+- Rebuild must support **track selection** (A/B/all) and record meta so drift can be detected.
 
-- Create new tables (`message_metrics`, rollups, optional dim tables).
-- Do NOT automatically rebuild on every startup (could be big).
-- Provide explicit commands:
-  - `cass analytics rebuild` (or `cass doctor --fix --rebuild-analytics`)
-  - `cass analytics status` (shows coverage, last rebuild time, row counts)
+### 6.2 Track A Rebuild (Already Implemented)
+- Clear `message_metrics`, `usage_hourly`, `usage_daily` in a transaction.
+- Stream messages joined with dims:
+  - messages + conversations (source_id) + agents (agent_slug) + workspaces (workspace_id)
+  - Prefer decoding `messages.extra_bin` (MessagePack) when present.
+- Compute per-message metrics via `extract_tokens_for_agent()` and insert `message_metrics` (batched).
+- Populate `usage_*` rollups from the fact table.
 
-### 6.2 Rebuild algorithm
+### 6.3 Track B Rebuild (To Implement)
+- Clear `token_usage` + `token_daily_stats` and reset conversation summary columns.
+- Stream messages and rebuild `token_usage` deterministically (batched insert).
+- Recompute `token_daily_stats` to match ingest semantics (prefer reusing `TokenStatsAggregator`).
+- Update conversation summaries from `token_usage`.
 
-Rebuild from SQLite (not from raw agent files) to make it fast and deterministic:
-
-1. Clear `message_metrics`, `usage_hourly`, `usage_daily` in a transaction.
-2. Stream messages joined with dims we need:
-   - messages + conversations (source_id) + agents (agent_slug) + workspaces (workspace_id)
-   - Prefer decoding `messages.extra_bin` (MessagePack) when present; fall back to `messages.extra_json` only when needed.
-3. Process in chunks (e.g., 10k messages per transaction):
-   - compute per-message metrics
-   - insert into `message_metrics` (batched multi-insert)
-   - update rollup aggregators in-memory
-   - flush rollup upserts per chunk
-4. Record rebuild metadata in `meta`:
-   - `analytics_rebuild_completed_at`
-   - `analytics_message_metrics_version`
-   - coverage stats (optional)
-
-### 6.3 Incremental maintenance (watch mode)
-
-After rebuild, live ingest keeps analytics up-to-date by updating:
-
-- `message_metrics` for new messages
-- rollups for new messages only
+### 6.4 Incremental Maintenance (Watch Mode)
+After rebuild, live ingest keeps analytics up-to-date by inserting new fact rows and upserting rollups for new messages only.
 
 No rescan required.
 
 ## 7. Query Surface (Robot-First)
 
-Even without UI, we should add an API for other agents/tools to consume.
+We want other agents (and future dashboards) to consume analytics without re-implementing SQL.
 
-Proposed CLI:
+Design rules:
+- stdout = JSON data only; stderr = diagnostics
+- buckets are UTC; weeks are ISO-8601 (Mon start)
+- prefer rollups; if a slow path is used, it must be explicit in `_meta`
 
-- `cass analytics tokens --group-by hour|day|week|month --since ... --until ...`
-- Filters:
-  - `--agent <slug>`
-  - `--workspace <path>` (resolved to workspace_id)
-  - `--source <local|remote|id>`
-- Metrics selection:
-  - `--metric api_total|api_input|api_output|content_est_total|...`
-- Include quality:
-  - `% api coverage` per bucket
-  - `api_total` vs `content_est_total` side-by-side
+Implementation plan:
+- Shared query layer: `crate::analytics` (z9fse.12)
+- CLI contract: `cass analytics … --json` (z9fse.3)
 
-Output is JSON in `--robot` mode and should follow existing conventions:
+Command tree (v1):
+- `cass analytics status --json`
+- `cass analytics tokens --json`
+- `cass analytics tools --json`
+- `cass analytics models --json`
+- `cass analytics cost --json`
+- `cass analytics rebuild --json`
+- `cass analytics validate --json`
 
-- stdout is data only
-- stderr diagnostics
-- include optional `_meta` timings / row counts
+Common flags (where applicable):
+- time window: `--since/--until`, `--days N`, `--today`, `--week`
+- filters: `--agent`, `--workspace`, `--source`
+- grouping: `--group-by hour|day|week|month`
+- top-N: `--limit N` for breakdown-style commands
+
+Coverage semantics (non-negotiable):
+- report `api_coverage_message_count` and derived `api_coverage_pct`
+- never present USD totals without pricing coverage signals (unknown != 0)
+- always include `_meta` with elapsed_ms and query path (`rollup` vs `slow`)
 
 ## 8. “LOTS MORE” Metrics (Designed In, Implement Later)
 
@@ -414,51 +386,61 @@ With `message_metrics` as a fact table, adding new analytics becomes easy:
 
 ## 9. Testing Strategy
 
-Add tests at three layers:
+This work is analytics-critical: we need confidence that rollups match facts, rebuild is deterministic, and coverage/drift diagnostics are correct.
 
-1. Unit tests (already exist) for extraction:
-   - extend `extract_codex_tokens` tests once Codex connector attaches token_count
+Already implemented tests (see `src/storage/sqlite.rs` test module):
+- schema + migration checks for analytics tables/indexes
+- ingest integration test that populates `message_metrics` + `usage_*` rollups
+- plan heuristic unit tests for `has_plan`
+- Track A rebuild integration test (clear + rebuild + verify)
 
-2. Storage tests:
-   - Insert a synthetic conversation with messages containing:
-     - user + assistant
-     - Claude-style `message.usage`
-     - tool_use blocks
-   - Assert `message_metrics` rows are created
-   - Assert hourly/daily rollups equal summed message_metrics
+Remaining additions (tracked primarily in z9fse.8 and z9fse.9):
+1. Connector extraction unit tests
+- Codex token_count attach + extraction path (z9fse.5)
+- Tool-name extraction (z9fse.6)
+- Model normalization edge cases (z9fse.11)
 
-3. End-to-end (robot) tests:
-   - `cass index --full` on fixture logs
-   - `cass analytics tokens --group-by day --robot` returns stable output
+2. Storage + invariants integration tests
+- Track B rebuild + coherency invariants (z9fse.13)
+- Drift injection tests (delete/alter one analytics table) must be detected with actionable output (z9fse.9 / z9fse.3.5)
+- Cost estimation arithmetic + pricing coverage rules (z9fse.10)
 
-## 10. Implementation Phases (Concrete)
+3. Robot/e2e shell scripts (tests/e2e/)
+- Index deterministic fixture sessions and assert:
+  - `cass analytics status --json` is sane and stable
+  - `cass analytics tokens --group-by {hour,day,week,month} --json` totals are consistent across granularities
+  - `cass analytics tools/models/cost --json` (once implemented) match fixture expectations and capture rich stderr diagnostics on failure
 
-### Phase 0: Design + Schema
+## 10. Implementation Plan (Aligned to Beads)
 
-- Add migrations for new tables + meta keys.
-- Add helper functions:
-  - `hour_id_from_millis`
-  - `millis_from_hour_id` (optional)
+### DONE (already in code)
+- `z9fse.1`: analytics schema v11 (`message_metrics`, `usage_hourly`, `usage_daily`)
+- `z9fse.2`: live ingest analytics (fact + rollups populated on insert)
+- `z9fse.4`: Track A rebuild/backfill (`rebuild_analytics()` rebuilds `message_metrics` + `usage_*`)
+- `z9fse.7`: plan detection v1 (`has_plan` + `plan_message_count`)
 
-### Phase 1: Fact Table + Rollups From Ingest
+### NEXT (core coherency + query surface)
+- `z9fse.13`: make Track A + Track B coherent under rebuild/backfill (Track B rebuild + meta + drift signals)
+- `z9fse.12`: shared analytics query library (bucket semantics, week/month aggregation, derived metrics)
+- `z9fse.3.1` + `z9fse.3.2` + `z9fse.3.3`: CLI scaffolding + status + tokens
+- `z9fse.8`: extend tests/e2e as CLI lands
 
-- Implement `message_metrics` inserts in batched ingestion path.
-- Implement rollup updates in batched ingestion path.
-- Add `cass analytics status` (row counts, coverage).
+### THEN (dimensions + coverage)
+- `z9fse.5`: Codex token_count wiring (requires re-indexing Codex sources to backfill old sessions)
+- `z9fse.11` + `z9fse.3.6`: model dimension + CLI models
+- `z9fse.6` + `z9fse.3.9`: per-tool-name detail + rollups + CLI tools
 
-### Phase 2: Backfill Command
+### THEN (USD cost)
+- `z9fse.10` + `z9fse.3.7`: cost estimation + CLI cost
 
-- Add `cass analytics rebuild` (fast rebuild from SQLite).
+### THEN (trust + docs)
+- `z9fse.9` + `z9fse.3.5`: validator/perf guardrails + CLI validate
+- `z9fse.3.8`: robot-docs for analytics
 
-### Phase 3: Codex token_count wiring
+### LATER (plan analytics v2)
+- `z9fse.14`: plan token attribution + heuristic refinement (plan token share, avg tokens per plan)
 
-- Modify Codex connector to retain token_count and attach to assistant turns.
-- Extend `extract_codex_tokens` accordingly.
-
-### Phase 4: Tool breakdowns + plan heuristics refinement
-
-- Add per-tool rollup (optional) if needed.
-- Improve plan detection and add plan token metrics.
+Out of scope for this plan: ftui analytics dashboards (`2noh9.4.18.*`). Those should consume `crate::analytics` so the numbers match CLI exactly.
 
 ## Open Questions
 
