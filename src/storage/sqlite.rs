@@ -1540,8 +1540,11 @@ impl SqliteStorage {
         let mut outcomes = Vec::with_capacity(conversations.len());
         let mut fts_entries = Vec::new();
         let mut stats = StatsAggregator::new();
+        let mut token_stats = TokenStatsAggregator::new();
+        let mut token_entries: Vec<TokenUsageEntry> = Vec::new();
+        let mut conv_ids_to_summarize: Vec<i64> = Vec::new();
 
-        // Process all conversations, collecting FTS entries
+        // Process all conversations, collecting FTS entries and token data
         for &(agent_id, workspace_id, conv) in conversations {
             let (outcome, delta) = insert_conversation_in_tx_batched(
                 &tx,
@@ -1567,6 +1570,129 @@ impl SqliteStorage {
                     delta.total_chars_delta,
                 );
             }
+
+            // Extract token usage from newly inserted messages
+            let has_new_messages = !outcome.inserted_indices.is_empty();
+            if has_new_messages {
+                let conv_day_id = conv
+                    .started_at
+                    .map(SqliteStorage::day_id_from_millis)
+                    .unwrap_or(0);
+
+                // Track primary model for session-level stats
+                let mut session_model_family = String::from("unknown");
+                let mut has_any_tokens = false;
+
+                // For each newly inserted message, extract tokens and create entries
+                // We need the message_id from the DB. Query inserted messages by conv+idx.
+                for msg in &conv.messages {
+                    if !outcome.inserted_indices.contains(&msg.idx) {
+                        continue;
+                    }
+
+                    let role_s = role_str(&msg.role);
+                    let usage = crate::connectors::extract_tokens_for_agent(
+                        &conv.agent_slug,
+                        &msg.extra_json,
+                        &msg.content,
+                        &role_s,
+                    );
+
+                    // Look up message_id from DB
+                    let msg_id: Option<i64> = tx
+                        .query_row(
+                            "SELECT id FROM messages WHERE conversation_id = ? AND idx = ?",
+                            params![outcome.conversation_id, msg.idx],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+
+                    let Some(message_id) = msg_id else {
+                        continue;
+                    };
+
+                    let msg_ts = msg.created_at.or(conv.started_at).unwrap_or(0);
+                    let msg_day_id = if msg_ts > 0 {
+                        SqliteStorage::day_id_from_millis(msg_ts)
+                    } else {
+                        conv_day_id
+                    };
+
+                    // Normalize model for aggregation
+                    let model_info = usage
+                        .model_name
+                        .as_deref()
+                        .map(crate::connectors::normalize_model);
+
+                    let model_family = model_info
+                        .as_ref()
+                        .map(|i| i.family.clone())
+                        .unwrap_or_else(|| "unknown".into());
+
+                    if model_family != "unknown" {
+                        session_model_family = model_family.clone();
+                    }
+
+                    // Feed into token stats aggregator
+                    token_stats.record(
+                        &conv.agent_slug,
+                        &conv.source_id,
+                        msg_day_id,
+                        &model_family,
+                        &role_s,
+                        &usage,
+                        msg.content.len() as i64,
+                    );
+
+                    if usage.has_token_data() {
+                        has_any_tokens = true;
+                    }
+
+                    // Build token_usage row
+                    token_entries.push(TokenUsageEntry {
+                        message_id,
+                        conversation_id: outcome.conversation_id,
+                        agent_id,
+                        workspace_id,
+                        source_id: conv.source_id.clone(),
+                        timestamp_ms: msg_ts,
+                        day_id: msg_day_id,
+                        model_name: usage.model_name.clone(),
+                        model_family: Some(model_family),
+                        model_tier: model_info.as_ref().map(|i| i.tier.clone()),
+                        service_tier: usage.service_tier.clone(),
+                        provider: usage.provider.clone(),
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        cache_read_tokens: usage.cache_read_tokens,
+                        cache_creation_tokens: usage.cache_creation_tokens,
+                        thinking_tokens: usage.thinking_tokens,
+                        total_tokens: usage.total_tokens(),
+                        estimated_cost_usd: None, // Cost computed later via model_pricing
+                        role: role_s,
+                        content_chars: msg.content.len() as i64,
+                        has_tool_calls: usage.has_tool_calls,
+                        tool_call_count: usage.tool_call_count,
+                        data_source: usage.data_source.as_str().to_string(),
+                    });
+                }
+
+                // Record session count in token stats (once per new conversation)
+                if delta.session_count_delta > 0 {
+                    token_stats.record_session(
+                        &conv.agent_slug,
+                        &conv.source_id,
+                        conv_day_id,
+                        &session_model_family,
+                    );
+                }
+
+                // Mark conversation for summary update if it has any token data
+                if has_any_tokens {
+                    conv_ids_to_summarize.push(outcome.conversation_id);
+                }
+            }
+
             outcomes.push(outcome);
         }
 
@@ -1594,6 +1720,36 @@ impl SqliteStorage {
                 affected = affected,
                 "batched_stats_update_complete"
             );
+        }
+
+        // Batch insert token_usage rows
+        if !token_entries.is_empty() {
+            let token_count = token_entries.len();
+            let inserted = insert_token_usage_batched_in_tx(&tx, &token_entries)?;
+            tracing::debug!(
+                target: "cass::perf::token_usage",
+                total = token_count,
+                inserted = inserted,
+                "batch_token_usage_insert_complete"
+            );
+        }
+
+        // Batched token_daily_stats update
+        if !token_stats.is_empty() {
+            let entries = token_stats.expand();
+            let affected = update_token_daily_stats_batched_in_tx(&tx, &entries)?;
+            tracing::debug!(
+                target: "cass::perf::token_daily_stats",
+                raw = token_stats.raw_entry_count(),
+                expanded = entries.len(),
+                affected = affected,
+                "batched_token_stats_update_complete"
+            );
+        }
+
+        // Update conversation-level token summaries
+        for conv_id in &conv_ids_to_summarize {
+            update_conversation_token_summaries_in_tx(&tx, *conv_id)?;
         }
 
         tx.commit()?;
@@ -3055,6 +3211,183 @@ fn update_daily_stats_batched_in_tx(
     }
 
     Ok(total_affected)
+}
+
+// -------------------------------------------------------------------------
+// Token Usage Batch Insert
+// -------------------------------------------------------------------------
+
+/// Batch insert token_usage rows inside an existing transaction.
+fn insert_token_usage_batched_in_tx(
+    tx: &Transaction<'_>,
+    entries: &[TokenUsageEntry],
+) -> Result<usize> {
+    if entries.is_empty() {
+        return Ok(0);
+    }
+
+    // 24 columns per row; SQLite limit ~999 params → batch ~41 rows, use 35 for safety
+    const BATCH_SIZE: usize = 35;
+    let mut total_inserted = 0;
+
+    for chunk in entries.chunks(BATCH_SIZE) {
+        let placeholders: String = (0..chunk.len())
+            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "INSERT OR IGNORE INTO token_usage (
+                message_id, conversation_id, agent_id, workspace_id, source_id,
+                timestamp_ms, day_id,
+                model_name, model_family, model_tier, service_tier, provider,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                thinking_tokens, total_tokens, estimated_cost_usd,
+                role, content_chars, has_tool_calls, tool_call_count, data_source
+            )
+            VALUES {}",
+            placeholders
+        );
+
+        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 24);
+        for e in chunk {
+            params_vec.push(e.message_id.into());
+            params_vec.push(e.conversation_id.into());
+            params_vec.push(e.agent_id.into());
+            params_vec.push(e.workspace_id.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.source_id.clone().into());
+            params_vec.push(e.timestamp_ms.into());
+            params_vec.push(e.day_id.into());
+            params_vec.push(e.model_name.clone().map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.model_family.clone().map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.model_tier.clone().map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.service_tier.clone().map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.provider.clone().map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.input_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.output_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.cache_read_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.cache_creation_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.thinking_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.total_tokens.map(|v| v.into()).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.estimated_cost_usd.map(|v| rusqlite::types::Value::Real(v)).unwrap_or(rusqlite::types::Value::Null));
+            params_vec.push(e.role.clone().into());
+            params_vec.push(e.content_chars.into());
+            params_vec.push((e.has_tool_calls as i64).into());
+            params_vec.push((e.tool_call_count as i64).into());
+            params_vec.push(e.data_source.clone().into());
+        }
+
+        total_inserted += tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
+    }
+
+    Ok(total_inserted)
+}
+
+/// Batch upsert token_daily_stats deltas inside an existing transaction.
+fn update_token_daily_stats_batched_in_tx(
+    tx: &Transaction<'_>,
+    entries: &[(i64, String, String, String, TokenStatsDelta)],
+) -> Result<usize> {
+    if entries.is_empty() {
+        return Ok(0);
+    }
+
+    let now = SqliteStorage::now_millis();
+    const BATCH_SIZE: usize = 25; // 19 params per row → ~52 rows max, use 25 for safety
+
+    let mut total_affected = 0;
+
+    for chunk in entries.chunks(BATCH_SIZE) {
+        let placeholders: String = (0..chunk.len())
+            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "INSERT INTO token_daily_stats (
+                day_id, agent_slug, source_id, model_family,
+                api_call_count, user_message_count, assistant_message_count, tool_message_count,
+                total_input_tokens, total_output_tokens, total_cache_read_tokens,
+                total_cache_creation_tokens, total_thinking_tokens, grand_total_tokens,
+                total_content_chars, total_tool_calls, estimated_cost_usd, session_count,
+                last_updated
+            )
+            VALUES {}
+            ON CONFLICT(day_id, agent_slug, source_id, model_family) DO UPDATE SET
+                api_call_count = api_call_count + excluded.api_call_count,
+                user_message_count = user_message_count + excluded.user_message_count,
+                assistant_message_count = assistant_message_count + excluded.assistant_message_count,
+                tool_message_count = tool_message_count + excluded.tool_message_count,
+                total_input_tokens = total_input_tokens + excluded.total_input_tokens,
+                total_output_tokens = total_output_tokens + excluded.total_output_tokens,
+                total_cache_read_tokens = total_cache_read_tokens + excluded.total_cache_read_tokens,
+                total_cache_creation_tokens = total_cache_creation_tokens + excluded.total_cache_creation_tokens,
+                total_thinking_tokens = total_thinking_tokens + excluded.total_thinking_tokens,
+                grand_total_tokens = grand_total_tokens + excluded.grand_total_tokens,
+                total_content_chars = total_content_chars + excluded.total_content_chars,
+                total_tool_calls = total_tool_calls + excluded.total_tool_calls,
+                estimated_cost_usd = estimated_cost_usd + excluded.estimated_cost_usd,
+                session_count = session_count + excluded.session_count,
+                last_updated = excluded.last_updated",
+            placeholders
+        );
+
+        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 19);
+        for (day_id, agent, source, model, delta) in chunk {
+            params_vec.push((*day_id).into());
+            params_vec.push(agent.clone().into());
+            params_vec.push(source.clone().into());
+            params_vec.push(model.clone().into());
+            params_vec.push(delta.api_call_count.into());
+            params_vec.push(delta.user_message_count.into());
+            params_vec.push(delta.assistant_message_count.into());
+            params_vec.push(delta.tool_message_count.into());
+            params_vec.push(delta.total_input_tokens.into());
+            params_vec.push(delta.total_output_tokens.into());
+            params_vec.push(delta.total_cache_read_tokens.into());
+            params_vec.push(delta.total_cache_creation_tokens.into());
+            params_vec.push(delta.total_thinking_tokens.into());
+            params_vec.push(delta.grand_total_tokens.into());
+            params_vec.push(delta.total_content_chars.into());
+            params_vec.push(delta.total_tool_calls.into());
+            params_vec.push(rusqlite::types::Value::Real(delta.estimated_cost_usd));
+            params_vec.push(delta.session_count.into());
+            params_vec.push(now.into());
+        }
+
+        total_affected += tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
+    }
+
+    Ok(total_affected)
+}
+
+/// Update conversation-level token summary columns from token_usage data.
+fn update_conversation_token_summaries_in_tx(
+    tx: &Transaction<'_>,
+    conversation_id: i64,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE conversations SET
+            total_input_tokens = (SELECT SUM(input_tokens) FROM token_usage WHERE conversation_id = ?1),
+            total_output_tokens = (SELECT SUM(output_tokens) FROM token_usage WHERE conversation_id = ?1),
+            total_cache_read_tokens = (SELECT SUM(cache_read_tokens) FROM token_usage WHERE conversation_id = ?1),
+            total_cache_creation_tokens = (SELECT SUM(cache_creation_tokens) FROM token_usage WHERE conversation_id = ?1),
+            grand_total_tokens = (SELECT SUM(total_tokens) FROM token_usage WHERE conversation_id = ?1),
+            estimated_cost_usd = (SELECT SUM(estimated_cost_usd) FROM token_usage WHERE conversation_id = ?1),
+            primary_model = (SELECT model_name FROM token_usage WHERE conversation_id = ?1
+                             AND model_name IS NOT NULL
+                             GROUP BY model_name ORDER BY COUNT(*) DESC LIMIT 1),
+            api_call_count = (SELECT COUNT(*) FROM token_usage WHERE conversation_id = ?1
+                              AND data_source = 'api'),
+            tool_call_count = (SELECT SUM(tool_call_count) FROM token_usage WHERE conversation_id = ?1),
+            user_message_count = (SELECT COUNT(*) FROM token_usage WHERE conversation_id = ?1
+                                  AND role = 'user'),
+            assistant_message_count = (SELECT COUNT(*) FROM token_usage WHERE conversation_id = ?1
+                                       AND role IN ('assistant', 'agent'))
+         WHERE id = ?1",
+        params![conversation_id],
+    )?;
+    Ok(())
 }
 
 fn path_to_string<P: AsRef<Path>>(p: P) -> String {
