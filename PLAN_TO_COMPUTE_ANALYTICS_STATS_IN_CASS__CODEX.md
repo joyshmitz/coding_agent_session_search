@@ -40,6 +40,10 @@ Key facts from the current architecture:
   - `extra` (raw per-agent JSON payload, often containing rich metadata)
 - Indexer persists into SQLite (`conversations`, `messages`, etc.) and Tantivy.
 - There is already a derived aggregation table `daily_stats` used for fast “sessions/messages/chars per day”.
+- SQLite already stores some heavy JSON blobs in a compact binary form as well:
+  - `conversations.metadata_bin` (MessagePack)
+  - `messages.extra_bin` (MessagePack)
+  This is ideal for **fast analytics backfills** without repeatedly parsing JSON.
 - **Important**: `src/connectors/mod.rs` already contains token extraction utilities:
   - `extract_claude_code_tokens(extra)` parses Claude Code `message.usage`
   - `extract_codex_tokens(extra)` parses Codex `event_msg` `token_count` payload
@@ -51,6 +55,10 @@ So we do not need to invent extraction; we need to:
 - Persist extracted usage in SQLite
 - Add time-bucketed rollups for fast analytics queries
 - Fix ingestion gaps (Codex token_count events are currently skipped by the Codex connector)
+
+Note: existing `daily_stats` buckets message counts by **conversation started_at** (because it is updated at conversation insert/append time).
+For token analytics, we want buckets by **message timestamps** (created_at) so multi-day sessions attribute usage to the correct day/hour.
+That is why this plan introduces new usage rollups instead of reusing `daily_stats`.
 
 ## 2. Definitions (Avoid “One Token Number” Confusion)
 
@@ -339,6 +347,7 @@ Rebuild from SQLite (not from raw agent files) to make it fast and deterministic
 1. Clear `message_metrics`, `usage_hourly`, `usage_daily` in a transaction.
 2. Stream messages joined with dims we need:
    - messages + conversations (source_id) + agents (agent_slug) + workspaces (workspace_id)
+   - Prefer decoding `messages.extra_bin` (MessagePack) when present; fall back to `messages.extra_json` only when needed.
 3. Process in chunks (e.g., 10k messages per transaction):
    - compute per-message metrics
    - insert into `message_metrics` (batched multi-insert)
@@ -456,4 +465,3 @@ Add tests at three layers:
 1. Codex `token_count` semantics: output-only, total, or something else? We need to confirm by inspecting real rollout logs.
 2. Should we add a real tokenizer (BPE) for content tokens, or keep `chars/4` for now?
 3. How aggressively should we denormalize dims into rollups (workspace_id + agent_slug + source_id)? Row count could grow; we should measure on a real corpus.
-
