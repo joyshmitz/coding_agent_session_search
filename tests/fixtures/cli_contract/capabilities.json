@@ -38,7 +38,9 @@
         "aider",
         "cursor",
         "chatgpt",
-        "pi_agent"
+        "pi_agent",
+        "factory",
+        "openclaw"
     ],
     "limits": {
         "max_limit": 10000,
