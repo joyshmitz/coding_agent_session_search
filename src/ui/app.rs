@@ -1360,17 +1360,17 @@ impl super::ftui_adapter::Model for CassApp {
 
     fn update(&mut self, msg: CassMsg) -> ftui::Cmd<CassMsg> {
         // Consent dialog intercepts D/H keys and blocks other query input
-        if self.show_consent_dialog {
-            if let CassMsg::QueryChanged(ref text) = msg {
-                if text.eq_ignore_ascii_case("d") {
-                    return self.update(CassMsg::ModelDownloadAccepted);
-                }
-                if text.eq_ignore_ascii_case("h") {
-                    return self.update(CassMsg::HashModeAccepted);
-                }
-                // Ignore other query input while consent dialog is open
-                return ftui::Cmd::none();
+        if self.show_consent_dialog
+            && let CassMsg::QueryChanged(ref text) = msg
+        {
+            if text.eq_ignore_ascii_case("d") {
+                return self.update(CassMsg::ModelDownloadAccepted);
             }
+            if text.eq_ignore_ascii_case("h") {
+                return self.update(CassMsg::HashModeAccepted);
+            }
+            // Ignore other query input while consent dialog is open
+            return ftui::Cmd::none();
         }
 
         match msg {
