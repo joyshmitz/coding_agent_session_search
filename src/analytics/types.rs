@@ -744,6 +744,30 @@ mod tests {
     }
 
     #[test]
+    fn group_by_next_cycles_through_all() {
+        assert_eq!(GroupBy::Hour.next(), GroupBy::Day);
+        assert_eq!(GroupBy::Day.next(), GroupBy::Week);
+        assert_eq!(GroupBy::Week.next(), GroupBy::Month);
+        assert_eq!(GroupBy::Month.next(), GroupBy::Hour);
+    }
+
+    #[test]
+    fn group_by_prev_cycles_through_all() {
+        assert_eq!(GroupBy::Hour.prev(), GroupBy::Month);
+        assert_eq!(GroupBy::Day.prev(), GroupBy::Hour);
+        assert_eq!(GroupBy::Week.prev(), GroupBy::Day);
+        assert_eq!(GroupBy::Month.prev(), GroupBy::Week);
+    }
+
+    #[test]
+    fn group_by_label() {
+        assert_eq!(GroupBy::Hour.label(), "Hourly");
+        assert_eq!(GroupBy::Day.label(), "Daily");
+        assert_eq!(GroupBy::Week.label(), "Weekly");
+        assert_eq!(GroupBy::Month.label(), "Monthly");
+    }
+
+    #[test]
     fn default_filter_is_unfiltered() {
         let f = AnalyticsFilter::default();
         assert!(f.since_ms.is_none());

@@ -101,6 +101,19 @@ pub struct AnalyticsChartData {
     pub total_cost_usd: f64,
     /// Daily cost: `(label, estimated_cost_usd)`.
     pub daily_cost: Vec<(String, f64)>,
+    // ── Tools view (enhanced) ─────────────────────────────────
+    /// Full tool report rows (agent → calls, msgs, tokens, derived metrics).
+    pub tool_rows: Vec<crate::analytics::ToolRow>,
+
+    // ── Cost / Models view ───────────────────────────────────
+    /// Per-model estimated cost (USD): `(model_family, usd)` sorted desc.
+    pub model_cost: Vec<(String, f64)>,
+    /// Per-model message counts: `(model_family, count)` sorted desc.
+    pub model_messages: Vec<(String, f64)>,
+    /// Models with unknown pricing (from `query_unpriced_models`).
+    pub unpriced_models: Vec<crate::analytics::UnpricedModel>,
+    /// Percentage of token_usage rows with known pricing (0..100).
+    pub pricing_coverage_pct: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -229,20 +242,19 @@ pub fn load_chart_data(
             .collect();
     }
 
-    // Tool usage.
-    if let Ok(result) = analytics::query::query_tools(conn, &filter, group_by, 20) {
+    // Tool usage — load full rows for the enhanced tools table.
+    if let Ok(result) = analytics::query::query_tools(conn, &filter, group_by, 50) {
         data.agent_tool_calls = result
             .rows
             .iter()
             .map(|r| (r.key.clone(), r.tool_call_count as f64))
             .collect();
         data.total_tool_calls = result.total_tool_calls;
+        data.tool_rows = result.rows;
     }
 
     // Daily timeseries (for sparklines and line chart).
-    if let Ok(result) =
-        analytics::query::query_tokens_timeseries(conn, &filter, group_by)
-    {
+    if let Ok(result) = analytics::query::query_tokens_timeseries(conn, &filter, group_by) {
         data.daily_tokens = result
             .buckets
             .iter()
@@ -312,9 +324,45 @@ pub fn load_chart_data(
             .collect();
     }
 
+    // Model cost breakdown (Track B — EstimatedCostUsd).
+    if let Ok(result) = analytics::query::query_breakdown(
+        conn,
+        &filter,
+        analytics::Dim::Model,
+        analytics::Metric::EstimatedCostUsd,
+        20,
+    ) {
+        data.model_cost = result
+            .rows
+            .iter()
+            .map(|r| (r.key.clone(), r.value as f64))
+            .collect();
+    }
+
+    // Model message counts (Track B).
+    if let Ok(result) = analytics::query::query_breakdown(
+        conn,
+        &filter,
+        analytics::Dim::Model,
+        analytics::Metric::MessageCount,
+        20,
+    ) {
+        data.model_messages = result
+            .rows
+            .iter()
+            .map(|r| (r.key.clone(), r.value as f64))
+            .collect();
+    }
+
+    // Unpriced models — highlights models missing pricing data.
+    if let Ok(report) = analytics::query::query_unpriced_models(conn, 10) {
+        data.unpriced_models = report.models;
+    }
+
     // Coverage percentage.
     if let Ok(status) = analytics::query::query_status(conn, &filter) {
         data.coverage_pct = status.coverage.api_token_coverage_pct;
+        data.pricing_coverage_pct = status.coverage.pricing_coverage_pct;
     }
 
     data
@@ -670,22 +718,31 @@ pub fn render_explorer(
         metric_color,
     )];
 
-    // Per-agent overlay: add a series per top agent (max 5 for readability).
-    let agent_overlay_data: Vec<Vec<(f64, f64)>>;
-    if state.overlay == ExplorerOverlay::ByAgent && !data.agent_tokens.is_empty() {
-        // Pick the correct breakdown for agent names (matching build_agent_overlay).
-        let agent_names: &[(String, f64)] = match state.metric {
+    // Dimension overlay: add a series per top-N item (max 5 for readability).
+    let overlay_data: Vec<Vec<(f64, f64)>>;
+    let dim_breakdown: Option<StrF64Slice<'_>> = match state.overlay {
+        ExplorerOverlay::None => Option::None,
+        ExplorerOverlay::ByAgent => Some(match state.metric {
             ExplorerMetric::Messages | ExplorerMetric::PlanMessages => &data.agent_messages,
             ExplorerMetric::ToolCalls => &data.agent_tool_calls,
             _ => &data.agent_tokens,
-        };
-        agent_overlay_data = build_agent_overlay(data, state.metric);
-        for (i, points) in agent_overlay_data.iter().enumerate().take(5) {
+        }),
+        ExplorerOverlay::ByWorkspace => Some(match state.metric {
+            ExplorerMetric::Messages | ExplorerMetric::PlanMessages => &data.workspace_messages,
+            _ => &data.workspace_tokens,
+        }),
+        ExplorerOverlay::BySource => Some(match state.metric {
+            ExplorerMetric::Messages | ExplorerMetric::PlanMessages => &data.source_messages,
+            _ => &data.source_tokens,
+        }),
+    };
+    if let Some(breakdown) = dim_breakdown
+        && !breakdown.is_empty()
+    {
+        overlay_data = build_dimension_overlay(breakdown, metric_data);
+        for (i, points) in overlay_data.iter().enumerate().take(5) {
             if !points.is_empty() {
-                let name = agent_names
-                    .get(i)
-                    .map(|(n, _)| n.as_str())
-                    .unwrap_or("other");
+                let name = breakdown.get(i).map(|(n, _)| n.as_str()).unwrap_or("other");
                 series.push(ChartSeries::new(name, points, agent_color(i)).markers(true));
             }
         }
@@ -727,33 +784,25 @@ fn metric_series(
 
 /// Build per-agent overlay series. Each agent gets its own Vec<(f64, f64)>.
 ///
-/// This is a simplified overlay — it uses the global daily data and distributes
-/// proportionally by each agent's share of the total. A full implementation
-/// would query per-agent timeseries, but this approximation works for v1.
+/// Simplified proportional overlay — distributes the daily totals by each
+/// dimension item's share of the overall breakdown total. A full implementation
+/// would query per-dimension timeseries, but this approximation works for v1.
 type StrF64Slice<'a> = &'a [(String, f64)];
 
-fn build_agent_overlay(data: &AnalyticsChartData, metric: ExplorerMetric) -> Vec<Vec<(f64, f64)>> {
-    // Pick the metric-appropriate per-agent breakdown and daily series.
-    let (agent_breakdown, daily_series): (StrF64Slice<'_>, StrF64Slice<'_>) = match metric {
-        ExplorerMetric::ApiTokens | ExplorerMetric::ContentTokens | ExplorerMetric::Cost => {
-            (&data.agent_tokens, metric_series(data, metric).0)
-        }
-        ExplorerMetric::Messages | ExplorerMetric::PlanMessages => {
-            (&data.agent_messages, metric_series(data, metric).0)
-        }
-        ExplorerMetric::ToolCalls => (&data.agent_tool_calls, metric_series(data, metric).0),
-    };
-
-    let total: f64 = agent_breakdown.iter().map(|(_, v)| *v).sum();
+fn build_dimension_overlay(
+    breakdown: StrF64Slice<'_>,
+    daily_series: &[(String, f64)],
+) -> Vec<Vec<(f64, f64)>> {
+    let total: f64 = breakdown.iter().map(|(_, v)| *v).sum();
     if total <= 0.0 {
         return vec![];
     }
 
-    agent_breakdown
+    breakdown
         .iter()
         .take(5)
-        .map(|(_, agent_total)| {
-            let share = agent_total / total;
+        .map(|(_, item_total)| {
+            let share = item_total / total;
             daily_series
                 .iter()
                 .enumerate()
@@ -1311,33 +1360,148 @@ fn shorten_label(s: &str, max_len: usize) -> String {
     truncated
 }
 
-/// Render the Tools view: tool calls per agent with derived metrics.
+/// Number of visible rows in the Tools view (for selection bounds).
+pub fn tools_row_count(data: &AnalyticsChartData) -> usize {
+    let max_visible = 20;
+    data.tool_rows.len().min(max_visible)
+}
+
+/// Render the Tools view: per-agent table with calls, messages, tokens, calls/1K, and trend.
 pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
-    if data.agent_tool_calls.is_empty() {
+    if data.tool_rows.is_empty() {
         Paragraph::new(" No tool usage data available. Run 'cass analytics rebuild'.")
             .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
             .render(area, frame);
         return;
     }
 
-    let groups: Vec<BarGroup<'_>> = data
-        .agent_tool_calls
-        .iter()
-        .take(10)
-        .map(|(name, val)| BarGroup::new(name, vec![*val]))
-        .collect();
+    // Layout: header (1) | table rows (fill) | sparkline (3) | summary (1)
+    let has_sparkline = !data.daily_tool_calls.is_empty();
+    let constraints = if has_sparkline {
+        vec![
+            Constraint::Fixed(1),
+            Constraint::Min(3),
+            Constraint::Fixed(3),
+            Constraint::Fixed(1),
+        ]
+    } else {
+        vec![
+            Constraint::Fixed(1),
+            Constraint::Min(3),
+            Constraint::Fixed(1),
+        ]
+    };
+    let chunks = Flex::vertical().constraints(constraints).split(area);
 
-    let colors: Vec<PackedRgba> = (0..groups.len()).map(agent_color).collect();
+    // ── Header ──
+    let header_style = ftui::Style::new().fg(PackedRgba::rgb(180, 200, 255)).bold();
+    let header = tools_header_line(area.width as usize);
+    Paragraph::new(&*header)
+        .style(header_style)
+        .render(chunks[0], frame);
 
-    let chart = BarChart::new(groups)
-        .direction(BarDirection::Horizontal)
-        .bar_width(1)
-        .bar_gap(0)
-        .colors(colors);
-    chart.render(area, frame);
+    // ── Table rows ──
+    let table_area = chunks[1];
+    let max_rows = (table_area.height as usize).min(tools_row_count(data));
+    let total_calls = data.total_tool_calls.max(1) as f64;
+
+    for (i, row) in data.tool_rows.iter().take(max_rows).enumerate() {
+        if i >= table_area.height as usize {
+            break;
+        }
+        let row_rect = Rect {
+            x: table_area.x,
+            y: table_area.y + i as u16,
+            width: table_area.width,
+            height: 1,
+        };
+        let pct_share = (row.tool_call_count as f64 / total_calls) * 100.0;
+        let line = tools_row_line(row, pct_share, area.width as usize);
+        let color = agent_color(i);
+        Paragraph::new(&*line)
+            .style(ftui::Style::new().fg(color))
+            .render(row_rect, frame);
+    }
+
+    // ── Daily tool calls sparkline ──
+    if has_sparkline {
+        let spark_area = chunks[2];
+        let values: Vec<f64> = data.daily_tool_calls.iter().map(|(_, v)| *v).collect();
+        let sparkline = Sparkline::new(&values)
+            .gradient(PackedRgba::rgb(60, 60, 120), PackedRgba::rgb(100, 200, 255));
+        sparkline.render(spark_area, frame);
+    }
+
+    // ── Summary ──
+    let summary_idx = if has_sparkline { 3 } else { 2 };
+    let summary = format!(
+        " {} agents \u{00b7} {} total calls \u{00b7} {} API tokens",
+        data.tool_rows.len(),
+        format_compact(data.total_tool_calls),
+        format_compact(
+            data.tool_rows
+                .iter()
+                .map(|r| r.api_tokens_total)
+                .sum::<i64>()
+        ),
+    );
+    Paragraph::new(&*summary)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(150, 150, 150)))
+        .render(chunks[summary_idx], frame);
+}
+
+/// Build the header line for the tools table.
+fn tools_header_line(width: usize) -> String {
+    let w = width.max(40);
+    let name_w = (w * 30 / 100).max(8);
+    format!(
+        " {:<name_w$} {:>10} {:>10} {:>12} {:>9} {:>6}",
+        "Agent",
+        "Calls",
+        "Messages",
+        "API Tokens",
+        "Calls/1K",
+        "Share",
+        name_w = name_w,
+    )
+}
+
+/// Format a single tool-report row into a table line.
+fn tools_row_line(row: &crate::analytics::ToolRow, pct_share: f64, width: usize) -> String {
+    let w = width.max(40);
+    let name_w = (w * 30 / 100).max(8);
+    let per_1k = row
+        .tool_calls_per_1k_api_tokens
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or_else(|| "\u{2014}".to_string());
+    format!(
+        " {:<name_w$} {:>10} {:>10} {:>12} {:>9} {:>5.1}%",
+        shorten_label(&row.key, name_w),
+        format_number(row.tool_call_count),
+        format_number(row.message_count),
+        format_compact(row.api_tokens_total),
+        per_1k,
+        pct_share,
+        name_w = name_w,
+    )
 }
 
 /// Render the Cost/Models view: model family token breakdown.
+/// Model-specific color palette for the Cost view.
+const MODEL_COST_COLORS: &[PackedRgba] = &[
+    PackedRgba::rgb(0, 180, 220),   // blue
+    PackedRgba::rgb(220, 120, 0),   // amber
+    PackedRgba::rgb(80, 200, 80),   // green
+    PackedRgba::rgb(200, 60, 180),  // magenta
+    PackedRgba::rgb(255, 200, 60),  // yellow
+    PackedRgba::rgb(120, 120, 255), // indigo
+];
+
+fn cost_model_color(idx: usize) -> PackedRgba {
+    MODEL_COST_COLORS[idx % MODEL_COST_COLORS.len()]
+}
+
+/// Render the Cost view: header + side-by-side model charts + unpriced warning + sparkline.
 pub fn render_cost(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
     if data.model_tokens.is_empty() {
         Paragraph::new(
@@ -1348,86 +1512,424 @@ pub fn render_cost(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fram
         return;
     }
 
-    // Split: bar chart | summary text
-    let chunks = Flex::vertical()
-        .constraints([Constraint::Min(4), Constraint::Fixed(2)])
-        .split(area);
-
-    let groups: Vec<BarGroup<'_>> = data
-        .model_tokens
-        .iter()
-        .take(10)
-        .map(|(name, val)| BarGroup::new(name, vec![*val]))
-        .collect();
-
-    let model_colors = &[
-        PackedRgba::rgb(0, 180, 220),   // blue
-        PackedRgba::rgb(220, 120, 0),   // amber
-        PackedRgba::rgb(80, 200, 80),   // green
-        PackedRgba::rgb(200, 60, 180),  // magenta
-        PackedRgba::rgb(255, 200, 60),  // yellow
-        PackedRgba::rgb(120, 120, 255), // indigo
-    ];
-    let colors: Vec<PackedRgba> = (0..groups.len())
-        .map(|i| model_colors[i % model_colors.len()])
-        .collect();
-
-    let chart = BarChart::new(groups)
-        .direction(BarDirection::Horizontal)
-        .bar_width(1)
-        .colors(colors);
-    chart.render(chunks[0], frame);
-
-    let total: f64 = data.model_tokens.iter().map(|(_, v)| v).sum();
-    let summary = format!(
-        " Total API tokens across {} models: {}",
-        data.model_tokens.len(),
-        format_number(total as i64),
-    );
-    Paragraph::new(&*summary)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 180)))
-        .render(chunks[1], frame);
-}
-
-/// Render the Coverage view: coverage percentage + daily coverage sparkline.
-pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
+    // Layout: header (3) + charts (fill) + unpriced warning (0-2) + sparkline (0-3)
+    let has_unpriced = !data.unpriced_models.is_empty();
+    let unpriced_h = if has_unpriced && area.height >= 12 {
+        2
+    } else {
+        0
+    };
+    let show_sparkline = area.height >= 10 && !data.daily_cost.is_empty();
+    let spark_h = if show_sparkline { 3 } else { 0 };
     let chunks = Flex::vertical()
         .constraints([
-            Constraint::Fixed(3), // coverage summary
-            Constraint::Min(3),   // daily sparkline
+            Constraint::Fixed(3),          // cost summary + pricing coverage
+            Constraint::Min(4),            // side-by-side: tokens | cost
+            Constraint::Fixed(unpriced_h), // unpriced models warning
+            Constraint::Fixed(spark_h),    // daily cost sparkline
         ])
         .split(area);
 
-    let cov_bar_width = area.width.saturating_sub(4) as usize;
-    let filled = (data.coverage_pct / 100.0 * cov_bar_width as f64).round() as usize;
-    let empty = cov_bar_width.saturating_sub(filled);
-    let bar = format!(
-        " API Coverage: {:.1}%  [{}{}]",
-        data.coverage_pct,
-        "█".repeat(filled),
-        "░".repeat(empty),
+    // ── 1. Cost summary header ──────────────────────────────────────────
+    render_cost_header(data, chunks[0], frame);
+
+    // ── 2. Side-by-side bar charts: Tokens (left) | USD Cost (right) ───
+    render_cost_charts(data, chunks[1], frame);
+
+    // ── 3. Unpriced models warning ──────────────────────────────────────
+    if has_unpriced && unpriced_h > 0 {
+        render_unpriced_warning(data, chunks[2], frame);
+    }
+
+    // ── 4. Daily cost sparkline ─────────────────────────────────────────
+    if show_sparkline {
+        render_cost_sparkline(data, chunks[3], frame);
+    }
+}
+
+/// Number of selectable rows in the Cost view.
+pub fn cost_rows(data: &AnalyticsChartData) -> usize {
+    data.model_tokens.len().min(10)
+}
+
+fn render_cost_header(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
+    let cost_str = if data.total_cost_usd > 0.0 {
+        format!("${:.2}", data.total_cost_usd)
+    } else {
+        "N/A".to_string()
+    };
+    let per_msg = if data.total_messages > 0 && data.total_cost_usd > 0.0 {
+        format!(
+            "${:.4}/msg",
+            data.total_cost_usd / data.total_messages as f64
+        )
+    } else {
+        "\u{2014}".to_string()
+    };
+    let per_1k = if data.total_api_tokens > 0 && data.total_cost_usd > 0.0 {
+        format!(
+            "${:.4}/1K tok",
+            data.total_cost_usd / (data.total_api_tokens as f64 / 1000.0)
+        )
+    } else {
+        "\u{2014}".to_string()
+    };
+    let line1 = format!(
+        " Total Cost: {} | {} models | {} messages",
+        cost_str,
+        data.model_tokens.len(),
+        format_compact(data.total_messages),
     );
-    let bar_color = if data.coverage_pct >= 80.0 {
+    let line2 = format!(" {per_msg} | {per_1k}");
+
+    // Pricing coverage bar on line 3.
+    let pricing_pct = data.pricing_coverage_pct;
+    let bar_w = area.width.saturating_sub(26) as usize;
+    let filled = (pricing_pct / 100.0 * bar_w as f64).round() as usize;
+    let empty = bar_w.saturating_sub(filled);
+    let line3 = format!(
+        " Pricing Coverage: {:.0}% [{}{}]",
+        pricing_pct,
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(empty),
+    );
+
+    let rows = Flex::vertical()
+        .constraints([
+            Constraint::Fixed(1),
+            Constraint::Fixed(1),
+            Constraint::Fixed(1),
+        ])
+        .split(area);
+
+    let cost_color = if data.total_cost_usd > 100.0 {
+        PackedRgba::rgb(255, 120, 80)
+    } else if data.total_cost_usd > 10.0 {
+        PackedRgba::rgb(255, 200, 60)
+    } else {
+        PackedRgba::rgb(80, 200, 120)
+    };
+    Paragraph::new(&*line1)
+        .style(ftui::Style::new().fg(cost_color).bold())
+        .render(rows[0], frame);
+    Paragraph::new(&*line2)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(160, 160, 160)))
+        .render(rows[1], frame);
+
+    let cov_color = if pricing_pct >= 80.0 {
         PackedRgba::rgb(80, 200, 80)
-    } else if data.coverage_pct >= 50.0 {
+    } else if pricing_pct >= 50.0 {
         PackedRgba::rgb(255, 200, 0)
     } else {
-        PackedRgba::rgb(255, 80, 80)
+        PackedRgba::rgb(255, 100, 100)
     };
-    Paragraph::new(&*bar)
-        .style(ftui::Style::new().fg(bar_color))
-        .render(chunks[0], frame);
+    Paragraph::new(&*line3)
+        .style(ftui::Style::new().fg(cov_color))
+        .render(rows[2], frame);
+}
 
-    // Daily token sparkline as a proxy for coverage activity.
+fn render_cost_charts(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
+    let has_cost = !data.model_cost.is_empty();
+    if !has_cost {
+        // Only token chart (no cost data available).
+        let groups: Vec<BarGroup<'_>> = data
+            .model_tokens
+            .iter()
+            .take(10)
+            .map(|(name, val)| BarGroup::new(name, vec![*val]))
+            .collect();
+        let colors: Vec<PackedRgba> = (0..groups.len()).map(cost_model_color).collect();
+        BarChart::new(groups)
+            .direction(BarDirection::Horizontal)
+            .bar_width(1)
+            .colors(colors)
+            .render(area, frame);
+        return;
+    }
+
+    // Side-by-side: tokens (left) | USD cost (right).
+    let halves = Flex::horizontal()
+        .constraints([Constraint::Percentage(50.0), Constraint::Percentage(50.0)])
+        .split(area);
+
+    // Left: tokens by model.
+    {
+        let groups: Vec<BarGroup<'_>> = data
+            .model_tokens
+            .iter()
+            .take(10)
+            .map(|(name, val)| BarGroup::new(name, vec![*val]))
+            .collect();
+        let colors: Vec<PackedRgba> = (0..groups.len()).map(cost_model_color).collect();
+        BarChart::new(groups)
+            .direction(BarDirection::Horizontal)
+            .bar_width(1)
+            .colors(colors)
+            .render(halves[0], frame);
+    }
+
+    // Right: USD cost by model.
+    {
+        let groups: Vec<BarGroup<'_>> = data
+            .model_cost
+            .iter()
+            .take(10)
+            .map(|(name, val)| {
+                let label = format!("{name} ${val:.2}");
+                BarGroup::new(Box::leak(label.into_boxed_str()) as &str, vec![*val])
+            })
+            .collect();
+        let colors: Vec<PackedRgba> = (0..groups.len())
+            .map(|i| {
+                let model_name = &data.model_cost[i].0;
+                data.model_tokens
+                    .iter()
+                    .position(|t| t.0 == *model_name)
+                    .map(cost_model_color)
+                    .unwrap_or(PackedRgba::rgb(180, 180, 180))
+            })
+            .collect();
+        BarChart::new(groups)
+            .direction(BarDirection::Horizontal)
+            .bar_width(1)
+            .colors(colors)
+            .render(halves[1], frame);
+    }
+}
+
+fn render_unpriced_warning(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
+    let names: Vec<&str> = data
+        .unpriced_models
+        .iter()
+        .take(5)
+        .map(|m| m.model_name.as_str())
+        .collect();
+    let total_unpriced: i64 = data.unpriced_models.iter().map(|m| m.total_tokens).sum();
+    let extra = if data.unpriced_models.len() > 5 {
+        format!(" +{} more", data.unpriced_models.len() - 5)
+    } else {
+        String::new()
+    };
+    let line = format!(
+        " \u{26a0} Unpriced models ({} tokens): {}{}",
+        format_compact(total_unpriced),
+        names.join(", "),
+        extra,
+    );
+    Paragraph::new(&*line)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(255, 180, 60)))
+        .render(area, frame);
+}
+
+fn render_cost_sparkline(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
+    let label = " Daily Cost ";
+    let label_w = label.len() as u16;
+    if area.width <= label_w + 4 {
+        return;
+    }
+    let label_rect = Rect {
+        x: area.x,
+        y: area.y,
+        width: label_w,
+        height: 1,
+    };
+    Paragraph::new(label)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
+        .render(label_rect, frame);
+
+    let spark_inner = Rect {
+        x: area.x + label_w,
+        y: area.y,
+        width: area.width.saturating_sub(label_w),
+        height: area.height,
+    };
+    let vals: Vec<f64> = data.daily_cost.iter().map(|(_, v)| *v).collect();
+    let spark = Sparkline::new(&vals).style(ftui::Style::new().fg(PackedRgba::rgb(255, 200, 60)));
+    spark.render(spark_inner, frame);
+}
+
+/// Render the Coverage view: overall bar + per-agent breakdown + daily sparkline.
+pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
+    // Agent rows to show (up to 10).
+    let agent_row_count = data.agent_tokens.len().min(10);
+    let table_height = if agent_row_count > 0 {
+        (agent_row_count + 1) as u16 // +1 header
+    } else {
+        0
+    };
+
+    let chunks = Flex::vertical()
+        .constraints([
+            Constraint::Fixed(2),            // overall coverage bar
+            Constraint::Fixed(table_height), // per-agent breakdown
+            Constraint::Min(3),              // daily sparkline
+        ])
+        .split(area);
+
+    // ── Overall coverage bar ─────────────────────────────────
+    let bar_width = area.width.saturating_sub(6) as usize;
+    let api_filled = (data.coverage_pct / 100.0 * bar_width as f64).round() as usize;
+    let api_empty = bar_width.saturating_sub(api_filled);
+    let line1 = format!(
+        " API Token Coverage: {:.1}%  [{}{}]",
+        data.coverage_pct,
+        "\u{2588}".repeat(api_filled),
+        "\u{2591}".repeat(api_empty),
+    );
+    let line2 = format!(
+        " Pricing Coverage:   {:.1}%  \u{2502}  {} agents  \u{2502}  {} total API tokens",
+        data.pricing_coverage_pct,
+        data.agent_count,
+        format_compact(data.total_api_tokens),
+    );
+    let cov_color = coverage_color(data.coverage_pct);
+    Paragraph::new(&*line1)
+        .style(ftui::Style::new().fg(cov_color))
+        .render(chunks[0], frame);
+    if chunks[0].height > 1 {
+        let line2_area = Rect {
+            x: chunks[0].x,
+            y: chunks[0].y + 1,
+            width: chunks[0].width,
+            height: 1,
+        };
+        Paragraph::new(&*line2)
+            .style(ftui::Style::new().fg(PackedRgba::rgb(160, 160, 160)))
+            .render(line2_area, frame);
+    }
+
+    // ── Per-agent coverage breakdown ─────────────────────────
+    if agent_row_count > 0 && chunks[1].height > 0 {
+        let w = chunks[1].width as usize;
+        // Header.
+        let header = format!(
+            " {:<16} {:>12} {:>10} {:>8}",
+            "Agent", "API Tokens", "Messages", "Data"
+        );
+        let header_trunc = coverage_truncate(&header, w);
+        let header_area = Rect {
+            x: chunks[1].x,
+            y: chunks[1].y,
+            width: chunks[1].width,
+            height: 1,
+        };
+        Paragraph::new(&*header_trunc)
+            .style(ftui::Style::new().fg(PackedRgba::rgb(200, 200, 200)).bold())
+            .render(header_area, frame);
+
+        // Agent rows.
+        for (i, (agent, tokens)) in data.agent_tokens.iter().take(10).enumerate() {
+            let row_y = chunks[1].y + 1 + i as u16;
+            if row_y >= chunks[1].y + chunks[1].height {
+                break;
+            }
+            let msgs = data
+                .agent_messages
+                .iter()
+                .find(|(a, _)| a == agent)
+                .map(|(_, v)| *v)
+                .unwrap_or(0.0);
+            // Agents with >0 API tokens have real API data.
+            let data_indicator = if *tokens > 0.0 {
+                "\u{2713} API"
+            } else {
+                "~ est"
+            };
+            let indicator_color = if *tokens > 0.0 {
+                PackedRgba::rgb(80, 200, 80)
+            } else {
+                PackedRgba::rgb(255, 200, 0)
+            };
+            let agent_display = coverage_truncate(agent, 16);
+            let row_text = format!(
+                " {:<16} {:>12} {:>10} {:>8}",
+                agent_display,
+                format_compact(*tokens as i64),
+                format_compact(msgs as i64),
+                data_indicator,
+            );
+            let row_trunc = coverage_truncate(&row_text, w);
+            let row_area = Rect {
+                x: chunks[1].x,
+                y: row_y,
+                width: chunks[1].width,
+                height: 1,
+            };
+            Paragraph::new(&*row_trunc)
+                .style(ftui::Style::new().fg(agent_color(i)))
+                .render(row_area, frame);
+            // Overlay data indicator in its own color at the right edge.
+            let indicator_len = data_indicator.len() as u16;
+            if chunks[1].width > indicator_len + 1 {
+                let ind_area = Rect {
+                    x: chunks[1].x + chunks[1].width - indicator_len - 1,
+                    y: row_y,
+                    width: indicator_len + 1,
+                    height: 1,
+                };
+                let ind_text = format!(
+                    "{:>width$}",
+                    data_indicator,
+                    width = (indicator_len + 1) as usize
+                );
+                Paragraph::new(&*ind_text)
+                    .style(ftui::Style::new().fg(indicator_color))
+                    .render(ind_area, frame);
+            }
+        }
+    }
+
+    // ── Daily token sparkline ────────────────────────────────
     if !data.daily_tokens.is_empty() {
+        let label = " Daily API Tokens";
+        if chunks[2].height > 0 {
+            let label_area = Rect {
+                x: chunks[2].x,
+                y: chunks[2].y,
+                width: chunks[2].width.min(label.len() as u16),
+                height: 1,
+            };
+            Paragraph::new(label)
+                .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
+                .render(label_area, frame);
+        }
+
+        let spark_area = if chunks[2].height > 1 {
+            Rect {
+                x: chunks[2].x,
+                y: chunks[2].y + 1,
+                width: chunks[2].width,
+                height: chunks[2].height - 1,
+            }
+        } else {
+            chunks[2]
+        };
         let values: Vec<f64> = data.daily_tokens.iter().map(|(_, v)| *v).collect();
         let sparkline = Sparkline::new(&values)
             .gradient(PackedRgba::rgb(60, 60, 120), PackedRgba::rgb(80, 200, 80));
-        sparkline.render(chunks[1], frame);
+        sparkline.render(spark_area, frame);
     } else {
         Paragraph::new(" No daily data for sparkline")
             .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
-            .render(chunks[1], frame);
+            .render(chunks[2], frame);
+    }
+}
+
+fn coverage_color(pct: f64) -> PackedRgba {
+    if pct >= 80.0 {
+        PackedRgba::rgb(80, 200, 80)
+    } else if pct >= 50.0 {
+        PackedRgba::rgb(255, 200, 0)
+    } else {
+        PackedRgba::rgb(255, 80, 80)
+    }
+}
+
+fn coverage_truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        s[..max_len].to_string()
     }
 }
 
@@ -1480,28 +1982,37 @@ pub fn render_analytics_content(
         }
         AnalyticsView::Tools => {
             render_tools(data, area, frame);
+            // Selection indicator offset by 1 for the header row.
+            let tools_content = if area.height > 1 {
+                Rect {
+                    x: area.x,
+                    y: area.y + 1,
+                    width: area.width,
+                    height: area.height - 1,
+                }
+            } else {
+                area
+            };
             render_selection_indicator(
                 selection,
-                data.agent_tool_calls.len().min(10),
-                area,
+                tools_row_count(data),
+                tools_content,
                 frame,
                 false,
             );
         }
         AnalyticsView::Cost => {
             render_cost(data, area, frame);
-            // Cost has a vertical split: bar chart (Min) + summary (Fixed 2).
-            if !data.model_tokens.is_empty() && area.height >= 4 {
-                let chunks = Flex::vertical()
-                    .constraints([Constraint::Min(4), Constraint::Fixed(2)])
-                    .split(area);
-                render_selection_indicator(
-                    selection,
-                    data.model_tokens.len().min(10),
-                    chunks[0],
-                    frame,
-                    false,
-                );
+            // Selection indicator in the chart area (offset by 3-row header).
+            let row_count = cost_rows(data);
+            if row_count > 0 && area.height > 3 {
+                let chart_area = Rect {
+                    x: area.x,
+                    y: area.y + 3,
+                    width: area.width,
+                    height: area.height.saturating_sub(3),
+                };
+                render_selection_indicator(selection, row_count, chart_area, frame, false);
             }
         }
         AnalyticsView::Coverage => render_coverage(data, area, frame),
@@ -1705,5 +2216,107 @@ mod tests {
         assert_eq!(m.next(), HeatmapMetric::Messages);
         assert_eq!(HeatmapMetric::Coverage.next(), HeatmapMetric::ApiTokens);
         assert_eq!(HeatmapMetric::ApiTokens.prev(), HeatmapMetric::Coverage);
+    }
+
+    // ── Tools view tests ──────────────────────────────────────────────
+
+    fn sample_tool_rows() -> Vec<crate::analytics::ToolRow> {
+        vec![
+            crate::analytics::ToolRow {
+                key: "claude_code".to_string(),
+                tool_call_count: 12000,
+                message_count: 1200,
+                api_tokens_total: 45_000_000,
+                tool_calls_per_1k_api_tokens: Some(0.267),
+                tool_calls_per_1k_content_tokens: Some(0.5),
+            },
+            crate::analytics::ToolRow {
+                key: "codex".to_string(),
+                tool_call_count: 8000,
+                message_count: 800,
+                api_tokens_total: 23_000_000,
+                tool_calls_per_1k_api_tokens: Some(0.348),
+                tool_calls_per_1k_content_tokens: None,
+            },
+            crate::analytics::ToolRow {
+                key: "aider".to_string(),
+                tool_call_count: 2000,
+                message_count: 400,
+                api_tokens_total: 12_000_000,
+                tool_calls_per_1k_api_tokens: Some(0.167),
+                tool_calls_per_1k_content_tokens: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn tools_row_count_empty() {
+        let data = AnalyticsChartData::default();
+        assert_eq!(tools_row_count(&data), 0);
+    }
+
+    #[test]
+    fn tools_row_count_with_data() {
+        let data = AnalyticsChartData {
+            tool_rows: sample_tool_rows(),
+            ..Default::default()
+        };
+        assert_eq!(tools_row_count(&data), 3);
+    }
+
+    #[test]
+    fn tools_row_count_capped_at_20() {
+        let rows: Vec<crate::analytics::ToolRow> = (0..30)
+            .map(|i| crate::analytics::ToolRow {
+                key: format!("agent_{i}"),
+                tool_call_count: 100 - i,
+                message_count: 10,
+                api_tokens_total: 1000,
+                tool_calls_per_1k_api_tokens: Some(0.1),
+                tool_calls_per_1k_content_tokens: None,
+            })
+            .collect();
+        let data = AnalyticsChartData {
+            tool_rows: rows,
+            ..Default::default()
+        };
+        assert_eq!(tools_row_count(&data), 20);
+    }
+
+    #[test]
+    fn tools_header_line_contains_columns() {
+        let header = tools_header_line(100);
+        assert!(header.contains("Agent"));
+        assert!(header.contains("Calls"));
+        assert!(header.contains("Messages"));
+        assert!(header.contains("API Tokens"));
+        assert!(header.contains("Calls/1K"));
+        assert!(header.contains("Share"));
+    }
+
+    #[test]
+    fn tools_row_line_formats_numbers() {
+        let row = &sample_tool_rows()[0];
+        let line = tools_row_line(row, 54.5, 100);
+        assert!(line.contains("claude_code"));
+        assert!(line.contains("12,000"));
+        assert!(line.contains("1,200"));
+        assert!(line.contains("45.0M"));
+        assert!(line.contains("0.27"));
+        assert!(line.contains("54.5%"));
+    }
+
+    #[test]
+    fn tools_row_line_handles_no_per_1k() {
+        let row = crate::analytics::ToolRow {
+            key: "test".to_string(),
+            tool_call_count: 100,
+            message_count: 10,
+            api_tokens_total: 0,
+            tool_calls_per_1k_api_tokens: None,
+            tool_calls_per_1k_content_tokens: None,
+        };
+        let line = tools_row_line(&row, 1.0, 80);
+        assert!(line.contains("\u{2014}")); // em-dash for missing data
     }
 }

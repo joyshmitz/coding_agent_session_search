@@ -232,6 +232,8 @@ pub enum ExplorerOverlay {
     #[default]
     None,
     ByAgent,
+    ByWorkspace,
+    BySource,
 }
 
 impl ExplorerOverlay {
@@ -239,13 +241,17 @@ impl ExplorerOverlay {
         match self {
             Self::None => "No Overlay",
             Self::ByAgent => "By Agent",
+            Self::ByWorkspace => "By Workspace",
+            Self::BySource => "By Source",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
             Self::None => Self::ByAgent,
-            Self::ByAgent => Self::None,
+            Self::ByAgent => Self::ByWorkspace,
+            Self::ByWorkspace => Self::BySource,
+            Self::BySource => Self::None,
         }
     }
 }
@@ -2978,8 +2984,8 @@ impl CassApp {
             AnalyticsView::Breakdowns => {
                 super::analytics_charts::breakdown_rows(data, self.breakdown_tab)
             }
-            AnalyticsView::Tools => data.agent_tool_calls.len().min(10),
-            AnalyticsView::Cost => data.model_tokens.len().min(10),
+            AnalyticsView::Tools => super::analytics_charts::tools_row_count(data),
+            AnalyticsView::Cost => super::analytics_charts::cost_rows(data),
             // Dashboard and Coverage have no selectable rows.
             AnalyticsView::Dashboard | AnalyticsView::Coverage => 0,
         }
@@ -3062,12 +3068,12 @@ impl CassApp {
                 }
             }
             AnalyticsView::Tools => {
-                // Drill into a specific agent (tools are keyed by agent).
-                let (agent, _) = data.agent_tool_calls.get(idx)?;
+                // Drill into a specific agent (tool rows are keyed by agent).
+                let row = data.tool_rows.get(idx)?;
                 Some(DrilldownContext {
                     since_ms: base_since,
                     until_ms: base_until,
-                    agent: Some(agent.clone()),
+                    agent: Some(row.key.clone()),
                     model: None,
                 })
             }
@@ -10651,6 +10657,54 @@ mod tests {
         assert!(ctx.agent.is_none());
     }
 
+    #[test]
+    fn build_drilldown_context_tools_agent() {
+        let mut app = CassApp::default();
+        app.analytics_view = AnalyticsView::Tools;
+        let mut data = AnalyticsChartData::default();
+        data.tool_rows = vec![
+            crate::analytics::ToolRow {
+                key: "claude_code".into(),
+                tool_call_count: 5000,
+                message_count: 500,
+                api_tokens_total: 10_000_000,
+                tool_calls_per_1k_api_tokens: Some(0.5),
+                tool_calls_per_1k_content_tokens: None,
+            },
+            crate::analytics::ToolRow {
+                key: "codex".into(),
+                tool_call_count: 3000,
+                message_count: 300,
+                api_tokens_total: 8_000_000,
+                tool_calls_per_1k_api_tokens: Some(0.375),
+                tool_calls_per_1k_content_tokens: None,
+            },
+        ];
+        app.analytics_cache = Some(data);
+        app.analytics_selection = 1;
+
+        let ctx = app.build_drilldown_context().expect("should build context");
+        assert_eq!(ctx.agent.as_deref(), Some("codex"));
+        assert!(ctx.model.is_none());
+    }
+
+    #[test]
+    fn tools_selectable_count_uses_tool_rows() {
+        let mut app = CassApp::default();
+        app.analytics_view = AnalyticsView::Tools;
+        let mut data = AnalyticsChartData::default();
+        data.tool_rows = vec![crate::analytics::ToolRow {
+            key: "a".into(),
+            tool_call_count: 100,
+            message_count: 10,
+            api_tokens_total: 1000,
+            tool_calls_per_1k_api_tokens: None,
+            tool_calls_per_1k_content_tokens: None,
+        }];
+        app.analytics_cache = Some(data);
+        assert_eq!(app.analytics_selectable_count(), 1);
+    }
+
     // -- Explorer keyboard binding tests --
 
     #[test]
@@ -10691,6 +10745,12 @@ mod tests {
         assert_eq!(app.explorer_overlay, ExplorerOverlay::ByAgent);
 
         let _ = app.update(CassMsg::OpenInEditor);
+        assert_eq!(app.explorer_overlay, ExplorerOverlay::ByWorkspace);
+
+        let _ = app.update(CassMsg::OpenInEditor);
+        assert_eq!(app.explorer_overlay, ExplorerOverlay::BySource);
+
+        let _ = app.update(CassMsg::OpenInEditor);
         assert_eq!(app.explorer_overlay, ExplorerOverlay::None);
     }
 
@@ -10705,6 +10765,49 @@ mod tests {
         assert!(
             app.query.is_empty(),
             "query should remain empty on analytics surface"
+        );
+    }
+
+    #[test]
+    fn explorer_g_key_cycles_group_by_forward() {
+        use crate::analytics::GroupBy;
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        assert_eq!(app.explorer_group_by, GroupBy::Day);
+        let _ = app.update(CassMsg::QueryChanged("g".to_string()));
+        assert_eq!(app.explorer_group_by, GroupBy::Week);
+        let _ = app.update(CassMsg::QueryChanged("g".to_string()));
+        assert_eq!(app.explorer_group_by, GroupBy::Month);
+        let _ = app.update(CassMsg::QueryChanged("g".to_string()));
+        assert_eq!(app.explorer_group_by, GroupBy::Hour);
+        let _ = app.update(CassMsg::QueryChanged("g".to_string()));
+        assert_eq!(app.explorer_group_by, GroupBy::Day);
+    }
+
+    #[test]
+    fn explorer_shift_g_key_cycles_group_by_backward() {
+        use crate::analytics::GroupBy;
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        assert_eq!(app.explorer_group_by, GroupBy::Day);
+        let _ = app.update(CassMsg::QueryChanged("G".to_string()));
+        assert_eq!(app.explorer_group_by, GroupBy::Hour);
+    }
+
+    #[test]
+    fn explorer_group_by_change_invalidates_cache() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        // Simulate a cached value.
+        app.analytics_cache = Some(AnalyticsChartData::default());
+        assert!(app.analytics_cache.is_some());
+        let _ = app.update(CassMsg::ExplorerGroupByCycled { forward: true });
+        assert!(
+            app.analytics_cache.is_none(),
+            "cache should be invalidated on group-by change"
         );
     }
 }
