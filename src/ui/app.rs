@@ -8484,7 +8484,59 @@ impl super::ftui_adapter::Model for CassApp {
                     item.busy = true;
                 }
                 self.sources_view.status = format!("Syncing '{name}'...");
-                ftui::Cmd::none()
+
+                // Spawn background sync task.
+                let source_name = name.clone();
+                #[cfg(not(test))]
+                {
+                    use crate::sources::{SourcesConfig, SyncEngine};
+                    let config = SourcesConfig::load().unwrap_or_default();
+                    if let Some(source_def) = config.find_source(&source_name) {
+                        let source_def = source_def.clone();
+                        ftui::Cmd::task(move || {
+                            let data_dir = dirs::data_dir()
+                                .unwrap_or_else(|| PathBuf::from("."))
+                                .join("coding-agent-search");
+                            let engine = SyncEngine::new(&data_dir);
+                            match engine.sync_source(&source_def) {
+                                Ok(report) => {
+                                    let msg = if report.all_succeeded {
+                                        format!(
+                                            "Sync '{}' OK: {} files, {} bytes",
+                                            source_name,
+                                            report.total_files(),
+                                            report.total_bytes()
+                                        )
+                                    } else {
+                                        format!(
+                                            "Sync '{}' partial: {}/{} paths OK",
+                                            source_name,
+                                            report.successful_paths(),
+                                            report.successful_paths() + report.failed_paths()
+                                        )
+                                    };
+                                    CassMsg::SourceSyncCompleted {
+                                        source_name,
+                                        message: msg,
+                                    }
+                                }
+                                Err(e) => CassMsg::SourceSyncCompleted {
+                                    source_name,
+                                    message: format!("Sync failed: {e}"),
+                                },
+                            }
+                        })
+                    } else {
+                        self.sources_view.status =
+                            format!("Source '{source_name}' not found in config");
+                        ftui::Cmd::none()
+                    }
+                }
+                #[cfg(test)]
+                {
+                    let _ = source_name;
+                    ftui::Cmd::none()
+                }
             }
             CassMsg::SourceSyncCompleted {
                 ref source_name,
@@ -8509,7 +8561,76 @@ impl super::ftui_adapter::Model for CassApp {
                     item.busy = true;
                 }
                 self.sources_view.status = format!("Running doctor on '{name}'...");
-                ftui::Cmd::none()
+
+                // Spawn background doctor/probe task.
+                let source_name = name.clone();
+                #[cfg(not(test))]
+                {
+                    use crate::sources::{DiscoveredHost, SourcesConfig, probe_host};
+                    let config = SourcesConfig::load().unwrap_or_default();
+                    if let Some(source_def) = config.find_source(&source_name) {
+                        let host_str = source_def
+                            .host
+                            .clone()
+                            .unwrap_or_else(|| source_name.clone());
+                        ftui::Cmd::task(move || {
+                            let host = DiscoveredHost {
+                                name: host_str,
+                                hostname: None,
+                                user: None,
+                                port: None,
+                                identity_file: None,
+                            };
+                            let result = probe_host(&host, 15);
+                            let mut passed = 0usize;
+                            let mut warnings = 0usize;
+                            let mut failed = 0usize;
+
+                            // SSH reachable?
+                            if result.reachable {
+                                passed += 1;
+                            } else {
+                                failed += 1;
+                            }
+                            // Cass installed?
+                            if result.has_cass() {
+                                passed += 1;
+                            } else {
+                                warnings += 1;
+                            }
+                            // Agent data present?
+                            if result.has_agent_data() {
+                                passed += 1;
+                            } else {
+                                warnings += 1;
+                            }
+                            // Disk space available?
+                            if let Some(ref res) = result.resources {
+                                if res.disk_available_mb >= 1024 {
+                                    passed += 1;
+                                } else {
+                                    warnings += 1;
+                                }
+                            }
+
+                            CassMsg::SourceDoctorCompleted {
+                                source_name,
+                                passed,
+                                warnings,
+                                failed,
+                            }
+                        })
+                    } else {
+                        self.sources_view.status =
+                            format!("Source '{source_name}' not found in config");
+                        ftui::Cmd::none()
+                    }
+                }
+                #[cfg(test)]
+                {
+                    let _ = source_name;
+                    ftui::Cmd::none()
+                }
             }
             CassMsg::SourceDoctorCompleted {
                 ref source_name,
