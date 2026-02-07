@@ -41,6 +41,11 @@ pub const JSON_VIEW: &str = "J";
 pub const TOGGLE_SELECT: &str = "Ctrl+X";
 pub const PANE_FILTER: &str = "/";
 
+// Find in detail
+pub const DETAIL_FIND: &str = "/";
+pub const DETAIL_FIND_NEXT: &str = "n";
+pub const DETAIL_FIND_PREV: &str = "N";
+
 // Theme editor
 pub const THEME_EDITOR: &str = "Ctrl+Shift+T";
 

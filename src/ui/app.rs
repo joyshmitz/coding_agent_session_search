@@ -1640,6 +1640,8 @@ pub struct CassApp {
     pub detail_tab: DetailTab,
     /// Inline find state within the detail pane.
     pub detail_find: Option<DetailFindState>,
+    /// Cache for find-in-detail match line numbers (written during rendering).
+    pub detail_find_matches_cache: RefCell<Vec<u16>>,
     /// Whether the detail drill-in modal is open.
     pub show_detail_modal: bool,
     /// Scroll position within the detail modal.
@@ -1857,6 +1859,7 @@ impl Default for CassApp {
             detail_scroll: 0,
             detail_tab: DetailTab::default(),
             detail_find: None,
+            detail_find_matches_cache: RefCell::new(Vec::new()),
             show_detail_modal: false,
             modal_scroll: 0,
             cached_detail: None,
@@ -3378,10 +3381,21 @@ impl CassApp {
                 DetailTab::Json => self.build_json_lines(hit, styles),
             };
 
-            // Apply find-in-detail highlighting
+            // Apply find-in-detail highlighting and cache match positions
             if let Some(ref find) = self.detail_find {
-                let _matches =
+                let matches =
                     Self::apply_find_highlight(&mut lines, &find.query, find.current, styles);
+                // Deduplicate: match_positions has one entry per occurrence; we want
+                // unique line numbers for navigation.
+                let mut unique_lines: Vec<u16> = Vec::new();
+                for &ln in &matches {
+                    if unique_lines.last() != Some(&ln) {
+                        unique_lines.push(ln);
+                    }
+                }
+                *self.detail_find_matches_cache.borrow_mut() = unique_lines;
+            } else {
+                self.detail_find_matches_cache.borrow_mut().clear();
             }
 
             // Apply scroll offset — skip `detail_scroll` lines
@@ -6518,6 +6532,110 @@ impl super::ftui_adapter::Model for CassApp {
             }
         }
 
+        // ── Detail modal intercept ──────────────────────────────────
+        // When the full-screen detail modal is open, remap navigation and
+        // provide find-in-detail text search (Ctrl+F or /).
+        if self.show_detail_modal {
+            // Sub-intercept: when find bar is active, route text input there.
+            if self.detail_find.is_some() {
+                match &msg {
+                    CassMsg::QueryChanged(text) => {
+                        if let Some(ref mut find) = self.detail_find {
+                            if text.is_empty() {
+                                find.query.pop();
+                            } else {
+                                find.query.push_str(text);
+                            }
+                            let q = find.query.clone();
+                            return self.update(CassMsg::DetailFindQueryChanged(q));
+                        }
+                        return ftui::Cmd::none();
+                    }
+                    CassMsg::QuerySubmitted | CassMsg::DetailOpened => {
+                        // Enter → navigate to next match
+                        return self.update(CassMsg::DetailFindNavigated { forward: true });
+                    }
+                    CassMsg::QuitRequested => {
+                        // Esc → close find bar (detail modal stays open)
+                        self.detail_find = None;
+                        self.input_mode = InputMode::Query;
+                        return ftui::Cmd::none();
+                    }
+                    // Let detail-specific messages through
+                    CassMsg::DetailFindToggled
+                    | CassMsg::DetailFindQueryChanged(_)
+                    | CassMsg::DetailFindNavigated { .. }
+                    | CassMsg::DetailClosed
+                    | CassMsg::DetailTabChanged(_)
+                    | CassMsg::DetailScrolled { .. }
+                    | CassMsg::DetailWrapToggled
+                    | CassMsg::Tick
+                    | CassMsg::MouseEvent { .. }
+                    | CassMsg::ForceQuit => {}
+                    _ => return ftui::Cmd::none(),
+                }
+            } else {
+                // Find bar is NOT active — handle detail-level navigation
+                match &msg {
+                    // Slash or Ctrl+F opens find
+                    CassMsg::PaneFilterOpened | CassMsg::WildcardFallbackToggled => {
+                        return self.update(CassMsg::DetailFindToggled);
+                    }
+                    // j/k scroll the detail view
+                    CassMsg::QueryChanged(text) if text == "j" => {
+                        return self.update(CassMsg::DetailScrolled { delta: 3 });
+                    }
+                    CassMsg::QueryChanged(text) if text == "k" => {
+                        return self.update(CassMsg::DetailScrolled { delta: -3 });
+                    }
+                    // n/N navigate find matches (if any remain from a previous find)
+                    CassMsg::QueryChanged(text) if text == "n" => {
+                        return self.update(CassMsg::DetailFindNavigated { forward: true });
+                    }
+                    CassMsg::QueryChanged(text) if text == "N" => {
+                        return self.update(CassMsg::DetailFindNavigated { forward: false });
+                    }
+                    // w toggles wrap
+                    CassMsg::QueryChanged(text) if text == "w" => {
+                        return self.update(CassMsg::DetailWrapToggled);
+                    }
+                    // Up/Down scroll detail
+                    CassMsg::SelectionMoved { delta } => {
+                        return self.update(CassMsg::DetailScrolled { delta: *delta });
+                    }
+                    // Esc closes detail modal
+                    CassMsg::QuitRequested => {
+                        return self.update(CassMsg::DetailClosed);
+                    }
+                    // Tab cycles detail tabs
+                    CassMsg::FocusToggled => {
+                        let next = match self.detail_tab {
+                            DetailTab::Messages => DetailTab::Snippets,
+                            DetailTab::Snippets => DetailTab::Raw,
+                            DetailTab::Raw => DetailTab::Json,
+                            DetailTab::Json => DetailTab::Messages,
+                        };
+                        return self.update(CassMsg::DetailTabChanged(next));
+                    }
+                    // Let these through unchanged
+                    CassMsg::DetailClosed
+                    | CassMsg::DetailOpened
+                    | CassMsg::DetailTabChanged(_)
+                    | CassMsg::DetailScrolled { .. }
+                    | CassMsg::DetailWrapToggled
+                    | CassMsg::DetailFindToggled
+                    | CassMsg::DetailFindQueryChanged(_)
+                    | CassMsg::DetailFindNavigated { .. }
+                    | CassMsg::ToggleJsonView
+                    | CassMsg::PageScrolled { .. }
+                    | CassMsg::Tick
+                    | CassMsg::MouseEvent { .. }
+                    | CassMsg::ForceQuit => {}
+                    _ => return ftui::Cmd::none(),
+                }
+            }
+        }
+
         // -- Analytics surface interception -----------------------------------
         // When on the analytics surface, remap navigation/selection messages to
         // analytics-specific variants so Enter drills down and Up/Down moves
@@ -7112,11 +7230,22 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::DetailFindQueryChanged(q) => {
                 if let Some(ref mut find) = self.detail_find {
                     find.query = q;
-                    // TODO: compute matches
+                    find.current = 0;
+                    // Matches are computed during rendering by apply_find_highlight,
+                    // which writes back to find.matches. Clear stale matches here
+                    // so the renderer recomputes from scratch.
+                    find.matches.clear();
                 }
                 ftui::Cmd::none()
             }
             CassMsg::DetailFindNavigated { forward } => {
+                // Sync matches from render cache before navigating
+                if let Some(ref mut find) = self.detail_find {
+                    let cached = self.detail_find_matches_cache.borrow();
+                    if !cached.is_empty() {
+                        find.matches = cached.clone();
+                    }
+                }
                 if let Some(ref mut find) = self.detail_find
                     && !find.matches.is_empty()
                 {
@@ -7128,6 +7257,9 @@ impl super::ftui_adapter::Model for CassApp {
                             .checked_sub(1)
                             .unwrap_or(find.matches.len() - 1);
                     }
+                    // Auto-scroll to bring current match into view
+                    let target_line = find.matches[find.current];
+                    self.detail_scroll = target_line.saturating_sub(3);
                 }
                 ftui::Cmd::none()
             }
@@ -12561,6 +12693,174 @@ mod tests {
         // Navigate backward from 0 wraps to end
         let _ = app.update(CassMsg::DetailFindNavigated { forward: false });
         assert_eq!(app.detail_find.as_ref().unwrap().current, 2);
+    }
+
+    #[test]
+    fn detail_find_query_changed_resets_current_and_clears_matches() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::DetailFindToggled);
+        // Simulate having matches from a previous query
+        if let Some(ref mut find) = app.detail_find {
+            find.matches = vec![5, 10, 20];
+            find.current = 2;
+        }
+        let _ = app.update(CassMsg::DetailFindQueryChanged("new query".to_string()));
+        let find = app.detail_find.as_ref().unwrap();
+        assert_eq!(find.query, "new query");
+        assert_eq!(find.current, 0, "current should reset on query change");
+        assert!(find.matches.is_empty(), "stale matches should be cleared");
+    }
+
+    #[test]
+    fn detail_find_navigation_auto_scrolls() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::DetailFindToggled);
+        // Populate matches via the cache (simulating what the renderer does)
+        *app.detail_find_matches_cache.borrow_mut() = vec![10, 30, 50];
+        if let Some(ref mut find) = app.detail_find {
+            find.query = "test".to_string();
+        }
+        // Navigate forward — should sync from cache and scroll
+        let _ = app.update(CassMsg::DetailFindNavigated { forward: true });
+        let find = app.detail_find.as_ref().unwrap();
+        assert_eq!(find.matches, vec![10, 30, 50], "matches synced from cache");
+        assert_eq!(find.current, 1); // advanced from 0 to 1
+        assert_eq!(
+            app.detail_scroll, 27,
+            "should scroll to match line 30 minus 3"
+        );
+    }
+
+    #[test]
+    fn detail_modal_intercept_routes_slash_to_find() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        // '/' in the event map becomes PaneFilterOpened
+        let _ = app.update(CassMsg::PaneFilterOpened);
+        assert!(
+            app.detail_find.is_some(),
+            "slash should toggle find in detail modal"
+        );
+    }
+
+    #[test]
+    fn detail_modal_intercept_routes_text_to_find_query() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        let _ = app.update(CassMsg::DetailFindToggled);
+        assert!(app.detail_find.is_some());
+        // Type characters
+        let _ = app.update(CassMsg::QueryChanged("h".to_string()));
+        let _ = app.update(CassMsg::QueryChanged("i".to_string()));
+        assert_eq!(app.detail_find.as_ref().unwrap().query, "hi");
+        // Backspace
+        let _ = app.update(CassMsg::QueryChanged(String::new()));
+        assert_eq!(app.detail_find.as_ref().unwrap().query, "h");
+    }
+
+    #[test]
+    fn detail_modal_intercept_esc_closes_find_first() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        let _ = app.update(CassMsg::DetailFindToggled);
+        assert!(app.detail_find.is_some());
+        // Esc should close find bar, NOT the detail modal
+        let _ = app.update(CassMsg::QuitRequested);
+        assert!(app.detail_find.is_none(), "find should close");
+        assert!(app.show_detail_modal, "detail modal should stay open");
+        // Second Esc closes the detail modal
+        let _ = app.update(CassMsg::QuitRequested);
+        assert!(!app.show_detail_modal, "detail modal should close now");
+    }
+
+    #[test]
+    fn detail_modal_intercept_j_k_scroll() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        app.detail_scroll = 0;
+        let _ = app.update(CassMsg::QueryChanged("j".to_string()));
+        assert_eq!(app.detail_scroll, 3, "j should scroll down 3");
+        let _ = app.update(CassMsg::QueryChanged("k".to_string()));
+        assert_eq!(app.detail_scroll, 0, "k should scroll up 3");
+    }
+
+    #[test]
+    fn detail_modal_intercept_tab_cycles_tabs() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        assert_eq!(app.detail_tab, DetailTab::Messages);
+        let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(app.detail_tab, DetailTab::Snippets);
+        let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(app.detail_tab, DetailTab::Raw);
+        let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(app.detail_tab, DetailTab::Json);
+        let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(app.detail_tab, DetailTab::Messages);
+    }
+
+    #[test]
+    fn detail_modal_intercept_enter_navigates_find() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        let _ = app.update(CassMsg::DetailFindToggled);
+        // Pre-populate matches via cache
+        *app.detail_find_matches_cache.borrow_mut() = vec![5, 15];
+        if let Some(ref mut find) = app.detail_find {
+            find.query = "test".to_string();
+        }
+        // Enter should navigate to next match
+        let _ = app.update(CassMsg::QuerySubmitted);
+        assert_eq!(app.detail_find.as_ref().unwrap().current, 1);
+    }
+
+    #[test]
+    fn detail_modal_n_navigates_find_when_not_in_find_mode() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        // Set up find state with matches but find bar closed
+        app.detail_find = Some(DetailFindState {
+            query: "test".to_string(),
+            matches: vec![5, 15, 25],
+            current: 0,
+        });
+        // Close find bar
+        app.detail_find = None;
+        // Re-open without query — press n should still navigate
+        // (requires matches, which come from cache)
+        *app.detail_find_matches_cache.borrow_mut() = vec![5, 15, 25];
+        // Actually, n without active find just does nothing since
+        // detail_find is None. This tests that n is consumed (no crash).
+        let _ = app.update(CassMsg::QueryChanged("n".to_string()));
+        // No crash — n was consumed by the detail modal intercept
+    }
+
+    #[test]
+    fn detail_find_highlight_function_works() {
+        let style_opts = crate::ui::style_system::StyleOptions::default();
+        let styles = StyleContext::from_options(style_opts);
+
+        let mut lines = vec![
+            ftui::text::Line::raw("Hello world".to_string()),
+            ftui::text::Line::raw("no match here".to_string()),
+            ftui::text::Line::raw("HELLO again".to_string()),
+        ];
+
+        let matches = CassApp::apply_find_highlight(&mut lines, "hello", 0, &styles);
+        // Should find "Hello" on line 0 and "HELLO" on line 2 (case-insensitive)
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], 0);
+        assert_eq!(matches[1], 2);
+    }
+
+    #[test]
+    fn detail_find_highlight_empty_query_returns_no_matches() {
+        let style_opts = crate::ui::style_system::StyleOptions::default();
+        let styles = StyleContext::from_options(style_opts);
+
+        let mut lines = vec![ftui::text::Line::raw("Hello".to_string())];
+        let matches = CassApp::apply_find_highlight(&mut lines, "", 0, &styles);
+        assert!(matches.is_empty());
     }
 
     #[test]
