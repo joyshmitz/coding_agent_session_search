@@ -808,8 +808,11 @@ pub enum FocusRegion {
 /// |  └ Detail        | Full-width or hide  | min 25 cols              | min 32 cols             | min 34 cols              |
 /// |  └ Split handle  | None (no split)     | Active (draggable)       | Active (draggable)      | Active (draggable)       |
 /// |  └ Navigation    | Focus toggles pane  | Focus + mouse + drag     | Focus + mouse + drag    | Focus + mouse + drag     |
-/// | **Analytics**    | Area-adaptive       | Area-adaptive            | Area-adaptive           | Area-adaptive            |
-/// |  └ All 8 views   | min 20w×4h guard    | Full area, inline adjust | Full area, inline adjust| Full area, inline adjust |
+/// | **Analytics**    | Compact chrome       | Standard chrome          | Full chrome + tabs      | Full chrome + tabs       |
+/// |  └ Tab bar       | Hidden (active only) | Hidden (active only)     | Full tab bar            | Full tab bar             |
+/// |  └ Filter summary| Hidden               | Shown                    | Shown                   | Shown                    |
+/// |  └ Footer hints  | Minimal              | Full nav hints           | Full nav hints          | Full nav hints           |
+/// |  └ Content views  | min 20w×4h guard    | Full area, inline adjust | Full area, inline adjust| Full area, inline adjust |
 /// | **Detail modal** | Full-screen overlay | Full-screen overlay      | Full-screen overlay     | Full-screen overlay      |
 /// | **Other modals** | Centered, fixed     | Centered, fixed          | Centered, fixed         | Centered, fixed          |
 /// | **Footer**       | "narrow"            | "med-n"                  | "med"                   | "wide"                   |
@@ -828,11 +831,11 @@ pub enum FocusRegion {
 ///
 /// # Analytics surface notes
 ///
-/// Analytics views do NOT consume `LayoutBreakpoint`. Each view checks its assigned
-/// `Rect` dimensions directly (e.g., `area.height < 4 || area.width < 20` as a
-/// minimum guard) and adapts layout inline. This is intentional: analytics views
-/// occupy the full content area regardless of breakpoint, so the breakpoint only
-/// affects the outer chrome (header, footer, borders).
+/// Analytics view content areas do NOT consume `LayoutBreakpoint` — each view
+/// checks its assigned `Rect` dimensions directly (e.g., `area.height < 4` as
+/// a minimum guard) and adapts layout inline. The breakpoint drives the outer
+/// chrome: header tab bar visibility, filter summary, and footer hint density.
+/// See [`AnalyticsTopology`] for the per-breakpoint contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayoutBreakpoint {
     /// <80 cols: single pane with tab switching (very tight)
@@ -856,6 +859,19 @@ pub struct SearchTopology {
     pub has_split_handle: bool,
     /// Whether both panes are visible simultaneously.
     pub dual_pane: bool,
+}
+
+/// Per-breakpoint layout parameters for the analytics surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnalyticsTopology {
+    /// Whether to show the full tab bar (all view labels) or just the active view.
+    pub show_tab_bar: bool,
+    /// Whether to show the filter summary line in the header.
+    pub show_filter_summary: bool,
+    /// Header height in rows (includes borders).
+    pub header_rows: u16,
+    /// Whether the footer shows key hints alongside the view label.
+    pub show_footer_hints: bool,
 }
 
 impl LayoutBreakpoint {
@@ -898,6 +914,36 @@ impl LayoutBreakpoint {
                 min_detail: 34,
                 has_split_handle: true,
                 dual_pane: true,
+            },
+        }
+    }
+
+    /// Return the analytics surface topology contract for this breakpoint.
+    pub fn analytics_topology(self) -> AnalyticsTopology {
+        match self {
+            Self::Narrow => AnalyticsTopology {
+                show_tab_bar: false,
+                show_filter_summary: false,
+                header_rows: 3,
+                show_footer_hints: false,
+            },
+            Self::MediumNarrow => AnalyticsTopology {
+                show_tab_bar: false,
+                show_filter_summary: true,
+                header_rows: 3,
+                show_footer_hints: true,
+            },
+            Self::Medium => AnalyticsTopology {
+                show_tab_bar: true,
+                show_filter_summary: true,
+                header_rows: 3,
+                show_footer_hints: true,
+            },
+            Self::Wide => AnalyticsTopology {
+                show_tab_bar: true,
+                show_filter_summary: true,
+                header_rows: 3,
+                show_footer_hints: true,
             },
         }
     }
@@ -9931,16 +9977,17 @@ impl super::ftui_adapter::Model for CassApp {
                 self.last_saved_view_row_areas.borrow_mut().clear();
 
                 // ── Analytics surface layout ─────────────────────────────
+                let atopo = breakpoint.analytics_topology();
                 let vertical = Flex::vertical()
                     .constraints([
-                        Constraint::Fixed(3), // Header / nav bar
-                        Constraint::Min(4),   // Content
-                        Constraint::Fixed(1), // Status footer
+                        Constraint::Fixed(atopo.header_rows), // Header / nav bar
+                        Constraint::Min(4),                   // Content
+                        Constraint::Fixed(1),                 // Status footer
                     ])
                     .split(layout_area);
 
                 // ── Analytics header with view tabs ──────────────────────
-                let header_title = if area.width >= 100 {
+                let header_title = if atopo.show_tab_bar {
                     let view_tabs: String = AnalyticsView::all()
                         .iter()
                         .map(|v| {
@@ -9964,7 +10011,7 @@ impl super::ftui_adapter::Model for CassApp {
                     .style(pane_focused_style);
                 let header_inner = header_block.inner(vertical[0]);
                 header_block.render(vertical[0], frame);
-                if render_content && !header_inner.is_empty() {
+                if render_content && !header_inner.is_empty() && atopo.show_filter_summary {
                     let filter_desc = self.analytics_filter_summary();
                     Paragraph::new(&*filter_desc)
                         .style(text_muted_style)
@@ -10016,11 +10063,19 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     String::new()
                 };
+                let nav_hints = if atopo.show_footer_hints {
+                    format!(
+                        " | \u{2190}\u{2192}=views \u{2191}\u{2193}=select{} Esc=back",
+                        drilldown_hint
+                    )
+                } else {
+                    // Narrow: omit hints to save space, keep essentials only.
+                    format!("{} Esc=back", drilldown_hint)
+                };
                 let analytics_status = format!(
-                    " Analytics: {} | \u{2190}\u{2192}=views \u{2191}\u{2193}=select{} Esc=back{}",
+                    " Analytics: {} | {}{nav_hints}{analytics_deg_tag}",
                     self.analytics_view.label(),
-                    drilldown_hint,
-                    analytics_deg_tag
+                    breakpoint.footer_label(),
                 );
                 Paragraph::new(&*analytics_status)
                     .style(text_muted_style)
@@ -15011,6 +15066,52 @@ mod tests {
         );
         assert!(LayoutBreakpoint::Medium.inspector_label().contains("120"));
         assert!(LayoutBreakpoint::Wide.inspector_label().contains("160"));
+    }
+
+    #[test]
+    fn analytics_topology_narrow_hides_tab_bar() {
+        let t = LayoutBreakpoint::Narrow.analytics_topology();
+        assert!(!t.show_tab_bar);
+        assert!(!t.show_filter_summary);
+        assert!(!t.show_footer_hints);
+    }
+
+    #[test]
+    fn analytics_topology_medium_narrow_shows_filter() {
+        let t = LayoutBreakpoint::MediumNarrow.analytics_topology();
+        assert!(!t.show_tab_bar, "medium-narrow should hide tab bar");
+        assert!(t.show_filter_summary);
+        assert!(t.show_footer_hints);
+    }
+
+    #[test]
+    fn analytics_topology_medium_shows_tabs() {
+        let t = LayoutBreakpoint::Medium.analytics_topology();
+        assert!(t.show_tab_bar);
+        assert!(t.show_filter_summary);
+        assert!(t.show_footer_hints);
+    }
+
+    #[test]
+    fn analytics_topology_wide_shows_everything() {
+        let t = LayoutBreakpoint::Wide.analytics_topology();
+        assert!(t.show_tab_bar);
+        assert!(t.show_filter_summary);
+        assert!(t.show_footer_hints);
+    }
+
+    #[test]
+    fn analytics_footer_includes_breakpoint_label() {
+        use ftui_harness::buffer_to_text;
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        let buf =
+            render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+        assert!(
+            text.contains("med"),
+            "analytics footer at 120 cols should include breakpoint label 'med'"
+        );
     }
 
     #[test]
