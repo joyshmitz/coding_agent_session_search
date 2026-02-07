@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-02-07
+
+### Added
+
+#### FrankenTUI (ftui) Migration
+- **Complete TUI Rewrite**: Migrated from Ratatui to FrankenTUI (ftui), a custom immediate-mode terminal UI framework with differential rendering, spring animations, and adaptive degradation
+- **CassApp Model**: New Elm-architecture model with 60+ message variants, 15 context scopes, 100+ keybindings, and FocusGraph-based keyboard navigation
+- **Responsive 3-Pane Layout**: LayoutBreakpoint-driven adaptive splits (Narrow/Medium/Wide) with DensityMode row heights (compact/cozy/spacious)
+- **Virtualized Results List**: O(visible) rendering supporting 100K+ results via ftui VirtualizedList with Fenwick-tree height prediction
+- **Command Palette**: Ctrl+P overlay with 14 actions (theme, density, filters, saved views, bulk operations, reload index) and fuzzy search
+
+#### Analytics Dashboard (8 Views)
+- **Dashboard**: 2x3 KPI tile wall with per-tile sparklines, delta indicators, and top agents bar chart
+- **Explorer**: Metric selector (API tokens, content tokens, messages, tool calls, plan messages, cost) with overlay breakdowns (by agent/workspace/source), group-by (hour/day/week/month), and zoom levels (All/24h/7d/30d/90d)
+- **Heatmap**: Activity heatmap visualization
+- **Breakdowns**: Tabbed view with 4 dimensions (Agent/Workspace/Source/Model) with side-by-side bar charts and drilldown
+- **Tools**: Tool usage analytics
+- **Cost**: Dual bar charts (tokens + USD) per model, pricing coverage bar, daily cost sparkline
+- **Plans**: Plan message KPIs, per-agent plan breakdown, plan share metrics
+- **Coverage**: Data quality and pricing coverage visualization
+
+#### Spring Animation System
+- **Spring Physics**: Natural-feeling spring-based animations replacing linear timing
+- **7 Animation Targets**: Focus flash, peek badge, panel resize, modal open/close, staggered result list reveal
+- **Kill Switch**: `CASS_DISABLE_ANIMATIONS=1` environment variable disables all animations
+
+#### Input Macro Recording & Playback
+- **Alt+M Toggle**: Start/stop recording user input as JSONL macro files
+- **JSONL Serialization**: Full key/modifier/timing roundtrip fidelity with path redaction
+- **CLI Flags**: `--record-macro FILE` and `--play-macro FILE` for headless recording/replay
+- **Status Indicator**: Recording (REC) and playback (PLAY) indicators in status footer
+
+#### Inline Mode
+- **`--inline` Flag**: Scrollback-preserving TUI mode with `--ui-height` and `--anchor` options
+- **Asciicast Recording**: `--asciicast FILE` for reproducible demo recordings in v2 format
+
+#### Clipboard Integration
+- **OSC52 Clipboard**: Native terminal clipboard via ftui-extras with multiplexer passthrough fallback
+- **Copy Keybindings**: `y` (copy ID), `Ctrl+Y` (copy path), `Ctrl+Shift+C` (copy content)
+
+#### Undo/Redo System
+- **Snapshot History**: Ctrl+Z / Ctrl+Shift+Z for query, filter, grouping, and saved view changes (max depth 100)
+
+#### JSON Viewer
+- **Detail Tab**: `J` key toggles syntax-highlighted JSON view of raw session data
+
+### Changed
+
+#### Performance
+- **Adaptive Rendering**: FrameBudgetConfig with 16ms/60fps PID degradation, graceful DegradationLevel stepping (SimpleBorders -> NoStyling -> EssentialOnly -> Skeleton)
+- **Differential Rendering**: Only changed cells are written to the terminal, dramatically reducing I/O
+
+#### Theme System
+- **Persistent Config**: JSON persistence at `~/.config/cass/theme.json` with versioned schema
+- **19 Semantic Color Slots**: Per-slot hex color overrides with validation
+- **No-Color Mode**: Underline+bold fallback when colors are unavailable
+
+#### UI Polish
+- **Adaptive Borders**: Degradation-level fallback to ASCII characters
+- **Responsive Titles**: Abbreviated hints at narrow terminal widths
+- **80x24 Compatibility**: Nothing breaks at minimum terminal size
+
+### Removed
+- **Ratatui Dependency**: Completely removed from Cargo.toml and all source code
+- **Legacy TUI Module**: `tui.rs` reduced to 4-line stub; all rendering in ftui-based `app.rs`
+
+### Testing
+- **50 UI Snapshot Tests**: Deterministic frame capture with PackedRgba/StyleFlags assertions
+- **15 Macro Tests**: Recording lifecycle, path redaction, JSONL roundtrip, playback injection
+- **5 Performance E2E Tests**: Render timing, scaling, optimization chain verification
+- **PTY E2E Tests**: Interactive flow verification with output-growth assertions
+- **CI Failure Artifacts**: Automatic forensic bundles (frames, events, logs) on test failure
+
+---
+
 ## [0.1.64] - 2026-02-01
 
 ### Added
