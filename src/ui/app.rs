@@ -44,6 +44,7 @@ use crate::ui::components::palette::{PaletteAction, PaletteState, default_action
 use crate::ui::components::pills::Pill;
 use crate::ui::components::toast::ToastManager;
 use crate::ui::data::{ConversationView, InputMode};
+use crate::ui::shortcuts;
 use crate::ui::time_parser::parse_time_input;
 use crate::update_check::{UpdateInfo, open_in_browser, skip_version};
 #[cfg(not(test))]
@@ -51,6 +52,8 @@ use crate::update_check::{run_self_update, spawn_update_check};
 use ftui::widgets::Widget;
 use ftui::widgets::block::{Alignment, Block};
 use ftui::widgets::borders::{BorderType, Borders};
+use ftui::widgets::help_registry::{HelpContent, HelpId, HelpRegistry, Keybinding};
+use ftui::widgets::hint_ranker::{HintContext, HintRanker, RankerConfig};
 use ftui::widgets::json_view::{JsonToken, JsonView};
 use ftui::widgets::paragraph::Paragraph;
 use ftui::widgets::{RenderItem, StatefulWidget, VirtualizedList, VirtualizedListState};
@@ -96,6 +99,23 @@ pub const SAVED_VIEWS_MODAL_TITLE: &str = " Saved Views ";
 
 /// Number of selected items before requiring double-press confirmation.
 pub const OPEN_CONFIRM_THRESHOLD: usize = 12;
+const FOOTER_HINT_ROOT_ID: HelpId = HelpId(1_000_000);
+const FOOTER_HINT_WIDE_MIN_WIDTH: u16 = 100;
+const FOOTER_HINT_MEDIUM_MIN_WIDTH: u16 = 60;
+
+#[derive(Clone, Debug)]
+struct FooterHintCandidate {
+    key: &'static str,
+    action: &'static str,
+    context: HintContext,
+    static_priority: u32,
+}
+
+impl FooterHintCandidate {
+    fn token(&self) -> String {
+        format!("{}={}", self.key, self.action)
+    }
+}
 
 // =========================================================================
 // Enums (ported from tui.rs, canonical for ftui)
@@ -226,6 +246,96 @@ impl ExplorerOverlay {
         match self {
             Self::None => Self::ByAgent,
             Self::ByAgent => Self::None,
+        }
+    }
+}
+
+/// Active tab within the Breakdowns view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BreakdownTab {
+    #[default]
+    Agent,
+    Workspace,
+    Source,
+    Model,
+}
+
+impl BreakdownTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Agent => "Agents",
+            Self::Workspace => "Workspaces",
+            Self::Source => "Sources",
+            Self::Model => "Models",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Agent => Self::Workspace,
+            Self::Workspace => Self::Source,
+            Self::Source => Self::Model,
+            Self::Model => Self::Agent,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Agent => Self::Model,
+            Self::Workspace => Self::Agent,
+            Self::Source => Self::Workspace,
+            Self::Model => Self::Source,
+        }
+    }
+
+    pub fn all() -> &'static [Self] {
+        &[Self::Agent, Self::Workspace, Self::Source, Self::Model]
+    }
+}
+
+/// Metric to display in the Heatmap view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HeatmapMetric {
+    #[default]
+    ApiTokens,
+    Messages,
+    ContentTokens,
+    ToolCalls,
+    Cost,
+    Coverage,
+}
+
+impl HeatmapMetric {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ApiTokens => "API Tokens",
+            Self::Messages => "Messages",
+            Self::ContentTokens => "Content Tokens",
+            Self::ToolCalls => "Tool Calls",
+            Self::Cost => "Cost (USD)",
+            Self::Coverage => "Coverage %",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::ApiTokens => Self::Messages,
+            Self::Messages => Self::ContentTokens,
+            Self::ContentTokens => Self::ToolCalls,
+            Self::ToolCalls => Self::Cost,
+            Self::Cost => Self::Coverage,
+            Self::Coverage => Self::ApiTokens,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::ApiTokens => Self::Coverage,
+            Self::Messages => Self::ApiTokens,
+            Self::ContentTokens => Self::Messages,
+            Self::ToolCalls => Self::ContentTokens,
+            Self::Cost => Self::ToolCalls,
+            Self::Coverage => Self::Cost,
         }
     }
 }
@@ -702,6 +812,12 @@ pub struct CassApp {
     pub explorer_metric: ExplorerMetric,
     /// Explorer overlay mode.
     pub explorer_overlay: ExplorerOverlay,
+    /// Explorer time-bucket granularity (Hour / Day / Week / Month).
+    pub explorer_group_by: crate::analytics::GroupBy,
+    /// Active tab within the Breakdowns view.
+    pub breakdown_tab: BreakdownTab,
+    /// Active metric for the Heatmap view.
+    pub heatmap_metric: HeatmapMetric,
 
     // -- Search & query ---------------------------------------------------
     /// Current search query text.
@@ -904,6 +1020,9 @@ impl Default for CassApp {
             analytics_selection: 0,
             explorer_metric: ExplorerMetric::default(),
             explorer_overlay: ExplorerOverlay::default(),
+            explorer_group_by: crate::analytics::GroupBy::Day,
+            breakdown_tab: BreakdownTab::default(),
+            heatmap_metric: HeatmapMetric::default(),
             query: String::new(),
             filters: SearchFilters::default(),
             results: Vec::new(),
@@ -1082,6 +1201,193 @@ impl CassApp {
             && !self.palette_state.open
     }
 
+    fn footer_hint_context_key(&self) -> &'static str {
+        if self.show_export_modal
+            || self.show_bulk_modal
+            || self.show_saved_views_modal
+            || self.show_consent_dialog
+            || self.source_filter_menu_open
+            || self.palette_state.open
+            || self.show_help
+            || self.show_detail_modal
+        {
+            return "modal";
+        }
+
+        if self.surface == AppSurface::Analytics {
+            return "analytics";
+        }
+
+        if self.input_mode != InputMode::Query {
+            return "filter";
+        }
+
+        if self.focus_region == FocusRegion::Detail {
+            return "detail";
+        }
+
+        "results"
+    }
+
+    fn footer_hint_slots(width: u16) -> usize {
+        if width >= FOOTER_HINT_WIDE_MIN_WIDTH {
+            4
+        } else if width >= FOOTER_HINT_MEDIUM_MIN_WIDTH {
+            2
+        } else {
+            0
+        }
+    }
+
+    fn footer_hint_budget(width: u16) -> usize {
+        if width >= FOOTER_HINT_WIDE_MIN_WIDTH {
+            52
+        } else if width >= FOOTER_HINT_MEDIUM_MIN_WIDTH {
+            22
+        } else {
+            0
+        }
+    }
+
+    fn footer_hint_candidates(&self) -> Vec<FooterHintCandidate> {
+        let mut hints = Vec::with_capacity(16);
+        let contextual = HintContext::Mode(self.footer_hint_context_key().to_string());
+        let mut push = |key: &'static str,
+                        action: &'static str,
+                        context: HintContext,
+                        static_priority: u32| {
+            hints.push(FooterHintCandidate {
+                key,
+                action,
+                context,
+                static_priority,
+            });
+        };
+
+        match self.footer_hint_context_key() {
+            "results" => {
+                push(shortcuts::DETAIL_OPEN, "open", contextual.clone(), 1);
+                push(shortcuts::TOGGLE_SELECT, "select", contextual.clone(), 2);
+                if !self.selected.is_empty() {
+                    push(shortcuts::BULK_MENU, "bulk", contextual.clone(), 3);
+                    push("Ctrl+O", "open", contextual.clone(), 4);
+                    push(shortcuts::TAB_FOCUS, "focus", contextual.clone(), 5);
+                    push(shortcuts::PANE_FILTER, "filter", contextual.clone(), 6);
+                } else {
+                    push(shortcuts::TAB_FOCUS, "focus", contextual.clone(), 3);
+                    push(shortcuts::PANE_FILTER, "filter", contextual.clone(), 4);
+                }
+            }
+            "detail" => {
+                push(shortcuts::TAB_FOCUS, "focus", contextual.clone(), 1);
+                push(shortcuts::JSON_VIEW, "json", contextual.clone(), 2);
+                push(shortcuts::PANE_FILTER, "find", contextual.clone(), 3);
+                push(shortcuts::COPY, "copy", contextual.clone(), 4);
+            }
+            "filter" => {
+                push(shortcuts::DETAIL_OPEN, "apply", contextual.clone(), 1);
+                push(shortcuts::DETAIL_CLOSE, "cancel", contextual.clone(), 2);
+                push(shortcuts::TAB_FOCUS, "next", contextual.clone(), 3);
+            }
+            "analytics" => {
+                push("←/→", "views", contextual.clone(), 1);
+                if self.analytics_selectable_count() > 0 {
+                    push("↑/↓", "select", contextual.clone(), 2);
+                    push(shortcuts::DETAIL_OPEN, "drill", contextual.clone(), 3);
+                }
+                push(shortcuts::DETAIL_CLOSE, "back", contextual.clone(), 4);
+            }
+            "modal" => {
+                push(shortcuts::TAB_FOCUS, "next", contextual.clone(), 1);
+                push("Space", "toggle", contextual.clone(), 2);
+                push(shortcuts::DETAIL_CLOSE, "close", contextual.clone(), 3);
+            }
+            _ => {}
+        }
+
+        // Global hints are low-priority fallback hints.
+        push(shortcuts::HELP, "help", HintContext::Global, 20);
+        push(shortcuts::THEME, "theme", HintContext::Global, 21);
+        push(shortcuts::DENSITY, "density", HintContext::Global, 22);
+        push(shortcuts::BORDERS, "borders", HintContext::Global, 23);
+        push(shortcuts::PALETTE, "palette", HintContext::Global, 24);
+        push(shortcuts::DETAIL_CLOSE, "quit", HintContext::Global, 25);
+
+        hints
+    }
+
+    fn build_contextual_footer_hints(&self, width: u16) -> String {
+        let slots = Self::footer_hint_slots(width);
+        if slots == 0 {
+            return String::new();
+        }
+
+        let budget = Self::footer_hint_budget(width);
+        let context_key = self.footer_hint_context_key();
+        let mut ranker = HintRanker::new(RankerConfig {
+            hysteresis: 0.0,
+            voi_weight: 0.0,
+            lambda: 0.02,
+            ..RankerConfig::default()
+        });
+        let mut registry = HelpRegistry::new();
+        registry.register(FOOTER_HINT_ROOT_ID, HelpContent::short("cass footer hints"));
+
+        for candidate in self.footer_hint_candidates() {
+            let token = candidate.token();
+            let rank_id = ranker.register(
+                token.clone(),
+                token.len() as f64,
+                candidate.context,
+                candidate.static_priority,
+            );
+            let help_id = HelpId(rank_id as u64 + 1);
+            registry.register(
+                help_id,
+                HelpContent {
+                    short: token,
+                    long: None,
+                    keybindings: vec![Keybinding::new(candidate.key, candidate.action)],
+                    see_also: vec![],
+                },
+            );
+            let _ = registry.set_parent(help_id, FOOTER_HINT_ROOT_ID);
+        }
+
+        let (ordering, _ledger) = ranker.rank(Some(context_key));
+        let mut picked = Vec::with_capacity(slots);
+        let mut used = 0usize;
+        for rank_id in ordering {
+            if picked.len() >= slots {
+                break;
+            }
+            let help_id = HelpId(rank_id as u64 + 1);
+            let Some(help) = registry.resolve(help_id) else {
+                continue;
+            };
+            let Some(binding) = help.keybindings.first() else {
+                continue;
+            };
+            let token = format!("{}={}", binding.key, binding.action);
+            let extra = if picked.is_empty() {
+                token.len()
+            } else {
+                token.len() + 2
+            };
+            if used + extra > budget {
+                continue;
+            }
+            used += extra;
+            picked.push(token);
+        }
+
+        if picked.is_empty() {
+            String::new()
+        } else {
+            format!(" | {}", picked.join("  "))
+        }
+    }
+
     fn sort_saved_views(&mut self) {
         self.saved_views.sort_by_key(|v| v.slot);
     }
@@ -1113,8 +1419,8 @@ impl CassApp {
             self.saved_views_selection = 0;
             return;
         }
-        let len = self.saved_views.len() as i32;
-        let next = self.saved_views_selection as i32 + delta;
+        let len = self.saved_views.len() as i64;
+        let next = self.saved_views_selection as i64 + delta as i64;
         self.saved_views_selection = next.rem_euclid(len) as usize;
     }
 
@@ -2669,7 +2975,9 @@ impl CassApp {
         match self.analytics_view {
             AnalyticsView::Explorer => data.daily_tokens.len(),
             AnalyticsView::Heatmap => data.heatmap_days.len(),
-            AnalyticsView::Breakdowns => data.agent_tokens.len().min(8),
+            AnalyticsView::Breakdowns => {
+                super::analytics_charts::breakdown_rows(data, self.breakdown_tab)
+            }
             AnalyticsView::Tools => data.agent_tool_calls.len().min(10),
             AnalyticsView::Cost => data.model_tokens.len().min(10),
             // Dashboard and Coverage have no selectable rows.
@@ -2712,14 +3020,46 @@ impl CassApp {
                 })
             }
             AnalyticsView::Breakdowns => {
-                // Drill into a specific agent.
-                let (agent, _) = data.agent_tokens.get(idx)?;
-                Some(DrilldownContext {
-                    since_ms: base_since,
-                    until_ms: base_until,
-                    agent: Some(agent.clone()),
-                    model: None,
-                })
+                // Drill into the selected dimension based on active tab.
+                match self.breakdown_tab {
+                    BreakdownTab::Agent => {
+                        let (agent, _) = data.agent_tokens.get(idx)?;
+                        Some(DrilldownContext {
+                            since_ms: base_since,
+                            until_ms: base_until,
+                            agent: Some(agent.clone()),
+                            model: None,
+                        })
+                    }
+                    BreakdownTab::Workspace => {
+                        let (_ws, _) = data.workspace_tokens.get(idx)?;
+                        // Workspace drilldown inherits time filters only.
+                        Some(DrilldownContext {
+                            since_ms: base_since,
+                            until_ms: base_until,
+                            agent: None,
+                            model: None,
+                        })
+                    }
+                    BreakdownTab::Source => {
+                        let (_src, _) = data.source_tokens.get(idx)?;
+                        Some(DrilldownContext {
+                            since_ms: base_since,
+                            until_ms: base_until,
+                            agent: None,
+                            model: None,
+                        })
+                    }
+                    BreakdownTab::Model => {
+                        let (model, _) = data.model_tokens.get(idx)?;
+                        Some(DrilldownContext {
+                            since_ms: base_since,
+                            until_ms: base_until,
+                            agent: None,
+                            model: Some(model.clone()),
+                        })
+                    }
+                }
             }
             AnalyticsView::Tools => {
                 // Drill into a specific agent (tools are keyed by agent).
@@ -2784,16 +3124,11 @@ fn day_label_to_epoch_range(label: &str) -> Option<(i64, i64)> {
         let y = y as i64;
         let m = m as i64;
         let d = d as i64;
-        let era: i64;
-        let yoe: i64;
-        let doy: i64;
-        let doe: i64;
-
         let (y2, m2) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
-        era = if y2 >= 0 { y2 / 400 } else { (y2 - 399) / 400 };
-        yoe = y2 - era * 400;
-        doy = (153 * m2 + 2) / 5 + d - 1;
-        doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let era = if y2 >= 0 { y2 / 400 } else { (y2 - 399) / 400 };
+        let yoe = y2 - era * 400;
+        let doy = (153 * m2 + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
         era * 146097 + doe - 719468
     }
 
@@ -3170,6 +3505,12 @@ pub enum CassMsg {
     ExplorerMetricCycled { forward: bool },
     /// Cycle the Explorer overlay mode.
     ExplorerOverlayCycled,
+    /// Cycle the Explorer group-by granularity forward or backward.
+    ExplorerGroupByCycled { forward: bool },
+    /// Cycle the Breakdowns tab forward or backward.
+    BreakdownTabCycled { forward: bool },
+    /// Cycle the Heatmap metric forward or backward.
+    HeatmapMetricCycled { forward: bool },
 
     // -- Lifecycle ---------------------------------------------------------
     /// Application quit requested.
@@ -3809,6 +4150,65 @@ impl super::ftui_adapter::Model for CassApp {
                         self.analytics_view = views[next];
                         self.analytics_selection = 0; // reset selection on view change
                     }
+                    return ftui::Cmd::none();
+                }
+                // Tab / Shift+Tab cycle breakdown sub-tabs when on Breakdowns view.
+                CassMsg::FocusToggled if self.analytics_view == AnalyticsView::Breakdowns => {
+                    return self.update(CassMsg::BreakdownTabCycled { forward: true });
+                }
+                CassMsg::FocusDirectional { .. }
+                    if self.analytics_view == AnalyticsView::Breakdowns =>
+                {
+                    return self.update(CassMsg::BreakdownTabCycled { forward: false });
+                }
+                // Tab / Shift+Tab cycle heatmap metric when on Heatmap view.
+                CassMsg::FocusToggled if self.analytics_view == AnalyticsView::Heatmap => {
+                    return self.update(CassMsg::HeatmapMetricCycled { forward: true });
+                }
+                CassMsg::FocusDirectional { .. }
+                    if self.analytics_view == AnalyticsView::Heatmap =>
+                {
+                    return self.update(CassMsg::HeatmapMetricCycled { forward: false });
+                }
+                // Heatmap view: 'm' cycles metric.
+                CassMsg::QueryChanged(text) if self.analytics_view == AnalyticsView::Heatmap => {
+                    match text.as_str() {
+                        "m" => {
+                            return self.update(CassMsg::HeatmapMetricCycled { forward: true });
+                        }
+                        "M" => {
+                            return self.update(CassMsg::HeatmapMetricCycled { forward: false });
+                        }
+                        _ => {}
+                    }
+                }
+                // Explorer view: 'm' cycles metric, 'o' cycles overlay, 'g' cycles group-by.
+                CassMsg::QueryChanged(text) if self.analytics_view == AnalyticsView::Explorer => {
+                    match text.as_str() {
+                        "m" => {
+                            return self.update(CassMsg::ExplorerMetricCycled { forward: true });
+                        }
+                        "M" => {
+                            return self.update(CassMsg::ExplorerMetricCycled { forward: false });
+                        }
+                        "o" | "O" => {
+                            return self.update(CassMsg::ExplorerOverlayCycled);
+                        }
+                        "g" => {
+                            return self.update(CassMsg::ExplorerGroupByCycled { forward: true });
+                        }
+                        "G" => {
+                            return self.update(CassMsg::ExplorerGroupByCycled { forward: false });
+                        }
+                        _ => {}
+                    }
+                }
+                // Bare 'o' key fires OpenInEditor; remap to overlay toggle on Explorer.
+                CassMsg::OpenInEditor if self.analytics_view == AnalyticsView::Explorer => {
+                    return self.update(CassMsg::ExplorerOverlayCycled);
+                }
+                // Suppress query input on analytics surface (no search bar visible).
+                CassMsg::QueryChanged(_) => {
                     return ftui::Cmd::none();
                 }
                 // Let other messages (analytics-specific, lifecycle, etc.) fall through.
@@ -5585,6 +5985,7 @@ impl super::ftui_adapter::Model for CassApp {
                     self.analytics_cache = Some(super::analytics_charts::load_chart_data(
                         db,
                         &self.analytics_filters,
+                        self.explorer_group_by,
                     ));
                 }
                 ftui::Cmd::none()
@@ -5693,6 +6094,33 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::ExplorerOverlayCycled => {
                 self.explorer_overlay = self.explorer_overlay.next();
+                ftui::Cmd::none()
+            }
+            CassMsg::ExplorerGroupByCycled { forward } => {
+                self.explorer_group_by = if forward {
+                    self.explorer_group_by.next()
+                } else {
+                    self.explorer_group_by.prev()
+                };
+                // Invalidate cache so timeseries reloads with new granularity.
+                self.analytics_cache = None;
+                ftui::Cmd::none()
+            }
+            CassMsg::BreakdownTabCycled { forward } => {
+                self.breakdown_tab = if forward {
+                    self.breakdown_tab.next()
+                } else {
+                    self.breakdown_tab.prev()
+                };
+                self.analytics_selection = 0; // reset selection on tab change
+                ftui::Cmd::none()
+            }
+            CassMsg::HeatmapMetricCycled { forward } => {
+                self.heatmap_metric = if forward {
+                    self.heatmap_metric.next()
+                } else {
+                    self.heatmap_metric.prev()
+                };
                 ftui::Cmd::none()
             }
 
@@ -6082,13 +6510,7 @@ impl super::ftui_adapter::Model for CassApp {
                     format!(" | src:{}", self.filters.source_filter)
                 };
                 let status_line = if self.status.is_empty() {
-                    let hints = if area.width >= 100 {
-                        " | F2=theme D=density ^B=borders"
-                    } else if area.width >= 60 {
-                        " | ?=help"
-                    } else {
-                        ""
-                    };
+                    let hints = self.build_contextual_footer_hints(area.width);
                     format!(
                         " {hits_for_status} hits | {bp_label} | {density_label}{source_tag}{degradation_tag}{sel_tag}{hints}",
                     )
@@ -6163,11 +6585,14 @@ impl super::ftui_adapter::Model for CassApp {
                     let explorer_state = super::analytics_charts::ExplorerState {
                         metric: self.explorer_metric,
                         overlay: self.explorer_overlay,
+                        group_by: self.explorer_group_by,
                     };
                     super::analytics_charts::render_analytics_content(
                         self.analytics_view,
                         chart_data,
                         &explorer_state,
+                        self.breakdown_tab,
+                        self.heatmap_metric,
                         self.analytics_selection,
                         content_inner,
                         frame,
@@ -6952,6 +7377,19 @@ mod tests {
 
         let _ = app.update(CassMsg::SavedViewsClosed);
         assert!(!app.show_saved_views_modal);
+    }
+
+    #[test]
+    fn saved_views_selection_move_handles_extreme_delta() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::ViewSaved(1));
+        let _ = app.update(CassMsg::ViewSaved(2));
+        let _ = app.update(CassMsg::ViewSaved(3));
+        let _ = app.update(CassMsg::SavedViewsOpened);
+
+        assert_eq!(app.selected_saved_view_slot(), Some(3));
+        let _ = app.update(CassMsg::SavedViewsSelectionMoved { delta: i32::MIN });
+        assert_eq!(app.selected_saved_view_slot(), Some(1));
     }
 
     #[test]
@@ -9188,7 +9626,7 @@ mod tests {
     fn status_footer_adapts_to_width() {
         let app = CassApp::default();
 
-        // Wide: shows full hints
+        // Wide: shows richer contextual hints.
         let wide_text = ftui_harness::buffer_to_text(&render_at_degradation(
             &app,
             120,
@@ -9196,21 +9634,60 @@ mod tests {
             ftui::render::budget::DegradationLevel::Full,
         ));
         assert!(
-            wide_text.contains("F2=theme"),
-            "wide footer should show full hints"
+            wide_text.contains("Enter=open"),
+            "wide footer should show contextual open hint"
         );
 
-        // Narrow: abbreviated hints
-        let narrow_text = ftui_harness::buffer_to_text(&render_at_degradation(
+        // Medium: still shows at least one contextual hint.
+        let medium_text = ftui_harness::buffer_to_text(&render_at_degradation(
             &app,
             70,
             24,
             ftui::render::budget::DegradationLevel::Full,
         ));
         assert!(
-            !narrow_text.contains("F2=theme"),
-            "narrow footer should omit verbose hints"
+            medium_text.contains("Enter=open"),
+            "medium footer should keep essential contextual hints"
         );
+
+        // Narrow: hints collapse to keep the status compact.
+        let narrow_text = ftui_harness::buffer_to_text(&render_at_degradation(
+            &app,
+            50,
+            24,
+            ftui::render::budget::DegradationLevel::Full,
+        ));
+        assert!(
+            !narrow_text.contains("Enter=open"),
+            "narrow footer should omit contextual hints"
+        );
+    }
+
+    #[test]
+    fn contextual_footer_hints_include_bulk_actions_when_selected() {
+        let mut app = app_with_hits(3);
+        let _ = app.update(CassMsg::SelectAllToggled);
+        let hints = app.build_contextual_footer_hints(120);
+        assert!(hints.contains("A=bulk"));
+        assert!(hints.contains("Ctrl+O=open"));
+    }
+
+    #[test]
+    fn contextual_footer_hints_switch_for_filter_mode() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Agent;
+        let hints = app.build_contextual_footer_hints(120);
+        assert!(hints.contains("Enter=apply"));
+        assert!(hints.contains("Esc=cancel"));
+    }
+
+    #[test]
+    fn contextual_footer_hints_switch_for_analytics_surface() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        let hints = app.build_contextual_footer_hints(120);
+        assert!(hints.contains("←/→=views"));
+        assert!(hints.contains("Esc=back"));
     }
 
     #[test]
@@ -10062,5 +10539,172 @@ mod tests {
         let _ = app.update(CassMsg::Undo);
         assert_eq!(app.filters.agents, agents);
         assert_eq!(app.time_preset, TimePreset::Week);
+    }
+
+    #[test]
+    fn analytics_selection_wraps_around() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Breakdowns;
+        let mut data = AnalyticsChartData::default();
+        data.agent_tokens = vec![
+            ("claude_code".into(), 100.0),
+            ("codex".into(), 80.0),
+            ("gemini".into(), 50.0),
+        ];
+        app.analytics_cache = Some(data);
+        app.analytics_selection = 0;
+
+        let _ = app.update(CassMsg::AnalyticsSelectionMoved { delta: 1 });
+        assert_eq!(app.analytics_selection, 1);
+        let _ = app.update(CassMsg::AnalyticsSelectionMoved { delta: 1 });
+        assert_eq!(app.analytics_selection, 2);
+        let _ = app.update(CassMsg::AnalyticsSelectionMoved { delta: 1 });
+        assert_eq!(app.analytics_selection, 0, "should wrap to start");
+        let _ = app.update(CassMsg::AnalyticsSelectionMoved { delta: -1 });
+        assert_eq!(app.analytics_selection, 2, "should wrap to end");
+    }
+
+    #[test]
+    fn analytics_enter_on_breakdowns_triggers_drilldown() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        app.analytics_view = AnalyticsView::Breakdowns;
+        let mut data = AnalyticsChartData::default();
+        data.agent_tokens = vec![("claude_code".into(), 100.0), ("codex".into(), 80.0)];
+        app.analytics_cache = Some(data);
+        app.analytics_selection = 1;
+
+        let _ = app.update(CassMsg::DetailOpened);
+        assert_eq!(app.surface, AppSurface::Search);
+        let expected: HashSet<String> = ["codex"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(app.filters.agents, expected);
+    }
+
+    #[test]
+    fn analytics_enter_on_dashboard_is_noop() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        app.analytics_view = AnalyticsView::Dashboard;
+        app.analytics_cache = Some(AnalyticsChartData::default());
+
+        let _ = app.update(CassMsg::DetailOpened);
+        assert_eq!(app.surface, AppSurface::Analytics);
+    }
+
+    #[test]
+    fn analytics_view_change_resets_selection() {
+        let mut app = CassApp::default();
+        app.analytics_selection = 5;
+        let _ = app.update(CassMsg::AnalyticsViewChanged(AnalyticsView::Tools));
+        assert_eq!(app.analytics_selection, 0);
+    }
+
+    #[test]
+    fn analytics_left_right_cycles_views() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert_eq!(app.analytics_view, AnalyticsView::Dashboard);
+
+        let _ = app.update(CassMsg::CursorMoved { delta: 1 });
+        assert_eq!(app.analytics_view, AnalyticsView::Explorer);
+        let _ = app.update(CassMsg::CursorMoved { delta: -1 });
+        assert_eq!(app.analytics_view, AnalyticsView::Dashboard);
+        let _ = app.update(CassMsg::CursorMoved { delta: -1 });
+        assert_eq!(app.analytics_view, AnalyticsView::Coverage);
+    }
+
+    #[test]
+    fn build_drilldown_context_explorer_bucket() {
+        let mut app = CassApp::default();
+        app.analytics_view = AnalyticsView::Explorer;
+        let mut data = AnalyticsChartData::default();
+        data.daily_tokens = vec![
+            ("2026-02-05".into(), 100.0),
+            ("2026-02-06".into(), 200.0),
+            ("2026-02-07".into(), 150.0),
+        ];
+        app.analytics_cache = Some(data);
+        app.analytics_selection = 1;
+
+        let ctx = app.build_drilldown_context().expect("should build context");
+        assert!(ctx.since_ms.is_some());
+        assert!(ctx.until_ms.is_some());
+        let since = ctx.since_ms.unwrap();
+        let until = ctx.until_ms.unwrap();
+        assert_eq!(until - since, 86_400_000);
+        assert!(ctx.agent.is_none());
+        assert!(ctx.model.is_none());
+    }
+
+    #[test]
+    fn build_drilldown_context_cost_model() {
+        let mut app = CassApp::default();
+        app.analytics_view = AnalyticsView::Cost;
+        let mut data = AnalyticsChartData::default();
+        data.model_tokens = vec![("claude-3-sonnet".into(), 500.0), ("gpt-4o".into(), 300.0)];
+        app.analytics_cache = Some(data);
+        app.analytics_selection = 0;
+
+        let ctx = app.build_drilldown_context().expect("should build context");
+        assert_eq!(ctx.model.as_deref(), Some("claude-3-sonnet"));
+        assert!(ctx.agent.is_none());
+    }
+
+    // -- Explorer keyboard binding tests --
+
+    #[test]
+    fn explorer_m_key_cycles_metric_forward() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        assert_eq!(app.explorer_metric, ExplorerMetric::ApiTokens);
+
+        let _ = app.update(CassMsg::QueryChanged("m".to_string()));
+        assert_eq!(app.explorer_metric, ExplorerMetric::ContentTokens);
+
+        let _ = app.update(CassMsg::QueryChanged("m".to_string()));
+        assert_eq!(app.explorer_metric, ExplorerMetric::Messages);
+    }
+
+    #[test]
+    fn explorer_shift_m_key_cycles_metric_backward() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        assert_eq!(app.explorer_metric, ExplorerMetric::ApiTokens);
+
+        // M (shift+m) cycles backward — should wrap to Cost.
+        let _ = app.update(CassMsg::QueryChanged("M".to_string()));
+        assert_eq!(app.explorer_metric, ExplorerMetric::Cost);
+    }
+
+    #[test]
+    fn explorer_o_key_cycles_overlay() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        assert_eq!(app.explorer_overlay, ExplorerOverlay::None);
+
+        // 'o' in Explorer view cycles overlay (intercepted from OpenInEditor).
+        let _ = app.update(CassMsg::OpenInEditor);
+        assert_eq!(app.explorer_overlay, ExplorerOverlay::ByAgent);
+
+        let _ = app.update(CassMsg::OpenInEditor);
+        assert_eq!(app.explorer_overlay, ExplorerOverlay::None);
+    }
+
+    #[test]
+    fn explorer_query_input_suppressed_on_analytics_surface() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Dashboard;
+
+        // Non-explorer query input on analytics surface should be suppressed.
+        let _ = app.update(CassMsg::QueryChanged("x".to_string()));
+        assert!(
+            app.query.is_empty(),
+            "query should remain empty on analytics surface"
+        );
     }
 }

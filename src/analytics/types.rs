@@ -64,6 +64,38 @@ impl std::fmt::Display for GroupBy {
     }
 }
 
+impl GroupBy {
+    /// Human-readable label for display in TUI headers.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hour => "Hourly",
+            Self::Day => "Daily",
+            Self::Week => "Weekly",
+            Self::Month => "Monthly",
+        }
+    }
+
+    /// Cycle to the next granularity (Hour → Day → Week → Month → Hour).
+    pub fn next(self) -> Self {
+        match self {
+            Self::Hour => Self::Day,
+            Self::Day => Self::Week,
+            Self::Week => Self::Month,
+            Self::Month => Self::Hour,
+        }
+    }
+
+    /// Cycle to the previous granularity.
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Hour => Self::Month,
+            Self::Day => Self::Hour,
+            Self::Week => Self::Day,
+            Self::Month => Self::Week,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Filters
 // ---------------------------------------------------------------------------

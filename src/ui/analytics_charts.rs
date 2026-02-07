@@ -12,7 +12,7 @@ use ftui_extras::charts::LineChart as FtuiLineChart;
 use ftui_extras::charts::Series as ChartSeries;
 use ftui_extras::charts::{BarChart, BarDirection, BarGroup, Sparkline};
 
-use super::app::{AnalyticsView, ExplorerMetric, ExplorerOverlay};
+use super::app::{AnalyticsView, BreakdownTab, ExplorerMetric, ExplorerOverlay, HeatmapMetric};
 use super::ftui_adapter::{Constraint, Flex, Rect};
 use crate::sources::provenance::SourceFilter;
 
@@ -57,6 +57,16 @@ pub struct AnalyticsChartData {
     pub agent_messages: Vec<(String, f64)>,
     /// Per-agent tool call counts: `(agent_slug, tool_call_count)` sorted desc.
     pub agent_tool_calls: Vec<(String, f64)>,
+    // ── Workspace breakdowns ─────────────────────────────────────
+    /// Per-workspace token totals: `(workspace_path, api_tokens_total)` sorted desc.
+    pub workspace_tokens: Vec<(String, f64)>,
+    /// Per-workspace message counts: `(workspace_path, message_count)` sorted desc.
+    pub workspace_messages: Vec<(String, f64)>,
+    // ── Source breakdowns ────────────────────────────────────────
+    /// Per-source token totals: `(source_id, api_tokens_total)` sorted desc.
+    pub source_tokens: Vec<(String, f64)>,
+    /// Per-source message counts: `(source_id, message_count)` sorted desc.
+    pub source_messages: Vec<(String, f64)>,
     /// Daily timeseries: `(label, api_tokens_total)` ordered by date.
     pub daily_tokens: Vec<(String, f64)>,
     /// Daily timeseries: `(label, message_count)` ordered by date.
@@ -104,6 +114,7 @@ pub struct AnalyticsChartData {
 pub fn load_chart_data(
     db: &crate::storage::sqlite::SqliteStorage,
     filters: &super::app::AnalyticsFilterState,
+    group_by: crate::analytics::GroupBy,
 ) -> AnalyticsChartData {
     use crate::analytics;
 
@@ -162,8 +173,64 @@ pub fn load_chart_data(
         data.total_messages = result.rows.iter().map(|r| r.value).sum();
     }
 
+    // Workspace breakdown (Track A — usage_daily).
+    if let Ok(result) = analytics::query::query_breakdown(
+        conn,
+        &filter,
+        analytics::Dim::Workspace,
+        analytics::Metric::ApiTotal,
+        20,
+    ) {
+        data.workspace_tokens = result
+            .rows
+            .iter()
+            .map(|r| (r.key.clone(), r.value as f64))
+            .collect();
+    }
+    if let Ok(result) = analytics::query::query_breakdown(
+        conn,
+        &filter,
+        analytics::Dim::Workspace,
+        analytics::Metric::MessageCount,
+        20,
+    ) {
+        data.workspace_messages = result
+            .rows
+            .iter()
+            .map(|r| (r.key.clone(), r.value as f64))
+            .collect();
+    }
+
+    // Source breakdown (Track A — usage_daily).
+    if let Ok(result) = analytics::query::query_breakdown(
+        conn,
+        &filter,
+        analytics::Dim::Source,
+        analytics::Metric::ApiTotal,
+        20,
+    ) {
+        data.source_tokens = result
+            .rows
+            .iter()
+            .map(|r| (r.key.clone(), r.value as f64))
+            .collect();
+    }
+    if let Ok(result) = analytics::query::query_breakdown(
+        conn,
+        &filter,
+        analytics::Dim::Source,
+        analytics::Metric::MessageCount,
+        20,
+    ) {
+        data.source_messages = result
+            .rows
+            .iter()
+            .map(|r| (r.key.clone(), r.value as f64))
+            .collect();
+    }
+
     // Tool usage.
-    if let Ok(result) = analytics::query::query_tools(conn, &filter, analytics::GroupBy::Day, 20) {
+    if let Ok(result) = analytics::query::query_tools(conn, &filter, group_by, 20) {
         data.agent_tool_calls = result
             .rows
             .iter()
@@ -174,7 +241,7 @@ pub fn load_chart_data(
 
     // Daily timeseries (for sparklines and line chart).
     if let Ok(result) =
-        analytics::query::query_tokens_timeseries(conn, &filter, analytics::GroupBy::Day)
+        analytics::query::query_tokens_timeseries(conn, &filter, group_by)
     {
         data.daily_tokens = result
             .buckets
@@ -554,11 +621,37 @@ pub fn render_explorer(
         .constraints([Constraint::Fixed(2), Constraint::Min(4)])
         .split(area);
 
-    // ── Header: metric selector + overlay indicator ──────────────
+    // ── Header: metric selector + overlay + total + data range ──
+    let metric_total = metric_data.iter().map(|(_, v)| *v).sum::<f64>();
+    let total_display = if metric_total >= 1_000_000_000.0 {
+        format!("{:.1}B", metric_total / 1_000_000_000.0)
+    } else if metric_total >= 1_000_000.0 {
+        format!("{:.1}M", metric_total / 1_000_000.0)
+    } else if metric_total >= 10_000.0 {
+        format!("{:.1}K", metric_total / 1_000.0)
+    } else if state.metric == ExplorerMetric::Cost {
+        format!("${:.2}", metric_total)
+    } else {
+        format!("{}", metric_total as i64)
+    };
+
+    let date_range = if metric_data.len() >= 2 {
+        format!(
+            " ({} .. {})",
+            &metric_data[0].0,
+            &metric_data[metric_data.len() - 1].0
+        )
+    } else {
+        String::new()
+    };
+
     let header_text = format!(
-        " Metric: {}  |  Overlay: {}  |  (m=cycle metric  o=cycle overlay)",
+        " Metric: {} ({})  |  {}  |  Overlay: {}  |  m/M=metric  g/G=group  o=overlay{}",
         state.metric.label(),
+        total_display,
+        state.group_by.label(),
         state.overlay.label(),
+        date_range,
     );
     Paragraph::new(&*header_text)
         .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 200)))
@@ -580,10 +673,19 @@ pub fn render_explorer(
     // Per-agent overlay: add a series per top agent (max 5 for readability).
     let agent_overlay_data: Vec<Vec<(f64, f64)>>;
     if state.overlay == ExplorerOverlay::ByAgent && !data.agent_tokens.is_empty() {
+        // Pick the correct breakdown for agent names (matching build_agent_overlay).
+        let agent_names: &[(String, f64)] = match state.metric {
+            ExplorerMetric::Messages | ExplorerMetric::PlanMessages => &data.agent_messages,
+            ExplorerMetric::ToolCalls => &data.agent_tool_calls,
+            _ => &data.agent_tokens,
+        };
         agent_overlay_data = build_agent_overlay(data, state.metric);
         for (i, points) in agent_overlay_data.iter().enumerate().take(5) {
             if !points.is_empty() {
-                let name = &data.agent_tokens[i].0;
+                let name = agent_names
+                    .get(i)
+                    .map(|(n, _)| n.as_str())
+                    .unwrap_or("other");
                 series.push(ChartSeries::new(name, points, agent_color(i)).markers(true));
             }
         }
@@ -628,19 +730,31 @@ fn metric_series(
 /// This is a simplified overlay — it uses the global daily data and distributes
 /// proportionally by each agent's share of the total. A full implementation
 /// would query per-agent timeseries, but this approximation works for v1.
-fn build_agent_overlay(data: &AnalyticsChartData, _metric: ExplorerMetric) -> Vec<Vec<(f64, f64)>> {
-    // Distribute the primary metric across agents by their token share.
-    let total: f64 = data.agent_tokens.iter().map(|(_, v)| *v).sum();
+type StrF64Slice<'a> = &'a [(String, f64)];
+
+fn build_agent_overlay(data: &AnalyticsChartData, metric: ExplorerMetric) -> Vec<Vec<(f64, f64)>> {
+    // Pick the metric-appropriate per-agent breakdown and daily series.
+    let (agent_breakdown, daily_series): (StrF64Slice<'_>, StrF64Slice<'_>) = match metric {
+        ExplorerMetric::ApiTokens | ExplorerMetric::ContentTokens | ExplorerMetric::Cost => {
+            (&data.agent_tokens, metric_series(data, metric).0)
+        }
+        ExplorerMetric::Messages | ExplorerMetric::PlanMessages => {
+            (&data.agent_messages, metric_series(data, metric).0)
+        }
+        ExplorerMetric::ToolCalls => (&data.agent_tool_calls, metric_series(data, metric).0),
+    };
+
+    let total: f64 = agent_breakdown.iter().map(|(_, v)| *v).sum();
     if total <= 0.0 {
         return vec![];
     }
 
-    data.agent_tokens
+    agent_breakdown
         .iter()
         .take(5)
         .map(|(_, agent_total)| {
             let share = agent_total / total;
-            data.daily_tokens
+            daily_series
                 .iter()
                 .enumerate()
                 .map(|(i, (_, day_val))| (i as f64, day_val * share))
@@ -649,69 +763,466 @@ fn build_agent_overlay(data: &AnalyticsChartData, _metric: ExplorerMetric) -> Ve
         .collect()
 }
 
-/// Render the Heatmap view: calendar-style token intensity using canvas.
-pub fn render_heatmap(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
-    if data.heatmap_days.is_empty() {
+/// Select the heatmap timeseries and raw values for the given metric.
+///
+/// Returns `(series, min_raw, max_raw)` where series items are `(label, normalised 0..1)`.
+fn heatmap_series_for_metric(
+    data: &AnalyticsChartData,
+    metric: HeatmapMetric,
+) -> (Vec<(String, f64)>, f64, f64) {
+    let raw: &[(String, f64)] = match metric {
+        HeatmapMetric::ApiTokens => &data.daily_tokens,
+        HeatmapMetric::Messages => &data.daily_messages,
+        HeatmapMetric::ContentTokens => &data.daily_content_tokens,
+        HeatmapMetric::ToolCalls => &data.daily_tool_calls,
+        HeatmapMetric::Cost => &data.daily_cost,
+        HeatmapMetric::Coverage => &data.daily_tokens, // placeholder; normalized later
+    };
+    if raw.is_empty() {
+        return (Vec::new(), 0.0, 0.0);
+    }
+    let max_val = raw.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max);
+    let min_val = raw.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
+    let series = raw
+        .iter()
+        .map(|(label, v)| {
+            let norm = if max_val > 0.0 { v / max_val } else { 0.0 };
+            (label.clone(), norm)
+        })
+        .collect();
+    (series, min_val, max_val)
+}
+
+/// Format a raw heatmap value for tooltip display.
+fn format_heatmap_value(val: f64, metric: HeatmapMetric) -> String {
+    match metric {
+        HeatmapMetric::Cost => format!("${:.2}", val),
+        HeatmapMetric::Coverage => format!("{:.0}%", val),
+        _ => {
+            let abs = val.abs() as i64;
+            format_compact(abs)
+        }
+    }
+}
+
+/// Day-of-week labels for the left gutter (Mon, Wed, Fri shown; others blank).
+const DOW_LABELS: [&str; 7] = ["Mon", "", "Wed", "", "Fri", "", ""];
+
+/// Parse a "YYYY-MM-DD" label into (year, month, day).
+fn parse_day_label(label: &str) -> Option<(i32, u32, u32)> {
+    let parts: Vec<&str> = label.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let y: i32 = parts[0].parse().ok()?;
+    let m: u32 = parts[1].parse().ok()?;
+    let d: u32 = parts[2].parse().ok()?;
+    Some((y, m, d))
+}
+
+/// Compute ISO weekday for a date (Mon=0 .. Sun=6) using Tomohiko Sakamoto's method.
+#[allow(dead_code)] // used in tests; reserved for future calendar-aligned layout
+fn weekday_index(y: i32, m: u32, d: u32) -> usize {
+    static T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if m < 3 { y - 1 } else { y };
+    let dow = (y + y / 4 - y / 100 + y / 400 + T[m as usize - 1] + d as i32) % 7;
+    // Sakamoto gives Sun=0, Mon=1 … Sat=6; convert to Mon=0 … Sun=6.
+    ((dow + 6) % 7) as usize
+}
+
+/// Render the Heatmap view: GitHub-contributions-style calendar with metric
+/// selector, day-of-week labels, month headers, selection highlight, and legend.
+pub fn render_heatmap(
+    data: &AnalyticsChartData,
+    metric: HeatmapMetric,
+    selection: usize,
+    area: Rect,
+    frame: &mut ftui::Frame,
+) {
+    let (series, min_raw, max_raw) = heatmap_series_for_metric(data, metric);
+
+    if series.is_empty() {
         Paragraph::new(" No daily data available for heatmap. Run 'cass analytics rebuild'.")
             .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
             .render(area, frame);
         return;
     }
 
-    // Use HalfBlock mode for 1×2 sub-pixels per cell.
-    let mut painter = Painter::for_area(area, CanvasMode::HalfBlock);
-    let (pw, ph) = painter.size();
+    // ── Layout: metric tabs (1) + month labels (1) + grid body (min 5) + legend (1)
+    let min_body = 5u16;
+    if area.height < 4 {
+        // Fallback: too small, just show a sparkline.
+        let vals: Vec<f64> = series.iter().map(|(_, v)| *v).collect();
+        let spark =
+            Sparkline::new(&vals).style(ftui::Style::new().fg(PackedRgba::rgb(80, 200, 120)));
+        spark.render(area, frame);
+        return;
+    }
 
-    // Lay out days in 7-row columns (rows = day of week, columns = weeks).
-    let rows = 7u16;
-    let cols = (data.heatmap_days.len() as u16).div_ceil(rows);
-    let cell_w = if cols > 0 { pw / cols } else { 1 };
-    let cell_h = if rows > 0 { ph / rows } else { 1 };
+    let show_legend = area.height >= min_body + 3;
+    let legend_h = if show_legend { 1 } else { 0 };
+    let chunks = Flex::vertical()
+        .constraints([
+            Constraint::Fixed(1),        // metric tab bar
+            Constraint::Fixed(1),        // month labels row
+            Constraint::Min(min_body),   // grid body
+            Constraint::Fixed(legend_h), // legend
+        ])
+        .split(area);
+    let tab_area = chunks[0];
+    let month_area = chunks[1];
+    let grid_area = chunks[2];
+    let legend_area = chunks[3];
 
-    for (i, (_, value)) in data.heatmap_days.iter().enumerate() {
-        let col = i as u16 / rows;
-        let row = i as u16 % rows;
-        let x = (col * cell_w) as i32;
-        let y = (row * cell_h) as i32;
+    // ── 1. Metric tab bar ───────────────────────────────────────────────
+    render_heatmap_tabs(metric, tab_area, frame);
+
+    // ── 2. Compute grid geometry ────────────────────────────────────────
+    let left_gutter = 4u16; // "Mon " = 4 chars
+    let grid_inner = Rect {
+        x: grid_area.x + left_gutter,
+        y: grid_area.y,
+        width: grid_area.width.saturating_sub(left_gutter),
+        height: grid_area.height,
+    };
+
+    let rows = 7u16; // days of week
+    let day_count = series.len() as u16;
+    let cols = day_count.div_ceil(rows);
+
+    // Determine how many weeks we can show given available width.
+    // Each column needs at least 2 chars wide to be readable.
+    let max_cols = grid_inner.width / 2;
+    let visible_cols = cols.min(max_cols).max(1);
+    // If we have more weeks than space, show the most recent N weeks.
+    let skip_cols = cols.saturating_sub(visible_cols);
+    let skip_days = (skip_cols * rows) as usize;
+
+    let cell_w = if visible_cols > 0 {
+        grid_inner.width / visible_cols
+    } else {
+        1
+    };
+    let cell_h = if rows > 0 {
+        grid_inner.height / rows
+    } else {
+        1
+    };
+    let cell_h = cell_h.max(1);
+    let cell_w = cell_w.max(1);
+
+    // ── 3. Day-of-week gutter labels ────────────────────────────────────
+    for (r, label) in DOW_LABELS.iter().enumerate() {
+        if !label.is_empty() && (r as u16) < grid_area.height {
+            let label_rect = Rect {
+                x: grid_area.x,
+                y: grid_area.y + (r as u16) * cell_h,
+                width: left_gutter,
+                height: 1,
+            };
+            Paragraph::new(*label)
+                .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
+                .render(label_rect, frame);
+        }
+    }
+
+    // ── 4. Month header labels ──────────────────────────────────────────
+    {
+        let month_inner = Rect {
+            x: month_area.x + left_gutter,
+            y: month_area.y,
+            width: month_area.width.saturating_sub(left_gutter),
+            height: 1,
+        };
+        let month_names = [
+            "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        let mut last_month = 0u32;
+        for (i, (label, _)) in series.iter().enumerate().skip(skip_days) {
+            let local_i = (i - skip_days) as u16;
+            let col = local_i / rows;
+            if col >= visible_cols {
+                break;
+            }
+            let row = local_i % rows;
+            if row != 0 {
+                continue; // only check first day of each column
+            }
+            if let Some((_, m, _)) = parse_day_label(label)
+                && m != last_month
+            {
+                last_month = m;
+                let x = month_inner.x + col * cell_w;
+                if x + 3 <= month_inner.x + month_inner.width {
+                    let mname = month_names.get(m as usize).unwrap_or(&"");
+                    let mr = Rect {
+                        x,
+                        y: month_inner.y,
+                        width: 3.min(month_inner.width.saturating_sub(x - month_inner.x)),
+                        height: 1,
+                    };
+                    Paragraph::new(*mname)
+                        .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 180)))
+                        .render(mr, frame);
+                }
+            }
+        }
+    }
+
+    // ── 5. Heatmap grid (canvas) ────────────────────────────────────────
+    let mut painter = Painter::for_area(grid_inner, CanvasMode::HalfBlock);
+
+    for (i, (_, value)) in series.iter().enumerate().skip(skip_days) {
+        let local_i = (i - skip_days) as u16;
+        let col = local_i / rows;
+        if col >= visible_cols {
+            break;
+        }
+        let row = local_i % rows;
+        let px = (col * cell_w) as i32;
+        let py = (row * cell_h) as i32;
         let color = ftui_extras::charts::heatmap_gradient(*value);
-        // Fill a small rect for each day.
-        let fill_w = cell_w.max(1) as i32;
-        let fill_h = cell_h.max(1) as i32;
-        for dy in 0..fill_h {
-            for dx in 0..fill_w {
-                painter.point_colored(x + dx, y + dy, color);
+        let fw = (cell_w.max(1) as i32).saturating_sub(1).max(1);
+        let fh = (cell_h.max(1) as i32).saturating_sub(0).max(1);
+        for dy in 0..fh {
+            for dx in 0..fw {
+                painter.point_colored(px + dx, py + dy, color);
             }
         }
     }
 
     let canvas = CanvasRef::from_painter(&painter)
         .style(ftui::Style::new().fg(PackedRgba::rgb(200, 200, 200)));
-    canvas.render(area, frame);
+    canvas.render(grid_inner, frame);
+
+    // ── 6. Selection highlight ──────────────────────────────────────────
+    if selection < series.len() && selection >= skip_days {
+        let local_sel = (selection - skip_days) as u16;
+        let sel_col = local_sel / rows;
+        let sel_row = local_sel % rows;
+        if sel_col < visible_cols {
+            let sx = grid_inner.x + sel_col * cell_w;
+            let sy = grid_inner.y + sel_row * cell_h;
+            let sw = cell_w.min(grid_inner.x + grid_inner.width - sx);
+            let sh = cell_h.min(grid_inner.y + grid_inner.height - sy);
+            if sw > 0 && sh > 0 {
+                let sel_rect = Rect {
+                    x: sx,
+                    y: sy,
+                    width: sw,
+                    height: sh,
+                };
+                // Render a bright border/marker over the selected cell.
+                let marker = if sw >= 2 {
+                    "\u{25a0}".to_string() // filled square
+                } else {
+                    "\u{25b6}".to_string() // arrow
+                };
+                Paragraph::new(marker)
+                    .style(ftui::Style::new().fg(PackedRgba::rgb(255, 255, 80)).bold())
+                    .render(sel_rect, frame);
+            }
+        }
+    }
+
+    // ── 7. Tooltip: show selected day's date + value ────────────────────
+    if selection < series.len() {
+        let (label, norm) = &series[selection];
+        let raw_val = norm * max_raw;
+        let val_str = format_heatmap_value(raw_val, metric);
+        let tip = format!(" {} : {} ", label, val_str);
+        let tip_w = tip.len() as u16;
+        // Place tooltip at bottom-right of grid area.
+        if grid_inner.width >= tip_w {
+            let tip_rect = Rect {
+                x: grid_inner.x + grid_inner.width - tip_w,
+                y: grid_area.y + grid_area.height.saturating_sub(1),
+                width: tip_w,
+                height: 1,
+            };
+            Paragraph::new(tip)
+                .style(
+                    ftui::Style::new()
+                        .fg(PackedRgba::rgb(255, 255, 255))
+                        .bg(PackedRgba::rgb(60, 60, 80)),
+                )
+                .render(tip_rect, frame);
+        }
+    }
+
+    // ── 8. Legend: gradient ramp with min/max labels ─────────────────────
+    if show_legend && legend_area.height > 0 {
+        let min_str = format_heatmap_value(min_raw, metric);
+        let max_str = format_heatmap_value(max_raw, metric);
+        let label_left = format!(" {} ", min_str);
+        let label_right = format!(" {} ", max_str);
+        let ll = label_left.len() as u16;
+        let lr = label_right.len() as u16;
+
+        // Left label
+        let left_rect = Rect {
+            x: legend_area.x + left_gutter,
+            y: legend_area.y,
+            width: ll.min(legend_area.width),
+            height: 1,
+        };
+        Paragraph::new(label_left)
+            .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
+            .render(left_rect, frame);
+
+        // Gradient ramp in the middle
+        let ramp_x = left_rect.x + ll;
+        let ramp_end = legend_area.x + legend_area.width.saturating_sub(lr);
+        let ramp_w = ramp_end.saturating_sub(ramp_x);
+        if ramp_w > 0 {
+            for dx in 0..ramp_w {
+                let t = dx as f64 / ramp_w.max(1) as f64;
+                let color = ftui_extras::charts::heatmap_gradient(t);
+                let cell_rect = Rect {
+                    x: ramp_x + dx,
+                    y: legend_area.y,
+                    width: 1,
+                    height: 1,
+                };
+                Paragraph::new("\u{2588}") // full block
+                    .style(ftui::Style::new().fg(color))
+                    .render(cell_rect, frame);
+            }
+        }
+
+        // Right label
+        if legend_area.x + legend_area.width >= lr {
+            let right_rect = Rect {
+                x: legend_area.x + legend_area.width - lr,
+                y: legend_area.y,
+                width: lr,
+                height: 1,
+            };
+            Paragraph::new(label_right)
+                .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
+                .render(right_rect, frame);
+        }
+    }
 }
 
-/// Render the Breakdowns view: agent/source bar charts side by side.
-pub fn render_breakdowns(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
-    if data.agent_tokens.is_empty() {
-        Paragraph::new(" No breakdown data available. Run 'cass analytics rebuild'.")
+/// Render the heatmap metric tab bar.
+fn render_heatmap_tabs(active: HeatmapMetric, area: Rect, frame: &mut ftui::Frame) {
+    let metrics = [
+        HeatmapMetric::ApiTokens,
+        HeatmapMetric::Messages,
+        HeatmapMetric::ContentTokens,
+        HeatmapMetric::ToolCalls,
+        HeatmapMetric::Cost,
+        HeatmapMetric::Coverage,
+    ];
+    let mut x = area.x;
+    for m in &metrics {
+        let label = m.label();
+        let is_active = *m == active;
+        let display = if is_active {
+            format!(" [{}] ", label)
+        } else {
+            format!("  {}  ", label)
+        };
+        let w = display.len() as u16;
+        if x + w > area.x + area.width {
+            break;
+        }
+        let style = if is_active {
+            ftui::Style::new().fg(PackedRgba::rgb(255, 255, 80)).bold()
+        } else {
+            ftui::Style::new().fg(PackedRgba::rgb(160, 160, 160))
+        };
+        let tab_rect = Rect {
+            x,
+            y: area.y,
+            width: w,
+            height: 1,
+        };
+        Paragraph::new(display).style(style).render(tab_rect, frame);
+        x += w;
+    }
+}
+
+/// Render the Breakdowns view: tabbed agent/workspace/source/model bar charts.
+pub fn render_breakdowns(
+    data: &AnalyticsChartData,
+    tab: BreakdownTab,
+    area: Rect,
+    frame: &mut ftui::Frame,
+) {
+    type BreakdownSeries<'a> = (
+        &'a [(String, f64)],
+        &'a [(String, f64)],
+        fn(usize) -> PackedRgba,
+    );
+
+    // Select which data to display based on the active tab.
+    let (tokens, messages, color_fn): BreakdownSeries<'_> = match tab {
+        BreakdownTab::Agent => (&data.agent_tokens, &data.agent_messages, agent_color),
+        BreakdownTab::Workspace => (
+            &data.workspace_tokens,
+            &data.workspace_messages,
+            breakdown_color,
+        ),
+        BreakdownTab::Source => (&data.source_tokens, &data.source_messages, breakdown_color),
+        BreakdownTab::Model => (&data.model_tokens, &data.model_tokens, model_color),
+    };
+
+    if tokens.is_empty() {
+        let msg = format!(
+            " No {} breakdown data. Run 'cass analytics rebuild'.",
+            tab.label()
+        );
+        Paragraph::new(&*msg)
             .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
             .render(area, frame);
         return;
     }
 
-    // Split horizontally: tokens bar chart | messages bar chart
-    let chunks = Flex::horizontal()
-        .constraints([Constraint::Percentage(50.0), Constraint::Percentage(50.0)])
+    // Layout: tab bar (1 row) | content (fill)
+    let layout = Flex::vertical()
+        .constraints([Constraint::Fixed(1), Constraint::Min(3)])
         .split(area);
 
-    // Token breakdown by agent.
-    {
-        let groups: Vec<BarGroup<'_>> = data
-            .agent_tokens
+    // ── Tab bar ──────────────────────────────────────────
+    render_breakdown_tabs(tab, layout[0], frame);
+
+    // ── Content: side-by-side bar charts (tokens | messages) ─
+    let content = layout[1];
+
+    // For Model tab, show a single tokens-only chart (no message counts).
+    if matches!(tab, BreakdownTab::Model) {
+        let groups: Vec<BarGroup<'_>> = tokens
             .iter()
-            .take(8)
+            .take(10)
             .map(|(name, val)| BarGroup::new(name, vec![*val]))
             .collect();
-        let colors: Vec<PackedRgba> = (0..groups.len()).map(agent_color).collect();
+        let colors: Vec<PackedRgba> = (0..groups.len()).map(color_fn).collect();
+        let chart = BarChart::new(groups)
+            .direction(BarDirection::Horizontal)
+            .bar_width(1)
+            .colors(colors);
+        chart.render(content, frame);
+        return;
+    }
+
+    let chunks = Flex::horizontal()
+        .constraints([Constraint::Percentage(50.0), Constraint::Percentage(50.0)])
+        .split(content);
+
+    // Token breakdown.
+    {
+        let token_rows: Vec<(String, f64)> = tokens
+            .iter()
+            .take(8)
+            .map(|(name, val)| (shorten_label(name, 20), *val))
+            .collect();
+        let groups: Vec<BarGroup<'_>> = token_rows
+            .iter()
+            .map(|(label, val)| BarGroup::new(label.as_str(), vec![*val]))
+            .collect();
+        let colors: Vec<PackedRgba> = (0..groups.len()).map(color_fn).collect();
         let chart = BarChart::new(groups)
             .direction(BarDirection::Horizontal)
             .bar_width(1)
@@ -719,21 +1230,85 @@ pub fn render_breakdowns(data: &AnalyticsChartData, area: Rect, frame: &mut ftui
         chart.render(chunks[0], frame);
     }
 
-    // Message breakdown by agent.
+    // Message breakdown.
     {
-        let groups: Vec<BarGroup<'_>> = data
-            .agent_messages
+        let message_rows: Vec<(String, f64)> = messages
             .iter()
             .take(8)
-            .map(|(name, val)| BarGroup::new(name, vec![*val]))
+            .map(|(name, val)| (shorten_label(name, 20), *val))
             .collect();
-        let colors: Vec<PackedRgba> = (0..groups.len()).map(agent_color).collect();
+        let groups: Vec<BarGroup<'_>> = message_rows
+            .iter()
+            .map(|(label, val)| BarGroup::new(label.as_str(), vec![*val]))
+            .collect();
+        let colors: Vec<PackedRgba> = (0..groups.len()).map(color_fn).collect();
         let chart = BarChart::new(groups)
             .direction(BarDirection::Horizontal)
             .bar_width(1)
             .colors(colors);
         chart.render(chunks[1], frame);
     }
+}
+
+/// Color palette for non-agent breakdowns (workspaces, sources).
+const BREAKDOWN_COLORS: &[PackedRgba] = &[
+    PackedRgba::rgb(0, 180, 220),
+    PackedRgba::rgb(220, 160, 0),
+    PackedRgba::rgb(80, 200, 120),
+    PackedRgba::rgb(200, 80, 180),
+    PackedRgba::rgb(120, 200, 255),
+    PackedRgba::rgb(255, 140, 80),
+    PackedRgba::rgb(160, 120, 255),
+    PackedRgba::rgb(255, 200, 120),
+];
+
+fn breakdown_color(idx: usize) -> PackedRgba {
+    BREAKDOWN_COLORS[idx % BREAKDOWN_COLORS.len()]
+}
+
+fn model_color(idx: usize) -> PackedRgba {
+    const MODEL_COLORS: &[PackedRgba] = &[
+        PackedRgba::rgb(0, 180, 220),
+        PackedRgba::rgb(220, 120, 0),
+        PackedRgba::rgb(80, 200, 80),
+        PackedRgba::rgb(200, 60, 180),
+        PackedRgba::rgb(255, 200, 60),
+        PackedRgba::rgb(120, 120, 255),
+    ];
+    MODEL_COLORS[idx % MODEL_COLORS.len()]
+}
+
+/// Render the tab selector bar for the Breakdowns view.
+fn render_breakdown_tabs(active: BreakdownTab, area: Rect, frame: &mut ftui::Frame) {
+    let mut text = String::with_capacity(64);
+    text.push(' ');
+    for tab in BreakdownTab::all() {
+        if *tab == active {
+            text.push_str(&format!("[{}]", tab.label()));
+        } else {
+            text.push_str(&format!(" {} ", tab.label()));
+        }
+        text.push(' ');
+    }
+    text.push_str("  (Tab/Shift+Tab to switch)");
+    let style = ftui::Style::new().fg(PackedRgba::rgb(180, 200, 255)).bold();
+    Paragraph::new(&*text).style(style).render(area, frame);
+}
+
+/// Shorten a label (e.g., workspace path) to fit in `max_len` characters.
+fn shorten_label(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    if s.contains('/') {
+        let last = s.rsplit('/').next().unwrap_or(s);
+        if last.len() <= max_len {
+            return last.to_string();
+        }
+    }
+    let mut truncated = s[..max_len.saturating_sub(1)].to_string();
+    truncated.push('\u{2026}');
+    truncated
 }
 
 /// Render the Tools view: tool calls per agent with derived metrics.
@@ -860,15 +1435,19 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
 pub struct ExplorerState {
     pub metric: ExplorerMetric,
     pub overlay: ExplorerOverlay,
+    pub group_by: crate::analytics::GroupBy,
 }
 
 /// Dispatch rendering to the appropriate view function.
 ///
 /// `selection` is the currently highlighted item index (for drilldown).
+#[allow(clippy::too_many_arguments)]
 pub fn render_analytics_content(
     view: AnalyticsView,
     data: &AnalyticsChartData,
     explorer: &ExplorerState,
+    breakdown_tab: BreakdownTab,
+    heatmap_metric: HeatmapMetric,
     selection: usize,
     area: Rect,
     frame: &mut ftui::Frame,
@@ -876,15 +1455,27 @@ pub fn render_analytics_content(
     match view {
         AnalyticsView::Dashboard => render_dashboard(data, area, frame),
         AnalyticsView::Explorer => render_explorer(data, explorer, area, frame),
-        AnalyticsView::Heatmap => render_heatmap(data, area, frame),
+        AnalyticsView::Heatmap => render_heatmap(data, heatmap_metric, selection, area, frame),
         AnalyticsView::Breakdowns => {
-            render_breakdowns(data, area, frame);
+            render_breakdowns(data, breakdown_tab, area, frame);
+            let row_count = breakdown_rows(data, breakdown_tab);
+            // Offset by 1 for the tab bar row.
+            let content_area = if area.height > 1 {
+                Rect {
+                    x: area.x,
+                    y: area.y + 1,
+                    width: area.width,
+                    height: area.height - 1,
+                }
+            } else {
+                area
+            };
             render_selection_indicator(
                 selection,
-                data.agent_tokens.len().min(8),
-                area,
+                row_count,
+                content_area,
                 frame,
-                true,
+                !matches!(breakdown_tab, BreakdownTab::Model),
             );
         }
         AnalyticsView::Tools => {
@@ -914,6 +1505,16 @@ pub fn render_analytics_content(
             }
         }
         AnalyticsView::Coverage => render_coverage(data, area, frame),
+    }
+}
+
+/// Number of selectable rows in the Breakdowns view for the given tab.
+pub fn breakdown_rows(data: &AnalyticsChartData, tab: BreakdownTab) -> usize {
+    match tab {
+        BreakdownTab::Agent => data.agent_tokens.len().min(8),
+        BreakdownTab::Workspace => data.workspace_tokens.len().min(8),
+        BreakdownTab::Source => data.source_tokens.len().min(8),
+        BreakdownTab::Model => data.model_tokens.len().min(10),
     }
 }
 
@@ -1033,5 +1634,76 @@ mod tests {
                 | AnalyticsView::Coverage => {}
             }
         }
+    }
+
+    #[test]
+    fn weekday_index_known_dates() {
+        // 2026-02-07 is a Saturday → index 5 (Mon=0..Sun=6)
+        assert_eq!(weekday_index(2026, 2, 7), 5);
+        // 2026-02-02 is a Monday → index 0
+        assert_eq!(weekday_index(2026, 2, 2), 0);
+        // 2026-01-01 is a Thursday → index 3
+        assert_eq!(weekday_index(2026, 1, 1), 3);
+    }
+
+    #[test]
+    fn parse_day_label_valid() {
+        assert_eq!(parse_day_label("2026-02-07"), Some((2026, 2, 7)));
+        assert_eq!(parse_day_label("2025-12-31"), Some((2025, 12, 31)));
+        assert_eq!(parse_day_label("invalid"), None);
+        assert_eq!(parse_day_label("2026-13-01"), Some((2026, 13, 1))); // parser doesn't validate ranges
+    }
+
+    #[test]
+    fn heatmap_series_empty_data() {
+        let data = AnalyticsChartData::default();
+        let (series, min, max) = heatmap_series_for_metric(&data, HeatmapMetric::ApiTokens);
+        assert!(series.is_empty());
+        assert_eq!(min, 0.0);
+        assert_eq!(max, 0.0);
+    }
+
+    #[test]
+    fn heatmap_series_normalizes() {
+        let data = AnalyticsChartData {
+            daily_tokens: vec![
+                ("2026-02-01".to_string(), 100.0),
+                ("2026-02-02".to_string(), 200.0),
+                ("2026-02-03".to_string(), 50.0),
+            ],
+            ..Default::default()
+        };
+        let (series, min, max) = heatmap_series_for_metric(&data, HeatmapMetric::ApiTokens);
+        assert_eq!(series.len(), 3);
+        assert_eq!(max, 200.0);
+        assert_eq!(min, 50.0);
+        // Max value normalizes to 1.0
+        assert!((series[1].1 - 1.0).abs() < 0.001);
+        // Min value normalizes to 0.25
+        assert!((series[2].1 - 0.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn format_heatmap_value_cost() {
+        assert_eq!(format_heatmap_value(42.567, HeatmapMetric::Cost), "$42.57");
+        assert_eq!(format_heatmap_value(0.0, HeatmapMetric::Cost), "$0.00");
+    }
+
+    #[test]
+    fn format_heatmap_value_tokens() {
+        assert_eq!(
+            format_heatmap_value(1500000.0, HeatmapMetric::ApiTokens),
+            "1.5M"
+        );
+        assert_eq!(format_heatmap_value(500.0, HeatmapMetric::Messages), "500");
+    }
+
+    #[test]
+    fn heatmap_metric_cycles() {
+        let m = HeatmapMetric::default();
+        assert_eq!(m, HeatmapMetric::ApiTokens);
+        assert_eq!(m.next(), HeatmapMetric::Messages);
+        assert_eq!(HeatmapMetric::Coverage.next(), HeatmapMetric::ApiTokens);
+        assert_eq!(HeatmapMetric::ApiTokens.prev(), HeatmapMetric::Coverage);
     }
 }
