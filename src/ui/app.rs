@@ -2971,6 +2971,295 @@ impl CassApp {
         }
     }
 
+    // -- Help overlay rendering -----------------------------------------------
+
+    /// Build the help content lines using ftui text types.
+    fn build_help_lines(&self, styles: &StyleContext) -> Vec<ftui::text::Line> {
+        let title_style = styles.style(style_system::STYLE_STATUS_INFO).bold();
+        let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
+
+        let mut lines: Vec<ftui::text::Line> = Vec::new();
+
+        // Helper closure: push a section title + items + blank line
+        let add_section =
+            |out: &mut Vec<ftui::text::Line>, title: &str, items: &[String]| {
+                out.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled(title.to_string(), title_style),
+                ]));
+                for item in items {
+                    out.push(ftui::text::Line::from(format!("  {item}")));
+                }
+                out.push(ftui::text::Line::from(""));
+            };
+
+        // Welcome
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled(
+                "Welcome to CASS - Coding Agent Session Search".to_string(),
+                title_style,
+            ),
+        ]));
+        lines.push(ftui::text::Line::from(""));
+        lines.push(ftui::text::Line::from("  Layout:"));
+        for row in [
+            "  ┌─────────────────────────────────────────────────┐",
+            "  │ [Search Bar]         [Filter Chips]    [Status] │",
+            "  ├────────────────┬────────────────────────────────┤",
+            "  │                │                                │",
+            "  │   Results      │       Detail Preview           │",
+            "  │   (Left/↑↓)    │       (Tab to focus)           │",
+            "  │                │                                │",
+            "  ├────────────────┴────────────────────────────────┤",
+            "  │ [Help Strip]                                    │",
+            "  └─────────────────────────────────────────────────┘",
+        ] {
+            lines.push(ftui::text::Line::from(row));
+        }
+        lines.push(ftui::text::Line::from(""));
+
+        add_section(
+            &mut lines,
+            "Data Locations",
+            &[
+                "Index & state: ~/.local/share/coding-agent-search/".into(),
+                "  agent_search.db - Full-text search index".into(),
+                "  tui_state.json - UI preferences | watch_state.json - Watch timestamps"
+                    .into(),
+                "  remotes/ - Synced session data from remote sources".into(),
+                "Config: ~/.config/cass/sources.toml (remote sources)".into(),
+                "Agents: Claude, Codex, Gemini, Cline, OpenCode, Amp, Cursor, ChatGPT, Aider, Pi-Agent, Factory"
+                    .into(),
+            ],
+        );
+
+        add_section(
+            &mut lines,
+            "Updates",
+            &[
+                "Checks GitHub releases hourly (offline-friendly, no auto-download)".into(),
+                "When available: banner shows at top with U/S/Esc options".into(),
+                "  U - Open release page in browser (Shift+U)".into(),
+                "  S - Skip this version permanently (Shift+S)".into(),
+                "  Esc - Dismiss banner for this session".into(),
+            ],
+        );
+
+        add_section(
+            &mut lines,
+            "Search",
+            &[
+                format!(
+                    "type to live-search; {} focuses query; {} cycles history",
+                    shortcuts::FOCUS_QUERY,
+                    shortcuts::HISTORY_CYCLE
+                ),
+                "Wildcards: foo* (prefix), *foo (suffix), *foo* (contains)".into(),
+                "Auto-fuzzy: searches with few results try *term* fallback".into(),
+                format!("{} refresh search (re-query index)", shortcuts::REFRESH),
+                "/ detail-find in preview; n/N to jump matches".into(),
+            ],
+        );
+
+        add_section(
+            &mut lines,
+            "Filters",
+            &[
+                format!(
+                    "{} agent | {} workspace | {} from | {} to | {} clear all",
+                    shortcuts::FILTER_AGENT,
+                    shortcuts::FILTER_WORKSPACE,
+                    shortcuts::FILTER_DATE_FROM,
+                    shortcuts::FILTER_DATE_TO,
+                    shortcuts::CLEAR_FILTERS
+                ),
+                format!(
+                    "{} scope to active agent | {} clear scope | {} cycle time presets (24h/7d/30d/all)",
+                    shortcuts::SCOPE_AGENT,
+                    shortcuts::SCOPE_WORKSPACE,
+                    shortcuts::CYCLE_TIME_PRESETS
+                ),
+                "Chips in search bar; Backspace removes last; Enter (query empty) edits last chip"
+                    .into(),
+            ],
+        );
+
+        add_section(
+            &mut lines,
+            "Sources (Multi-Machine)",
+            &[
+                "F11 cycle source filter: all → local → remote → all".into(),
+                "Shift+F11 opens source filter menu (select specific sources)".into(),
+                "Remote sessions show [source-name] in results list".into(),
+                "Setup: cass sources setup (interactive wizard with SSH discovery)".into(),
+                "Sync: rsync over SSH (delta transfers, additive-only for safety)".into(),
+            ],
+        );
+
+        add_section(
+            &mut lines,
+            "Modes",
+            &[
+                format!(
+                    "{} search mode: Lexical → Semantic → Hybrid",
+                    shortcuts::SEARCH_MODE
+                ),
+                format!(
+                    "{} match mode: prefix (default) ⇄ standard",
+                    shortcuts::MATCH_MODE
+                ),
+                format!(
+                    "{} ranking: recent → balanced → relevance → match-quality",
+                    shortcuts::RANKING
+                ),
+                format!(
+                    "{} theme: dark/light | {} toggle border style",
+                    shortcuts::THEME,
+                    shortcuts::BORDERS
+                ),
+            ],
+        );
+
+        add_section(
+            &mut lines,
+            "Context",
+            &[
+                format!(
+                    "{} cycles S/M/L/XL context window",
+                    shortcuts::CONTEXT_WINDOW
+                ),
+                "Ctrl+Space: peek XL for current hit, tap again to restore".into(),
+            ],
+        );
+
+        add_section(
+            &mut lines,
+            "Navigation",
+            &[
+                "Arrows move; Left/Right pane; PgUp/PgDn page".into(),
+                format!(
+                    "{} vim-style nav (when results showing)",
+                    shortcuts::VIM_NAV
+                ),
+                format!("{} or Alt+g/G jump to first/last item", shortcuts::JUMP_TOP),
+                format!(
+                    "{} toggle select; {} bulk actions; Esc clears selection",
+                    shortcuts::TOGGLE_SELECT,
+                    shortcuts::BULK_MENU
+                ),
+                "Ctrl+Enter queue item; Ctrl+O open all queued".into(),
+                format!("{} toggles focus (Results ⇄ Detail)", shortcuts::TAB_FOCUS),
+                "[ / ] cycle detail tabs (when results showing)".into(),
+            ],
+        );
+
+        add_section(
+            &mut lines,
+            "Actions",
+            &[
+                format!(
+                    "{} opens detail modal (o=open, c=copy, p=path, s=snip, n=nano, Esc=close)",
+                    shortcuts::DETAIL_OPEN
+                ),
+                format!(
+                    "{} open hit in $EDITOR; {} copy path/content",
+                    shortcuts::EDITOR,
+                    shortcuts::COPY
+                ),
+                format!(
+                    "{} detail-find within messages; n/N cycle matches",
+                    shortcuts::PANE_FILTER
+                ),
+                format!(
+                    "{}/? toggle this help; {} quit (or back from detail)",
+                    shortcuts::HELP,
+                    shortcuts::QUIT
+                ),
+            ],
+        );
+
+        add_section(
+            &mut lines,
+            "States",
+            &[
+                "UI state persists in tui_state.json (data dir).".into(),
+                format!(
+                    "{} reset UI state or launch with `cass tui --reset-state`",
+                    shortcuts::RESET_STATE
+                ),
+            ],
+        );
+
+        // Pinned indicator
+        if self.help_pinned {
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("  [PINNED] ".to_string(), title_style),
+                ftui::text::Span::styled(
+                    "Press P to unpin, Esc to close".to_string(),
+                    muted_style,
+                ),
+            ]));
+        } else {
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(
+                    "  P=pin  ↑/↓=scroll  Esc=close".to_string(),
+                    muted_style,
+                ),
+            ]));
+        }
+
+        lines
+    }
+
+    /// Render the help overlay as a centered popup with scrollable content.
+    fn render_help_overlay(
+        &self,
+        frame: &mut super::ftui_adapter::Frame,
+        area: Rect,
+        styles: &StyleContext,
+    ) {
+        // Size: 70% width, 70% height (clamped to area)
+        let popup_w = ((area.width as u32 * 70) / 100).min(area.width as u32) as u16;
+        let popup_h = ((area.height as u32 * 70) / 100).min(area.height as u32) as u16;
+        if popup_w < 20 || popup_h < 6 {
+            return;
+        }
+
+        let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+        let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+        let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+        let bg_style = styles.style(style_system::STYLE_PANE_BASE);
+        let border_style = styles.style(style_system::STYLE_PANE_FOCUSED);
+
+        // Clear background
+        Block::new().style(bg_style).render(popup_area, frame);
+
+        let title = if self.help_pinned {
+            "Quick Start & Shortcuts (pinned)"
+        } else {
+            "Quick Start & Shortcuts (F1 or ? to toggle)"
+        };
+        let outer = Block::new()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title(title)
+            .title_alignment(Alignment::Left)
+            .style(border_style);
+        let inner = outer.inner(popup_area);
+        outer.render(popup_area, frame);
+        if inner.is_empty() {
+            return;
+        }
+
+        let lines = self.build_help_lines(styles);
+        let text = ftui::text::Text::from_lines(lines);
+        Paragraph::new(text)
+            .style(styles.style(style_system::STYLE_TEXT_PRIMARY))
+            .wrap(ftui::text::WrapMode::Word)
+            .scroll((self.help_scroll, 0))
+            .render(inner, frame);
+    }
+
     /// Render the source filter popup menu centered on screen.
     fn render_source_filter_menu_overlay(
         &self,
@@ -7384,6 +7673,11 @@ impl super::ftui_adapter::Model for CassApp {
 
         if self.source_filter_menu_open {
             self.render_source_filter_menu_overlay(frame, area, &styles);
+        }
+
+        // ── Help overlay ─────────────────────────────────────────────
+        if self.show_help {
+            self.render_help_overlay(frame, area, &styles);
         }
 
         // ── Command palette overlay ──────────────────────────────────
@@ -12209,6 +12503,150 @@ mod tests {
         );
     }
 
+    // -- Performance guardrail tests (2noh9.5.6) -----------------------------
+
+    /// Budget: single render of any surface must complete within this many ms.
+    /// This is intentionally generous (catches catastrophic regressions, not
+    /// micro-optimizations).
+    const PERF_RENDER_SINGLE_BUDGET_MS: u128 = 200;
+    /// Budget: rendering all key screens sequentially (search + all analytics).
+    const PERF_RENDER_ALL_SCREENS_BUDGET_MS: u128 = 2000;
+    /// Budget: a single ftui Buffer at 120x40 must not exceed this many cells.
+    /// (120 * 40 = 4800 cells; a 2x safety margin → 9600 is extreme, real
+    /// buffers should match exactly.)
+    const PERF_BUFFER_CELL_BUDGET: usize = 120 * 40;
+
+    #[test]
+    fn perf_guard_search_surface_render_time() {
+        let app = app_with_hits(10);
+        let start = std::time::Instant::now();
+        let _ = render_at_degradation(
+            &app,
+            120,
+            40,
+            ftui::render::budget::DegradationLevel::Full,
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < PERF_RENDER_SINGLE_BUDGET_MS,
+            "search surface render took {:?} — exceeds {}ms budget",
+            elapsed,
+            PERF_RENDER_SINGLE_BUDGET_MS
+        );
+    }
+
+    #[test]
+    fn perf_guard_detail_surface_render_time() {
+        let mut app = app_with_hits(5);
+        app.focus_region = FocusRegion::Detail;
+        let start = std::time::Instant::now();
+        let _ = render_at_degradation(
+            &app,
+            120,
+            40,
+            ftui::render::budget::DegradationLevel::Full,
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < PERF_RENDER_SINGLE_BUDGET_MS,
+            "detail surface render took {:?} — exceeds {}ms budget",
+            elapsed,
+            PERF_RENDER_SINGLE_BUDGET_MS
+        );
+    }
+
+    #[test]
+    fn perf_guard_all_screens_sequential() {
+        // Render: default search + detail focus + all 8 analytics views = 10 renders.
+        let start = std::time::Instant::now();
+
+        // Search surface
+        let app = app_with_hits(10);
+        let _ = render_at_degradation(
+            &app,
+            120,
+            40,
+            ftui::render::budget::DegradationLevel::Full,
+        );
+
+        // Detail focus
+        let mut detail_app = app_with_hits(5);
+        detail_app.focus_region = FocusRegion::Detail;
+        let _ = render_at_degradation(
+            &detail_app,
+            120,
+            40,
+            ftui::render::budget::DegradationLevel::Full,
+        );
+
+        // All 8 analytics views with data
+        for &view in AnalyticsView::all() {
+            let analytics = analytics_app_with_data(view);
+            let _ = render_at_degradation(
+                &analytics,
+                120,
+                40,
+                ftui::render::budget::DegradationLevel::Full,
+            );
+        }
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < PERF_RENDER_ALL_SCREENS_BUDGET_MS,
+            "rendering all 10 screens took {:?} — exceeds {}ms budget",
+            elapsed,
+            PERF_RENDER_ALL_SCREENS_BUDGET_MS
+        );
+    }
+
+    #[test]
+    fn perf_guard_buffer_text_within_bounds() {
+        // Verify rendered text fits expected bounds (no runaway content).
+        let app = app_with_hits(5);
+        let buf = render_at_degradation(
+            &app,
+            120,
+            40,
+            ftui::render::budget::DegradationLevel::Full,
+        );
+        let text = ftui_harness::buffer_to_text(&buf);
+        // At 120x40 (4800 cells), text length should not wildly exceed
+        // the cell count (accounting for newlines and trailing spaces).
+        assert!(
+            text.len() < PERF_BUFFER_CELL_BUDGET * 2,
+            "rendered text {} chars exceeds 2x cell budget {}",
+            text.len(),
+            PERF_BUFFER_CELL_BUDGET * 2
+        );
+    }
+
+    #[test]
+    fn perf_guard_repeated_render_deterministic_timing() {
+        // Rendering the same state 5 times should not show increasing cost
+        // (would indicate a leak or accumulating state).
+        let app = app_with_hits(10);
+        let mut times_ms = Vec::with_capacity(5);
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            let _ = render_at_degradation(
+                &app,
+                120,
+                40,
+                ftui::render::budget::DegradationLevel::Full,
+            );
+            times_ms.push(start.elapsed().as_millis());
+        }
+        // Last render should not be >3x the first (generous margin for CI variability).
+        let first = times_ms[0].max(1);
+        let last = times_ms[4];
+        assert!(
+            last <= first * 3,
+            "render cost grew from {}ms to {}ms over 5 iterations — possible leak",
+            first,
+            last
+        );
+    }
+
     // -- Animation state tests (2noh9.4.14) ---------------------------------
 
     #[test]
@@ -12304,5 +12742,214 @@ mod tests {
         let anim = AnimationState::new(false);
         assert!((anim.reveal_progress(0) - 1.0).abs() < 0.01);
         assert!((anim.reveal_progress(99) - 1.0).abs() < 0.01);
+    }
+
+    // =========================================================================
+    // Help Overlay Tests (bead 2noh9.3.7)
+    // =========================================================================
+
+    #[test]
+    fn help_toggle_opens_and_closes() {
+        let mut app = test_app();
+        assert!(!app.show_help);
+        let _ = app.update(CassMsg::HelpToggled);
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 0);
+        let _ = app.update(CassMsg::HelpToggled);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn help_scroll_increments_and_clamps() {
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        assert_eq!(app.help_scroll, 0);
+        let _ = app.update(CassMsg::HelpScrolled { delta: 5 });
+        assert_eq!(app.help_scroll, 5);
+        let _ = app.update(CassMsg::HelpScrolled { delta: -10 });
+        // Should clamp to 0 not go negative
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn help_pin_toggle() {
+        let mut app = test_app();
+        assert!(!app.help_pinned);
+        let _ = app.update(CassMsg::HelpPinToggled);
+        assert!(app.help_pinned);
+        let _ = app.update(CassMsg::HelpPinToggled);
+        assert!(!app.help_pinned);
+    }
+
+    #[test]
+    fn help_toggle_resets_scroll() {
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        let _ = app.update(CassMsg::HelpScrolled { delta: 20 });
+        assert_eq!(app.help_scroll, 20);
+        // Close and reopen — scroll should reset to 0
+        let _ = app.update(CassMsg::HelpToggled);
+        let _ = app.update(CassMsg::HelpToggled);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn help_esc_closes_overlay() {
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        assert!(app.show_help);
+        let _ = app.update(CassMsg::EscPressed);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn help_overlay_render_no_panic_80x24() {
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        render_at_degradation(&app, 80, 24, ftui::render::budget::DegradationLevel::Full);
+    }
+
+    #[test]
+    fn help_overlay_render_no_panic_120x40() {
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
+    }
+
+    #[test]
+    fn help_overlay_render_narrow_no_panic() {
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        // Very narrow — should not panic, just potentially skip rendering
+        render_at_degradation(&app, 30, 10, ftui::render::budget::DegradationLevel::Full);
+    }
+
+    #[test]
+    fn help_overlay_contains_shortcut_keys() {
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        let buf =
+            render_at_degradation(&app, 120, 60, ftui::render::budget::DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        // Help content should include key shortcuts from shortcuts.rs
+        assert!(
+            text.contains(shortcuts::HELP),
+            "Help text should contain F1 shortcut"
+        );
+        assert!(
+            text.contains("Search"),
+            "Help text should contain 'Search' section"
+        );
+        assert!(
+            text.contains("Navigation"),
+            "Help text should contain 'Navigation' section"
+        );
+        assert!(
+            text.contains("Filters"),
+            "Help text should contain 'Filters' section"
+        );
+    }
+
+    #[test]
+    fn help_overlay_shows_pinned_indicator() {
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        let _ = app.update(CassMsg::HelpPinToggled);
+        let buf =
+            render_at_degradation(&app, 120, 60, ftui::render::budget::DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(
+            text.contains("pinned"),
+            "Pinned help should show 'pinned' in title or body"
+        );
+    }
+
+    #[test]
+    fn help_overlay_scroll_changes_visible_content() {
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        let buf_top =
+            render_at_degradation(&app, 120, 30, ftui::render::budget::DegradationLevel::Full);
+        let text_top = ftui_harness::buffer_to_text(&buf_top);
+
+        let _ = app.update(CassMsg::HelpScrolled { delta: 30 });
+        let buf_scrolled =
+            render_at_degradation(&app, 120, 30, ftui::render::budget::DegradationLevel::Full);
+        let text_scrolled = ftui_harness::buffer_to_text(&buf_scrolled);
+
+        // After scrolling, content should be different
+        assert_ne!(
+            text_top, text_scrolled,
+            "Scrolled help content should differ from top"
+        );
+    }
+
+    #[test]
+    fn help_build_lines_contains_all_sections() {
+        let app = test_app();
+        let styles = StyleContext::new(StyleOptions {
+            preset: UiThemePreset::Dark,
+            fancy_borders: true,
+        });
+        let lines = app.build_help_lines(&styles);
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for section in [
+            "Data Locations",
+            "Updates",
+            "Search",
+            "Filters",
+            "Sources",
+            "Modes",
+            "Context",
+            "Navigation",
+            "Actions",
+            "States",
+        ] {
+            assert!(
+                text.contains(section),
+                "Help lines should contain section: {section}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_build_lines_references_shortcuts() {
+        let app = test_app();
+        let styles = StyleContext::new(StyleOptions {
+            preset: UiThemePreset::Dark,
+            fancy_borders: true,
+        });
+        let lines = app.build_help_lines(&styles);
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Must reference actual shortcut constants
+        assert!(text.contains(shortcuts::HELP), "Should reference F1");
+        assert!(
+            text.contains(shortcuts::FILTER_AGENT),
+            "Should reference F3"
+        );
+        assert!(
+            text.contains(shortcuts::CONTEXT_WINDOW),
+            "Should reference F7"
+        );
+        assert!(text.contains(shortcuts::EDITOR), "Should reference F8");
+        assert!(text.contains(shortcuts::RANKING), "Should reference F12");
+        assert!(
+            text.contains(shortcuts::TAB_FOCUS),
+            "Should reference Tab"
+        );
+        assert!(
+            text.contains(shortcuts::VIM_NAV),
+            "Should reference vim nav"
+        );
     }
 }

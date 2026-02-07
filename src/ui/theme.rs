@@ -12,6 +12,7 @@
 //!   `CASS_NO_GRADIENT`, `CASS_DISABLE_ANIMATIONS`, and `CASS_A11Y`.
 //! - Preset cycling: all six `ThemePreset` variants produce a valid ftui Theme.
 
+use ftui::render::cell::PackedRgba;
 use ftui::{Color, ColorCache, ColorProfile, Style, StyleSheet, Theme};
 
 use crate::ui::components::theme::{self as legacy, ThemePalette, ThemePreset};
@@ -318,10 +319,8 @@ impl CassTheme {
     /// Get a pane style for a specific agent. Returns (bg_only, bg+fg) styles.
     pub fn agent_pane_style(&self, agent: &str) -> (Style, Style) {
         let pane = ThemePalette::agent_pane(agent);
-        let bg = Style::new().bg(ratatui_to_ftui_packed(pane.bg));
-        let fg = Style::new()
-            .fg(ratatui_to_ftui_packed(pane.fg))
-            .bg(ratatui_to_ftui_packed(pane.bg));
+        let bg = Style::new().bg(pane.bg);
+        let fg = Style::new().fg(pane.fg).bg(pane.bg);
         (bg, fg)
     }
 
@@ -345,8 +344,8 @@ impl Default for CassTheme {
 
 /// Convert a legacy cass `ThemePalette` into an ftui `Theme`.
 fn build_ftui_theme(palette: &ThemePalette, is_dark: bool) -> Theme {
-    // Map palette colors to ftui's semantic slots
-    let c = |color: ratatui::style::Color| -> Color { ratatui_to_ftui(color) };
+    // PackedRgba → ftui::Color via From impl
+    let c = |color: PackedRgba| -> Color { color.into() };
 
     Theme::builder()
         .primary(c(palette.accent))
@@ -382,212 +381,172 @@ fn build_ftui_theme(palette: &ThemePalette, is_dark: bool) -> Theme {
 /// Build the named-style registry from a palette.
 fn build_stylesheet(palette: &ThemePalette, is_dark: bool, flags: &ThemeFlags) -> StyleSheet {
     let sheet = StyleSheet::new();
-    let c = |color: ratatui::style::Color| ratatui_to_ftui_packed(color);
 
     // Text hierarchy
-    sheet.define(style_ids::TEXT_PRIMARY, Style::new().fg(c(palette.fg)));
+    sheet.define(style_ids::TEXT_PRIMARY, Style::new().fg(palette.fg));
     sheet.define(
         style_ids::TEXT_SECONDARY,
         Style::new().fg(if is_dark {
-            c(legacy::colors::TEXT_SECONDARY)
+            legacy::colors::TEXT_SECONDARY
         } else {
-            c(palette.fg)
+            palette.fg
         }),
     );
-    sheet.define(style_ids::TEXT_MUTED, Style::new().fg(c(palette.hint)));
+    sheet.define(style_ids::TEXT_MUTED, Style::new().fg(palette.hint));
     sheet.define(
         style_ids::TEXT_DISABLED,
         Style::new().fg(if is_dark {
-            c(legacy::colors::TEXT_DISABLED)
+            legacy::colors::TEXT_DISABLED
         } else {
-            c(ratatui::style::Color::Rgb(180, 180, 190))
+            PackedRgba::rgb(180, 180, 190)
         }),
     );
 
     // Accents
     sheet.define(
         style_ids::ACCENT_PRIMARY,
-        Style::new().fg(c(palette.accent)).bold(),
+        Style::new().fg(palette.accent).bold(),
     );
     sheet.define(
         style_ids::ACCENT_SECONDARY,
-        Style::new().fg(c(palette.accent_alt)),
+        Style::new().fg(palette.accent_alt),
     );
     sheet.define(
         style_ids::ACCENT_TERTIARY,
         Style::new().fg(if is_dark {
-            c(legacy::colors::ACCENT_TERTIARY)
+            legacy::colors::ACCENT_TERTIARY
         } else {
-            c(ratatui::style::Color::Rgb(0, 130, 200))
+            PackedRgba::rgb(0, 130, 200)
         }),
     );
 
     // Surfaces
-    sheet.define(style_ids::BG_DEEP, Style::new().bg(c(palette.bg)));
-    sheet.define(style_ids::BG_SURFACE, Style::new().bg(c(palette.surface)));
+    sheet.define(style_ids::BG_DEEP, Style::new().bg(palette.bg));
+    sheet.define(style_ids::BG_SURFACE, Style::new().bg(palette.surface));
     sheet.define(
         style_ids::BG_HIGHLIGHT,
         Style::new().bg(if is_dark {
-            c(legacy::colors::BG_HIGHLIGHT)
+            legacy::colors::BG_HIGHLIGHT
         } else {
-            c(ratatui::style::Color::Rgb(230, 232, 240))
+            PackedRgba::rgb(230, 232, 240)
         }),
     );
 
     // Borders
-    sheet.define(style_ids::BORDER, Style::new().fg(c(palette.border)));
+    sheet.define(style_ids::BORDER, Style::new().fg(palette.border));
     sheet.define(
         style_ids::BORDER_FOCUS,
-        Style::new().fg(c(legacy::colors::BORDER_FOCUS)),
+        Style::new().fg(legacy::colors::BORDER_FOCUS),
     );
     sheet.define(
         style_ids::BORDER_MINIMAL,
-        Style::new().fg(c(legacy::colors::BORDER_MINIMAL)),
+        Style::new().fg(legacy::colors::BORDER_MINIMAL),
     );
     sheet.define(
         style_ids::BORDER_EMPHASIZED,
-        Style::new().fg(c(legacy::colors::BORDER_EMPHASIZED)),
+        Style::new().fg(legacy::colors::BORDER_EMPHASIZED),
     );
 
     // Roles (foreground)
-    sheet.define(style_ids::ROLE_USER, Style::new().fg(c(palette.user)));
-    sheet.define(style_ids::ROLE_AGENT, Style::new().fg(c(palette.agent)));
-    sheet.define(style_ids::ROLE_TOOL, Style::new().fg(c(palette.tool)));
-    sheet.define(style_ids::ROLE_SYSTEM, Style::new().fg(c(palette.system)));
+    sheet.define(style_ids::ROLE_USER, Style::new().fg(palette.user));
+    sheet.define(style_ids::ROLE_AGENT, Style::new().fg(palette.agent));
+    sheet.define(style_ids::ROLE_TOOL, Style::new().fg(palette.tool));
+    sheet.define(style_ids::ROLE_SYSTEM, Style::new().fg(palette.system));
 
     // Role backgrounds
     sheet.define(
         style_ids::ROLE_USER_BG,
-        Style::new().bg(c(legacy::colors::ROLE_USER_BG)),
+        Style::new().bg(legacy::colors::ROLE_USER_BG),
     );
     sheet.define(
         style_ids::ROLE_AGENT_BG,
-        Style::new().bg(c(legacy::colors::ROLE_AGENT_BG)),
+        Style::new().bg(legacy::colors::ROLE_AGENT_BG),
     );
     sheet.define(
         style_ids::ROLE_TOOL_BG,
-        Style::new().bg(c(legacy::colors::ROLE_TOOL_BG)),
+        Style::new().bg(legacy::colors::ROLE_TOOL_BG),
     );
     sheet.define(
         style_ids::ROLE_SYSTEM_BG,
-        Style::new().bg(c(legacy::colors::ROLE_SYSTEM_BG)),
+        Style::new().bg(legacy::colors::ROLE_SYSTEM_BG),
     );
 
     // Status
     sheet.define(
         style_ids::STATUS_SUCCESS,
-        Style::new().fg(c(legacy::colors::STATUS_SUCCESS)),
+        Style::new().fg(legacy::colors::STATUS_SUCCESS),
     );
     sheet.define(
         style_ids::STATUS_WARNING,
-        Style::new().fg(c(legacy::colors::STATUS_WARNING)),
+        Style::new().fg(legacy::colors::STATUS_WARNING),
     );
     sheet.define(
         style_ids::STATUS_ERROR,
-        Style::new().fg(c(legacy::colors::STATUS_ERROR)).bold(),
+        Style::new().fg(legacy::colors::STATUS_ERROR).bold(),
     );
     sheet.define(
         style_ids::STATUS_INFO,
-        Style::new().fg(c(legacy::colors::STATUS_INFO)),
+        Style::new().fg(legacy::colors::STATUS_INFO),
     );
 
     // Interaction states
     sheet.define(
         style_ids::HIGHLIGHT,
-        Style::new().fg(c(palette.bg)).bg(c(palette.accent)).bold(),
+        Style::new().fg(palette.bg).bg(palette.accent).bold(),
     );
     sheet.define(
         style_ids::SELECTED,
         Style::new()
             .bg(if is_dark {
-                c(legacy::colors::BG_HIGHLIGHT)
+                legacy::colors::BG_HIGHLIGHT
             } else {
-                c(ratatui::style::Color::Rgb(220, 224, 236))
+                PackedRgba::rgb(220, 224, 236)
             })
             .bold(),
     );
     sheet.define(
         style_ids::CHIP,
-        Style::new().fg(c(palette.accent_alt)).bold(),
+        Style::new().fg(palette.accent_alt).bold(),
     );
-    sheet.define(style_ids::KBD, Style::new().fg(c(palette.accent)).bold());
+    sheet.define(style_ids::KBD, Style::new().fg(palette.accent).bold());
     sheet.define(
         style_ids::CODE,
         Style::new()
             .fg(if is_dark {
-                c(legacy::colors::TEXT_SECONDARY)
+                legacy::colors::TEXT_SECONDARY
             } else {
-                c(palette.fg)
+                palette.fg
             })
-            .bg(c(palette.surface)),
+            .bg(palette.surface),
     );
 
     // Zebra stripes
     sheet.define(
         style_ids::STRIPE_EVEN,
-        Style::new().bg(c(palette.stripe_even)),
+        Style::new().bg(palette.stripe_even),
     );
     sheet.define(
         style_ids::STRIPE_ODD,
-        Style::new().bg(c(palette.stripe_odd)),
+        Style::new().bg(palette.stripe_odd),
     );
 
     // Gradients (only meaningful for dark presets with truecolor)
     if !flags.no_gradient {
         sheet.define(
             style_ids::GRADIENT_TOP,
-            Style::new().bg(c(legacy::colors::GRADIENT_HEADER_TOP)),
+            Style::new().bg(legacy::colors::GRADIENT_HEADER_TOP),
         );
         sheet.define(
             style_ids::GRADIENT_MID,
-            Style::new().bg(c(legacy::colors::GRADIENT_HEADER_MID)),
+            Style::new().bg(legacy::colors::GRADIENT_HEADER_MID),
         );
         sheet.define(
             style_ids::GRADIENT_BOT,
-            Style::new().bg(c(legacy::colors::GRADIENT_HEADER_BOT)),
+            Style::new().bg(legacy::colors::GRADIENT_HEADER_BOT),
         );
     }
 
     sheet
-}
-
-// ─── Color conversion utilities ─────────────────────────────────────────────
-
-/// Convert a ratatui `Color` to an ftui `Color`.
-pub fn ratatui_to_ftui(color: ratatui::style::Color) -> Color {
-    match color {
-        ratatui::style::Color::Rgb(r, g, b) => Color::rgb(r, g, b),
-        ratatui::style::Color::Black => Color::Ansi16(ftui::Ansi16::Black),
-        ratatui::style::Color::Red => Color::Ansi16(ftui::Ansi16::Red),
-        ratatui::style::Color::Green => Color::Ansi16(ftui::Ansi16::Green),
-        ratatui::style::Color::Yellow => Color::Ansi16(ftui::Ansi16::Yellow),
-        ratatui::style::Color::Blue => Color::Ansi16(ftui::Ansi16::Blue),
-        ratatui::style::Color::Magenta => Color::Ansi16(ftui::Ansi16::Magenta),
-        ratatui::style::Color::Cyan => Color::Ansi16(ftui::Ansi16::Cyan),
-        ratatui::style::Color::White => Color::Ansi16(ftui::Ansi16::White),
-        ratatui::style::Color::Gray => Color::Ansi16(ftui::Ansi16::BrightBlack),
-        ratatui::style::Color::DarkGray => Color::Ansi16(ftui::Ansi16::BrightBlack),
-        ratatui::style::Color::LightRed => Color::Ansi16(ftui::Ansi16::BrightRed),
-        ratatui::style::Color::LightGreen => Color::Ansi16(ftui::Ansi16::BrightGreen),
-        ratatui::style::Color::LightBlue => Color::Ansi16(ftui::Ansi16::BrightBlue),
-        ratatui::style::Color::LightYellow => Color::Ansi16(ftui::Ansi16::BrightYellow),
-        ratatui::style::Color::LightMagenta => Color::Ansi16(ftui::Ansi16::BrightMagenta),
-        ratatui::style::Color::LightCyan => Color::Ansi16(ftui::Ansi16::BrightCyan),
-        ratatui::style::Color::Indexed(idx) => Color::Ansi256(idx),
-        _ => Color::rgb(128, 128, 128), // fallback
-    }
-}
-
-/// Convert a ratatui `Color` to an ftui `PackedRgba` (for StyleSheet use).
-fn ratatui_to_ftui_packed(color: ratatui::style::Color) -> ftui::render::cell::PackedRgba {
-    match color {
-        ratatui::style::Color::Rgb(r, g, b) => ftui::render::cell::PackedRgba::rgb(r, g, b),
-        other => {
-            let ftui_color = ratatui_to_ftui(other);
-            let rgb = ftui_color.to_rgb();
-            ftui::render::cell::PackedRgba::rgb(rgb.r, rgb.g, rgb.b)
-        }
-    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -830,9 +789,9 @@ mod tests {
     }
 
     #[test]
-    fn ratatui_rgb_round_trips() {
-        let orig = ratatui::style::Color::Rgb(42, 84, 168);
-        let ftui_color = ratatui_to_ftui(orig);
+    fn packed_rgba_to_color_round_trips() {
+        let orig = PackedRgba::rgb(42, 84, 168);
+        let ftui_color: Color = orig.into();
         let rgb = ftui_color.to_rgb();
         assert_eq!(rgb.r, 42);
         assert_eq!(rgb.g, 84);

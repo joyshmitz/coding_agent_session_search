@@ -7,199 +7,200 @@
 //! - High contrast where it matters (text legibility)
 //! - Subtle agent differentiation via tinted backgrounds
 
-use ratatui::style::{Color, Modifier, Style};
+use ftui::render::cell::PackedRgba;
+use ftui::Style;
 
 /// Premium color palette inspired by modern design systems.
 /// Uses low-saturation colors for comfort with refined accents for highlights.
 pub mod colors {
-    use ratatui::style::Color;
+    use ftui::render::cell::PackedRgba as Color;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // BASE COLORS - The foundation of the UI
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Deep background - primary canvas color
-    pub const BG_DEEP: Color = Color::Rgb(26, 27, 38); // #1a1b26
+    pub const BG_DEEP: Color = Color::rgb(26, 27, 38); // #1a1b26
 
     /// Elevated surface - cards, modals, popups
-    pub const BG_SURFACE: Color = Color::Rgb(36, 40, 59); // #24283b
+    pub const BG_SURFACE: Color = Color::rgb(36, 40, 59); // #24283b
 
     /// Subtle surface - hover states, selected items
-    pub const BG_HIGHLIGHT: Color = Color::Rgb(41, 46, 66); // #292e42
+    pub const BG_HIGHLIGHT: Color = Color::rgb(41, 46, 66); // #292e42
 
     /// Border color - subtle separators
-    pub const BORDER: Color = Color::Rgb(59, 66, 97); // #3b4261
+    pub const BORDER: Color = Color::rgb(59, 66, 97); // #3b4261
 
     /// Border accent - focused/active elements
-    pub const BORDER_FOCUS: Color = Color::Rgb(125, 145, 200); // #7d91c8
+    pub const BORDER_FOCUS: Color = Color::rgb(125, 145, 200); // #7d91c8
 
     // ═══════════════════════════════════════════════════════════════════════════
     // TEXT COLORS - Hierarchical text styling
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Primary text - headings, important content
-    pub const TEXT_PRIMARY: Color = Color::Rgb(192, 202, 245); // #c0caf5
+    pub const TEXT_PRIMARY: Color = Color::rgb(192, 202, 245); // #c0caf5
 
     /// Secondary text - body content
-    pub const TEXT_SECONDARY: Color = Color::Rgb(169, 177, 214); // #a9b1d6
+    pub const TEXT_SECONDARY: Color = Color::rgb(169, 177, 214); // #a9b1d6
 
     /// Muted text - hints, placeholders, timestamps
     /// Lightened from original Tokyo Night #565f89 to meet WCAG AA-large (3:1) contrast
-    pub const TEXT_MUTED: Color = Color::Rgb(105, 114, 158); // #696e9e (WCAG AA-large compliant)
+    pub const TEXT_MUTED: Color = Color::rgb(105, 114, 158); // #696e9e (WCAG AA-large compliant)
 
     /// Disabled/inactive text
-    pub const TEXT_DISABLED: Color = Color::Rgb(68, 75, 106); // #444b6a
+    pub const TEXT_DISABLED: Color = Color::rgb(68, 75, 106); // #444b6a
 
     // ═══════════════════════════════════════════════════════════════════════════
     // ACCENT COLORS - Brand and interaction highlights
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Primary accent - main actions, links, focus states
-    pub const ACCENT_PRIMARY: Color = Color::Rgb(122, 162, 247); // #7aa2f7
+    pub const ACCENT_PRIMARY: Color = Color::rgb(122, 162, 247); // #7aa2f7
 
     /// Secondary accent - complementary highlights
-    pub const ACCENT_SECONDARY: Color = Color::Rgb(187, 154, 247); // #bb9af7
+    pub const ACCENT_SECONDARY: Color = Color::rgb(187, 154, 247); // #bb9af7
 
     /// Tertiary accent - subtle highlights
-    pub const ACCENT_TERTIARY: Color = Color::Rgb(125, 207, 255); // #7dcfff
+    pub const ACCENT_TERTIARY: Color = Color::rgb(125, 207, 255); // #7dcfff
 
     // ═══════════════════════════════════════════════════════════════════════════
     // SEMANTIC COLORS - Role-based coloring (muted versions)
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// User messages - soft sage green
-    pub const ROLE_USER: Color = Color::Rgb(158, 206, 106); // #9ece6a
+    pub const ROLE_USER: Color = Color::rgb(158, 206, 106); // #9ece6a
 
     /// Agent/Assistant messages - matches primary accent
-    pub const ROLE_AGENT: Color = Color::Rgb(122, 162, 247); // #7aa2f7
+    pub const ROLE_AGENT: Color = Color::rgb(122, 162, 247); // #7aa2f7
 
     /// Tool invocations - warm peach
-    pub const ROLE_TOOL: Color = Color::Rgb(255, 158, 100); // #ff9e64
+    pub const ROLE_TOOL: Color = Color::rgb(255, 158, 100); // #ff9e64
 
     /// System messages - soft amber
-    pub const ROLE_SYSTEM: Color = Color::Rgb(224, 175, 104); // #e0af68
+    pub const ROLE_SYSTEM: Color = Color::rgb(224, 175, 104); // #e0af68
 
     // ═══════════════════════════════════════════════════════════════════════════
     // STATUS COLORS - Feedback and state indication
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Success states
-    pub const STATUS_SUCCESS: Color = Color::Rgb(115, 218, 202); // #73daca
+    pub const STATUS_SUCCESS: Color = Color::rgb(115, 218, 202); // #73daca
 
     /// Warning states
-    pub const STATUS_WARNING: Color = Color::Rgb(224, 175, 104); // #e0af68
+    pub const STATUS_WARNING: Color = Color::rgb(224, 175, 104); // #e0af68
 
     /// Error states
-    pub const STATUS_ERROR: Color = Color::Rgb(247, 118, 142); // #f7768e
+    pub const STATUS_ERROR: Color = Color::rgb(247, 118, 142); // #f7768e
 
     /// Info states
-    pub const STATUS_INFO: Color = Color::Rgb(125, 207, 255); // #7dcfff
+    pub const STATUS_INFO: Color = Color::rgb(125, 207, 255); // #7dcfff
 
     // ═══════════════════════════════════════════════════════════════════════════
     // AGENT-SPECIFIC TINTS - Distinct background variations per agent
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Claude Code - distinct blue tint
-    pub const AGENT_CLAUDE_BG: Color = Color::Rgb(24, 30, 52); // #181e34 - blue
+    pub const AGENT_CLAUDE_BG: Color = Color::rgb(24, 30, 52); // #181e34 - blue
 
     /// Codex - distinct green tint
-    pub const AGENT_CODEX_BG: Color = Color::Rgb(22, 38, 32); // #162620 - green
+    pub const AGENT_CODEX_BG: Color = Color::rgb(22, 38, 32); // #162620 - green
 
     /// Cline - distinct cyan tint
-    pub const AGENT_CLINE_BG: Color = Color::Rgb(20, 34, 42); // #14222a - cyan
+    pub const AGENT_CLINE_BG: Color = Color::rgb(20, 34, 42); // #14222a - cyan
 
     /// Gemini - distinct purple tint
-    pub const AGENT_GEMINI_BG: Color = Color::Rgb(34, 24, 48); // #221830 - purple
+    pub const AGENT_GEMINI_BG: Color = Color::rgb(34, 24, 48); // #221830 - purple
 
     /// Amp - distinct warm/orange tint
-    pub const AGENT_AMP_BG: Color = Color::Rgb(42, 28, 24); // #2a1c18 - warm
+    pub const AGENT_AMP_BG: Color = Color::rgb(42, 28, 24); // #2a1c18 - warm
 
     /// Aider - distinct teal tint
-    pub const AGENT_AIDER_BG: Color = Color::Rgb(20, 36, 36); // #142424 - teal
+    pub const AGENT_AIDER_BG: Color = Color::rgb(20, 36, 36); // #142424 - teal
 
     /// Cursor - distinct magenta tint
-    pub const AGENT_CURSOR_BG: Color = Color::Rgb(38, 24, 38); // #261826 - magenta
+    pub const AGENT_CURSOR_BG: Color = Color::rgb(38, 24, 38); // #261826 - magenta
 
     /// ChatGPT - distinct emerald tint
-    pub const AGENT_CHATGPT_BG: Color = Color::Rgb(20, 38, 28); // #14261c - emerald
+    pub const AGENT_CHATGPT_BG: Color = Color::rgb(20, 38, 28); // #14261c - emerald
 
     /// `OpenCode` - neutral gray
-    pub const AGENT_OPENCODE_BG: Color = Color::Rgb(32, 32, 36); // #202024 - neutral
+    pub const AGENT_OPENCODE_BG: Color = Color::rgb(32, 32, 36); // #202024 - neutral
 
     // ═══════════════════════════════════════════════════════════════════════════
     // ROLE-AWARE BACKGROUND TINTS - Subtle backgrounds per message type
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// User message background - subtle green tint
-    pub const ROLE_USER_BG: Color = Color::Rgb(26, 32, 30); // #1a201e
+    pub const ROLE_USER_BG: Color = Color::rgb(26, 32, 30); // #1a201e
 
     /// Assistant/agent message background - subtle blue tint
-    pub const ROLE_AGENT_BG: Color = Color::Rgb(26, 28, 36); // #1a1c24
+    pub const ROLE_AGENT_BG: Color = Color::rgb(26, 28, 36); // #1a1c24
 
     /// Tool invocation background - subtle orange/warm tint
-    pub const ROLE_TOOL_BG: Color = Color::Rgb(32, 28, 26); // #201c1a
+    pub const ROLE_TOOL_BG: Color = Color::rgb(32, 28, 26); // #201c1a
 
     /// System message background - subtle amber tint
-    pub const ROLE_SYSTEM_BG: Color = Color::Rgb(32, 30, 26); // #201e1a
+    pub const ROLE_SYSTEM_BG: Color = Color::rgb(32, 30, 26); // #201e1a
 
     // ═══════════════════════════════════════════════════════════════════════════
     // GRADIENT SIMULATION COLORS - Multi-shade for depth effects
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Header gradient top - darkest shade
-    pub const GRADIENT_HEADER_TOP: Color = Color::Rgb(22, 24, 32); // #161820
+    pub const GRADIENT_HEADER_TOP: Color = Color::rgb(22, 24, 32); // #161820
 
     /// Header gradient middle - mid shade
-    pub const GRADIENT_HEADER_MID: Color = Color::Rgb(30, 32, 44); // #1e202c
+    pub const GRADIENT_HEADER_MID: Color = Color::rgb(30, 32, 44); // #1e202c
 
     /// Header gradient bottom - lightest shade
-    pub const GRADIENT_HEADER_BOT: Color = Color::Rgb(36, 40, 54); // #242836
+    pub const GRADIENT_HEADER_BOT: Color = Color::rgb(36, 40, 54); // #242836
 
     /// Pill gradient left
-    pub const GRADIENT_PILL_LEFT: Color = Color::Rgb(50, 56, 80); // #323850
+    pub const GRADIENT_PILL_LEFT: Color = Color::rgb(50, 56, 80); // #323850
 
     /// Pill gradient center
-    pub const GRADIENT_PILL_CENTER: Color = Color::Rgb(60, 68, 96); // #3c4460
+    pub const GRADIENT_PILL_CENTER: Color = Color::rgb(60, 68, 96); // #3c4460
 
     /// Pill gradient right
-    pub const GRADIENT_PILL_RIGHT: Color = Color::Rgb(50, 56, 80); // #323850
+    pub const GRADIENT_PILL_RIGHT: Color = Color::rgb(50, 56, 80); // #323850
 
     // ═══════════════════════════════════════════════════════════════════════════
     // BORDER VARIANTS - For adaptive width styling
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Subtle border - for narrow terminals
-    pub const BORDER_MINIMAL: Color = Color::Rgb(45, 50, 72); // #2d3248
+    pub const BORDER_MINIMAL: Color = Color::rgb(45, 50, 72); // #2d3248
 
     /// Standard border - normal terminals
-    pub const BORDER_STANDARD: Color = Color::Rgb(59, 66, 97); // #3b4261 (same as BORDER)
+    pub const BORDER_STANDARD: Color = Color::rgb(59, 66, 97); // #3b4261 (same as BORDER)
 
     /// Emphasized border - for wide terminals
-    pub const BORDER_EMPHASIZED: Color = Color::Rgb(75, 85, 120); // #4b5578
+    pub const BORDER_EMPHASIZED: Color = Color::rgb(75, 85, 120); // #4b5578
 }
 
 /// Complete styling for a message role (user, assistant, tool, system).
 #[derive(Clone, Copy)]
 pub struct RoleTheme {
     /// Foreground (text) color
-    pub fg: Color,
+    pub fg: PackedRgba,
     /// Background tint (subtle)
-    pub bg: Color,
+    pub bg: PackedRgba,
     /// Border/accent color
-    pub border: Color,
+    pub border: PackedRgba,
     /// Badge/indicator color
-    pub badge: Color,
+    pub badge: PackedRgba,
 }
 
 /// Gradient shades for simulating depth effects in headers/pills.
 #[derive(Clone, Copy)]
 pub struct GradientShades {
     /// Darkest shade (top/edges)
-    pub dark: Color,
+    pub dark: PackedRgba,
     /// Mid-tone shade
-    pub mid: Color,
+    pub mid: PackedRgba,
     /// Lightest shade (center/bottom)
-    pub light: Color,
+    pub light: PackedRgba,
 }
 
 impl GradientShades {
@@ -224,9 +225,9 @@ impl GradientShades {
     /// Create styles for each shade
     pub fn styles(&self) -> (Style, Style, Style) {
         (
-            Style::default().bg(self.dark),
-            Style::default().bg(self.mid),
-            Style::default().bg(self.light),
+            Style::new().bg(self.dark),
+            Style::new().bg(self.mid),
+            Style::new().bg(self.light),
         )
     }
 }
@@ -255,7 +256,7 @@ impl TerminalWidth {
     }
 
     /// Get the appropriate border color for this width
-    pub fn border_color(self) -> Color {
+    pub fn border_color(self) -> PackedRgba {
         match self {
             Self::Narrow => colors::BORDER_MINIMAL,
             Self::Normal => colors::BORDER_STANDARD,
@@ -265,7 +266,7 @@ impl TerminalWidth {
 
     /// Get border style for this width
     pub fn border_style(self) -> Style {
-        Style::default().fg(self.border_color())
+        Style::new().fg(self.border_color())
     }
 
     /// Should we show decorative elements at this width?
@@ -285,7 +286,7 @@ pub struct AdaptiveBorders {
     /// Current terminal width classification
     pub width_class: TerminalWidth,
     /// Border color
-    pub color: Color,
+    pub color: PackedRgba,
     /// Border style
     pub style: Style,
     /// Use double borders for emphasis
@@ -302,7 +303,7 @@ impl AdaptiveBorders {
         Self {
             width_class,
             color,
-            style: Style::default().fg(color),
+            style: Style::new().fg(color),
             use_double: matches!(width_class, TerminalWidth::Wide),
             show_corners: width_class.show_decorations(),
         }
@@ -312,53 +313,53 @@ impl AdaptiveBorders {
     pub fn focused(cols: u16) -> Self {
         let mut borders = Self::for_width(cols);
         borders.color = colors::BORDER_FOCUS;
-        borders.style = Style::default().fg(colors::BORDER_FOCUS);
+        borders.style = Style::new().fg(colors::BORDER_FOCUS);
         borders
     }
 }
 
 #[derive(Clone, Copy)]
 pub struct PaneTheme {
-    pub bg: Color,
-    pub fg: Color,
-    pub accent: Color,
+    pub bg: PackedRgba,
+    pub fg: PackedRgba,
+    pub accent: PackedRgba,
 }
 
 #[derive(Clone, Copy)]
 pub struct ThemePalette {
-    pub accent: Color,
-    pub accent_alt: Color,
-    pub bg: Color,
-    pub fg: Color,
-    pub surface: Color,
-    pub hint: Color,
-    pub border: Color,
-    pub user: Color,
-    pub agent: Color,
-    pub tool: Color,
-    pub system: Color,
+    pub accent: PackedRgba,
+    pub accent_alt: PackedRgba,
+    pub bg: PackedRgba,
+    pub fg: PackedRgba,
+    pub surface: PackedRgba,
+    pub hint: PackedRgba,
+    pub border: PackedRgba,
+    pub user: PackedRgba,
+    pub agent: PackedRgba,
+    pub tool: PackedRgba,
+    pub system: PackedRgba,
     /// Alternating stripe colors for zebra-striping results (sux.6.3)
-    pub stripe_even: Color,
-    pub stripe_odd: Color,
+    pub stripe_even: PackedRgba,
+    pub stripe_odd: PackedRgba,
 }
 
 impl ThemePalette {
     /// Light theme - clean, minimal, professional
     pub fn light() -> Self {
         Self {
-            accent: Color::Rgb(47, 107, 231),       // Rich blue
-            accent_alt: Color::Rgb(124, 93, 198),   // Purple
-            bg: Color::Rgb(250, 250, 252),          // Off-white
-            fg: Color::Rgb(36, 41, 46),             // Near-black
-            surface: Color::Rgb(240, 241, 245),     // Light gray
-            hint: Color::Rgb(125, 134, 144),        // Medium gray (higher contrast)
-            border: Color::Rgb(216, 222, 228),      // Border gray
-            user: Color::Rgb(45, 138, 72),          // Forest green
-            agent: Color::Rgb(47, 107, 231),        // Rich blue
-            tool: Color::Rgb(207, 107, 44),         // Warm orange
-            system: Color::Rgb(177, 133, 41),       // Amber
-            stripe_even: Color::Rgb(250, 250, 252), // Same as bg
-            stripe_odd: Color::Rgb(240, 241, 245),  // Slightly darker
+            accent: PackedRgba::rgb(47, 107, 231),       // Rich blue
+            accent_alt: PackedRgba::rgb(124, 93, 198),   // Purple
+            bg: PackedRgba::rgb(250, 250, 252),          // Off-white
+            fg: PackedRgba::rgb(36, 41, 46),             // Near-black
+            surface: PackedRgba::rgb(240, 241, 245),     // Light gray
+            hint: PackedRgba::rgb(125, 134, 144),        // Medium gray (higher contrast)
+            border: PackedRgba::rgb(216, 222, 228),      // Border gray
+            user: PackedRgba::rgb(45, 138, 72),          // Forest green
+            agent: PackedRgba::rgb(47, 107, 231),        // Rich blue
+            tool: PackedRgba::rgb(207, 107, 44),         // Warm orange
+            system: PackedRgba::rgb(177, 133, 41),       // Amber
+            stripe_even: PackedRgba::rgb(250, 250, 252), // Same as bg
+            stripe_odd: PackedRgba::rgb(240, 241, 245),  // Slightly darker
         }
     }
 
@@ -377,40 +378,40 @@ impl ThemePalette {
             tool: colors::ROLE_TOOL,
             system: colors::ROLE_SYSTEM,
             stripe_even: colors::BG_DEEP,       // #1a1b26
-            stripe_odd: Color::Rgb(30, 32, 48), // #1e2030 - slightly lighter
+            stripe_odd: PackedRgba::rgb(30, 32, 48), // #1e2030 - slightly lighter
         }
     }
 
     /// Title style - accent colored with bold modifier
     pub fn title(self) -> Style {
-        Style::default()
+        Style::new()
             .fg(self.accent)
-            .add_modifier(Modifier::BOLD)
+            .bold()
     }
 
     /// Subtle title style - less prominent headers
     pub fn title_subtle(self) -> Style {
-        Style::default().fg(self.fg).add_modifier(Modifier::BOLD)
+        Style::new().fg(self.fg).bold()
     }
 
     /// Hint text style - for secondary/muted information
     pub fn hint_style(self) -> Style {
-        Style::default().fg(self.hint)
+        Style::new().fg(self.hint)
     }
 
     /// Border style - for unfocused elements
     pub fn border_style(self) -> Style {
-        Style::default().fg(self.border)
+        Style::new().fg(self.border)
     }
 
     /// Focused border style - for active elements
     pub fn border_focus_style(self) -> Style {
-        Style::default().fg(colors::BORDER_FOCUS)
+        Style::new().fg(colors::BORDER_FOCUS)
     }
 
     /// Surface style - for cards, modals, elevated content
     pub fn surface_style(self) -> Style {
-        Style::default().bg(self.surface)
+        Style::new().bg(self.surface)
     }
 
     /// Per-agent pane colors - distinct tinted backgrounds with consistent text colors.
@@ -428,11 +429,11 @@ impl ThemePalette {
             "cline" => (colors::AGENT_CLINE_BG, colors::ACCENT_TERTIARY),                  // Cyan
             "gemini" | "gemini_cli" => (colors::AGENT_GEMINI_BG, colors::ACCENT_SECONDARY), // Purple
             "amp" => (colors::AGENT_AMP_BG, colors::STATUS_ERROR), // Orange/Red
-            "aider" => (colors::AGENT_AIDER_BG, Color::Rgb(64, 224, 208)), // Turquoise accent
-            "cursor" => (colors::AGENT_CURSOR_BG, Color::Rgb(236, 72, 153)), // Pink accent
-            "chatgpt" => (colors::AGENT_CHATGPT_BG, Color::Rgb(16, 163, 127)), // ChatGPT green
+            "aider" => (colors::AGENT_AIDER_BG, PackedRgba::rgb(64, 224, 208)), // Turquoise accent
+            "cursor" => (colors::AGENT_CURSOR_BG, PackedRgba::rgb(236, 72, 153)), // Pink accent
+            "chatgpt" => (colors::AGENT_CHATGPT_BG, PackedRgba::rgb(16, 163, 127)), // ChatGPT green
             "opencode" => (colors::AGENT_OPENCODE_BG, colors::ROLE_USER), // Neutral/sage
-            "pi_agent" => (colors::AGENT_CODEX_BG, Color::Rgb(255, 140, 0)), // Orange for pi
+            "pi_agent" => (colors::AGENT_CODEX_BG, PackedRgba::rgb(255, 140, 0)), // Orange for pi
             _ => (colors::BG_DEEP, colors::ACCENT_PRIMARY),
         };
 
@@ -470,7 +471,7 @@ impl ThemePalette {
             "system" => self.system,
             _ => self.hint,
         };
-        Style::default().fg(color)
+        Style::new().fg(color)
     }
 
     /// Get a complete `RoleTheme` for a message role with full styling options.
@@ -535,22 +536,22 @@ impl ThemePalette {
     /// Highlighted text style - for search matches
     /// Uses high-contrast background with theme-aware foreground for visibility
     pub fn highlight_style(self) -> Style {
-        Style::default()
+        Style::new()
             .fg(self.bg) // Dark text on light bg, light text on dark bg
             .bg(self.accent) // Accent color background for high visibility
-            .add_modifier(Modifier::BOLD)
+            .bold()
     }
 
     /// Selected item style - for list selections
     pub fn selected_style(self) -> Style {
-        Style::default()
+        Style::new()
             .bg(colors::BG_HIGHLIGHT)
-            .add_modifier(Modifier::BOLD)
+            .bold()
     }
 
     /// Code block background style
     pub fn code_style(self) -> Style {
-        Style::default()
+        Style::new()
             .bg(colors::BG_SURFACE)
             .fg(colors::TEXT_SECONDARY)
     }
@@ -562,16 +563,16 @@ impl ThemePalette {
 
 /// Creates a subtle badge/chip style for filter indicators
 pub fn chip_style(palette: ThemePalette) -> Style {
-    Style::default()
+    Style::new()
         .fg(palette.accent_alt)
-        .add_modifier(Modifier::BOLD)
+        .bold()
 }
 
 /// Creates a keyboard shortcut style (for help text)
 pub fn kbd_style(palette: ThemePalette) -> Style {
-    Style::default()
+    Style::new()
         .fg(palette.accent)
-        .add_modifier(Modifier::BOLD)
+        .bold()
 }
 
 /// Creates style for score indicators based on magnitude
@@ -584,15 +585,14 @@ pub fn score_style(score: f32, palette: ThemePalette) -> Style {
         palette.hint
     };
 
-    let modifier = if score >= 8.0 {
-        Modifier::BOLD
-    } else if score >= 5.0 {
-        Modifier::empty()
+    let base = Style::new().fg(color);
+    if score >= 8.0 {
+        base.bold()
+    } else if score < 5.0 {
+        base.dim()
     } else {
-        Modifier::DIM
-    };
-
-    Style::default().fg(color).add_modifier(modifier)
+        base
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -601,28 +601,8 @@ pub fn score_style(score: f32, palette: ThemePalette) -> Style {
 
 /// Calculate relative luminance of an RGB color per WCAG 2.1.
 /// Returns a value from 0.0 (black) to 1.0 (white).
-pub fn relative_luminance(color: Color) -> f64 {
-    let (r, g, b) = match color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        // For non-RGB colors, approximate with reasonable values
-        Color::Black => (0, 0, 0),
-        Color::White => (255, 255, 255),
-        Color::Red => (255, 0, 0),
-        Color::Green => (0, 255, 0),
-        Color::Blue => (0, 0, 255),
-        Color::Yellow => (255, 255, 0),
-        Color::Magenta => (255, 0, 255),
-        Color::Cyan => (0, 255, 255),
-        Color::Gray => (128, 128, 128),
-        Color::DarkGray => (64, 64, 64),
-        Color::LightRed => (255, 128, 128),
-        Color::LightGreen => (128, 255, 128),
-        Color::LightBlue => (128, 128, 255),
-        Color::LightYellow => (255, 255, 128),
-        Color::LightMagenta => (255, 128, 255),
-        Color::LightCyan => (128, 255, 255),
-        _ => (128, 128, 128), // Default gray for indexed colors
-    };
+pub fn relative_luminance(color: PackedRgba) -> f64 {
+    let (r, g, b) = (color.r(), color.g(), color.b());
 
     fn linearize(c: u8) -> f64 {
         let c = f64::from(c) / 255.0;
@@ -642,7 +622,7 @@ pub fn relative_luminance(color: Color) -> f64 {
 
 /// Calculate WCAG contrast ratio between two colors.
 /// Returns a value from 1.0 (no contrast) to 21.0 (black/white).
-pub fn contrast_ratio(fg: Color, bg: Color) -> f64 {
+pub fn contrast_ratio(fg: PackedRgba, bg: PackedRgba) -> f64 {
     let lum_fg = relative_luminance(fg);
     let lum_bg = relative_luminance(bg);
     let (lighter, darker) = if lum_fg > lum_bg {
@@ -705,13 +685,13 @@ impl ContrastLevel {
 }
 
 /// Check contrast compliance between foreground and background colors.
-pub fn check_contrast(fg: Color, bg: Color) -> ContrastLevel {
+pub fn check_contrast(fg: PackedRgba, bg: PackedRgba) -> ContrastLevel {
     ContrastLevel::from_ratio(contrast_ratio(fg, bg))
 }
 
 /// Ensure a color meets minimum contrast against a background.
 /// If the color doesn't meet the requirement, returns a suggested alternative.
-pub fn ensure_contrast(fg: Color, bg: Color, min_level: ContrastLevel) -> Color {
+pub fn ensure_contrast(fg: PackedRgba, bg: PackedRgba, min_level: ContrastLevel) -> PackedRgba {
     let level = check_contrast(fg, bg);
     if level.meets(min_level) {
         return fg;
@@ -721,10 +701,10 @@ pub fn ensure_contrast(fg: Color, bg: Color, min_level: ContrastLevel) -> Color 
     let bg_lum = relative_luminance(bg);
     if bg_lum > 0.5 {
         // Light background, use black for maximum contrast
-        Color::Rgb(0, 0, 0)
+        PackedRgba::BLACK
     } else {
         // Dark background, use white for maximum contrast
-        Color::Rgb(255, 255, 255)
+        PackedRgba::WHITE
     }
 }
 
@@ -818,19 +798,19 @@ impl ThemePalette {
     pub fn catppuccin() -> Self {
         Self {
             // Catppuccin Mocha palette
-            accent: Color::Rgb(137, 180, 250),     // Blue
-            accent_alt: Color::Rgb(203, 166, 247), // Mauve
-            bg: Color::Rgb(30, 30, 46),            // Base
-            fg: Color::Rgb(205, 214, 244),         // Text
-            surface: Color::Rgb(49, 50, 68),       // Surface0
-            hint: Color::Rgb(127, 132, 156),       // Overlay1
-            border: Color::Rgb(69, 71, 90),        // Surface1
-            user: Color::Rgb(166, 227, 161),       // Green
-            agent: Color::Rgb(137, 180, 250),      // Blue
-            tool: Color::Rgb(250, 179, 135),       // Peach
-            system: Color::Rgb(249, 226, 175),     // Yellow
-            stripe_even: Color::Rgb(30, 30, 46),   // Base
-            stripe_odd: Color::Rgb(36, 36, 54),    // Slightly lighter
+            accent: PackedRgba::rgb(137, 180, 250),     // Blue
+            accent_alt: PackedRgba::rgb(203, 166, 247), // Mauve
+            bg: PackedRgba::rgb(30, 30, 46),            // Base
+            fg: PackedRgba::rgb(205, 214, 244),         // Text
+            surface: PackedRgba::rgb(49, 50, 68),       // Surface0
+            hint: PackedRgba::rgb(127, 132, 156),       // Overlay1
+            border: PackedRgba::rgb(69, 71, 90),        // Surface1
+            user: PackedRgba::rgb(166, 227, 161),       // Green
+            agent: PackedRgba::rgb(137, 180, 250),      // Blue
+            tool: PackedRgba::rgb(250, 179, 135),       // Peach
+            system: PackedRgba::rgb(249, 226, 175),     // Yellow
+            stripe_even: PackedRgba::rgb(30, 30, 46),   // Base
+            stripe_odd: PackedRgba::rgb(36, 36, 54),    // Slightly lighter
         }
     }
 
@@ -839,19 +819,19 @@ impl ThemePalette {
     pub fn dracula() -> Self {
         Self {
             // Dracula palette
-            accent: Color::Rgb(189, 147, 249),     // Purple
-            accent_alt: Color::Rgb(255, 121, 198), // Pink
-            bg: Color::Rgb(40, 42, 54),            // Background
-            fg: Color::Rgb(248, 248, 242),         // Foreground
-            surface: Color::Rgb(68, 71, 90),       // Current Line
-            hint: Color::Rgb(155, 165, 200), // Lightened from Dracula comment for WCAG AA-large on surface
-            border: Color::Rgb(68, 71, 90),  // Current Line
-            user: Color::Rgb(80, 250, 123),  // Green
-            agent: Color::Rgb(189, 147, 249), // Purple
-            tool: Color::Rgb(255, 184, 108), // Orange
-            system: Color::Rgb(241, 250, 140), // Yellow
-            stripe_even: Color::Rgb(40, 42, 54), // Background
-            stripe_odd: Color::Rgb(48, 50, 64), // Slightly lighter
+            accent: PackedRgba::rgb(189, 147, 249),     // Purple
+            accent_alt: PackedRgba::rgb(255, 121, 198), // Pink
+            bg: PackedRgba::rgb(40, 42, 54),            // Background
+            fg: PackedRgba::rgb(248, 248, 242),         // Foreground
+            surface: PackedRgba::rgb(68, 71, 90),       // Current Line
+            hint: PackedRgba::rgb(155, 165, 200), // Lightened from Dracula comment for WCAG AA-large on surface
+            border: PackedRgba::rgb(68, 71, 90),  // Current Line
+            user: PackedRgba::rgb(80, 250, 123),  // Green
+            agent: PackedRgba::rgb(189, 147, 249), // Purple
+            tool: PackedRgba::rgb(255, 184, 108), // Orange
+            system: PackedRgba::rgb(241, 250, 140), // Yellow
+            stripe_even: PackedRgba::rgb(40, 42, 54), // Background
+            stripe_odd: PackedRgba::rgb(48, 50, 64), // Slightly lighter
         }
     }
 
@@ -860,19 +840,19 @@ impl ThemePalette {
     pub fn nord() -> Self {
         Self {
             // Nord palette
-            accent: Color::Rgb(136, 192, 208), // Nord8 (frost cyan)
-            accent_alt: Color::Rgb(180, 142, 173), // Nord15 (aurora purple)
-            bg: Color::Rgb(46, 52, 64),        // Nord0 (polar night)
-            fg: Color::Rgb(236, 239, 244),     // Nord6 (snow storm)
-            surface: Color::Rgb(59, 66, 82),   // Nord1
-            hint: Color::Rgb(145, 155, 180),   // Lightened from Nord3 for WCAG AA-large on surface
-            border: Color::Rgb(67, 76, 94),    // Nord2
-            user: Color::Rgb(163, 190, 140),   // Nord14 (aurora green)
-            agent: Color::Rgb(136, 192, 208),  // Nord8 (frost cyan)
-            tool: Color::Rgb(208, 135, 112),   // Nord12 (aurora orange)
-            system: Color::Rgb(235, 203, 139), // Nord13 (aurora yellow)
-            stripe_even: Color::Rgb(46, 52, 64), // Nord0
-            stripe_odd: Color::Rgb(52, 58, 72), // Slightly lighter
+            accent: PackedRgba::rgb(136, 192, 208), // Nord8 (frost cyan)
+            accent_alt: PackedRgba::rgb(180, 142, 173), // Nord15 (aurora purple)
+            bg: PackedRgba::rgb(46, 52, 64),        // Nord0 (polar night)
+            fg: PackedRgba::rgb(236, 239, 244),     // Nord6 (snow storm)
+            surface: PackedRgba::rgb(59, 66, 82),   // Nord1
+            hint: PackedRgba::rgb(145, 155, 180),   // Lightened from Nord3 for WCAG AA-large on surface
+            border: PackedRgba::rgb(67, 76, 94),    // Nord2
+            user: PackedRgba::rgb(163, 190, 140),   // Nord14 (aurora green)
+            agent: PackedRgba::rgb(136, 192, 208),  // Nord8 (frost cyan)
+            tool: PackedRgba::rgb(208, 135, 112),   // Nord12 (aurora orange)
+            system: PackedRgba::rgb(235, 203, 139), // Nord13 (aurora yellow)
+            stripe_even: PackedRgba::rgb(46, 52, 64), // Nord0
+            stripe_odd: PackedRgba::rgb(52, 58, 72), // Slightly lighter
         }
     }
 
@@ -883,19 +863,19 @@ impl ThemePalette {
     pub fn high_contrast() -> Self {
         Self {
             // High contrast palette - pure black background, white text
-            accent: Color::Rgb(0, 191, 255), // Bright cyan - high visibility
-            accent_alt: Color::Rgb(255, 105, 180), // Hot pink - distinct secondary
-            bg: Color::Rgb(0, 0, 0),         // Pure black
-            fg: Color::Rgb(255, 255, 255),   // Pure white
-            surface: Color::Rgb(28, 28, 28), // Very dark gray for elevation
-            hint: Color::Rgb(180, 180, 180), // Light gray - still readable
-            border: Color::Rgb(255, 255, 255), // White borders for clear separation
-            user: Color::Rgb(0, 255, 127),   // Bright spring green
-            agent: Color::Rgb(0, 191, 255),  // Bright cyan (matches accent)
-            tool: Color::Rgb(255, 165, 0),   // Bright orange
-            system: Color::Rgb(255, 255, 0), // Pure yellow
-            stripe_even: Color::Rgb(0, 0, 0), // Pure black
-            stripe_odd: Color::Rgb(24, 24, 24), // Very dark gray
+            accent: PackedRgba::rgb(0, 191, 255), // Bright cyan - high visibility
+            accent_alt: PackedRgba::rgb(255, 105, 180), // Hot pink - distinct secondary
+            bg: PackedRgba::BLACK,                 // Pure black
+            fg: PackedRgba::WHITE,                 // Pure white
+            surface: PackedRgba::rgb(28, 28, 28), // Very dark gray for elevation
+            hint: PackedRgba::rgb(180, 180, 180), // Light gray - still readable
+            border: PackedRgba::WHITE,             // White borders for clear separation
+            user: PackedRgba::rgb(0, 255, 127),   // Bright spring green
+            agent: PackedRgba::rgb(0, 191, 255),  // Bright cyan (matches accent)
+            tool: PackedRgba::rgb(255, 165, 0),   // Bright orange
+            system: PackedRgba::rgb(255, 255, 0), // Pure yellow
+            stripe_even: PackedRgba::BLACK,        // Pure black
+            stripe_odd: PackedRgba::rgb(24, 24, 24), // Very dark gray
         }
     }
 }
@@ -1017,9 +997,9 @@ mod tests {
     fn test_theme_palette_light() {
         let palette = ThemePalette::light();
         // Light theme should have a light background
-        assert_eq!(palette.bg, Color::Rgb(250, 250, 252));
+        assert_eq!(palette.bg, PackedRgba::rgb(250, 250, 252));
         // And dark foreground
-        assert_eq!(palette.fg, Color::Rgb(36, 41, 46));
+        assert_eq!(palette.fg, PackedRgba::rgb(36, 41, 46));
     }
 
     #[test]
@@ -1035,27 +1015,27 @@ mod tests {
     fn test_theme_palette_catppuccin() {
         let palette = ThemePalette::catppuccin();
         // Check specific Catppuccin colors
-        assert_eq!(palette.bg, Color::Rgb(30, 30, 46));
+        assert_eq!(palette.bg, PackedRgba::rgb(30, 30, 46));
     }
 
     #[test]
     fn test_theme_palette_dracula() {
         let palette = ThemePalette::dracula();
-        assert_eq!(palette.bg, Color::Rgb(40, 42, 54));
+        assert_eq!(palette.bg, PackedRgba::rgb(40, 42, 54));
     }
 
     #[test]
     fn test_theme_palette_nord() {
         let palette = ThemePalette::nord();
-        assert_eq!(palette.bg, Color::Rgb(46, 52, 64));
+        assert_eq!(palette.bg, PackedRgba::rgb(46, 52, 64));
     }
 
     #[test]
     fn test_theme_palette_high_contrast() {
         let palette = ThemePalette::high_contrast();
         // High contrast should use pure black and white
-        assert_eq!(palette.bg, Color::Rgb(0, 0, 0));
-        assert_eq!(palette.fg, Color::Rgb(255, 255, 255));
+        assert_eq!(palette.bg, PackedRgba::rgb(0, 0, 0));
+        assert_eq!(palette.fg, PackedRgba::rgb(255, 255, 255));
     }
 
     #[test]
@@ -1134,37 +1114,37 @@ mod tests {
 
     #[test]
     fn test_relative_luminance_black() {
-        let lum = relative_luminance(Color::Rgb(0, 0, 0));
+        let lum = relative_luminance(PackedRgba::rgb(0, 0, 0));
         assert!((lum - 0.0).abs() < 0.001);
     }
 
     #[test]
     fn test_relative_luminance_white() {
-        let lum = relative_luminance(Color::Rgb(255, 255, 255));
+        let lum = relative_luminance(PackedRgba::rgb(255, 255, 255));
         assert!((lum - 1.0).abs() < 0.001);
     }
 
     #[test]
     fn test_relative_luminance_named_colors() {
         // Black should have low luminance
-        let black_lum = relative_luminance(Color::Black);
+        let black_lum = relative_luminance(PackedRgba::BLACK);
         assert!(black_lum < 0.01);
 
         // White should have high luminance
-        let white_lum = relative_luminance(Color::White);
+        let white_lum = relative_luminance(PackedRgba::WHITE);
         assert!(white_lum > 0.99);
     }
 
     #[test]
     fn test_contrast_ratio_black_white() {
-        let ratio = contrast_ratio(Color::Rgb(255, 255, 255), Color::Rgb(0, 0, 0));
+        let ratio = contrast_ratio(PackedRgba::rgb(255, 255, 255), PackedRgba::rgb(0, 0, 0));
         // Maximum contrast is 21:1
         assert!(ratio > 20.0);
     }
 
     #[test]
     fn test_contrast_ratio_same_color() {
-        let ratio = contrast_ratio(Color::Rgb(128, 128, 128), Color::Rgb(128, 128, 128));
+        let ratio = contrast_ratio(PackedRgba::rgb(128, 128, 128), PackedRgba::rgb(128, 128, 128));
         // Same color = 1:1 contrast
         assert!((ratio - 1.0).abs() < 0.001);
     }
@@ -1172,18 +1152,18 @@ mod tests {
     #[test]
     fn test_check_contrast() {
         // High contrast pair
-        let level = check_contrast(Color::Rgb(255, 255, 255), Color::Rgb(0, 0, 0));
+        let level = check_contrast(PackedRgba::rgb(255, 255, 255), PackedRgba::rgb(0, 0, 0));
         assert_eq!(level, ContrastLevel::AAA);
 
         // Low contrast pair (similar grays)
-        let level = check_contrast(Color::Rgb(100, 100, 100), Color::Rgb(120, 120, 120));
+        let level = check_contrast(PackedRgba::rgb(100, 100, 100), PackedRgba::rgb(120, 120, 120));
         assert_eq!(level, ContrastLevel::Fail);
     }
 
     #[test]
     fn test_ensure_contrast_already_sufficient() {
-        let bg = Color::Rgb(0, 0, 0);
-        let fg = Color::Rgb(255, 255, 255);
+        let bg = PackedRgba::rgb(0, 0, 0);
+        let fg = PackedRgba::rgb(255, 255, 255);
         let result = ensure_contrast(fg, bg, ContrastLevel::AA);
         // Should return original since contrast is already good
         assert_eq!(result, fg);
@@ -1294,10 +1274,10 @@ mod tests {
         let palette = ThemePalette::dark();
         let theme = palette.role_theme("user");
         // Verify all fields are set
-        assert_ne!(theme.fg, Color::Reset);
-        assert_ne!(theme.bg, Color::Reset);
-        assert_ne!(theme.border, Color::Reset);
-        assert_ne!(theme.badge, Color::Reset);
+        assert_ne!(theme.fg, PackedRgba::TRANSPARENT);
+        assert_ne!(theme.bg, PackedRgba::TRANSPARENT);
+        assert_ne!(theme.border, PackedRgba::TRANSPARENT);
+        assert_ne!(theme.badge, PackedRgba::TRANSPARENT);
     }
 
     // ==================== PaneTheme tests ====================
@@ -1305,8 +1285,8 @@ mod tests {
     #[test]
     fn test_pane_theme_has_all_fields() {
         let pane = ThemePalette::agent_pane("claude");
-        assert_ne!(pane.fg, Color::Reset);
-        assert_ne!(pane.bg, Color::Reset);
-        assert_ne!(pane.accent, Color::Reset);
+        assert_ne!(pane.fg, PackedRgba::TRANSPARENT);
+        assert_ne!(pane.bg, PackedRgba::TRANSPARENT);
+        assert_ne!(pane.accent, PackedRgba::TRANSPARENT);
     }
 }
