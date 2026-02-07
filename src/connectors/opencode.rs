@@ -267,11 +267,11 @@ impl Connector for OpenCodeConnector {
 
 /// Check if a directory looks like OpenCode storage
 fn looks_like_opencode_storage(path: &std::path::Path) -> bool {
-    let path_str = path.to_string_lossy().to_lowercase();
-    path_str.contains("opencode")
-        || path.join("session").exists()
-        || path.join("message").exists()
-        || path.join("part").exists()
+    // Check for characteristic subdirectories.
+    // We require 'session' and 'message' to be present to confirm this is an OpenCode storage root.
+    // relying on the path name containing "opencode" is too loose and causes shadowing
+    // if the CASS data directory has "opencode" in its name.
+    path.join("session").exists() && path.join("message").exists()
 }
 
 fn session_has_updates(
@@ -555,10 +555,17 @@ mod tests {
     // =====================================================
 
     #[test]
-    fn looks_like_opencode_storage_with_opencode_in_path() {
+    fn looks_like_opencode_storage_requires_subdirs() {
         let dir = TempDir::new().unwrap();
         let opencode_path = dir.path().join("opencode").join("test");
         fs::create_dir_all(&opencode_path).unwrap();
+
+        // Name alone should NOT be enough (prevents shadowing)
+        assert!(!looks_like_opencode_storage(&opencode_path));
+
+        // Adding subdirs makes it valid
+        fs::create_dir_all(opencode_path.join("session")).unwrap();
+        fs::create_dir_all(opencode_path.join("message")).unwrap();
         assert!(looks_like_opencode_storage(&opencode_path));
     }
 

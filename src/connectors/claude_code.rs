@@ -45,12 +45,9 @@ impl Connector for ClaudeCodeConnector {
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         // Use data_root only if it looks like a Claude projects directory (for testing)
         // Otherwise use the default projects_root
-        let looks_like_root = |path: &PathBuf| {
-            path.join("projects").exists()
-                || path
-                    .file_name()
-                    .is_some_and(|n| n.to_str().unwrap_or("").contains("claude"))
-        };
+        // Strict check: require 'projects' subdirectory to avoid shadowing when CASS
+        // data directory has "claude" in its name.
+        let looks_like_root = |path: &PathBuf| path.join("projects").exists();
 
         let roots: Vec<PathBuf> = if ctx.use_default_detection() {
             if looks_like_root(&ctx.data_dir) {
