@@ -41,6 +41,9 @@ pub const JSON_VIEW: &str = "J";
 pub const TOGGLE_SELECT: &str = "Ctrl+X";
 pub const PANE_FILTER: &str = "/";
 
+// Theme editor
+pub const THEME_EDITOR: &str = "Ctrl+Shift+T";
+
 // Inspector
 pub const INSPECTOR: &str = "Ctrl+Shift+I";
 
