@@ -7,8 +7,18 @@
 //! - High contrast where it matters (text legibility)
 //! - Subtle agent differentiation via tinted backgrounds
 
-use ftui::render::cell::PackedRgba;
 use ftui::Style;
+use ftui::render::cell::PackedRgba;
+
+/// Convert a `PackedRgba` to a `ratatui::style::Color` for legacy rendering.
+///
+/// This bridge function exists during the ratatui→ftui migration. It allows
+/// legacy rendering code (tui.rs, component render functions) to consume
+/// palette colors that are now stored as `PackedRgba`.
+#[inline]
+pub fn to_ratatui_color(c: PackedRgba) -> ratatui::style::Color {
+    ratatui::style::Color::Rgb(c.r(), c.g(), c.b())
+}
 
 /// Premium color palette inspired by modern design systems.
 /// Uses low-saturation colors for comfort with refined accents for highlights.
@@ -377,16 +387,14 @@ impl ThemePalette {
             agent: colors::ROLE_AGENT,
             tool: colors::ROLE_TOOL,
             system: colors::ROLE_SYSTEM,
-            stripe_even: colors::BG_DEEP,       // #1a1b26
+            stripe_even: colors::BG_DEEP,            // #1a1b26
             stripe_odd: PackedRgba::rgb(30, 32, 48), // #1e2030 - slightly lighter
         }
     }
 
     /// Title style - accent colored with bold modifier
     pub fn title(self) -> Style {
-        Style::new()
-            .fg(self.accent)
-            .bold()
+        Style::new().fg(self.accent).bold()
     }
 
     /// Subtle title style - less prominent headers
@@ -544,9 +552,7 @@ impl ThemePalette {
 
     /// Selected item style - for list selections
     pub fn selected_style(self) -> Style {
-        Style::new()
-            .bg(colors::BG_HIGHLIGHT)
-            .bold()
+        Style::new().bg(colors::BG_HIGHLIGHT).bold()
     }
 
     /// Code block background style
@@ -563,16 +569,12 @@ impl ThemePalette {
 
 /// Creates a subtle badge/chip style for filter indicators
 pub fn chip_style(palette: ThemePalette) -> Style {
-    Style::new()
-        .fg(palette.accent_alt)
-        .bold()
+    Style::new().fg(palette.accent_alt).bold()
 }
 
 /// Creates a keyboard shortcut style (for help text)
 pub fn kbd_style(palette: ThemePalette) -> Style {
-    Style::new()
-        .fg(palette.accent)
-        .bold()
+    Style::new().fg(palette.accent).bold()
 }
 
 /// Creates style for score indicators based on magnitude
@@ -819,11 +821,11 @@ impl ThemePalette {
     pub fn dracula() -> Self {
         Self {
             // Dracula palette
-            accent: PackedRgba::rgb(189, 147, 249),     // Purple
+            accent: PackedRgba::rgb(189, 147, 249), // Purple
             accent_alt: PackedRgba::rgb(255, 121, 198), // Pink
-            bg: PackedRgba::rgb(40, 42, 54),            // Background
-            fg: PackedRgba::rgb(248, 248, 242),         // Foreground
-            surface: PackedRgba::rgb(68, 71, 90),       // Current Line
+            bg: PackedRgba::rgb(40, 42, 54),        // Background
+            fg: PackedRgba::rgb(248, 248, 242),     // Foreground
+            surface: PackedRgba::rgb(68, 71, 90),   // Current Line
             hint: PackedRgba::rgb(155, 165, 200), // Lightened from Dracula comment for WCAG AA-large on surface
             border: PackedRgba::rgb(68, 71, 90),  // Current Line
             user: PackedRgba::rgb(80, 250, 123),  // Green
@@ -845,11 +847,11 @@ impl ThemePalette {
             bg: PackedRgba::rgb(46, 52, 64),        // Nord0 (polar night)
             fg: PackedRgba::rgb(236, 239, 244),     // Nord6 (snow storm)
             surface: PackedRgba::rgb(59, 66, 82),   // Nord1
-            hint: PackedRgba::rgb(145, 155, 180),   // Lightened from Nord3 for WCAG AA-large on surface
-            border: PackedRgba::rgb(67, 76, 94),    // Nord2
-            user: PackedRgba::rgb(163, 190, 140),   // Nord14 (aurora green)
-            agent: PackedRgba::rgb(136, 192, 208),  // Nord8 (frost cyan)
-            tool: PackedRgba::rgb(208, 135, 112),   // Nord12 (aurora orange)
+            hint: PackedRgba::rgb(145, 155, 180), // Lightened from Nord3 for WCAG AA-large on surface
+            border: PackedRgba::rgb(67, 76, 94),  // Nord2
+            user: PackedRgba::rgb(163, 190, 140), // Nord14 (aurora green)
+            agent: PackedRgba::rgb(136, 192, 208), // Nord8 (frost cyan)
+            tool: PackedRgba::rgb(208, 135, 112), // Nord12 (aurora orange)
             system: PackedRgba::rgb(235, 203, 139), // Nord13 (aurora yellow)
             stripe_even: PackedRgba::rgb(46, 52, 64), // Nord0
             stripe_odd: PackedRgba::rgb(52, 58, 72), // Slightly lighter
@@ -865,16 +867,16 @@ impl ThemePalette {
             // High contrast palette - pure black background, white text
             accent: PackedRgba::rgb(0, 191, 255), // Bright cyan - high visibility
             accent_alt: PackedRgba::rgb(255, 105, 180), // Hot pink - distinct secondary
-            bg: PackedRgba::BLACK,                 // Pure black
-            fg: PackedRgba::WHITE,                 // Pure white
+            bg: PackedRgba::BLACK,                // Pure black
+            fg: PackedRgba::WHITE,                // Pure white
             surface: PackedRgba::rgb(28, 28, 28), // Very dark gray for elevation
             hint: PackedRgba::rgb(180, 180, 180), // Light gray - still readable
-            border: PackedRgba::WHITE,             // White borders for clear separation
+            border: PackedRgba::WHITE,            // White borders for clear separation
             user: PackedRgba::rgb(0, 255, 127),   // Bright spring green
             agent: PackedRgba::rgb(0, 191, 255),  // Bright cyan (matches accent)
             tool: PackedRgba::rgb(255, 165, 0),   // Bright orange
             system: PackedRgba::rgb(255, 255, 0), // Pure yellow
-            stripe_even: PackedRgba::BLACK,        // Pure black
+            stripe_even: PackedRgba::BLACK,       // Pure black
             stripe_odd: PackedRgba::rgb(24, 24, 24), // Very dark gray
         }
     }
@@ -1144,7 +1146,10 @@ mod tests {
 
     #[test]
     fn test_contrast_ratio_same_color() {
-        let ratio = contrast_ratio(PackedRgba::rgb(128, 128, 128), PackedRgba::rgb(128, 128, 128));
+        let ratio = contrast_ratio(
+            PackedRgba::rgb(128, 128, 128),
+            PackedRgba::rgb(128, 128, 128),
+        );
         // Same color = 1:1 contrast
         assert!((ratio - 1.0).abs() < 0.001);
     }
@@ -1156,7 +1161,10 @@ mod tests {
         assert_eq!(level, ContrastLevel::AAA);
 
         // Low contrast pair (similar grays)
-        let level = check_contrast(PackedRgba::rgb(100, 100, 100), PackedRgba::rgb(120, 120, 120));
+        let level = check_contrast(
+            PackedRgba::rgb(100, 100, 100),
+            PackedRgba::rgb(120, 120, 120),
+        );
         assert_eq!(level, ContrastLevel::Fail);
     }
 

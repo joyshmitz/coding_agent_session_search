@@ -325,14 +325,13 @@ pub fn log_conversation_cache_stats() {
     );
 }
 
-pub fn role_style(role: &MessageRole, palette: ThemePalette) -> ratatui::style::Style {
-    use ratatui::style::Style;
+pub fn role_style(role: &MessageRole, palette: ThemePalette) -> ftui::Style {
     match role {
-        MessageRole::User => Style::default().fg(palette.user),
-        MessageRole::Agent => Style::default().fg(palette.agent),
-        MessageRole::Tool => Style::default().fg(palette.tool),
-        MessageRole::System => Style::default().fg(palette.system),
-        MessageRole::Other(_) => Style::default().fg(palette.hint),
+        MessageRole::User => ftui::Style::new().fg(palette.user),
+        MessageRole::Agent => ftui::Style::new().fg(palette.agent),
+        MessageRole::Tool => ftui::Style::new().fg(palette.tool),
+        MessageRole::System => ftui::Style::new().fg(palette.system),
+        MessageRole::Other(_) => ftui::Style::new().fg(palette.hint),
     }
 }
 

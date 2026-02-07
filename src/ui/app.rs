@@ -2981,16 +2981,15 @@ impl CassApp {
         let mut lines: Vec<ftui::text::Line> = Vec::new();
 
         // Helper closure: push a section title + items + blank line
-        let add_section =
-            |out: &mut Vec<ftui::text::Line>, title: &str, items: &[String]| {
-                out.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled(title.to_string(), title_style),
-                ]));
-                for item in items {
-                    out.push(ftui::text::Line::from(format!("  {item}")));
-                }
-                out.push(ftui::text::Line::from(""));
-            };
+        let add_section = |out: &mut Vec<ftui::text::Line>, title: &str, items: &[String]| {
+            out.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(title.to_string(), title_style),
+            ]));
+            for item in items {
+                out.push(ftui::text::Line::from(format!("  {item}")));
+            }
+            out.push(ftui::text::Line::from(""));
+        };
 
         // Welcome
         lines.push(ftui::text::Line::from_spans(vec![
@@ -3193,17 +3192,11 @@ impl CassApp {
         if self.help_pinned {
             lines.push(ftui::text::Line::from_spans(vec![
                 ftui::text::Span::styled("  [PINNED] ".to_string(), title_style),
-                ftui::text::Span::styled(
-                    "Press P to unpin, Esc to close".to_string(),
-                    muted_style,
-                ),
+                ftui::text::Span::styled("Press P to unpin, Esc to close".to_string(), muted_style),
             ]));
         } else {
             lines.push(ftui::text::Line::from_spans(vec![
-                ftui::text::Span::styled(
-                    "  P=pin  ↑/↓=scroll  Esc=close".to_string(),
-                    muted_style,
-                ),
+                ftui::text::Span::styled("  P=pin  ↑/↓=scroll  Esc=close".to_string(), muted_style),
             ]));
         }
 
@@ -12520,12 +12513,7 @@ mod tests {
     fn perf_guard_search_surface_render_time() {
         let app = app_with_hits(10);
         let start = std::time::Instant::now();
-        let _ = render_at_degradation(
-            &app,
-            120,
-            40,
-            ftui::render::budget::DegradationLevel::Full,
-        );
+        let _ = render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
         let elapsed = start.elapsed();
         assert!(
             elapsed.as_millis() < PERF_RENDER_SINGLE_BUDGET_MS,
@@ -12540,12 +12528,7 @@ mod tests {
         let mut app = app_with_hits(5);
         app.focus_region = FocusRegion::Detail;
         let start = std::time::Instant::now();
-        let _ = render_at_degradation(
-            &app,
-            120,
-            40,
-            ftui::render::budget::DegradationLevel::Full,
-        );
+        let _ = render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
         let elapsed = start.elapsed();
         assert!(
             elapsed.as_millis() < PERF_RENDER_SINGLE_BUDGET_MS,
@@ -12562,12 +12545,7 @@ mod tests {
 
         // Search surface
         let app = app_with_hits(10);
-        let _ = render_at_degradation(
-            &app,
-            120,
-            40,
-            ftui::render::budget::DegradationLevel::Full,
-        );
+        let _ = render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
 
         // Detail focus
         let mut detail_app = app_with_hits(5);
@@ -12603,12 +12581,8 @@ mod tests {
     fn perf_guard_buffer_text_within_bounds() {
         // Verify rendered text fits expected bounds (no runaway content).
         let app = app_with_hits(5);
-        let buf = render_at_degradation(
-            &app,
-            120,
-            40,
-            ftui::render::budget::DegradationLevel::Full,
-        );
+        let buf =
+            render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
         let text = ftui_harness::buffer_to_text(&buf);
         // At 120x40 (4800 cells), text length should not wildly exceed
         // the cell count (accounting for newlines and trailing spaces).
@@ -12628,12 +12602,8 @@ mod tests {
         let mut times_ms = Vec::with_capacity(5);
         for _ in 0..5 {
             let start = std::time::Instant::now();
-            let _ = render_at_degradation(
-                &app,
-                120,
-                40,
-                ftui::render::budget::DegradationLevel::Full,
-            );
+            let _ =
+                render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
             times_ms.push(start.elapsed().as_millis());
         }
         // Last render should not be >3x the first (generous margin for CI variability).
@@ -12943,10 +12913,7 @@ mod tests {
         );
         assert!(text.contains(shortcuts::EDITOR), "Should reference F8");
         assert!(text.contains(shortcuts::RANKING), "Should reference F12");
-        assert!(
-            text.contains(shortcuts::TAB_FOCUS),
-            "Should reference Tab"
-        );
+        assert!(text.contains(shortcuts::TAB_FOCUS), "Should reference Tab");
         assert!(
             text.contains(shortcuts::VIM_NAV),
             "Should reference vim nav"

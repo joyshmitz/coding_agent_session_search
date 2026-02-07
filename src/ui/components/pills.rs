@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
 };
 
-use crate::ui::components::theme::ThemePalette;
+use crate::ui::components::theme::{ThemePalette, to_ratatui_color};
 
 #[derive(Clone, Debug)]
 pub struct Pill {
@@ -18,21 +18,16 @@ pub struct Pill {
 }
 
 /// Render pills in a single row. Caller controls focus/interaction; returns rects for click hit-testing.
-pub fn draw_pills(
-    f: &mut Frame<'_>,
-    area: Rect,
-    pills: &[Pill],
-    palette: ThemePalette,
-) -> Vec<Rect> {
+pub fn draw_pills(f: &mut Frame, area: Rect, pills: &[Pill], palette: ThemePalette) -> Vec<Rect> {
+    let constraints: Vec<Constraint> = pills
+        .iter()
+        .map(|_| Constraint::Length(20))
+        .chain(std::iter::once(Constraint::Min(0)))
+        .collect();
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(
-            pills
-                .iter()
-                .map(|_| Constraint::Length(20))
-                .chain(std::iter::once(Constraint::Min(0)))
-                .collect::<Vec<_>>(),
-        )
+        .constraints(constraints)
         .split(area);
 
     let mut rects = Vec::new();
@@ -56,7 +51,13 @@ pub fn draw_pills(
             palette.hint
         };
         let content = format!("{}: {}", pill.label, pill.value);
-        let para = Paragraph::new(content).block(
+        let mut style = Style::default()
+            .fg(to_ratatui_color(text_color))
+            .bg(to_ratatui_color(bg));
+        if pill.editable {
+            style = style.add_modifier(Modifier::ITALIC);
+        }
+        let para = Paragraph::new(content.as_str()).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(if pill.active {
@@ -64,17 +65,8 @@ pub fn draw_pills(
                 } else {
                     BorderType::Plain
                 })
-                .border_style(Style::default().fg(border_color))
-                .style(
-                    Style::default()
-                        .fg(text_color)
-                        .bg(bg)
-                        .add_modifier(if pill.editable {
-                            Modifier::ITALIC
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
+                .border_style(Style::default().fg(to_ratatui_color(border_color)))
+                .style(style),
         );
         f.render_widget(para, chunks[idx]);
         rects.push(chunks[idx]);
