@@ -812,7 +812,7 @@ pub fn query_breakdown(
         .collect();
 
     let rows = if use_track_b {
-        read_breakdown_rows_track_b(&mut stmt, &param_refs)?
+        read_breakdown_rows_track_b(&mut stmt, &param_refs, &metric)?
     } else {
         read_breakdown_rows_track_a(&mut stmt, &param_refs, &metric)?
     };
@@ -890,10 +890,15 @@ fn build_breakdown_sql_track_b(
         Metric::CacheRead => "total_cache_read_tokens",
         Metric::CacheCreation => "total_cache_creation_tokens",
         Metric::Thinking => "total_thinking_tokens",
+        Metric::ContentEstTotal => "total_content_chars",
         Metric::ToolCalls => "total_tool_calls",
+        // token_daily_stats does not carry plan-message rollups.
+        // Keep ordering deterministic/useful by call volume.
+        Metric::PlanCount => "api_call_count",
+        // Coverage on Track B is derived and generally 100%; rank by call volume.
+        Metric::CoveragePct => "api_call_count",
         Metric::MessageCount => "api_call_count",
         Metric::EstimatedCostUsd => "estimated_cost_usd",
-        _ => "grand_total_tokens",
     };
     format!(
         "SELECT {dim_col},
@@ -978,6 +983,7 @@ fn read_breakdown_rows_track_a(
 fn read_breakdown_rows_track_b(
     stmt: &mut rusqlite::Statement<'_>,
     params: &[&dyn rusqlite::types::ToSql],
+    metric: &Metric,
 ) -> AnalyticsResult<Vec<BreakdownRow>> {
     let rows_result = stmt
         .query_map(params, |row| {
@@ -1028,10 +1034,19 @@ fn read_breakdown_rows_track_b(
     for row in rows_result {
         let (key, bucket, sort_value) =
             row.map_err(|e| AnalyticsError::Db(format!("Row read error: {e}")))?;
+        let value = match metric {
+            Metric::CoveragePct => {
+                super::derive::safe_pct(bucket.api_coverage_message_count, bucket.message_count)
+                    as i64
+            }
+            Metric::ContentEstTotal => bucket.content_tokens_est_total,
+            Metric::PlanCount => 0,
+            _ => sort_value,
+        };
         result.push(BreakdownRow {
             message_count: bucket.message_count,
             key,
-            value: sort_value,
+            value,
             bucket,
         });
     }
@@ -1794,5 +1809,39 @@ mod tests {
         // Should order by estimated_cost_usd DESC: opus (1.50) > codex/gpt-4o (0.80) > sonnet (0.40)
         assert_eq!(result.rows[0].key, "opus");
         assert!((result.rows[0].bucket.estimated_cost_usd - 1.50).abs() < 0.01);
+    }
+
+    #[test]
+    fn query_breakdown_model_content_est_total_uses_content_chars() {
+        let conn = setup_token_daily_stats_db();
+        let filter = AnalyticsFilter::default();
+        let result =
+            query_breakdown(&conn, &filter, Dim::Model, Metric::ContentEstTotal, 10).unwrap();
+
+        // content_est_total is total_content_chars / 4 on Track B.
+        assert_eq!(result.rows[0].key, "opus");
+        assert_eq!(result.rows[0].value, 40_000);
+        assert_eq!(result.rows[1].key, "gpt-4o");
+        assert_eq!(result.rows[1].value, 25_000);
+    }
+
+    #[test]
+    fn query_breakdown_model_coverage_pct_is_derived() {
+        let conn = setup_token_daily_stats_db();
+        let filter = AnalyticsFilter::default();
+        let result = query_breakdown(&conn, &filter, Dim::Model, Metric::CoveragePct, 10).unwrap();
+
+        assert!(!result.rows.is_empty());
+        assert!(result.rows.iter().all(|r| r.value == 100));
+    }
+
+    #[test]
+    fn query_breakdown_model_plan_count_is_zero_on_track_b() {
+        let conn = setup_token_daily_stats_db();
+        let filter = AnalyticsFilter::default();
+        let result = query_breakdown(&conn, &filter, Dim::Model, Metric::PlanCount, 10).unwrap();
+
+        assert!(!result.rows.is_empty());
+        assert!(result.rows.iter().all(|r| r.value == 0));
     }
 }

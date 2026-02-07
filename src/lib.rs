@@ -2448,9 +2448,9 @@ async fn execute_cli(
                 })?;
             if let Commands::Tui {
                 once,
-                reset_state: _,
+                reset_state,
                 asciicast,
-                data_dir: _,
+                data_dir,
                 inline,
                 ui_height,
                 anchor,
@@ -2478,11 +2478,34 @@ async fn execute_cli(
                     record_path: record_macro,
                     play_path: play_macro,
                 };
+                let tui_data_dir = data_dir.clone().unwrap_or_else(default_data_dir);
+                if reset_state {
+                    let state_path = tui_data_dir.join("tui_state.json");
+                    match std::fs::remove_file(&state_path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            return Err(CliError {
+                                code: 9,
+                                kind: "tui-reset-state",
+                                message: format!(
+                                    "failed to remove persisted state {}: {e}",
+                                    state_path.display()
+                                ),
+                                hint: Some(
+                                    "Check file permissions or rerun without --reset-state."
+                                        .to_string(),
+                                ),
+                                retryable: false,
+                            });
+                        }
+                    }
+                }
 
                 let run_result = if let Some(path) = asciicast {
                     tui_asciicast::run_tui_with_asciicast(&path, !once)
                 } else {
-                    ui::app::run_tui_ftui(inline_config, macro_config)
+                    ui::app::run_tui_ftui(inline_config, macro_config, Some(tui_data_dir))
                 };
 
                 run_result.map_err(|e| CliError {

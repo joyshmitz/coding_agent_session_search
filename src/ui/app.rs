@@ -29,10 +29,10 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ftui::runtime::input_macro::{MacroPlayback, MacroRecorder};
 
@@ -1118,13 +1118,12 @@ impl ThemeEditorState {
     ///
     /// In test builds, skips disk I/O and returns a fresh state.
     #[allow(unused_mut)]
-    pub fn from_disk(preset: style_system::UiThemePreset) -> Self {
+    pub fn from_data_dir(preset: style_system::UiThemePreset, data_dir: &Path) -> Self {
         let mut state = Self::new(preset);
+        #[cfg(test)]
+        let _ = data_dir;
         #[cfg(not(test))]
         {
-            let data_dir = dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("coding-agent-search");
             let cfg_path = data_dir.join("theme.json");
             if let Ok(cfg) = style_system::ThemeConfig::load_from_path(&cfg_path) {
                 if let Some(p) = cfg.base_preset {
@@ -1134,6 +1133,14 @@ impl ThemeEditorState {
             }
         }
         state
+    }
+
+    #[allow(unused_mut)]
+    pub fn from_disk(preset: style_system::UiThemePreset) -> Self {
+        let data_dir = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("coding-agent-search");
+        Self::from_data_dir(preset, &data_dir)
     }
 
     /// Get the currently selected color slot.
@@ -1758,6 +1765,10 @@ pub struct CassApp {
     pub pane_split_drag: Option<PaneSplitDragState>,
 
     // -- Lazy-loaded services ---------------------------------------------
+    /// Data directory used for runtime state/index operations.
+    pub data_dir: PathBuf,
+    /// SQLite database path used for indexing/search operations.
+    pub db_path: PathBuf,
     /// Database reader (initialized on first use).
     pub db_reader: Option<Arc<SqliteStorage>>,
     /// Known workspace list (populated on first filter prompt).
@@ -1796,6 +1807,8 @@ pub struct CassApp {
     // -- Status line ------------------------------------------------------
     /// Footer status text.
     pub status: String,
+    /// Guard against overlapping index-refresh tasks.
+    pub index_refresh_in_flight: bool,
 }
 
 impl Default for CassApp {
@@ -1907,6 +1920,8 @@ impl Default for CassApp {
             last_split_handle_area: RefCell::new(None),
             last_saved_view_row_areas: RefCell::new(Vec::new()),
             pane_split_drag: None,
+            data_dir: crate::default_data_dir(),
+            db_path: crate::default_db_path(),
             db_reader: None,
             known_workspaces: None,
             search_service: None,
@@ -1921,6 +1936,7 @@ impl Default for CassApp {
             frame_timing: FrameTimingStats::default(),
             sources_view: SourcesViewState::default(),
             status: String::new(),
+            index_refresh_in_flight: false,
         };
         app.init_focus_graph();
         app
@@ -2030,6 +2046,27 @@ impl CassApp {
                 FocusRegion::Detail
             }
             _ => FocusRegion::Results,
+        }
+    }
+
+    fn state_file_path(&self) -> PathBuf {
+        self.data_dir.join(TUI_STATE_FILE_NAME)
+    }
+
+    fn capture_persisted_state(&self) -> PersistedState {
+        PersistedState {
+            search_mode: self.search_mode,
+            match_mode: self.match_mode,
+            ranking_mode: self.ranking_mode,
+            context_window: self.context_window,
+            theme_dark: self.theme_dark,
+            density_mode: self.density_mode,
+            per_pane_limit: self.per_pane_limit,
+            query_history: self.query_history.clone(),
+            saved_views: self.saved_views.clone(),
+            fancy_borders: self.fancy_borders,
+            help_pinned: self.help_pinned,
+            has_seen_help: self.help_pinned || self.show_help,
         }
     }
 
@@ -4644,9 +4681,7 @@ impl CassApp {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "unknown".into());
 
-        let data_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("coding-agent-search");
+        let data_dir = self.data_dir.clone();
         let sync_status = SyncStatus::load(&data_dir).unwrap_or_default();
 
         let mut items = Vec::new();
@@ -5233,14 +5268,22 @@ pub enum CassMsg {
     },
     /// Index refresh completed.
     IndexRefreshCompleted,
+    /// Index refresh failed.
+    IndexRefreshFailed(String),
 
     // -- State persistence ------------------------------------------------
     /// Load persisted state from disk.
     StateLoadRequested,
     /// Persisted state loaded.
     StateLoaded(Box<PersistedState>),
+    /// Persisted state load failed.
+    StateLoadFailed(String),
     /// Save current state to disk.
     StateSaveRequested,
+    /// Persisted state save completed.
+    StateSaved,
+    /// Persisted state save failed.
+    StateSaveFailed(String),
     /// Reset all persisted state to defaults.
     StateResetRequested,
 
@@ -5425,6 +5468,382 @@ pub struct PersistedState {
     pub has_seen_help: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct PersistedSavedView {
+    #[serde(default)]
+    slot: u8,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    agents: Vec<String>,
+    #[serde(default)]
+    workspaces: Vec<String>,
+    #[serde(default)]
+    created_from: Option<i64>,
+    #[serde(default)]
+    created_to: Option<i64>,
+    #[serde(default)]
+    ranking: Option<String>,
+    #[serde(default)]
+    source_filter_kind: Option<String>,
+    #[serde(default)]
+    source_filter_value: Option<String>,
+    #[serde(default)]
+    source_filter: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct PersistedStateFile {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    search_mode: Option<String>,
+    #[serde(default)]
+    match_mode: Option<String>,
+    #[serde(default)]
+    ranking_mode: Option<String>,
+    #[serde(default)]
+    context_window: Option<String>,
+    #[serde(default)]
+    theme_dark: Option<bool>,
+    #[serde(default)]
+    density_mode: Option<String>,
+    #[serde(default)]
+    per_pane_limit: Option<usize>,
+    #[serde(default)]
+    query_history: Vec<String>,
+    #[serde(default)]
+    saved_views: Vec<PersistedSavedView>,
+    #[serde(default)]
+    fancy_borders: Option<bool>,
+    #[serde(default)]
+    help_pinned: Option<bool>,
+    #[serde(default)]
+    has_seen_help: Option<bool>,
+}
+
+fn parse_search_mode(value: &str) -> Option<SearchMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "lexical" => Some(SearchMode::Lexical),
+        "semantic" => Some(SearchMode::Semantic),
+        "hybrid" => Some(SearchMode::Hybrid),
+        _ => None,
+    }
+}
+
+fn search_mode_str(value: SearchMode) -> &'static str {
+    match value {
+        SearchMode::Lexical => "lexical",
+        SearchMode::Semantic => "semantic",
+        SearchMode::Hybrid => "hybrid",
+    }
+}
+
+fn parse_match_mode(value: &str) -> Option<MatchMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "standard" => Some(MatchMode::Standard),
+        "prefix" => Some(MatchMode::Prefix),
+        _ => None,
+    }
+}
+
+fn match_mode_str(value: MatchMode) -> &'static str {
+    match value {
+        MatchMode::Standard => "standard",
+        MatchMode::Prefix => "prefix",
+    }
+}
+
+fn parse_ranking_mode(value: &str) -> Option<RankingMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "recent_heavy" => Some(RankingMode::RecentHeavy),
+        "balanced" => Some(RankingMode::Balanced),
+        "relevance_heavy" => Some(RankingMode::RelevanceHeavy),
+        "match_quality_heavy" => Some(RankingMode::MatchQualityHeavy),
+        "date_newest" => Some(RankingMode::DateNewest),
+        "date_oldest" => Some(RankingMode::DateOldest),
+        _ => None,
+    }
+}
+
+fn ranking_mode_str(value: RankingMode) -> &'static str {
+    match value {
+        RankingMode::RecentHeavy => "recent_heavy",
+        RankingMode::Balanced => "balanced",
+        RankingMode::RelevanceHeavy => "relevance_heavy",
+        RankingMode::MatchQualityHeavy => "match_quality_heavy",
+        RankingMode::DateNewest => "date_newest",
+        RankingMode::DateOldest => "date_oldest",
+    }
+}
+
+fn parse_context_window(value: &str) -> Option<ContextWindow> {
+    match value.to_ascii_lowercase().as_str() {
+        "small" => Some(ContextWindow::Small),
+        "medium" => Some(ContextWindow::Medium),
+        "large" => Some(ContextWindow::Large),
+        "xlarge" | "x_large" | "xl" => Some(ContextWindow::XLarge),
+        _ => None,
+    }
+}
+
+fn context_window_str(value: ContextWindow) -> &'static str {
+    match value {
+        ContextWindow::Small => "small",
+        ContextWindow::Medium => "medium",
+        ContextWindow::Large => "large",
+        ContextWindow::XLarge => "xlarge",
+    }
+}
+
+fn parse_density_mode(value: &str) -> Option<DensityMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "compact" => Some(DensityMode::Compact),
+        "cozy" => Some(DensityMode::Cozy),
+        "spacious" => Some(DensityMode::Spacious),
+        _ => None,
+    }
+}
+
+fn density_mode_str(value: DensityMode) -> &'static str {
+    match value {
+        DensityMode::Compact => "compact",
+        DensityMode::Cozy => "cozy",
+        DensityMode::Spacious => "spacious",
+    }
+}
+
+fn source_filter_to_parts(filter: &SourceFilter) -> (String, Option<String>) {
+    match filter {
+        SourceFilter::All => ("all".to_string(), None),
+        SourceFilter::Local => ("local".to_string(), None),
+        SourceFilter::Remote => ("remote".to_string(), None),
+        SourceFilter::SourceId(id) => ("source_id".to_string(), Some(id.clone())),
+    }
+}
+
+fn parse_legacy_source_filter(value: &serde_json::Value) -> Option<SourceFilter> {
+    match value {
+        serde_json::Value::String(s) => Some(SourceFilter::parse(s)),
+        serde_json::Value::Object(map) => {
+            if let Some(v) = map.get("source_id").and_then(|v| v.as_str()) {
+                return Some(SourceFilter::SourceId(v.to_string()));
+            }
+            if let Some(v) = map.get("SourceId").and_then(|v| v.as_str()) {
+                return Some(SourceFilter::SourceId(v.to_string()));
+            }
+            if map.contains_key("local") || map.contains_key("Local") {
+                return Some(SourceFilter::Local);
+            }
+            if map.contains_key("remote") || map.contains_key("Remote") {
+                return Some(SourceFilter::Remote);
+            }
+            if map.contains_key("all") || map.contains_key("All") {
+                return Some(SourceFilter::All);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn source_filter_from_parts(
+    kind: Option<&str>,
+    value: Option<&str>,
+    legacy: Option<&serde_json::Value>,
+) -> SourceFilter {
+    let legacy_filter = || parse_legacy_source_filter(legacy?);
+    if let Some(kind) = kind {
+        return match kind.to_ascii_lowercase().as_str() {
+            "all" => SourceFilter::All,
+            "local" => SourceFilter::Local,
+            "remote" => SourceFilter::Remote,
+            "source_id" => value
+                .map(|v| SourceFilter::SourceId(v.to_string()))
+                .unwrap_or(SourceFilter::All),
+            _ => legacy_filter().unwrap_or(SourceFilter::All),
+        };
+    }
+    legacy_filter().unwrap_or(SourceFilter::All)
+}
+
+fn persisted_state_defaults() -> PersistedState {
+    PersistedState {
+        search_mode: SearchMode::default(),
+        match_mode: MatchMode::default(),
+        ranking_mode: RankingMode::default(),
+        context_window: ContextWindow::default(),
+        theme_dark: true,
+        density_mode: DensityMode::default(),
+        per_pane_limit: 10,
+        query_history: VecDeque::with_capacity(QUERY_HISTORY_CAP),
+        saved_views: Vec::new(),
+        fancy_borders: true,
+        help_pinned: false,
+        has_seen_help: false,
+    }
+}
+
+fn persisted_state_file_from_state(state: &PersistedState) -> PersistedStateFile {
+    let saved_views = state
+        .saved_views
+        .iter()
+        .map(|view| {
+            let (source_filter_kind, source_filter_value) =
+                source_filter_to_parts(&view.source_filter);
+            PersistedSavedView {
+                slot: view.slot,
+                label: view.label.clone(),
+                agents: view.agents.iter().cloned().collect(),
+                workspaces: view.workspaces.iter().cloned().collect(),
+                created_from: view.created_from,
+                created_to: view.created_to,
+                ranking: Some(ranking_mode_str(view.ranking).to_string()),
+                source_filter_kind: Some(source_filter_kind),
+                source_filter_value,
+                source_filter: Some(serde_json::Value::String(view.source_filter.to_string())),
+            }
+        })
+        .collect();
+    PersistedStateFile {
+        version: 1,
+        search_mode: Some(search_mode_str(state.search_mode).to_string()),
+        match_mode: Some(match_mode_str(state.match_mode).to_string()),
+        ranking_mode: Some(ranking_mode_str(state.ranking_mode).to_string()),
+        context_window: Some(context_window_str(state.context_window).to_string()),
+        theme_dark: Some(state.theme_dark),
+        density_mode: Some(density_mode_str(state.density_mode).to_string()),
+        per_pane_limit: Some(state.per_pane_limit),
+        query_history: state.query_history.iter().cloned().collect(),
+        saved_views,
+        fancy_borders: Some(state.fancy_borders),
+        help_pinned: Some(state.help_pinned),
+        has_seen_help: Some(state.has_seen_help),
+    }
+}
+
+fn persisted_state_from_file(file: PersistedStateFile) -> PersistedState {
+    let defaults = persisted_state_defaults();
+    let mut dedup_slots = HashSet::new();
+    let saved_views = file
+        .saved_views
+        .into_iter()
+        .filter_map(|view| {
+            if !(1..=9).contains(&view.slot) || !dedup_slots.insert(view.slot) {
+                return None;
+            }
+            let ranking = view
+                .ranking
+                .as_deref()
+                .and_then(parse_ranking_mode)
+                .unwrap_or(RankingMode::Balanced);
+            let source_filter = source_filter_from_parts(
+                view.source_filter_kind.as_deref(),
+                view.source_filter_value.as_deref(),
+                view.source_filter.as_ref(),
+            );
+            Some(SavedView {
+                slot: view.slot,
+                label: view.label.filter(|s| !s.trim().is_empty()),
+                agents: view
+                    .agents
+                    .into_iter()
+                    .filter(|s| !s.trim().is_empty())
+                    .collect(),
+                workspaces: view
+                    .workspaces
+                    .into_iter()
+                    .filter(|s| !s.trim().is_empty())
+                    .collect(),
+                created_from: view.created_from,
+                created_to: view.created_to,
+                ranking,
+                source_filter,
+            })
+        })
+        .collect();
+    let mut query_history: VecDeque<String> = file
+        .query_history
+        .into_iter()
+        .filter(|q| !q.trim().is_empty())
+        .take(QUERY_HISTORY_CAP)
+        .collect();
+    if query_history.len() > QUERY_HISTORY_CAP {
+        query_history.truncate(QUERY_HISTORY_CAP);
+    }
+    PersistedState {
+        search_mode: file
+            .search_mode
+            .as_deref()
+            .and_then(parse_search_mode)
+            .unwrap_or(defaults.search_mode),
+        match_mode: file
+            .match_mode
+            .as_deref()
+            .and_then(parse_match_mode)
+            .unwrap_or(defaults.match_mode),
+        ranking_mode: file
+            .ranking_mode
+            .as_deref()
+            .and_then(parse_ranking_mode)
+            .unwrap_or(defaults.ranking_mode),
+        context_window: file
+            .context_window
+            .as_deref()
+            .and_then(parse_context_window)
+            .unwrap_or(defaults.context_window),
+        theme_dark: file.theme_dark.unwrap_or(defaults.theme_dark),
+        density_mode: file
+            .density_mode
+            .as_deref()
+            .and_then(parse_density_mode)
+            .unwrap_or(defaults.density_mode),
+        per_pane_limit: file
+            .per_pane_limit
+            .unwrap_or(defaults.per_pane_limit)
+            .clamp(4, 50),
+        query_history,
+        saved_views,
+        fancy_borders: file.fancy_borders.unwrap_or(defaults.fancy_borders),
+        help_pinned: file.help_pinned.unwrap_or(defaults.help_pinned),
+        has_seen_help: file.has_seen_help.unwrap_or(defaults.has_seen_help),
+    }
+}
+
+fn load_persisted_state_from_path(path: &Path) -> Result<Option<PersistedState>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed reading {}: {e}", path.display()))?;
+    let file: PersistedStateFile = serde_json::from_str(&raw)
+        .map_err(|e| format!("failed parsing {}: {e}", path.display()))?;
+    Ok(Some(persisted_state_from_file(file)))
+}
+
+fn save_persisted_state_to_path(path: &Path, state: &PersistedState) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed creating {}: {e}", parent.display()))?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    let payload = serde_json::to_vec_pretty(&persisted_state_file_from_state(state))
+        .map_err(|e| format!("failed serializing state: {e}"))?;
+    std::fs::write(&tmp_path, payload)
+        .map_err(|e| format!("failed writing {}: {e}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path)
+        .map_err(|e| format!("failed replacing {}: {e}", path.display()))?;
+    Ok(())
+}
+
+fn clear_persisted_state_file(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("failed removing {}: {e}", path.display())),
+    }
+}
+
 // =========================================================================
 // Service Traits
 // =========================================================================
@@ -5512,6 +5931,8 @@ pub trait PersistenceService: Send + Sync {
 }
 
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(60);
+const STATE_SAVE_DEBOUNCE: Duration = Duration::from_millis(450);
+const TUI_STATE_FILE_NAME: &str = "tui_state.json";
 const QUERY_HISTORY_CAP: usize = 50;
 
 // =========================================================================
@@ -5993,6 +6414,7 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 CassMsg::QuitRequested => {
                     self.show_bulk_modal = false;
+                    self.focus_manager.pop_trap();
                     return ftui::Cmd::none();
                 }
                 _ => {}
@@ -6783,10 +7205,12 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::BulkActionsClosed => {
                 self.show_bulk_modal = false;
+                self.focus_manager.pop_trap();
                 ftui::Cmd::none()
             }
             CassMsg::BulkActionExecuted { action_index } => {
                 self.show_bulk_modal = false;
+                self.focus_manager.pop_trap();
                 match action_index {
                     0 => {
                         // Open all in editor — delegate to OpenAllQueued
@@ -7315,7 +7739,10 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::ThemeEditorOpened => {
                 if !self.show_theme_editor {
                     self.show_theme_editor = true;
-                    self.theme_editor = Some(ThemeEditorState::from_disk(self.theme_preset));
+                    self.theme_editor = Some(ThemeEditorState::from_data_dir(
+                        self.theme_preset,
+                        &self.data_dir,
+                    ));
                 }
                 ftui::Cmd::none()
             }
@@ -7400,10 +7827,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::ThemeEditorExported => {
                 if let Some(editor) = self.theme_editor.as_ref() {
                     let config = editor.to_config();
-                    let data_dir = dirs::data_dir()
-                        .unwrap_or_else(|| PathBuf::from("."))
-                        .join("coding-agent-search");
-                    let path = data_dir.join("theme.json");
+                    let path = self.data_dir.join("theme.json");
                     match config.save_to_path(&path) {
                         Ok(()) => {
                             // Apply saved theme to the live UI.
@@ -7484,6 +7908,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::ExportModalClosed => {
                 self.show_export_modal = false;
                 self.export_modal_state = None;
+                self.focus_manager.pop_trap();
                 ftui::Cmd::none()
             }
             CassMsg::ExportFieldChanged { field, value } => {
@@ -7573,6 +7998,7 @@ impl super::ftui_adapter::Model for CassApp {
             } => {
                 self.show_export_modal = false;
                 self.export_modal_state = None;
+                self.focus_manager.pop_trap();
                 self.status = format!("Exported to {}", output_path.display());
                 ftui::Cmd::none()
             }
@@ -7997,18 +8423,71 @@ impl super::ftui_adapter::Model for CassApp {
 
             // -- Index --------------------------------------------------------
             CassMsg::IndexRefreshRequested => {
-                // TODO: dispatch index refresh via Cmd::task
+                if self.index_refresh_in_flight {
+                    self.status = "Index refresh already running".to_string();
+                    return ftui::Cmd::none();
+                }
+                self.index_refresh_in_flight = true;
+                self.status = "Refreshing index...".to_string();
+                let data_dir = self.data_dir.clone();
+                let db_path = self.db_path.clone();
+                #[cfg(test)]
+                {
+                    let _ = data_dir;
+                    let _ = db_path;
+                    ftui::Cmd::task(|| CassMsg::IndexRefreshCompleted)
+                }
+                #[cfg(not(test))]
+                {
+                    ftui::Cmd::task(move || {
+                        let opts = crate::indexer::IndexOptions {
+                            full: false,
+                            force_rebuild: false,
+                            watch: false,
+                            watch_once_paths: None,
+                            db_path,
+                            data_dir,
+                            semantic: false,
+                            build_hnsw: false,
+                            embedder: "fastembed".to_string(),
+                            progress: None,
+                        };
+                        match crate::indexer::run_index(opts, None) {
+                            Ok(()) => CassMsg::IndexRefreshCompleted,
+                            Err(e) => CassMsg::IndexRefreshFailed(e.to_string()),
+                        }
+                    })
+                }
+            }
+            CassMsg::IndexProgress {
+                processed,
+                total,
+                new_items,
+            } => {
+                if total > 0 {
+                    self.status = format!("Indexing {processed}/{total} (+{new_items} new)");
+                }
                 ftui::Cmd::none()
             }
-            CassMsg::IndexProgress { .. } | CassMsg::IndexRefreshCompleted => {
-                // TODO: update index progress display
+            CassMsg::IndexRefreshCompleted => {
+                self.index_refresh_in_flight = false;
+                self.status = "Index refresh complete".to_string();
+                ftui::Cmd::none()
+            }
+            CassMsg::IndexRefreshFailed(err) => {
+                self.index_refresh_in_flight = false;
+                self.status = format!("Index refresh failed: {err}");
                 ftui::Cmd::none()
             }
 
             // -- State persistence --------------------------------------------
             CassMsg::StateLoadRequested => {
-                // TODO: dispatch load via Cmd::task
-                ftui::Cmd::none()
+                let state_path = self.state_file_path();
+                ftui::Cmd::task(move || match load_persisted_state_from_path(&state_path) {
+                    Ok(Some(state)) => CassMsg::StateLoaded(Box::new(state)),
+                    Ok(None) => CassMsg::StateLoaded(Box::new(persisted_state_defaults())),
+                    Err(e) => CassMsg::StateLoadFailed(e),
+                })
             }
             CassMsg::StateLoaded(state) => {
                 self.search_mode = state.search_mode;
@@ -8031,14 +8510,50 @@ impl super::ftui_adapter::Model for CassApp {
                 self.clamp_saved_views_selection();
                 self.fancy_borders = state.fancy_borders;
                 self.help_pinned = state.help_pinned;
+                self.dirty_since = None;
+                ftui::Cmd::none()
+            }
+            CassMsg::StateLoadFailed(err) => {
+                self.status = format!("Failed to load TUI state: {err}");
                 ftui::Cmd::none()
             }
             CassMsg::StateSaveRequested => {
-                // TODO: dispatch save via Cmd::task
+                let state_path = self.state_file_path();
+                let snapshot = self.capture_persisted_state();
+                self.dirty_since = None;
+                ftui::Cmd::task(move || {
+                    match save_persisted_state_to_path(&state_path, &snapshot) {
+                        Ok(()) => CassMsg::StateSaved,
+                        Err(e) => CassMsg::StateSaveFailed(e),
+                    }
+                })
+            }
+            CassMsg::StateSaved => ftui::Cmd::none(),
+            CassMsg::StateSaveFailed(err) => {
+                self.status = format!("Failed to save TUI state: {err}");
                 ftui::Cmd::none()
             }
             CassMsg::StateResetRequested => {
-                *self = CassApp::default();
+                let state_path = self.state_file_path();
+                let data_dir = self.data_dir.clone();
+                let db_path = self.db_path.clone();
+                let search_service = self.search_service.clone();
+                let db_reader = self.db_reader.clone();
+                let known_workspaces = self.known_workspaces.clone();
+                let reset = CassApp {
+                    data_dir,
+                    db_path,
+                    search_service,
+                    db_reader,
+                    known_workspaces,
+                    ..CassApp::default()
+                };
+                *self = reset;
+                if let Err(e) = clear_persisted_state_file(&state_path) {
+                    self.status = format!("State reset in-memory, but failed to remove file: {e}");
+                } else {
+                    self.status = "Reset TUI state to defaults".to_string();
+                }
                 ftui::Cmd::none()
             }
 
@@ -8111,6 +8626,12 @@ impl super::ftui_adapter::Model for CassApp {
                     && dirty_ts.elapsed() >= SEARCH_DEBOUNCE
                 {
                     cmds.push(ftui::Cmd::msg(CassMsg::SearchRequested));
+                }
+                if let Some(dirty_ts) = self.dirty_since
+                    && dirty_ts.elapsed() >= STATE_SAVE_DEBOUNCE
+                {
+                    self.dirty_since = None;
+                    cmds.push(ftui::Cmd::msg(CassMsg::StateSaveRequested));
                 }
                 cmds.push(ftui::Cmd::msg(CassMsg::ToastTick));
                 // Advance macro playback and inject events as messages.
@@ -8487,6 +9008,7 @@ impl super::ftui_adapter::Model for CassApp {
 
                 // Spawn background sync task.
                 let source_name = name.clone();
+                let data_dir = self.data_dir.clone();
                 #[cfg(not(test))]
                 {
                     use crate::sources::{SourcesConfig, SyncEngine};
@@ -8494,9 +9016,6 @@ impl super::ftui_adapter::Model for CassApp {
                     if let Some(source_def) = config.find_source(&source_name) {
                         let source_def = source_def.clone();
                         ftui::Cmd::task(move || {
-                            let data_dir = dirs::data_dir()
-                                .unwrap_or_else(|| PathBuf::from("."))
-                                .join("coding-agent-search");
                             let engine = SyncEngine::new(&data_dir);
                             match engine.sync_source(&source_def) {
                                 Ok(report) => {
@@ -8534,6 +9053,7 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 #[cfg(test)]
                 {
+                    let _ = data_dir;
                     let _ = source_name;
                     ftui::Cmd::none()
                 }
@@ -9682,11 +10202,15 @@ fn macro_save_dir() -> PathBuf {
 pub fn run_tui_ftui(
     inline_config: Option<InlineTuiConfig>,
     macro_config: MacroConfig,
+    data_dir_override: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     use ftui::ProgramConfig;
     use ftui::render::budget::FrameBudgetConfig;
 
     let mut model = CassApp::default();
+    let data_dir = data_dir_override.unwrap_or_else(crate::default_data_dir);
+    model.data_dir = data_dir.clone();
+    model.db_path = data_dir.join("agent_search.db");
 
     // 16ms budget (60fps) with adaptive PID degradation.
     let budget = FrameBudgetConfig::default();
@@ -10495,6 +11019,161 @@ mod tests {
             help_pinned: false,
             has_seen_help: false,
         };
+    }
+
+    #[test]
+    fn persisted_state_roundtrip_preserves_saved_view_metadata() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let state_path = tmp.path().join("tui_state.json");
+        let mut query_history = VecDeque::new();
+        query_history.push_back("authentication error".to_string());
+
+        let mut agents = HashSet::new();
+        agents.insert("codex".to_string());
+        let mut workspaces = HashSet::new();
+        workspaces.insert("/repo".to_string());
+
+        let state = PersistedState {
+            search_mode: SearchMode::Hybrid,
+            match_mode: MatchMode::Prefix,
+            ranking_mode: RankingMode::DateNewest,
+            context_window: ContextWindow::Large,
+            theme_dark: false,
+            density_mode: DensityMode::Compact,
+            per_pane_limit: 22,
+            query_history,
+            saved_views: vec![SavedView {
+                slot: 3,
+                label: Some("triage".to_string()),
+                agents,
+                workspaces,
+                created_from: Some(1000),
+                created_to: Some(2000),
+                ranking: RankingMode::MatchQualityHeavy,
+                source_filter: SourceFilter::SourceId("remote-buildbox".to_string()),
+            }],
+            fancy_borders: false,
+            help_pinned: true,
+            has_seen_help: true,
+        };
+
+        save_persisted_state_to_path(&state_path, &state).expect("save state");
+        let loaded = load_persisted_state_from_path(&state_path)
+            .expect("load state")
+            .expect("state exists");
+
+        assert_eq!(loaded.search_mode, SearchMode::Hybrid);
+        assert_eq!(loaded.match_mode, MatchMode::Prefix);
+        assert_eq!(loaded.ranking_mode, RankingMode::DateNewest);
+        assert_eq!(loaded.context_window, ContextWindow::Large);
+        assert!(!loaded.theme_dark);
+        assert_eq!(loaded.density_mode, DensityMode::Compact);
+        assert_eq!(loaded.per_pane_limit, 22);
+        assert_eq!(
+            loaded.query_history.front().map(String::as_str),
+            Some("authentication error")
+        );
+        assert_eq!(loaded.saved_views.len(), 1);
+        assert_eq!(loaded.saved_views[0].slot, 3);
+        assert_eq!(loaded.saved_views[0].label.as_deref(), Some("triage"));
+        assert!(matches!(
+            loaded.saved_views[0].source_filter,
+            SourceFilter::SourceId(ref id) if id == "remote-buildbox"
+        ));
+    }
+
+    #[test]
+    fn persisted_state_load_accepts_legacy_source_filter_object_and_clamps_limit() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let state_path = tmp.path().join("tui_state.json");
+        let legacy = serde_json::json!({
+            "search_mode": "lexical",
+            "match_mode": "standard",
+            "ranking_mode": "balanced",
+            "context_window": "medium",
+            "per_pane_limit": 0,
+            "saved_views": [
+                {
+                    "slot": 2,
+                    "label": "legacy",
+                    "agents": ["codex"],
+                    "workspaces": ["/repo"],
+                    "ranking": "balanced",
+                    "source_filter": { "source_id": "legacy-source" }
+                }
+            ]
+        });
+        std::fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&legacy).expect("serialize legacy state"),
+        )
+        .expect("write legacy fixture");
+
+        let loaded = load_persisted_state_from_path(&state_path)
+            .expect("load should succeed")
+            .expect("state exists");
+        assert_eq!(loaded.per_pane_limit, 4);
+        assert_eq!(loaded.saved_views.len(), 1);
+        assert!(matches!(
+            loaded.saved_views[0].source_filter,
+            SourceFilter::SourceId(ref id) if id == "legacy-source"
+        ));
+    }
+
+    #[test]
+    fn state_load_requested_dispatches_background_task() {
+        let mut app = CassApp::default();
+        let cmd = app.update(CassMsg::StateLoadRequested);
+        let debug = format!("{cmd:?}");
+        assert!(debug.contains("Task"), "expected Cmd::Task, got: {debug}");
+    }
+
+    #[test]
+    fn state_save_requested_dispatches_background_task() {
+        let mut app = CassApp::default();
+        app.query = "hello".to_string();
+        app.query_history.push_front("hello".to_string());
+        let cmd = app.update(CassMsg::StateSaveRequested);
+        let debug = format!("{cmd:?}");
+        assert!(debug.contains("Task"), "expected Cmd::Task, got: {debug}");
+    }
+
+    #[test]
+    fn state_reset_requested_clears_state_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let mut app = CassApp::default();
+        app.data_dir = tmp.path().to_path_buf();
+        let state_path = app.state_file_path();
+        std::fs::write(&state_path, "{}").expect("write state fixture");
+        assert!(state_path.exists(), "state fixture should exist");
+        let _ = app.update(CassMsg::StateResetRequested);
+        assert!(
+            !state_path.exists(),
+            "state file should be removed by reset handler"
+        );
+    }
+
+    #[test]
+    fn index_refresh_requested_dispatches_task_and_rejects_parallel_refresh() {
+        let mut app = CassApp::default();
+        let first = app.update(CassMsg::IndexRefreshRequested);
+        let debug_first = format!("{first:?}");
+        assert!(
+            debug_first.contains("Task"),
+            "expected first refresh to dispatch Task, got: {debug_first}"
+        );
+        assert!(app.index_refresh_in_flight, "refresh should mark in-flight");
+
+        let second = app.update(CassMsg::IndexRefreshRequested);
+        let debug_second = format!("{second:?}");
+        assert!(
+            debug_second.contains("None"),
+            "expected second refresh request to no-op, got: {debug_second}"
+        );
+        assert!(
+            app.status.contains("already running"),
+            "status should explain duplicate refresh suppression"
+        );
     }
 
     #[test]

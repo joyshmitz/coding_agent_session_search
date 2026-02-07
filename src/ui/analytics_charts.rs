@@ -343,7 +343,7 @@ pub fn load_chart_data(
         data.model_cost = result
             .rows
             .iter()
-            .map(|r| (r.key.clone(), r.value as f64))
+            .map(|r| (r.key.clone(), r.bucket.estimated_cost_usd))
             .collect();
     }
 

@@ -364,8 +364,22 @@ fn tui_headless_reset_state_clears_persisted_state() {
         .assert()
         .success();
 
-    // State file should be cleared (the TUI may recreate a fresh one)
-    // We just verify the run succeeded with reset-state flag
+    // State file should be cleared/replaced; stale "prefix" value must not survive reset.
+    if state_file.exists() {
+        let raw = fs::read_to_string(&state_file).unwrap_or_default();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+        let stale = parsed
+            .get("match_mode")
+            .and_then(|v| v.as_str())
+            .map(|v| v == "prefix")
+            .unwrap_or(false);
+        assert!(
+            !stale,
+            "reset-state should not preserve stale match_mode=prefix"
+        );
+    }
+
     eprintln!("[SMOKE] tui_headless_reset_state_clears_persisted_state: PASSED");
 }
 
