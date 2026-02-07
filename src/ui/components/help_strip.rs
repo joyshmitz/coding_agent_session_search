@@ -1,18 +1,19 @@
 //! Contextual help strip rendering.
 
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
-};
+use ftui::core::geometry::Rect;
+use ftui::layout::{Constraint, Direction};
+use ftui::text::{Line, Span};
+use ftui::widgets::block::Block;
+use ftui::widgets::borders::Borders;
+use ftui::widgets::paragraph::Paragraph;
+use ftui::widgets::Widget;
+use ftui::{Frame, Style};
 
 use crate::ui::components::theme::ThemePalette;
 
 /// Render the help strip given a list of (key, label) pairs.
 pub fn draw_help_strip(
-    f: &mut Frame<'_>,
+    f: &mut Frame,
     area: Rect,
     shortcuts: &[(String, String)],
     palette: ThemePalette,
@@ -24,28 +25,25 @@ pub fn draw_help_strip(
             vec![
                 Span::styled(
                     format!(" {key} "),
-                    Style::default()
-                        .fg(palette.fg)
-                        .bg(palette.surface)
-                        .add_modifier(Modifier::BOLD),
+                    Style::new().fg(palette.fg).bg(palette.surface).bold(),
                 ),
-                Span::styled(format!("{label}  "), Style::default().fg(palette.hint)),
+                Span::styled(format!("{label}  "), Style::new().fg(palette.hint)),
             ]
         })
         .collect();
 
-    let block = Block::default()
+    let block = Block::new()
         .borders(Borders::TOP)
         .title(if pinned { "Help (pinned)" } else { "Help" })
-        .style(Style::default().fg(palette.hint));
+        .style(Style::new().fg(palette.hint));
 
-    let para = Paragraph::new(Line::from(spans)).block(block);
-    f.render_widget(para, area);
+    let para = Paragraph::new(Line::from_spans(spans)).block(block);
+    para.render(area, f);
 }
 
 /// Compute layout to allocate a single-line help strip at bottom.
 pub fn help_strip_area(area: Rect) -> Rect {
-    let chunks = Layout::default()
+    let chunks = ftui::layout::Layout::new()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
