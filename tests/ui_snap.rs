@@ -7,7 +7,8 @@
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use coding_agent_search::ui::components::theme::{ThemePalette, ThemePreset};
-use ratatui::style::{Color, Modifier};
+use ftui::StyleFlags;
+use ftui::render::cell::PackedRgba;
 
 #[test]
 fn cli_shows_help() {
@@ -35,7 +36,7 @@ fn highlight_style_has_background_color() {
         "highlight_style should have foreground color"
     );
     assert!(
-        style.add_modifier.contains(Modifier::BOLD),
+        style.attrs.is_some_and(|a| a.contains(StyleFlags::BOLD)),
         "highlight_style should be bold"
     );
 }
@@ -113,16 +114,16 @@ fn all_themes_have_stripe_colors() {
     for preset in ThemePreset::all() {
         let palette = preset.to_palette();
 
-        // Stripes should be valid colors (not default)
+        // Stripes should be valid colors (not transparent)
         assert_ne!(
             palette.stripe_even,
-            Color::Reset,
+            PackedRgba::TRANSPARENT,
             "{:?} theme should have stripe_even color",
             preset
         );
         assert_ne!(
             palette.stripe_odd,
-            Color::Reset,
+            PackedRgba::TRANSPARENT,
             "{:?} theme should have stripe_odd color",
             preset
         );
@@ -141,26 +142,25 @@ fn stripe_colors_have_subtle_contrast() {
     // Stripe colors should be similar but distinct - test RGB proximity
     let palette = ThemePalette::dark();
 
-    if let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) =
-        (palette.stripe_even, palette.stripe_odd)
-    {
-        // Calculate approximate color distance
-        let dr = (r1 as i32 - r2 as i32).abs();
-        let dg = (g1 as i32 - g2 as i32).abs();
-        let db = (b1 as i32 - b2 as i32).abs();
-        let distance = dr + dg + db;
+    let (r1, g1, b1) = (palette.stripe_even.r(), palette.stripe_even.g(), palette.stripe_even.b());
+    let (r2, g2, b2) = (palette.stripe_odd.r(), palette.stripe_odd.g(), palette.stripe_odd.b());
 
-        // Should be subtle (not too far apart)
-        assert!(
-            distance < 100,
-            "Stripe colors should be subtle (distance={distance}), not jarring"
-        );
-        // But should be visible (not identical)
-        assert!(
-            distance > 5,
-            "Stripe colors should be visibly different (distance={distance})"
-        );
-    }
+    // Calculate approximate color distance
+    let dr = (r1 as i32 - r2 as i32).abs();
+    let dg = (g1 as i32 - g2 as i32).abs();
+    let db = (b1 as i32 - b2 as i32).abs();
+    let distance = dr + dg + db;
+
+    // Should be subtle (not too far apart)
+    assert!(
+        distance < 100,
+        "Stripe colors should be subtle (distance={distance}), not jarring"
+    );
+    // But should be visible (not identical)
+    assert!(
+        distance > 5,
+        "Stripe colors should be visibly different (distance={distance})"
+    );
 }
 
 // ============================================================
@@ -216,21 +216,21 @@ fn high_contrast_theme_has_pure_colors() {
     // Background should be pure black
     assert_eq!(
         hc.bg,
-        Color::Rgb(0, 0, 0),
+        PackedRgba::rgb(0, 0, 0),
         "High contrast background should be pure black"
     );
 
     // Foreground should be pure white
     assert_eq!(
         hc.fg,
-        Color::Rgb(255, 255, 255),
+        PackedRgba::rgb(255, 255, 255),
         "High contrast foreground should be pure white"
     );
 
     // Stripes should also use high contrast
     assert_eq!(
         hc.stripe_even,
-        Color::Rgb(0, 0, 0),
+        PackedRgba::rgb(0, 0, 0),
         "High contrast stripe_even should be pure black"
     );
 }
@@ -251,15 +251,15 @@ fn role_theme_returns_complete_styling() {
     for role in &["user", "assistant", "tool", "system"] {
         let theme = palette.role_theme(role);
 
-        // All fields should be valid colors (not Reset)
-        assert_ne!(theme.fg, Color::Reset, "{role} should have fg color");
-        assert_ne!(theme.bg, Color::Reset, "{role} should have bg color");
+        // All fields should be valid colors (not transparent)
+        assert_ne!(theme.fg, PackedRgba::TRANSPARENT, "{role} should have fg color");
+        assert_ne!(theme.bg, PackedRgba::TRANSPARENT, "{role} should have bg color");
         assert_ne!(
             theme.border,
-            Color::Reset,
+            PackedRgba::TRANSPARENT,
             "{role} should have border color"
         );
-        assert_ne!(theme.badge, Color::Reset, "{role} should have badge color");
+        assert_ne!(theme.badge, PackedRgba::TRANSPARENT, "{role} should have badge color");
     }
 }
 
@@ -385,7 +385,7 @@ fn adaptive_borders_focused_has_focus_color() {
 #[test]
 fn contrast_ratio_black_white() {
     // Black and white should have maximum contrast (21:1)
-    let ratio = contrast_ratio(Color::Rgb(255, 255, 255), Color::Rgb(0, 0, 0));
+    let ratio = contrast_ratio(PackedRgba::rgb(255, 255, 255), PackedRgba::rgb(0, 0, 0));
     assert!(
         ratio > 20.0 && ratio <= 21.0,
         "black/white ratio should be ~21:1, got {ratio}"
@@ -395,7 +395,7 @@ fn contrast_ratio_black_white() {
 #[test]
 fn contrast_ratio_same_color() {
     // Same color should have ratio of 1:1
-    let ratio = contrast_ratio(Color::Rgb(128, 128, 128), Color::Rgb(128, 128, 128));
+    let ratio = contrast_ratio(PackedRgba::rgb(128, 128, 128), PackedRgba::rgb(128, 128, 128));
     assert!(
         (ratio - 1.0).abs() < 0.01,
         "same color ratio should be 1:1, got {ratio}"
@@ -476,7 +476,7 @@ fn detail_highlight_style_has_required_attributes() {
             preset
         );
         assert!(
-            style.add_modifier.contains(Modifier::BOLD),
+            style.attrs.is_some_and(|a| a.contains(StyleFlags::BOLD)),
             "{:?}: detail highlight should be bold",
             preset
         );
@@ -515,7 +515,8 @@ fn detail_highlight_uses_themed_accent() {
     );
 
     // The foreground should be dark (readable on highlight bg)
-    if let Some(Color::Rgb(r, g, b)) = highlight_style.fg {
+    if let Some(fg) = highlight_style.fg {
+        let (r, g, b) = (fg.r(), fg.g(), fg.b());
         // Dark fg (black or near-black) for readability on colored bg
         let luminance = r as u32 + g as u32 + b as u32;
         assert!(
@@ -532,10 +533,10 @@ fn all_themes_have_consistent_highlight_fg() {
         let palette = preset.to_palette();
         let style = palette.highlight_style();
 
-        // Check that fg is set and not reset
+        // Check that fg is set and not transparent
         assert!(
-            style.fg.is_some() && style.fg != Some(Color::Reset),
-            "{:?}: highlight fg should be explicitly set, not Reset",
+            style.fg.is_some() && style.fg != Some(PackedRgba::TRANSPARENT),
+            "{:?}: highlight fg should be explicitly set, not transparent",
             preset
         );
     }
@@ -556,7 +557,8 @@ fn highlight_style_bg_uses_accent_color() {
     );
 
     // Accent should be a saturated, visible color (not too dark/light)
-    if let Some(Color::Rgb(r, g, b)) = dark_style.bg {
+    if let Some(bg) = dark_style.bg {
+        let (r, g, b) = (bg.r(), bg.g(), bg.b());
         let max_channel = r.max(g).max(b);
         let min_channel = r.min(g).min(b);
         let saturation_proxy = max_channel.saturating_sub(min_channel);
@@ -756,10 +758,10 @@ fn role_style_all_themes_provide_valid_colors() {
                 role
             );
 
-            // Color should not be Reset
+            // Color should not be transparent
             assert_ne!(
                 style.fg,
-                Some(Color::Reset),
+                Some(PackedRgba::TRANSPARENT),
                 "{:?}: {:?} role should have explicit color",
                 preset,
                 role

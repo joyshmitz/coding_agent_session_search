@@ -1,5 +1,5 @@
 //! Command palette state and rendering (keyboard-first, fuzzy-ish search).
-//! Integration hooks live in `src/ui/tui.rs`; this module stays side-effect free.
+//! Integration hooks live in `src/ui/app.rs`; this module stays side-effect free.
 
 use crate::ui::shortcuts;
 
@@ -246,7 +246,6 @@ mod tests {
     fn test_palette_action_clone() {
         let action = PaletteAction::ToggleTheme;
         let cloned = action.clone();
-        // Both should exist independently
         assert!(matches!(cloned, PaletteAction::ToggleTheme));
     }
 
@@ -442,11 +441,10 @@ mod tests {
             item(PaletteAction::FilterWorkspace, "Workspace", "Set"),
         ];
         let mut state = PaletteState::new(items);
-        state.selected = 2; // Last item
+        state.selected = 2;
         state.query = "theme".to_string();
         state.refilter();
 
-        // Selection should be adjusted to valid range
         assert!(state.selected < state.filtered.len() || state.filtered.is_empty());
     }
 
@@ -508,7 +506,7 @@ mod tests {
         state.selected = 1;
 
         state.move_selection(1);
-        assert_eq!(state.selected, 0); // Wrapped to start
+        assert_eq!(state.selected, 0);
     }
 
     #[test]
@@ -521,7 +519,7 @@ mod tests {
         state.selected = 0;
 
         state.move_selection(-1);
-        assert_eq!(state.selected, 1); // Wrapped to end
+        assert_eq!(state.selected, 1);
     }
 
     #[test]
@@ -576,7 +574,6 @@ mod tests {
     fn test_default_actions_has_view_slots() {
         let actions = default_actions();
 
-        // Should have slots 1-9 for both save and load
         for slot in 1..=9 {
             let save_label = format!("Save view to slot {slot}");
             let load_label = format!("Load view from slot {slot}");

@@ -925,11 +925,8 @@ fn malformed_json_handled_gracefully() {
 // HELPER FUNCTIONS
 // =============================================================================
 
-fn extract_rgb(color: ratatui::style::Color) -> (u8, u8, u8) {
-    match color {
-        ratatui::style::Color::Rgb(r, g, b) => (r, g, b),
-        _ => panic!("Expected RGB color"),
-    }
+fn extract_rgb(color: ftui::render::cell::PackedRgba) -> (u8, u8, u8) {
+    (color.r(), color.g(), color.b())
 }
 
 fn color_distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {

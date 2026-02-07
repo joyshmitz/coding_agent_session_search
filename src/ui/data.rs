@@ -336,6 +336,37 @@ pub fn role_style(role: &MessageRole, palette: ThemePalette) -> ftui::Style {
 }
 
 // -------------------------------------------------------------------------
+// Shared TUI types (moved from tui.rs to remove ratatui dependency)
+// -------------------------------------------------------------------------
+
+/// How search results are ranked and ordered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RankingMode {
+    RecentHeavy,
+    Balanced,
+    RelevanceHeavy,
+    MatchQualityHeavy,
+    DateNewest,
+    DateOldest,
+}
+
+/// Format a timestamp as a short human-readable date for filter chips.
+/// Shows "Nov 25" for same year, "Nov 25, 2023" for other years.
+pub fn format_time_short(ms: i64) -> String {
+    use chrono::{DateTime, Datelike, Utc};
+    let now = Utc::now();
+    DateTime::<Utc>::from_timestamp_millis(ms)
+        .map(|dt| {
+            if dt.year() == now.year() {
+                dt.format("%b %d").to_string()
+            } else {
+                dt.format("%b %d, %Y").to_string()
+            }
+        })
+        .unwrap_or_else(|| "?".to_string())
+}
+
+// -------------------------------------------------------------------------
 // Unit Tests
 // -------------------------------------------------------------------------
 

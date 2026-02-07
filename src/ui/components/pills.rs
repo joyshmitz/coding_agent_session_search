@@ -1,13 +1,7 @@
-//! Filter pill rendering helpers.
-
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
-    widgets::{Block, BorderType, Borders, Paragraph},
-};
-
-use crate::ui::components::theme::{ThemePalette, to_ratatui_color};
+//! Filter pill type definitions.
+//!
+//! Legacy ratatui rendering has been removed.
+//! The ftui equivalent lives in `src/ui/app.rs`.
 
 #[derive(Clone, Debug)]
 pub struct Pill {
@@ -17,68 +11,9 @@ pub struct Pill {
     pub editable: bool,
 }
 
-/// Render pills in a single row. Caller controls focus/interaction; returns rects for click hit-testing.
-pub fn draw_pills(f: &mut Frame, area: Rect, pills: &[Pill], palette: ThemePalette) -> Vec<Rect> {
-    let constraints: Vec<Constraint> = pills
-        .iter()
-        .map(|_| Constraint::Length(20))
-        .chain(std::iter::once(Constraint::Min(0)))
-        .collect();
-
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(area);
-
-    let mut rects = Vec::new();
-    for (idx, pill) in pills.iter().enumerate() {
-        if idx >= chunks.len() {
-            break;
-        }
-        let bg = if pill.active {
-            palette.surface
-        } else {
-            palette.bg
-        };
-        let border_color = if pill.active {
-            palette.accent
-        } else {
-            palette.border
-        };
-        let text_color = if pill.active {
-            palette.fg
-        } else {
-            palette.hint
-        };
-        let content = format!("{}: {}", pill.label, pill.value);
-        let mut style = Style::default()
-            .fg(to_ratatui_color(text_color))
-            .bg(to_ratatui_color(bg));
-        if pill.editable {
-            style = style.add_modifier(Modifier::ITALIC);
-        }
-        let para = Paragraph::new(content.as_str()).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(if pill.active {
-                    BorderType::Rounded
-                } else {
-                    BorderType::Plain
-                })
-                .border_style(Style::default().fg(to_ratatui_color(border_color)))
-                .style(style),
-        );
-        f.render_widget(para, chunks[idx]);
-        rects.push(chunks[idx]);
-    }
-    rects
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ==================== Pill struct tests ====================
 
     #[test]
     fn test_pill_creation() {
