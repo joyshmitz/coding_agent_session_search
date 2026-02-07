@@ -8484,6 +8484,43 @@ mod tests {
     }
 
     #[test]
+    fn analytics_drilldown_back_navigation_preserves_selection() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_selection = 3;
+
+        let cmd = app.update(CassMsg::AnalyticsDrilldown(DrilldownContext {
+            since_ms: Some(1),
+            until_ms: Some(2),
+            agent: None,
+            model: None,
+        }));
+        assert!(matches!(extract_msg(cmd), Some(CassMsg::SearchRequested)));
+        assert_eq!(app.surface, AppSurface::Search);
+        assert_eq!(app.view_stack.last(), Some(&AppSurface::Analytics));
+
+        let _ = app.update(CassMsg::ViewStackPopped);
+        assert_eq!(app.surface, AppSurface::Analytics);
+        assert_eq!(app.analytics_selection, 3);
+    }
+
+    #[test]
+    fn day_label_to_epoch_range_validates_calendar_dates() {
+        assert_eq!(
+            day_label_to_epoch_range("1970-01-01"),
+            Some((0, 86_400_000))
+        );
+        assert_eq!(
+            day_label_to_epoch_range("2024-02-29").map(|(start, end)| end - start),
+            Some(86_400_000)
+        );
+        assert!(day_label_to_epoch_range("2023-02-29").is_none());
+        assert!(day_label_to_epoch_range("2026-13-01").is_none());
+        assert!(day_label_to_epoch_range("2026-04-31").is_none());
+        assert!(day_label_to_epoch_range("not-a-date").is_none());
+    }
+
+    #[test]
     fn analytics_view_labels_all_unique() {
         let views = AnalyticsView::all();
         let labels: Vec<&str> = views.iter().map(|v| v.label()).collect();

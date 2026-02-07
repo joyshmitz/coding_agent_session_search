@@ -1762,4 +1762,32 @@ mod tests {
         assert_eq!(result.totals.estimated_cost_usd, 0.0);
         assert_eq!(result.path, "none");
     }
+
+    #[test]
+    fn query_breakdown_agent_with_cost_metric_uses_track_b() {
+        let conn = setup_token_daily_stats_db();
+        let filter = AnalyticsFilter::default();
+        let result =
+            query_breakdown(&conn, &filter, Dim::Agent, Metric::EstimatedCostUsd, 10).unwrap();
+
+        // Should route to token_daily_stats (Track B), not usage_daily.
+        assert_eq!(result.source_table, "token_daily_stats");
+        assert!(!result.rows.is_empty());
+        // claude_code has cost 1.50 + 0.40 = 1.90, codex has 0.80
+        assert_eq!(result.rows[0].key, "claude_code");
+        assert!((result.rows[0].bucket.estimated_cost_usd - 1.90).abs() < 0.01);
+        assert!((result.rows[1].bucket.estimated_cost_usd - 0.80).abs() < 0.01);
+    }
+
+    #[test]
+    fn query_breakdown_model_with_cost_metric_orders_by_cost() {
+        let conn = setup_token_daily_stats_db();
+        let filter = AnalyticsFilter::default();
+        let result =
+            query_breakdown(&conn, &filter, Dim::Model, Metric::EstimatedCostUsd, 10).unwrap();
+
+        // Should order by estimated_cost_usd DESC: opus (1.50) > codex/gpt-4o (0.80) > sonnet (0.40)
+        assert_eq!(result.rows[0].key, "opus");
+        assert!((result.rows[0].bucket.estimated_cost_usd - 1.50).abs() < 0.01);
+    }
 }
