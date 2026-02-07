@@ -10,16 +10,6 @@
 use ftui::Style;
 use ftui::render::cell::PackedRgba;
 
-/// Convert a `PackedRgba` to a `ratatui::style::Color` for legacy rendering.
-///
-/// This bridge function exists during the ratatui→ftui migration. It allows
-/// legacy rendering code (tui.rs, component render functions) to consume
-/// palette colors that are now stored as `PackedRgba`.
-#[inline]
-pub fn to_ratatui_color(c: PackedRgba) -> ratatui::style::Color {
-    ratatui::style::Color::Rgb(c.r(), c.g(), c.b())
-}
-
 /// Premium color palette inspired by modern design systems.
 /// Uses low-saturation colors for comfort with refined accents for highlights.
 pub mod colors {

@@ -341,7 +341,6 @@ impl ExportModalState {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,11 +5,10 @@
 
 use ftui::core::geometry::Rect;
 use ftui::render::cell::PackedRgba;
-use ratatui::style::Color;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use super::theme::{ThemePalette, to_ratatui_color};
+use super::theme::ThemePalette;
 
 /// Type of toast notification, determines styling and icon
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,13 +34,13 @@ impl ToastType {
         }
     }
 
-    /// Get the color for this toast type as a ratatui Color.
-    pub fn color(self, palette: &ThemePalette) -> Color {
+    /// Get the color for this toast type as a PackedRgba.
+    pub fn color(self, palette: &ThemePalette) -> PackedRgba {
         match self {
-            Self::Info => to_ratatui_color(palette.accent),
-            Self::Success => to_ratatui_color(palette.user),
-            Self::Warning => to_ratatui_color(palette.system),
-            Self::Error => to_ratatui_color(PackedRgba::rgb(247, 118, 142)),
+            Self::Info => palette.accent,
+            Self::Success => palette.user,
+            Self::Warning => palette.system,
+            Self::Error => PackedRgba::rgb(247, 118, 142),
         }
     }
 
