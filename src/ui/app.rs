@@ -8114,7 +8114,10 @@ mod tests {
             x: inner.x + 1,
             y: target_y,
         });
-        assert!(!matches!(cmd, ftui::Cmd::None), "clicking a non-selected row should produce a command");
+        assert!(
+            !matches!(cmd, ftui::Cmd::None),
+            "clicking a non-selected row should produce a command"
+        );
     }
 
     #[test]
@@ -8129,7 +8132,10 @@ mod tests {
             x: inner.x + 1,
             y: inner.y,
         });
-        assert!(!matches!(cmd, ftui::Cmd::None), "clicking selected row should emit DetailOpened");
+        assert!(
+            !matches!(cmd, ftui::Cmd::None),
+            "clicking selected row should emit DetailOpened"
+        );
     }
 
     #[test]
@@ -8145,7 +8151,10 @@ mod tests {
             x: inner.x + 1,
             y: inner.y,
         });
-        assert!(!matches!(cmd, ftui::Cmd::None), "right-click should produce toggle command");
+        assert!(
+            !matches!(cmd, ftui::Cmd::None),
+            "right-click should produce toggle command"
+        );
     }
 
     #[test]
@@ -8160,7 +8169,10 @@ mod tests {
             x: inner.x + 1,
             y: inner.y + 1,
         });
-        assert!(!matches!(cmd, ftui::Cmd::None), "scroll in results should produce SelectionMoved");
+        assert!(
+            !matches!(cmd, ftui::Cmd::None),
+            "scroll in results should produce SelectionMoved"
+        );
     }
 
     #[test]
@@ -8175,7 +8187,10 @@ mod tests {
             x: detail.x + 1,
             y: detail.y + 1,
         });
-        assert!(!matches!(cmd, ftui::Cmd::None), "scroll in detail should produce DetailScrolled");
+        assert!(
+            !matches!(cmd, ftui::Cmd::None),
+            "scroll in detail should produce DetailScrolled"
+        );
     }
 
     #[test]
@@ -8191,7 +8206,10 @@ mod tests {
             x: detail.x + 1,
             y: detail.y + 1,
         });
-        assert!(!matches!(cmd, ftui::Cmd::None), "click in detail should emit FocusToggled");
+        assert!(
+            !matches!(cmd, ftui::Cmd::None),
+            "click in detail should emit FocusToggled"
+        );
     }
 
     #[test]
@@ -8207,7 +8225,10 @@ mod tests {
             x: search.x + 1,
             y: search.y,
         });
-        assert!(!matches!(cmd, ftui::Cmd::None), "click in search bar should emit FocusToggled");
+        assert!(
+            !matches!(cmd, ftui::Cmd::None),
+            "click in search bar should emit FocusToggled"
+        );
     }
 
     #[test]
