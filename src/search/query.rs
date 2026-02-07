@@ -1443,6 +1443,15 @@ thread_local! {
     static THREAD_SEARCHER: RefCell<Option<SearcherCacheEntry>> = const { RefCell::new(None) };
 }
 
+/// Sanitize query string to match Tantivy's `SimpleTokenizer` behavior.
+///
+/// `SimpleTokenizer` splits text on any character that is not alphanumeric.
+/// To ensure query terms match indexed tokens, we replace non-alphanumeric characters
+/// with spaces here (preserving `*` for wildcards and `"` for phrases).
+///
+/// Note: This causes precision loss for code symbols (e.g. `user-id` becomes `user` AND `id`,
+/// matching documents containing both terms anywhere, not necessarily adjacent).
+/// This is a known limitation of the current v6 schema using `SimpleTokenizer`.
 fn sanitize_query(raw: &str) -> String {
     // Replace any character that is not alphanumeric, asterisk, or double quote with a space.
     // Asterisks are preserved for wildcard query support (*foo, foo*, *bar*).
@@ -2069,8 +2078,11 @@ pub(crate) fn is_tool_invocation_noise(content: &str) -> bool {
             }
 
             // No content after bracket. Check for description inside.
-            // Format: "[Tool: Name - Desc]" (useful) vs "[Tool: Name]" (noise)
-            return !trimmed.contains(" - ");
+            // Format: "[Tool: Name - Desc]" (useful) vs "[Tool: Name]" (previously noise, now kept)
+            // We now keep "[Tool: Name]" because users might search for "Tool: Bash" to find usage.
+            // Only "[Tool:]" or "[Tool: ]" (empty name) is considered noise.
+            let inner = &trimmed[6..close_idx]; // Skip "[Tool:"
+            return inner.trim().is_empty();
         }
         // No closing bracket? Malformed, treat as noise
         return true;
