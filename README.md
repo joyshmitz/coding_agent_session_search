@@ -239,6 +239,8 @@ cass search "auth error handling" --mode hybrid --robot
 - **Mouse Support**: Click to select results, scroll panes, or clear filters.
 - **Theming**: Adaptive Dark/Light modes with role-colored messages (User/Assistant/System). Toggle border style (`Ctrl+B`) between rounded Unicode and plain ASCII.
 - **Ranking Modes**: Cycle through `recent`/`balanced`/`relevance`/`quality` with `F12`; quality mode penalizes fuzzy matches.
+- **Asciicast Recording**: Capture reproducible TUI demos and bug repro artifacts with `cass tui --asciicast demo.cast`.
+  - Security default: recording captures terminal output only (input keystrokes are not serialized by default).
 
 ### 📄 HTML Session Export
 
@@ -2129,7 +2131,7 @@ The `cass` binary supports both interactive use and automation.
 
 ```bash
 # Interactive
-cass [tui] [--data-dir DIR] [--once]
+cass [tui] [--data-dir DIR] [--once] [--asciicast FILE]
 
 # Indexing
 cass index [--full] [--watch] [--data-dir DIR] [--idempotency-key KEY]
@@ -2167,6 +2169,7 @@ cass completions bash > ~/.bash_completion.d/cass
 | Command | Purpose |
 |---------|---------|
 | `cass` (default) | Start TUI + background watcher |
+| `cass tui --asciicast FILE` | Run TUI and save terminal output as asciicast v2 |
 | `index --full` | Complete rebuild of DB and search index |
 | `index --watch` | Daemon mode: watch for file changes, reindex automatically |
 | `search --robot` | JSON output for automation pipelines |
