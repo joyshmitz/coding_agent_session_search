@@ -33,6 +33,19 @@ pub fn compute_derived(bucket: &UsageBucket) -> DerivedMetrics {
         None
     };
 
+    let plan_token_share_content = safe_div(
+        bucket.plan_content_tokens_est_total,
+        bucket.content_tokens_est_total,
+    );
+    let plan_token_share_api = safe_div(bucket.plan_api_tokens_total, bucket.api_tokens_total);
+
+    let cost_per_message = safe_div_f64(bucket.estimated_cost_usd, bucket.message_count);
+    let cost_per_1k_api_tokens = if bucket.api_tokens_total > 0 {
+        Some(bucket.estimated_cost_usd / (bucket.api_tokens_total as f64 / 1000.0))
+    } else {
+        None
+    };
+
     DerivedMetrics {
         api_coverage_pct,
         api_tokens_per_assistant_msg,
@@ -40,6 +53,10 @@ pub fn compute_derived(bucket: &UsageBucket) -> DerivedMetrics {
         tool_calls_per_1k_api_tokens,
         tool_calls_per_1k_content_tokens,
         plan_message_pct,
+        plan_token_share_content,
+        plan_token_share_api,
+        cost_per_message,
+        cost_per_1k_api_tokens,
     }
 }
 
@@ -64,6 +81,16 @@ pub fn safe_div(numerator: i64, denominator: i64) -> Option<f64> {
     }
 }
 
+/// Safe division for f64 numerator with i64 denominator.
+/// Returns `None` when the denominator is zero.
+pub fn safe_div_f64(numerator: f64, denominator: i64) -> Option<f64> {
+    if denominator == 0 {
+        None
+    } else {
+        Some(numerator / denominator as f64)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -80,6 +107,17 @@ mod tests {
     #[test]
     fn safe_div_normal() {
         assert_eq!(safe_div(100, 50), Some(2.0));
+    }
+
+    #[test]
+    fn safe_div_f64_zero_denominator() {
+        assert_eq!(safe_div_f64(1.50, 0), None);
+    }
+
+    #[test]
+    fn safe_div_f64_normal() {
+        let result = safe_div_f64(3.0, 2);
+        assert_eq!(result, Some(1.5));
     }
 
     #[test]
@@ -110,6 +148,10 @@ mod tests {
         assert_eq!(d.tool_calls_per_1k_api_tokens, None);
         assert_eq!(d.tool_calls_per_1k_content_tokens, None);
         assert_eq!(d.plan_message_pct, None);
+        assert_eq!(d.plan_token_share_content, None);
+        assert_eq!(d.plan_token_share_api, None);
+        assert_eq!(d.cost_per_message, None);
+        assert_eq!(d.cost_per_1k_api_tokens, None);
     }
 
     #[test]
@@ -120,9 +162,12 @@ mod tests {
             assistant_message_count: 50,
             tool_call_count: 10,
             plan_message_count: 5,
+            plan_content_tokens_est_total: 2_500,
+            plan_api_tokens_total: 3_000,
             api_coverage_message_count: 80,
             content_tokens_est_total: 50_000,
             api_tokens_total: 60_000,
+            estimated_cost_usd: 3.00,
             ..Default::default()
         };
         let d = compute_derived(&bucket);
@@ -132,6 +177,10 @@ mod tests {
         assert!(d.tool_calls_per_1k_api_tokens.is_some());
         assert!(d.tool_calls_per_1k_content_tokens.is_some());
         assert!((d.plan_message_pct.unwrap() - 5.0).abs() < 0.01);
+        assert_eq!(d.plan_token_share_content, Some(0.05));
+        assert_eq!(d.plan_token_share_api, Some(0.05));
+        assert_eq!(d.cost_per_message, Some(0.03));
+        assert_eq!(d.cost_per_1k_api_tokens, Some(0.05));
     }
 
     #[test]

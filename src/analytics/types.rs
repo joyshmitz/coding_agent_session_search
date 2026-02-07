@@ -147,6 +147,8 @@ pub enum Metric {
     CoveragePct,
     /// Message count.
     MessageCount,
+    /// Estimated cost in USD from model pricing.
+    EstimatedCostUsd,
 }
 
 impl Metric {
@@ -165,7 +167,8 @@ impl Metric {
             Self::ToolCalls => Some("tool_call_count"),
             Self::PlanCount => Some("plan_message_count"),
             Self::MessageCount => Some("message_count"),
-            Self::CoveragePct => None, // derived from api_coverage_message_count / message_count
+            Self::CoveragePct => None,      // derived
+            Self::EstimatedCostUsd => None, // only in token_daily_stats (Track B)
         }
     }
 }
@@ -184,6 +187,7 @@ impl std::fmt::Display for Metric {
             Self::PlanCount => write!(f, "plan_count"),
             Self::CoveragePct => write!(f, "coverage_pct"),
             Self::MessageCount => write!(f, "message_count"),
+            Self::EstimatedCostUsd => write!(f, "estimated_cost_usd"),
         }
     }
 }
@@ -196,7 +200,9 @@ impl std::fmt::Display for Metric {
 ///
 /// Mirrors the columns of `usage_daily` / `usage_hourly`.  Implements additive
 /// `merge()` for re-bucketing (day → week, day → month).
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+///
+/// Note: `Eq` is not derived because `estimated_cost_usd` is `f64`.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct UsageBucket {
     pub message_count: i64,
     pub user_message_count: i64,
@@ -213,6 +219,11 @@ pub struct UsageBucket {
     pub api_cache_read_tokens_total: i64,
     pub api_cache_creation_tokens_total: i64,
     pub api_thinking_tokens_total: i64,
+    pub plan_content_tokens_est_total: i64,
+    pub plan_api_tokens_total: i64,
+    /// Estimated cost in USD from model pricing tables.
+    /// Populated from Track B (token_daily_stats); 0.0 from Track A.
+    pub estimated_cost_usd: f64,
 }
 
 impl UsageBucket {
@@ -233,6 +244,9 @@ impl UsageBucket {
         self.api_cache_read_tokens_total += other.api_cache_read_tokens_total;
         self.api_cache_creation_tokens_total += other.api_cache_creation_tokens_total;
         self.api_thinking_tokens_total += other.api_thinking_tokens_total;
+        self.plan_content_tokens_est_total += other.plan_content_tokens_est_total;
+        self.plan_api_tokens_total += other.plan_api_tokens_total;
+        self.estimated_cost_usd += other.estimated_cost_usd;
     }
 
     /// Produce the nested JSON shape expected by CLI consumers.
@@ -263,9 +277,18 @@ impl UsageBucket {
                 "cache_creation": self.api_cache_creation_tokens_total,
                 "thinking": self.api_thinking_tokens_total,
             },
+            "plan_tokens": {
+                "content_est_total": self.plan_content_tokens_est_total,
+                "api_total": self.plan_api_tokens_total,
+            },
             "coverage": {
                 "api_coverage_message_count": self.api_coverage_message_count,
                 "api_coverage_pct": derived.api_coverage_pct,
+            },
+            "cost": {
+                "estimated_cost_usd": self.estimated_cost_usd,
+                "cost_per_message": derived.cost_per_message,
+                "cost_per_1k_api_tokens": derived.cost_per_1k_api_tokens,
             },
             "derived": {
                 "api_tokens_per_assistant_msg": derived.api_tokens_per_assistant_msg,
@@ -273,6 +296,8 @@ impl UsageBucket {
                 "tool_calls_per_1k_api_tokens": derived.tool_calls_per_1k_api_tokens,
                 "tool_calls_per_1k_content_tokens": derived.tool_calls_per_1k_content_tokens,
                 "plan_message_pct": derived.plan_message_pct,
+                "plan_token_share_content": derived.plan_token_share_content,
+                "plan_token_share_api": derived.plan_token_share_api,
             },
         })
     }
@@ -347,10 +372,12 @@ impl BreakdownRow {
             "key": self.key,
             "value": self.value,
             "message_count": self.message_count,
+            "estimated_cost_usd": self.bucket.estimated_cost_usd,
             "derived": {
                 "api_coverage_pct": derived.api_coverage_pct,
                 "tool_calls_per_1k_api_tokens": derived.tool_calls_per_1k_api_tokens,
                 "plan_message_pct": derived.plan_message_pct,
+                "cost_per_message": derived.cost_per_message,
             },
         })
     }
@@ -497,6 +524,7 @@ pub struct CoverageInfo {
     pub api_token_coverage_pct: f64,
     pub model_name_coverage_pct: f64,
     pub estimate_only_pct: f64,
+    pub pricing_coverage_pct: f64,
 }
 
 /// Drift detection output.
@@ -548,6 +576,7 @@ impl StatusResult {
                 "api_token_coverage_pct": self.coverage.api_token_coverage_pct,
                 "model_name_coverage_pct": self.coverage.model_name_coverage_pct,
                 "estimate_only_pct": self.coverage.estimate_only_pct,
+                "pricing_coverage_pct": self.coverage.pricing_coverage_pct,
             },
             "drift": {
                 "signals": signals_json,
@@ -557,6 +586,32 @@ impl StatusResult {
             "recommended_action": self.recommended_action,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Unpriced model report
+// ---------------------------------------------------------------------------
+
+/// A model name with no matching pricing entry, and its token volume.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnpricedModel {
+    /// The model name (or "(none)" if no model name was recorded).
+    pub model_name: String,
+    /// Total tokens across all unpriced usages of this model.
+    pub total_tokens: i64,
+    /// Number of token_usage rows with this model.
+    pub row_count: i64,
+}
+
+/// Result of the unpriced-models query.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnpricedModelsReport {
+    /// Models with no pricing match, sorted by total_tokens descending.
+    pub models: Vec<UnpricedModel>,
+    /// Total unpriced tokens across all models.
+    pub total_unpriced_tokens: i64,
+    /// Total priced tokens for context.
+    pub total_priced_tokens: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +627,10 @@ pub struct DerivedMetrics {
     pub tool_calls_per_1k_api_tokens: Option<f64>,
     pub tool_calls_per_1k_content_tokens: Option<f64>,
     pub plan_message_pct: Option<f64>,
+    pub plan_token_share_content: Option<f64>,
+    pub plan_token_share_api: Option<f64>,
+    pub cost_per_message: Option<f64>,
+    pub cost_per_1k_api_tokens: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +651,7 @@ mod tests {
             api_tokens_total: 1000,
             api_input_tokens_total: 600,
             api_output_tokens_total: 400,
+            estimated_cost_usd: 0.50,
             ..Default::default()
         };
         let b = UsageBucket {
@@ -602,6 +662,7 @@ mod tests {
             api_tokens_total: 2000,
             api_input_tokens_total: 1200,
             api_output_tokens_total: 800,
+            estimated_cost_usd: 1.25,
             ..Default::default()
         };
         a.merge(&b);
@@ -612,6 +673,7 @@ mod tests {
         assert_eq!(a.api_tokens_total, 3000);
         assert_eq!(a.api_input_tokens_total, 1800);
         assert_eq!(a.api_output_tokens_total, 1200);
+        assert!((a.estimated_cost_usd - 1.75).abs() < 0.001);
     }
 
     #[test]
@@ -619,17 +681,26 @@ mod tests {
         let bucket = UsageBucket {
             message_count: 100,
             assistant_message_count: 50,
+            plan_message_count: 10,
+            plan_content_tokens_est_total: 1_000,
+            plan_api_tokens_total: 2_000,
+            content_tokens_est_total: 10_000,
             api_tokens_total: 5000,
             api_coverage_message_count: 80,
+            estimated_cost_usd: 2.50,
             ..Default::default()
         };
         let json = bucket.to_json("2025-01-15");
         assert_eq!(json["bucket"], "2025-01-15");
         assert!(json["counts"]["message_count"].is_number());
+        assert!(json["plan_tokens"]["content_est_total"].is_number());
         assert!(json["content_tokens"]["est_total"].is_number());
         assert!(json["api_tokens"]["total"].is_number());
         assert!(json["coverage"]["api_coverage_pct"].is_number());
+        assert!(json["cost"]["estimated_cost_usd"].is_number());
         assert!(json["derived"].is_object());
+        assert!(json["derived"]["plan_token_share_content"].is_number());
+        assert!(json["derived"]["plan_token_share_api"].is_number());
     }
 
     #[test]

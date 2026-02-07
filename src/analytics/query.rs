@@ -24,6 +24,25 @@ pub fn table_exists(conn: &Connection, name: &str) -> bool {
     .is_ok()
 }
 
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    let mut stmt = match conn.prepare(&format!("PRAGMA table_info({table})")) {
+        Ok(stmt) => stmt,
+        Err(_) => return false,
+    };
+
+    let rows = match stmt.query_map([], |row| row.get::<_, String>(1)) {
+        Ok(rows) => rows,
+        Err(_) => return false,
+    };
+
+    rows.flatten().any(|name| name == column)
+}
+
+fn table_has_plan_token_rollups(conn: &Connection, table: &str) -> bool {
+    table_has_column(conn, table, "plan_content_tokens_est_total")
+        && table_has_column(conn, table, "plan_api_tokens_total")
+}
+
 /// Internal stats from a single COUNT/MIN/MAX query on a rollup table.
 #[derive(Debug, Default)]
 struct RollupStats {
@@ -292,6 +311,19 @@ pub fn query_status(conn: &Connection, _filter: &AnalyticsFilter) -> AnalyticsRe
             api_token_coverage_pct: (api_coverage_pct * 100.0).round() / 100.0,
             model_name_coverage_pct: (model_coverage_pct * 100.0).round() / 100.0,
             estimate_only_pct: (estimate_only_pct * 100.0).round() / 100.0,
+            pricing_coverage_pct: if has_token_usage && tu.row_count > 0 {
+                let with_cost: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM token_usage WHERE estimated_cost_usd > 0.0",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let pct = (with_cost as f64 / tu.row_count as f64) * 100.0;
+                (pct * 100.0).round() / 100.0
+            } else {
+                0.0
+            },
         },
         drift: DriftInfo {
             signals: drift_signals,
@@ -369,6 +401,18 @@ pub fn query_tokens_timeseries(
         format!(" WHERE {}", where_parts.join(" AND "))
     };
 
+    let has_plan_token_rollups = table_has_plan_token_rollups(conn, table);
+    let plan_content_expr = if has_plan_token_rollups {
+        "SUM(plan_content_tokens_est_total)"
+    } else {
+        "0"
+    };
+    let plan_api_expr = if has_plan_token_rollups {
+        "SUM(plan_api_tokens_total)"
+    } else {
+        "0"
+    };
+
     let sql = format!(
         "SELECT {bucket_col},
                 SUM(message_count),
@@ -376,6 +420,8 @@ pub fn query_tokens_timeseries(
                 SUM(assistant_message_count),
                 SUM(tool_call_count),
                 SUM(plan_message_count),
+                {plan_content_expr},
+                {plan_api_expr},
                 SUM(api_coverage_message_count),
                 SUM(content_tokens_est_total),
                 SUM(content_tokens_est_user),
@@ -420,6 +466,8 @@ pub fn query_tokens_timeseries(
                 row.get::<_, i64>(13)?,
                 row.get::<_, i64>(14)?,
                 row.get::<_, i64>(15)?,
+                row.get::<_, i64>(16)?,
+                row.get::<_, i64>(17)?,
             ))
         })
         .map_err(|e| AnalyticsError::Db(format!("Analytics query failed: {e}")))?;
@@ -435,16 +483,19 @@ pub fn query_tokens_timeseries(
                 assistant_message_count: r.3,
                 tool_call_count: r.4,
                 plan_message_count: r.5,
-                api_coverage_message_count: r.6,
-                content_tokens_est_total: r.7,
-                content_tokens_est_user: r.8,
-                content_tokens_est_assistant: r.9,
-                api_tokens_total: r.10,
-                api_input_tokens_total: r.11,
-                api_output_tokens_total: r.12,
-                api_cache_read_tokens_total: r.13,
-                api_cache_creation_tokens_total: r.14,
-                api_thinking_tokens_total: r.15,
+                plan_content_tokens_est_total: r.6,
+                plan_api_tokens_total: r.7,
+                api_coverage_message_count: r.8,
+                content_tokens_est_total: r.9,
+                content_tokens_est_user: r.10,
+                content_tokens_est_assistant: r.11,
+                api_tokens_total: r.12,
+                api_input_tokens_total: r.13,
+                api_output_tokens_total: r.14,
+                api_cache_read_tokens_total: r.15,
+                api_cache_creation_tokens_total: r.16,
+                api_thinking_tokens_total: r.17,
+                ..Default::default()
             },
         ));
     }
@@ -456,6 +507,172 @@ pub fn query_tokens_timeseries(
             .map(|(id, row)| (bucketing::hour_id_to_iso(id), row))
             .collect(),
         GroupBy::Day => raw_buckets
+            .into_iter()
+            .map(|(id, row)| (bucketing::day_id_to_iso(id), row))
+            .collect(),
+        GroupBy::Week => {
+            let mut merged: BTreeMap<String, UsageBucket> = BTreeMap::new();
+            for (day_id, row) in raw_buckets {
+                let key = bucketing::day_id_to_iso_week(day_id);
+                merged.entry(key).or_default().merge(&row);
+            }
+            merged.into_iter().collect()
+        }
+        GroupBy::Month => {
+            let mut merged: BTreeMap<String, UsageBucket> = BTreeMap::new();
+            for (day_id, row) in raw_buckets {
+                let key = bucketing::day_id_to_month(day_id);
+                merged.entry(key).or_default().merge(&row);
+            }
+            merged.into_iter().collect()
+        }
+    };
+
+    // Compute totals.
+    let mut totals = UsageBucket::default();
+    for (_, row) in &final_buckets {
+        totals.merge(row);
+    }
+
+    let elapsed_ms = query_start.elapsed().as_millis() as u64;
+
+    Ok(TimeseriesResult {
+        buckets: final_buckets,
+        totals,
+        source_table: table.into(),
+        group_by,
+        elapsed_ms,
+        path: "rollup".into(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// query_cost_timeseries (Track B)
+// ---------------------------------------------------------------------------
+
+/// Run a cost-focused timeseries query from `token_daily_stats` (Track B).
+///
+/// Unlike `query_tokens_timeseries` which reads Track A (`usage_daily`), this
+/// function reads Track B which carries the `estimated_cost_usd` column
+/// populated from model-pricing tables.  Returns the same `TimeseriesResult`
+/// so callers can use it interchangeably.
+pub fn query_cost_timeseries(
+    conn: &Connection,
+    filter: &AnalyticsFilter,
+    group_by: GroupBy,
+) -> AnalyticsResult<TimeseriesResult> {
+    let query_start = std::time::Instant::now();
+
+    let table = "token_daily_stats";
+
+    if !table_exists(conn, table) {
+        return Ok(TimeseriesResult {
+            buckets: vec![],
+            totals: UsageBucket::default(),
+            source_table: table.into(),
+            group_by,
+            elapsed_ms: query_start.elapsed().as_millis() as u64,
+            path: "none".into(),
+        });
+    }
+
+    // Build WHERE clause — Track B only has day_id (no hourly equivalent).
+    let (day_min, day_max) = bucketing::resolve_day_range(filter);
+    let (dim_parts, dim_params) = build_where_parts(filter);
+    let mut where_parts = dim_parts;
+    let mut bind_values = dim_params;
+
+    if let Some(min) = day_min {
+        bind_values.push(min.to_string());
+        where_parts.push(format!("day_id >= ?{}", bind_values.len()));
+    }
+    if let Some(max) = day_max {
+        bind_values.push(max.to_string());
+        where_parts.push(format!("day_id <= ?{}", bind_values.len()));
+    }
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+
+    let sql = format!(
+        "SELECT day_id,
+                SUM(api_call_count),
+                SUM(user_message_count),
+                SUM(assistant_message_count),
+                SUM(total_tool_calls),
+                SUM(total_input_tokens),
+                SUM(total_output_tokens),
+                SUM(total_cache_read_tokens),
+                SUM(total_cache_creation_tokens),
+                SUM(total_thinking_tokens),
+                SUM(grand_total_tokens),
+                SUM(total_content_chars),
+                SUM(estimated_cost_usd)
+         FROM {table}
+         {where_clause}
+         GROUP BY day_id
+         ORDER BY day_id"
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| AnalyticsError::Db(format!("Failed to prepare cost timeseries query: {e}")))?;
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let rows_result = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            let day_id: i64 = row.get(0)?;
+            let api_call_count: i64 = row.get(1)?;
+            let user_msg: i64 = row.get(2)?;
+            let asst_msg: i64 = row.get(3)?;
+            let tool_calls: i64 = row.get(4)?;
+            let input_tok: i64 = row.get(5)?;
+            let output_tok: i64 = row.get(6)?;
+            let cache_read: i64 = row.get(7)?;
+            let cache_create: i64 = row.get(8)?;
+            let thinking: i64 = row.get(9)?;
+            let grand_total: i64 = row.get(10)?;
+            let content_chars: i64 = row.get(11)?;
+            let cost: f64 = row.get(12)?;
+
+            Ok((
+                day_id,
+                UsageBucket {
+                    message_count: api_call_count,
+                    user_message_count: user_msg,
+                    assistant_message_count: asst_msg,
+                    tool_call_count: tool_calls,
+                    api_coverage_message_count: api_call_count, // all Track B = API
+                    content_tokens_est_total: content_chars / 4,
+                    api_tokens_total: grand_total,
+                    api_input_tokens_total: input_tok,
+                    api_output_tokens_total: output_tok,
+                    api_cache_read_tokens_total: cache_read,
+                    api_cache_creation_tokens_total: cache_create,
+                    api_thinking_tokens_total: thinking,
+                    estimated_cost_usd: cost,
+                    ..Default::default()
+                },
+            ))
+        })
+        .map_err(|e| AnalyticsError::Db(format!("Cost timeseries query failed: {e}")))?;
+
+    let mut raw_buckets: Vec<(i64, UsageBucket)> = Vec::new();
+    for row in rows_result {
+        let r = row.map_err(|e| AnalyticsError::Db(format!("Row read error: {e}")))?;
+        raw_buckets.push(r);
+    }
+
+    // Re-bucket by day/week/month (Track B has no hourly, so Hour falls back to Day).
+    let final_buckets: Vec<(String, UsageBucket)> = match group_by {
+        GroupBy::Hour | GroupBy::Day => raw_buckets
             .into_iter()
             .map(|(id, row)| (bucketing::day_id_to_iso(id), row))
             .collect(),
@@ -560,7 +777,14 @@ pub fn query_breakdown(
         build_breakdown_sql_track_b(dim_col, &metric, &where_clause, limit)
     } else {
         // Track A: usage_daily — full UsageBucket columns available.
-        build_breakdown_sql_track_a(dim_col, &metric, &where_clause, limit)
+        let has_plan_token_rollups = table_has_plan_token_rollups(conn, "usage_daily");
+        build_breakdown_sql_track_a(
+            dim_col,
+            &metric,
+            &where_clause,
+            limit,
+            has_plan_token_rollups,
+        )
     };
 
     let mut stmt = conn
@@ -595,8 +819,19 @@ fn build_breakdown_sql_track_a(
     metric: &Metric,
     where_clause: &str,
     limit: usize,
+    has_plan_token_rollups: bool,
 ) -> String {
     let order_col = metric.rollup_column().unwrap_or("api_tokens_total");
+    let plan_content_expr = if has_plan_token_rollups {
+        "SUM(plan_content_tokens_est_total)"
+    } else {
+        "0"
+    };
+    let plan_api_expr = if has_plan_token_rollups {
+        "SUM(plan_api_tokens_total)"
+    } else {
+        "0"
+    };
     format!(
         "SELECT CAST({dim_col} AS TEXT),
                 SUM(message_count),
@@ -604,6 +839,8 @@ fn build_breakdown_sql_track_a(
                 SUM(assistant_message_count),
                 SUM(tool_call_count),
                 SUM(plan_message_count),
+                {plan_content_expr},
+                {plan_api_expr},
                 SUM(api_coverage_message_count),
                 SUM(content_tokens_est_total),
                 SUM(content_tokens_est_user),
@@ -680,18 +917,21 @@ fn read_breakdown_rows_track_a(
                 assistant_message_count: row.get(3)?,
                 tool_call_count: row.get(4)?,
                 plan_message_count: row.get(5)?,
-                api_coverage_message_count: row.get(6)?,
-                content_tokens_est_total: row.get(7)?,
-                content_tokens_est_user: row.get(8)?,
-                content_tokens_est_assistant: row.get(9)?,
-                api_tokens_total: row.get(10)?,
-                api_input_tokens_total: row.get(11)?,
-                api_output_tokens_total: row.get(12)?,
-                api_cache_read_tokens_total: row.get(13)?,
-                api_cache_creation_tokens_total: row.get(14)?,
-                api_thinking_tokens_total: row.get(15)?,
+                plan_content_tokens_est_total: row.get(6)?,
+                plan_api_tokens_total: row.get(7)?,
+                api_coverage_message_count: row.get(8)?,
+                content_tokens_est_total: row.get(9)?,
+                content_tokens_est_user: row.get(10)?,
+                content_tokens_est_assistant: row.get(11)?,
+                api_tokens_total: row.get(12)?,
+                api_input_tokens_total: row.get(13)?,
+                api_output_tokens_total: row.get(14)?,
+                api_cache_read_tokens_total: row.get(15)?,
+                api_cache_creation_tokens_total: row.get(16)?,
+                api_thinking_tokens_total: row.get(17)?,
+                ..Default::default()
             };
-            let sort_value: i64 = row.get(16)?;
+            let sort_value: i64 = row.get(18)?;
             Ok((key, bucket, sort_value))
         })
         .map_err(|e| AnalyticsError::Db(format!("Breakdown query failed: {e}")))?;
@@ -738,7 +978,7 @@ fn read_breakdown_rows_track_b(
             let total_thinking: i64 = row.get(9)?;
             let grand_total: i64 = row.get(10)?;
             let total_content_chars: i64 = row.get(11)?;
-            let _estimated_cost: f64 = row.get(12)?;
+            let estimated_cost: f64 = row.get(12)?;
             let sort_value: i64 = row.get(13)?;
 
             // Map Track B columns to UsageBucket.
@@ -755,6 +995,7 @@ fn read_breakdown_rows_track_b(
                 api_cache_read_tokens_total: total_cache_read,
                 api_cache_creation_tokens_total: total_cache_creation,
                 api_thinking_tokens_total: total_thinking,
+                estimated_cost_usd: estimated_cost,
                 ..Default::default()
             };
 
@@ -923,6 +1164,71 @@ pub fn query_tools(
 }
 
 // ---------------------------------------------------------------------------
+// Unpriced models — discover unknown/unmatched pricing
+// ---------------------------------------------------------------------------
+
+/// Query `token_usage` for model names that have `estimated_cost_usd IS NULL`,
+/// grouped by model_name with total token counts.  Returns the top `limit`
+/// unpriced models sorted by total_tokens descending.
+pub fn query_unpriced_models(
+    conn: &Connection,
+    limit: usize,
+) -> AnalyticsResult<UnpricedModelsReport> {
+    if !table_exists(conn, "token_usage") {
+        return Ok(UnpricedModelsReport {
+            models: Vec::new(),
+            total_unpriced_tokens: 0,
+            total_priced_tokens: 0,
+        });
+    }
+
+    // Unpriced models
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(model_name, '(none)') AS model,
+                    SUM(COALESCE(total_tokens, 0)) AS tot,
+                    COUNT(*) AS cnt
+             FROM token_usage
+             WHERE estimated_cost_usd IS NULL
+             GROUP BY model
+             ORDER BY tot DESC
+             LIMIT ?1",
+        )
+        .map_err(|e| AnalyticsError::Db(e.to_string()))?;
+
+    let models: Vec<UnpricedModel> = stmt
+        .query_map([limit as i64], |row| {
+            Ok(UnpricedModel {
+                model_name: row.get(0)?,
+                total_tokens: row.get(1)?,
+                row_count: row.get(2)?,
+            })
+        })
+        .map_err(|e| AnalyticsError::Db(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let total_unpriced_tokens: i64 = models.iter().map(|m| m.total_tokens).sum();
+
+    // Total priced tokens for context
+    let total_priced_tokens: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(COALESCE(total_tokens, 0)), 0)
+             FROM token_usage
+             WHERE estimated_cost_usd IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    Ok(UnpricedModelsReport {
+        models,
+        total_unpriced_tokens,
+        total_priced_tokens,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1032,6 +1338,8 @@ mod tests {
                 assistant_message_count INTEGER NOT NULL DEFAULT 0,
                 tool_call_count INTEGER NOT NULL DEFAULT 0,
                 plan_message_count INTEGER NOT NULL DEFAULT 0,
+                plan_content_tokens_est_total INTEGER NOT NULL DEFAULT 0,
+                plan_api_tokens_total INTEGER NOT NULL DEFAULT 0,
                 api_coverage_message_count INTEGER NOT NULL DEFAULT 0,
                 content_tokens_est_total INTEGER NOT NULL DEFAULT 0,
                 content_tokens_est_user INTEGER NOT NULL DEFAULT 0,
@@ -1124,6 +1432,44 @@ mod tests {
             .unwrap();
         }
 
+        conn
+    }
+
+    /// Legacy Track A schema fixture (pre plan-token rollup columns).
+    fn setup_usage_daily_legacy_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_daily (
+                day_id INTEGER NOT NULL,
+                agent_slug TEXT NOT NULL,
+                workspace_id INTEGER NOT NULL DEFAULT 0,
+                source_id TEXT NOT NULL DEFAULT 'local',
+                message_count INTEGER NOT NULL DEFAULT 0,
+                user_message_count INTEGER NOT NULL DEFAULT 0,
+                assistant_message_count INTEGER NOT NULL DEFAULT 0,
+                tool_call_count INTEGER NOT NULL DEFAULT 0,
+                plan_message_count INTEGER NOT NULL DEFAULT 0,
+                api_coverage_message_count INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_total INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_user INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_assistant INTEGER NOT NULL DEFAULT 0,
+                api_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_input_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_output_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_cache_read_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_cache_creation_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_thinking_tokens_total INTEGER NOT NULL DEFAULT 0,
+                last_updated INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (day_id, agent_slug, workspace_id, source_id)
+            );
+            INSERT INTO usage_daily VALUES
+                (20254, 'codex', 1, 'local',
+                 3, 1, 2, 4, 1, 2,
+                 900, 300, 600,
+                 1200, 600, 500, 50, 30, 20,
+                 0);",
+        )
+        .unwrap();
         conn
     }
 
@@ -1239,6 +1585,18 @@ mod tests {
     }
 
     #[test]
+    fn query_tokens_timeseries_legacy_rollup_schema_defaults_plan_token_rollups_to_zero() {
+        let conn = setup_usage_daily_legacy_db();
+        let filter = AnalyticsFilter::default();
+        let result = query_tokens_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        assert_eq!(result.buckets.len(), 1);
+        let bucket = &result.buckets[0].1;
+        assert_eq!(bucket.plan_content_tokens_est_total, 0);
+        assert_eq!(bucket.plan_api_tokens_total, 0);
+    }
+
+    #[test]
     fn query_breakdown_result_to_json_shape() {
         let conn = setup_usage_daily_db();
         let filter = AnalyticsFilter::default();
@@ -1341,5 +1699,51 @@ mod tests {
     #[test]
     fn metric_rollup_column_api_total_is_some() {
         assert_eq!(Metric::ApiTotal.rollup_column(), Some("api_tokens_total"));
+    }
+
+    // -----------------------------------------------------------------------
+    // query_cost_timeseries tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn query_cost_timeseries_returns_cost_data() {
+        let conn = setup_token_daily_stats_db();
+        let filter = AnalyticsFilter::default();
+        let result = query_cost_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        assert_eq!(result.source_table, "token_daily_stats");
+        assert_eq!(result.buckets.len(), 1); // all seeded on day 20250
+        let (_, bucket) = &result.buckets[0];
+        // Total cost: opus 1.50 + sonnet 0.40 + gpt-4o 0.80 = 2.70
+        assert!((bucket.estimated_cost_usd - 2.70).abs() < 0.01);
+        // Total api_tokens: 60000 + 19700 + 29800 = 109500
+        assert_eq!(bucket.api_tokens_total, 109_500);
+        // Total messages: 80 + 40 + 50 = 170
+        assert_eq!(bucket.message_count, 170);
+    }
+
+    #[test]
+    fn query_cost_timeseries_totals_match_bucket_sums() {
+        let conn = setup_token_daily_stats_db();
+        let filter = AnalyticsFilter::default();
+        let result = query_cost_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        let sum_cost: f64 = result
+            .buckets
+            .iter()
+            .map(|(_, b)| b.estimated_cost_usd)
+            .sum();
+        assert!((result.totals.estimated_cost_usd - sum_cost).abs() < 0.001);
+    }
+
+    #[test]
+    fn query_cost_timeseries_missing_table_returns_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        let filter = AnalyticsFilter::default();
+        let result = query_cost_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        assert!(result.buckets.is_empty());
+        assert_eq!(result.totals.estimated_cost_usd, 0.0);
+        assert_eq!(result.path, "none");
     }
 }

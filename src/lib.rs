@@ -13,6 +13,7 @@ pub mod pages;
 pub mod search;
 pub mod sources;
 pub mod storage;
+pub mod tui_asciicast;
 pub mod ui;
 pub mod update_check;
 
@@ -106,6 +107,10 @@ pub enum Commands {
         /// Delete persisted UI state (`tui_state.json`) before launch
         #[arg(long, default_value_t = false)]
         reset_state: bool,
+
+        /// Record terminal output to asciicast v2 file (for demos/bug repro)
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        asciicast: Option<PathBuf>,
 
         /// Override data dir (matches index --data-dir)
         #[arg(long)]
@@ -1055,6 +1060,9 @@ pub enum AnalyticsCommand {
         /// Time bucket for aggregation
         #[arg(long, value_enum, default_value_t = AnalyticsBucketing::Day)]
         group_by: AnalyticsBucketing,
+        /// Maximum tools to return (default 20)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
     /// Top models by usage and coverage statistics
     #[command(name = "models")]
@@ -2401,6 +2409,7 @@ async fn execute_cli(
     let command = cli.command.clone().unwrap_or(Commands::Tui {
         once: false,
         reset_state: false,
+        asciicast: None,
         data_dir: None,
     });
 
@@ -2472,6 +2481,7 @@ async fn execute_cli(
             if let Commands::Tui {
                 once,
                 reset_state,
+                asciicast,
                 data_dir,
                 ..
             } = command.clone()
@@ -2497,10 +2507,14 @@ async fn execute_cli(
                     None
                 };
 
-                let run_result = match runtime {
-                    TuiRuntime::Ftui => ui::app::run_tui_ftui(),
-                    TuiRuntime::Legacy => {
-                        ui::tui::run_tui(data_dir, once, reset_state, legacy_progress, None)
+                let run_result = if let Some(path) = asciicast {
+                    tui_asciicast::run_tui_with_asciicast(&path, !once)
+                } else {
+                    match runtime {
+                        TuiRuntime::Ftui => ui::app::run_tui_ftui(),
+                        TuiRuntime::Legacy => {
+                            ui::tui::run_tui(data_dir, once, reset_state, legacy_progress, None)
+                        }
                     }
                 };
 
@@ -3440,7 +3454,20 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>) -> CliResult<(
         AnalyticsCommand::Rebuild { common, force } => {
             run_analytics_rebuild(common, *force, db_path.as_ref())?
         }
-        _ => analytics_stub_data(label),
+        AnalyticsCommand::Tools {
+            common,
+            group_by,
+            limit,
+        } => run_analytics_tools(common, *group_by, *limit, db_path.as_ref())?,
+        AnalyticsCommand::Validate { common, fix } => {
+            run_analytics_validate(common, *fix, db_path.as_ref())?
+        }
+        AnalyticsCommand::Cost { common, group_by } => {
+            run_analytics_cost(common, *group_by, db_path.as_ref())?
+        }
+        AnalyticsCommand::AnalyticsModels { common, group_by } => {
+            run_analytics_models(common, *group_by, db_path.as_ref())?
+        }
     };
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -3465,16 +3492,14 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>) -> CliResult<(
         let heading = match &cmd {
             AnalyticsCommand::Status { .. }
             | AnalyticsCommand::Tokens { .. }
-            | AnalyticsCommand::Rebuild { .. } => format!(
+            | AnalyticsCommand::Rebuild { .. }
+            | AnalyticsCommand::Tools { .. }
+            | AnalyticsCommand::Validate { .. }
+            | AnalyticsCommand::Cost { .. }
+            | AnalyticsCommand::AnalyticsModels { .. } => format!(
                 "{} analytics {}",
                 "cass".cyan().bold(),
                 label.yellow().bold()
-            ),
-            _ => format!(
-                "{} analytics {} {}",
-                "cass".cyan().bold(),
-                label.yellow().bold(),
-                "(stub — data queries not yet wired)".dimmed()
             ),
         };
         eprintln!("{heading}");
@@ -3513,14 +3538,6 @@ fn analytics_build_filters(common: &AnalyticsCommon) -> Vec<String> {
         f.push(format!("source={s}"));
     }
     f
-}
-
-/// Placeholder data for not-yet-implemented subcommands.
-fn analytics_stub_data(label: &str) -> serde_json::Value {
-    serde_json::json!({
-        "status": "not_implemented",
-        "message": format!("analytics {label} is scaffolded but data queries are not yet wired")
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3647,6 +3664,408 @@ fn run_analytics_rebuild(
             "rows_per_sec": result.messages_per_sec,
         },
         "overall_elapsed_ms": result.elapsed_ms,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// analytics tools (br-z9fse.3.9)
+// ---------------------------------------------------------------------------
+
+/// Run `cass analytics tools` — per-tool invocation counts and derived metrics.
+fn run_analytics_tools(
+    common: &AnalyticsCommon,
+    group_by: AnalyticsBucketing,
+    limit: usize,
+    db_path_override: Option<&PathBuf>,
+) -> CliResult<serde_json::Value> {
+    let lazy =
+        crate::storage::sqlite::LazyDb::from_overrides(&common.data_dir, db_path_override.cloned());
+    let conn = lazy.get("analytics-tools").map_err(lazy_db_to_cli_error)?;
+    let filter = analytics::AnalyticsFilter::from(common);
+
+    analytics::query::query_tools(&conn, &filter, group_by.into(), limit)
+        .map(|r| r.to_cli_json())
+        .map_err(|e| CliError {
+            code: 9,
+            kind: "db-error",
+            message: e.to_string(),
+            hint: Some("Check that the analytics tables exist and are not corrupt.".into()),
+            retryable: false,
+        })
+}
+
+// ---------------------------------------------------------------------------
+// analytics validate (br-z9fse.3.5)
+// ---------------------------------------------------------------------------
+
+/// Run `cass analytics validate` — rollup invariant checks and drift detection.
+fn run_analytics_validate(
+    common: &AnalyticsCommon,
+    _fix: bool,
+    db_path_override: Option<&PathBuf>,
+) -> CliResult<serde_json::Value> {
+    let lazy =
+        crate::storage::sqlite::LazyDb::from_overrides(&common.data_dir, db_path_override.cloned());
+    let conn = lazy
+        .get("analytics-validate")
+        .map_err(lazy_db_to_cli_error)?;
+
+    let config = analytics::ValidateConfig::default();
+    let report = analytics::validate::run_validation(&conn, &config);
+
+    // Performance guardrails
+    let perf_ts = analytics::validate::perf_query_guardrail(&conn);
+    let perf_bd = analytics::validate::perf_breakdown_guardrail(&conn);
+
+    // Summary counts
+    let errors = report
+        .checks
+        .iter()
+        .filter(|c| c.severity == analytics::validate::Severity::Error)
+        .count();
+    let warnings = report
+        .checks
+        .iter()
+        .filter(|c| c.severity == analytics::validate::Severity::Warning)
+        .count();
+    let drift_entries = report.drift.len();
+
+    // Human-readable stderr output
+    {
+        use colored::Colorize;
+        if errors > 0 {
+            eprintln!(
+                "  {} {} error(s), {} warning(s), {} drift entries",
+                "FAIL".red().bold(),
+                errors,
+                warnings,
+                drift_entries
+            );
+        } else if warnings > 0 {
+            eprintln!(
+                "  {} {} warning(s), {} drift entries",
+                "WARN".yellow().bold(),
+                warnings,
+                drift_entries
+            );
+        } else {
+            eprintln!("  {} all checks passed", "OK".green().bold());
+        }
+        let ts_status = if perf_ts.within_budget {
+            "OK".green().to_string()
+        } else {
+            "SLOW".red().to_string()
+        };
+        let bd_status = if perf_bd.within_budget {
+            "OK".green().to_string()
+        } else {
+            "SLOW".red().to_string()
+        };
+        eprintln!(
+            "  perf: timeseries {}ms [{}], breakdown {}ms [{}]",
+            perf_ts.elapsed_ms, ts_status, perf_bd.elapsed_ms, bd_status
+        );
+    }
+
+    Ok(serde_json::json!({
+        "summary": {
+            "errors": errors,
+            "warnings": warnings,
+            "drift_entries": drift_entries,
+            "buckets_checked": report._meta.sampling.buckets_checked,
+            "buckets_total": report._meta.sampling.buckets_total,
+        },
+        "checks": report.checks,
+        "drift": report.drift,
+        "perf": {
+            "timeseries": {
+                "elapsed_ms": perf_ts.elapsed_ms,
+                "budget_ms": perf_ts.budget_ms,
+                "within_budget": perf_ts.within_budget,
+            },
+            "breakdown": {
+                "elapsed_ms": perf_bd.elapsed_ms,
+                "budget_ms": perf_bd.budget_ms,
+                "within_budget": perf_bd.within_budget,
+            }
+        }
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// analytics cost (br-z9fse.3.7)
+// ---------------------------------------------------------------------------
+
+/// Run `cass analytics cost` — USD cost estimates with pricing coverage.
+fn run_analytics_cost(
+    common: &AnalyticsCommon,
+    group_by: AnalyticsBucketing,
+    db_path_override: Option<&PathBuf>,
+) -> CliResult<serde_json::Value> {
+    let lazy =
+        crate::storage::sqlite::LazyDb::from_overrides(&common.data_dir, db_path_override.cloned());
+    let conn = lazy.get("analytics-cost").map_err(lazy_db_to_cli_error)?;
+    let filter = analytics::AnalyticsFilter::from(common);
+    let db_err = |e: crate::analytics::AnalyticsError| CliError {
+        code: 9,
+        kind: "db-error",
+        message: e.to_string(),
+        hint: Some("Check that the analytics tables exist and are not corrupt.".into()),
+        retryable: false,
+    };
+
+    // Time-bucketed cost from Track B (token_daily_stats has estimated_cost_usd).
+    let ts =
+        analytics::query::query_cost_timeseries(&conn, &filter, group_by.into()).map_err(db_err)?;
+
+    // Model breakdown (cost by model family).
+    let by_model = analytics::query::query_breakdown(
+        &conn,
+        &filter,
+        analytics::Dim::Model,
+        analytics::Metric::EstimatedCostUsd,
+        50,
+    )
+    .map_err(db_err)?;
+
+    // Agent breakdown (cost by agent).
+    let by_agent = analytics::query::query_breakdown(
+        &conn,
+        &filter,
+        analytics::Dim::Agent,
+        analytics::Metric::EstimatedCostUsd,
+        50,
+    )
+    .map_err(db_err)?;
+
+    // Coverage information from status query.
+    let status = analytics::query::query_status(&conn, &filter).map_err(db_err)?;
+
+    // Unknown/unpriced models.
+    let unpriced = analytics::query::query_unpriced_models(&conn, 20).map_err(db_err)?;
+
+    // Totals across all buckets.
+    let total_cost: f64 = ts.buckets.iter().map(|(_, b)| b.estimated_cost_usd).sum();
+    let total_api_tokens: i64 = ts.buckets.iter().map(|(_, b)| b.api_tokens_total).sum();
+    let total_messages: i64 = ts.buckets.iter().map(|(_, b)| b.message_count).sum();
+    let cost_per_1k_api = if total_api_tokens > 0 {
+        Some(total_cost / (total_api_tokens as f64 / 1000.0))
+    } else {
+        None
+    };
+    let cost_per_message = if total_messages > 0 {
+        Some(total_cost / total_messages as f64)
+    } else {
+        None
+    };
+
+    // Period-over-period delta: compare to prior period of same length.
+    let period_delta = compute_cost_period_delta(&ts);
+
+    // Buckets as JSON array (already sorted by key in timeseries result).
+    let buckets_json: Vec<serde_json::Value> = ts
+        .buckets
+        .iter()
+        .map(|(key, b)| {
+            serde_json::json!({
+                "bucket": key,
+                "estimated_cost_usd": b.estimated_cost_usd,
+                "api_tokens_total": b.api_tokens_total,
+                "message_count": b.message_count,
+            })
+        })
+        .collect();
+
+    // Unpriced models JSON.
+    let unpriced_json: Vec<serde_json::Value> = unpriced
+        .models
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "model_name": m.model_name,
+                "total_tokens": m.total_tokens,
+                "row_count": m.row_count,
+            })
+        })
+        .collect();
+
+    let total_token_volume = unpriced.total_priced_tokens + unpriced.total_unpriced_tokens;
+    let unpriced_token_share = if total_token_volume > 0 {
+        Some((unpriced.total_unpriced_tokens as f64 / total_token_volume as f64) * 100.0)
+    } else {
+        None
+    };
+
+    // Human-readable stderr summary.
+    {
+        use colored::Colorize;
+        eprintln!(
+            "  total cost: {}",
+            format!("${total_cost:.4}").green().bold()
+        );
+        if let Some(cpm) = cost_per_message {
+            eprintln!("  cost/message: ${cpm:.6}");
+        }
+        if let Some(cpt) = cost_per_1k_api {
+            eprintln!("  cost/1k API tokens: ${cpt:.6}");
+        }
+        if let Some((delta_pct, _)) = &period_delta {
+            let sign = if *delta_pct >= 0.0 { "+" } else { "" };
+            let delta_str = format!("{sign}{delta_pct:.1}%");
+            let colored_delta = if *delta_pct > 10.0 {
+                delta_str.red()
+            } else if *delta_pct < -10.0 {
+                delta_str.green()
+            } else {
+                delta_str.yellow()
+            };
+            eprintln!("  period-over-period: {colored_delta}");
+        }
+        let cov = status.coverage.pricing_coverage_pct;
+        let cov_color = if cov > 80.0 {
+            format!("{cov:.1}%").green()
+        } else if cov > 50.0 {
+            format!("{cov:.1}%").yellow()
+        } else {
+            format!("{cov:.1}%").red()
+        };
+        eprintln!("  pricing coverage: {cov_color}");
+        if !unpriced.models.is_empty() {
+            eprintln!(
+                "  unpriced models: {} ({})",
+                unpriced.models.len().to_string().red(),
+                unpriced_token_share
+                    .map(|s| format!("{s:.1}% of token volume"))
+                    .unwrap_or_default()
+                    .dimmed()
+            );
+        }
+        eprintln!(
+            "  breakdowns: {} models, {} agents",
+            by_model.rows.len().to_string().cyan(),
+            by_agent.rows.len().to_string().cyan()
+        );
+    }
+
+    Ok(serde_json::json!({
+        "totals": {
+            "estimated_cost_usd": total_cost,
+            "api_tokens_total": total_api_tokens,
+            "message_count": total_messages,
+            "cost_per_1k_api_tokens": cost_per_1k_api,
+            "cost_per_message": cost_per_message,
+            "period_delta_pct": period_delta.as_ref().map(|(pct, _)| *pct),
+            "prior_period_cost_usd": period_delta.as_ref().map(|(_, prior)| *prior),
+        },
+        "pricing_coverage": {
+            "pricing_coverage_pct": status.coverage.pricing_coverage_pct,
+            "api_token_coverage_pct": status.coverage.api_token_coverage_pct,
+            "model_name_coverage_pct": status.coverage.model_name_coverage_pct,
+            "estimate_only_pct": status.coverage.estimate_only_pct,
+            "unpriced_token_share_pct": unpriced_token_share,
+            "unpriced_models": unpriced_json,
+        },
+        "buckets": buckets_json,
+        "by_model": by_model.to_cli_json(),
+        "by_agent": by_agent.to_cli_json(),
+    }))
+}
+
+/// Compute period-over-period cost delta from time-bucketed data.
+///
+/// Splits the buckets into two halves (first half = prior, second half = current)
+/// and returns `(delta_pct, prior_cost)`.  Returns `None` when fewer than 2 buckets.
+fn compute_cost_period_delta(ts: &analytics::TimeseriesResult) -> Option<(f64, f64)> {
+    let n = ts.buckets.len();
+    if n < 2 {
+        return None;
+    }
+    let mid = n / 2;
+    let prior_cost: f64 = ts.buckets[..mid]
+        .iter()
+        .map(|(_, b)| b.estimated_cost_usd)
+        .sum();
+    let current_cost: f64 = ts.buckets[mid..]
+        .iter()
+        .map(|(_, b)| b.estimated_cost_usd)
+        .sum();
+    if prior_cost.abs() < f64::EPSILON {
+        return None;
+    }
+    let delta_pct = ((current_cost - prior_cost) / prior_cost) * 100.0;
+    Some((delta_pct, prior_cost))
+}
+
+// ---------------------------------------------------------------------------
+// analytics models (br-z9fse.3.6)
+// ---------------------------------------------------------------------------
+
+/// Run `cass analytics models` — top models by usage and coverage statistics.
+fn run_analytics_models(
+    common: &AnalyticsCommon,
+    group_by: AnalyticsBucketing,
+    db_path_override: Option<&PathBuf>,
+) -> CliResult<serde_json::Value> {
+    let lazy =
+        crate::storage::sqlite::LazyDb::from_overrides(&common.data_dir, db_path_override.cloned());
+    let conn = lazy.get("analytics-models").map_err(lazy_db_to_cli_error)?;
+    let filter = analytics::AnalyticsFilter::from(common);
+    let db_err = |e: crate::analytics::AnalyticsError| CliError {
+        code: 9,
+        kind: "db-error",
+        message: e.to_string(),
+        hint: Some("Check that the analytics tables exist and are not corrupt.".into()),
+        retryable: false,
+    };
+
+    // Model breakdown by API tokens.
+    let by_tokens = analytics::query::query_breakdown(
+        &conn,
+        &filter,
+        analytics::Dim::Model,
+        analytics::Metric::ApiTotal,
+        50,
+    )
+    .map_err(db_err)?;
+
+    // Model breakdown by cost.
+    let by_cost = analytics::query::query_breakdown(
+        &conn,
+        &filter,
+        analytics::Dim::Model,
+        analytics::Metric::EstimatedCostUsd,
+        50,
+    )
+    .map_err(db_err)?;
+
+    // Time series for aggregate stats.
+    let ts = analytics::query::query_tokens_timeseries(&conn, &filter, group_by.into())
+        .map_err(db_err)?;
+
+    // Human-readable stderr summary.
+    {
+        use colored::Colorize;
+        eprintln!(
+            "  {} models (by API tokens)",
+            by_tokens.rows.len().to_string().cyan().bold()
+        );
+        for (i, row) in by_tokens.rows.iter().take(5).enumerate() {
+            eprintln!(
+                "    {}. {} — {} API tokens",
+                i + 1,
+                row.key.yellow(),
+                row.bucket.api_tokens_total
+            );
+        }
+        if by_tokens.rows.len() > 5 {
+            eprintln!("    ... and {} more", by_tokens.rows.len() - 5);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "by_api_tokens": by_tokens.to_cli_json(),
+        "by_cost": by_cost.to_cli_json(),
+        "timeseries": ts.to_cli_json(),
     }))
 }
 
@@ -4329,7 +4748,8 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass diag [--json] [--verbose] [--data-dir DIR]".to_string(),
             "  cass view <path> [-n LINE] [-C CONTEXT] [--json]".to_string(),
             "  cass index [--full] [--watch] [--json] [--data-dir DIR]".to_string(),
-            "  cass tui [--once] [--data-dir DIR] [--reset-state]".to_string(),
+            "  cass tui [--once] [--data-dir DIR] [--reset-state] [--asciicast FILE]"
+                .to_string(),
             "  cass capabilities [--json]".to_string(),
             "  cass robot-docs <topic>".to_string(),
             "  cass --robot-help".to_string(),
@@ -4508,55 +4928,150 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass sources discover     Just discover hosts (no setup)".to_string(),
             "  cass sources add          Manually add a source".to_string(),
         ],
-        RobotTopic::Analytics => vec![
-            "analytics:".to_string(),
-            String::new(),
-            "# cass analytics — Token, Cost, Tool, and Model Analytics".to_string(),
-            String::new(),
-            "## Subcommands".to_string(),
-            "  status    Row counts, freshness, coverage, drift warnings".to_string(),
-            "  tokens    Token usage over time with dimensional breakdowns".to_string(),
-            "  tools     Per-tool invocation counts and derived metrics".to_string(),
-            "  models    Top models by usage and coverage statistics".to_string(),
-            "  cost      USD cost estimates with pricing coverage".to_string(),
-            "  rebuild   Rebuild/backfill rollup tables with progress output".to_string(),
-            "  validate  Check rollup invariants and detect data drift".to_string(),
-            String::new(),
-            "## Shared Flags (all subcommands)".to_string(),
-            "  --since <ISO>        Filter from date (YYYY-MM-DD or full timestamp)".to_string(),
-            "  --until <ISO>        Filter to date".to_string(),
-            "  --days <N>           Filter to last N days".to_string(),
-            "  --agent <slug>       Filter by agent (repeatable)".to_string(),
-            "  --workspace <path>   Filter by workspace (repeatable)".to_string(),
-            "  --source <name>      Filter by source ('local', 'remote', hostname)".to_string(),
-            "  --json / --robot     Machine-readable JSON output".to_string(),
-            "  --data-dir <path>    Override data directory".to_string(),
-            String::new(),
-            "## Bucketed Subcommands (tokens, tools, models, cost)".to_string(),
-            "  --group-by <bucket>  hour | day (default) | week | month".to_string(),
-            String::new(),
-            "## Examples".to_string(),
-            "  cass analytics status --json".to_string(),
-            "  cass analytics tokens --days 7 --group-by day --json".to_string(),
-            "  cass analytics cost --agent claude --since 2026-01-01 --json".to_string(),
-            "  cass analytics models --group-by week --json".to_string(),
-            "  cass analytics tools --workspace /data/myproject --json".to_string(),
-            "  cass analytics rebuild --force --json".to_string(),
-            "  cass analytics validate --fix --json".to_string(),
-            String::new(),
-            "## Output Contract".to_string(),
-            "  stdout = JSON data only (in --json mode)".to_string(),
-            "  stderr = human diagnostics".to_string(),
-            "  exit 0 = success".to_string(),
-            String::new(),
-            "## JSON Envelope".to_string(),
-            "  All subcommands return: { \"command\": \"analytics/<sub>\", \"data\": {...}, \"_meta\": {...} }".to_string(),
-            "  _meta includes: elapsed_ms, filters_applied, data_dir".to_string(),
-        ],
+        RobotTopic::Analytics => render_analytics_docs(),
     };
 
     println!("{}", render_block(&lines, wrap));
     Ok(())
+}
+
+/// Render comprehensive analytics robot-docs.
+fn render_analytics_docs() -> Vec<String> {
+    vec![
+        "analytics:".into(),
+        String::new(),
+        "# cass analytics — Token, Cost, Tool, and Model Analytics".into(),
+        String::new(),
+        "## Subcommands".into(),
+        "  status    Row counts, freshness, coverage, drift warnings".into(),
+        "  tokens    Token usage over time with dimensional breakdowns".into(),
+        "  tools     Per-tool invocation counts and derived metrics".into(),
+        "  models    Top models by usage and coverage statistics".into(),
+        "  cost      USD cost estimates with pricing coverage".into(),
+        "  rebuild   Rebuild/backfill rollup tables with progress output".into(),
+        "  validate  Check rollup invariants and detect data drift".into(),
+        String::new(),
+        "## Shared Flags (all subcommands)".into(),
+        "  --since <ISO>        Filter from date (YYYY-MM-DD or full timestamp)".into(),
+        "  --until <ISO>        Filter to date".into(),
+        "  --days <N>           Filter to last N days".into(),
+        "  --agent <slug>       Filter by agent (repeatable)".into(),
+        "  --workspace <path>   Filter by workspace (repeatable)".into(),
+        "  --source <name>      Filter by source ('local', 'remote', hostname)".into(),
+        "  --json / --robot     Machine-readable JSON output".into(),
+        "  --data-dir <path>    Override data directory".into(),
+        String::new(),
+        "## Bucketed Subcommands (tokens, tools, models, cost)".into(),
+        "  --group-by <bucket>  hour | day (default) | week | month".into(),
+        String::new(),
+        "## JSON Envelope (all subcommands)".into(),
+        "  { \"command\": \"analytics/<sub>\", \"data\": {...}, \"_meta\": {...} }".into(),
+        "  _meta: { elapsed_ms: u64, filters_applied: [string], data_dir: string|null }".into(),
+        String::new(),
+        "## Per-Subcommand JSON Schemas".into(),
+        String::new(),
+        "### analytics status".into(),
+        "  data.tables: [{ table, exists, row_count, min_day_id, max_day_id, last_updated }]".into(),
+        "  data.coverage: { total_messages, message_metrics_coverage_pct, api_token_coverage_pct,".into(),
+        "                   model_name_coverage_pct, estimate_only_pct, pricing_coverage_pct }".into(),
+        "  data.drift: { signals: [{ signal, detail, severity }], track_a_fresh, track_b_fresh }".into(),
+        "  data.recommended_action: string".into(),
+        String::new(),
+        "### analytics tokens".into(),
+        "  data.buckets: [{ bucket: string, counts: {...}, content_tokens: {...},".into(),
+        "                   api_tokens: {...}, cost: {...}, plan: {...}, derived: {...} }]".into(),
+        "  data.totals: <same shape as bucket>".into(),
+        "  data.source_table: string  ('usage_daily' | 'usage_hourly')".into(),
+        "  data.granularity: string   ('hour' | 'day' | 'week' | 'month')".into(),
+        "  Bucket keys: counts.{message_count, user_message_count, assistant_message_count,".into(),
+        "    tool_call_count, plan_message_count}; api_tokens.{total, input, output,".into(),
+        "    cache_read, cache_creation, thinking}; derived.{api_coverage_pct,".into(),
+        "    avg_api_per_message, avg_content_per_message, cost_per_1k_api, cost_per_message}".into(),
+        String::new(),
+        "### analytics tools".into(),
+        "  data.rows: [{ key: string, tool_call_count, message_count, api_tokens_total,".into(),
+        "               tool_calls_per_1k_api_tokens, tool_calls_per_1k_content_tokens }]".into(),
+        "  data.totals: { tool_call_count, message_count, api_tokens_total,".into(),
+        "                 overall_per_1k_api_tokens }".into(),
+        "  data.row_count: int".into(),
+        "  --limit N (default 20): caps returned rows".into(),
+        String::new(),
+        "### analytics models".into(),
+        "  data.by_api_tokens: { dim, metric, rows: [{ key, value, message_count, ... }] }".into(),
+        "  data.by_cost: { dim, metric, rows: [{ key, value, estimated_cost_usd, ... }] }".into(),
+        "  data.timeseries: <same as analytics tokens>".into(),
+        "  Source: token_daily_stats (Track B) — models only available for connectors".into(),
+        "    that report model names (claude_code, codex, pi_agent, factory, opencode, cursor).".into(),
+        String::new(),
+        "### analytics cost".into(),
+        "  data.totals: { estimated_cost_usd, api_tokens_total, message_count,".into(),
+        "                 cost_per_1k_api_tokens, cost_per_message,".into(),
+        "                 period_delta_pct: f64|null, prior_period_cost_usd: f64|null }".into(),
+        "  data.pricing_coverage: { pricing_coverage_pct, api_token_coverage_pct,".into(),
+        "    model_name_coverage_pct, estimate_only_pct,".into(),
+        "    unpriced_token_share_pct: f64|null, unpriced_models: [{ model_name, total_tokens, row_count }] }".into(),
+        "  data.buckets: [{ bucket, estimated_cost_usd, api_tokens_total, message_count }]".into(),
+        "  data.by_model: { dim, metric, rows: [...] }".into(),
+        "  IMPORTANT: estimated_cost_usd = 0.0 when pricing_coverage_pct is 0%.".into(),
+        "  Never treat cost=0 as 'free'; check pricing_coverage first.".into(),
+        String::new(),
+        "### analytics rebuild".into(),
+        "  data.track: string ('a')".into(),
+        "  data.tracks_rebuilt: [string]".into(),
+        "  data.track_a: { message_metrics_rows, usage_hourly_rows, usage_daily_rows,".into(),
+        "                  usage_models_daily_rows, elapsed_ms, rows_per_sec }".into(),
+        "  data.overall_elapsed_ms: u64".into(),
+        "  --force: rebuild even when rollups appear fresh".into(),
+        String::new(),
+        "### analytics validate".into(),
+        "  data.summary: { errors, warnings, drift_entries, buckets_checked, buckets_total }".into(),
+        "  data.checks: [{ id, ok, severity, details, suggested_action? }]".into(),
+        "    Check IDs: track_a.tables_exist, track_a.{content_tokens,message_count,".into(),
+        "      api_tokens,api_coverage}_match, track_b.tables_exist,".into(),
+        "      track_b.{tokens,agents}_match, cross_track.drift, non_negative.counters".into(),
+        "  data.drift: [{ day_id, agent_slug, source_id, track_a_total,".into(),
+        "                 track_b_total, delta, delta_pct, likely_cause }]".into(),
+        "  data.perf: { timeseries: { elapsed_ms, budget_ms, within_budget },".into(),
+        "              breakdown: { elapsed_ms, budget_ms, within_budget } }".into(),
+        "  --fix: attempt automatic repair (not yet implemented)".into(),
+        String::new(),
+        "## Coverage & Uncertainty Semantics".into(),
+        "  - api_token_coverage_pct: % of messages with API token data (from Claude, Codex).".into(),
+        "  - pricing_coverage_pct: % of token_usage rows with cost > 0 (requires model_pricing match).".into(),
+        "  - estimate_only_pct: % of messages with content-estimated tokens only (chars/4 heuristic).".into(),
+        "  - When coverage is low, derived metrics are unreliable estimates, not ground truth.".into(),
+        "  - Content token estimates are always available (heuristic); API tokens are sparse.".into(),
+        String::new(),
+        "## Exit Codes".into(),
+        "  0  Success".into(),
+        "  2  Usage error (invalid flags, missing required args)".into(),
+        "  3  Missing database (run 'cass index --full' first)".into(),
+        "  9  Database error (corrupt, missing tables, query failure)".into(),
+        String::new(),
+        "## Retry Guidance".into(),
+        "  exit 9 + retryable=true: transient DB lock/busy — retry after 1s".into(),
+        "  exit 9 + retryable=false: schema or data issue — run 'cass analytics rebuild' first".into(),
+        "  exit 3: no database — run 'cass index --full' to create it".into(),
+        "  validate errors: run 'cass analytics rebuild --force' then re-validate".into(),
+        String::new(),
+        "## Common Workflows".into(),
+        "  # Quick health check".into(),
+        "  cass analytics status --json | jq '.data.coverage'".into(),
+        String::new(),
+        "  # Recent usage by agent for last 7 days".into(),
+        "  cass analytics tokens --days 7 --json | jq '.data.buckets'".into(),
+        String::new(),
+        "  # Cost analysis by model".into(),
+        "  cass analytics cost --json | jq '.data.by_model.rows[:5]'".into(),
+        String::new(),
+        "  # Tool usage top-10".into(),
+        "  cass analytics tools --limit 10 --json | jq '.data.rows'".into(),
+        String::new(),
+        "  # Validation + remediation loop".into(),
+        "  cass analytics validate --json | jq '.data.summary'".into(),
+        "  # If errors: rebuild then re-validate".into(),
+        "  cass analytics rebuild --force --json && cass analytics validate --json".into(),
+    ]
 }
 
 /// Render schema docs from live response schemas
