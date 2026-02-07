@@ -4943,6 +4943,17 @@ pub fn run_tui(
                                         status = format!("No saved view in slot {slot}");
                                     }
                                 }
+                                // Analytics actions are ftui-only; no-op in legacy TUI.
+                                PaletteAction::AnalyticsDashboard
+                                | PaletteAction::AnalyticsExplorer
+                                | PaletteAction::AnalyticsHeatmap
+                                | PaletteAction::AnalyticsBreakdowns
+                                | PaletteAction::AnalyticsTools
+                                | PaletteAction::AnalyticsCost
+                                | PaletteAction::AnalyticsCoverage => {
+                                    status =
+                                        "Analytics views available in ftui mode only".to_string();
+                                }
                             }
                             palette_state.open = false;
                         }

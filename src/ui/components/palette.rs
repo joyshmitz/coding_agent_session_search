@@ -29,6 +29,14 @@ pub enum PaletteAction {
     LoadViewSlot(u8),
     OpenBulkActions,
     ReloadIndex,
+    // -- Analytics surface ------------------------------------------------
+    AnalyticsDashboard,
+    AnalyticsExplorer,
+    AnalyticsHeatmap,
+    AnalyticsBreakdowns,
+    AnalyticsTools,
+    AnalyticsCost,
+    AnalyticsCoverage,
 }
 
 /// Render-ready descriptor for an action.
@@ -216,6 +224,42 @@ pub fn default_actions() -> Vec<PaletteItem> {
             "List saved slots",
         ),
     ];
+    // -- Analytics surface commands ----------------------------------------
+    items.push(item(
+        PaletteAction::AnalyticsDashboard,
+        "Analytics: Dashboard",
+        "KPI overview",
+    ));
+    items.push(item(
+        PaletteAction::AnalyticsExplorer,
+        "Analytics: Explorer",
+        "Time-series explorer",
+    ));
+    items.push(item(
+        PaletteAction::AnalyticsHeatmap,
+        "Analytics: Heatmap",
+        "Calendar heatmap",
+    ));
+    items.push(item(
+        PaletteAction::AnalyticsBreakdowns,
+        "Analytics: Breakdowns",
+        "Agents/workspaces/sources",
+    ));
+    items.push(item(
+        PaletteAction::AnalyticsTools,
+        "Analytics: Tools",
+        "Per-tool usage",
+    ));
+    items.push(item(
+        PaletteAction::AnalyticsCost,
+        "Analytics: Cost",
+        "USD cost estimation",
+    ));
+    items.push(item(
+        PaletteAction::AnalyticsCoverage,
+        "Analytics: Coverage",
+        "Token coverage diagnostics",
+    ));
     // Slots 1-9
     for slot in 1..=9 {
         items.push(item(

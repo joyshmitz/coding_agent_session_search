@@ -81,6 +81,79 @@ pub mod focus_ids {
 // Enums (ported from tui.rs, canonical for ftui)
 // =========================================================================
 
+/// Top-level application surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AppSurface {
+    /// Main search view (results list + detail pane).
+    #[default]
+    Search,
+    /// Analytics dashboard surface.
+    Analytics,
+}
+
+/// Analytics subview within the Analytics surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AnalyticsView {
+    /// Overview with KPI tiles + sparklines.
+    #[default]
+    Dashboard,
+    /// Interactive time-series explorer.
+    Explorer,
+    /// Calendar heatmap of daily activity.
+    Heatmap,
+    /// Agents/workspaces/sources/models breakdowns.
+    Breakdowns,
+    /// Per-tool usage analytics.
+    Tools,
+    /// Cost estimation (USD) by model/provider.
+    Cost,
+    /// Token measurement coverage diagnostics.
+    Coverage,
+}
+
+impl AnalyticsView {
+    /// Display label for the view.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dashboard => "Dashboard",
+            Self::Explorer => "Explorer",
+            Self::Heatmap => "Heatmap",
+            Self::Breakdowns => "Breakdowns",
+            Self::Tools => "Tools",
+            Self::Cost => "Cost",
+            Self::Coverage => "Coverage",
+        }
+    }
+
+    /// All analytics views in display order.
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Dashboard,
+            Self::Explorer,
+            Self::Heatmap,
+            Self::Breakdowns,
+            Self::Tools,
+            Self::Cost,
+            Self::Coverage,
+        ]
+    }
+}
+
+/// Analytics-specific filter state (persisted within the analytics surface).
+#[derive(Clone, Debug, Default)]
+pub struct AnalyticsFilterState {
+    /// Time range: since (ms epoch).
+    pub since_ms: Option<i64>,
+    /// Time range: until (ms epoch).
+    pub until_ms: Option<i64>,
+    /// Filter to specific agents (empty = all).
+    pub agents: HashSet<String>,
+    /// Filter to specific workspaces (empty = all).
+    pub workspaces: HashSet<String>,
+    /// Source filter.
+    pub source_filter: SourceFilter,
+}
+
 /// Which tab is active in the detail pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DetailTab {
@@ -338,6 +411,16 @@ pub struct SavedView {
 /// Every field here is the single source of truth; rendering and
 /// event handling derive all behavior from this struct.
 pub struct CassApp {
+    // -- View routing -----------------------------------------------------
+    /// Top-level surface (Search or Analytics).
+    pub surface: AppSurface,
+    /// Navigation back-stack (Esc pops, drilldowns push).
+    pub view_stack: Vec<AppSurface>,
+    /// Current analytics subview.
+    pub analytics_view: AnalyticsView,
+    /// Analytics-specific filter state.
+    pub analytics_filters: AnalyticsFilterState,
+
     // -- Search & query ---------------------------------------------------
     /// Current search query text.
     pub query: String,
@@ -502,6 +585,10 @@ pub struct CassApp {
 impl Default for CassApp {
     fn default() -> Self {
         Self {
+            surface: AppSurface::default(),
+            view_stack: Vec::new(),
+            analytics_view: AnalyticsView::default(),
+            analytics_filters: AnalyticsFilterState::default(),
             query: String::new(),
             filters: SearchFilters::default(),
             results: Vec::new(),
@@ -1328,6 +1415,48 @@ impl CassApp {
                 .render(count_area, frame);
         }
     }
+
+    /// Build a one-line summary of active analytics filters for the header bar.
+    fn analytics_filter_summary(&self) -> String {
+        let f = &self.analytics_filters;
+        let mut parts: Vec<String> = Vec::new();
+
+        // Time range
+        match (f.since_ms, f.until_ms) {
+            (Some(s), Some(u)) => parts.push(format!("time:{s}..{u}")),
+            (Some(s), None) => parts.push(format!("since:{s}")),
+            (None, Some(u)) => parts.push(format!("until:{u}")),
+            (None, None) => {}
+        }
+
+        // Agent filter
+        if !f.agents.is_empty() {
+            let mut agents: Vec<&str> = f.agents.iter().map(|s| s.as_str()).collect();
+            agents.sort();
+            parts.push(format!("agents:{}", agents.join(",")));
+        }
+
+        // Workspace filter
+        if !f.workspaces.is_empty() {
+            let mut ws: Vec<&str> = f.workspaces.iter().map(|s| s.as_str()).collect();
+            ws.sort();
+            parts.push(format!("ws:{}", ws.join(",")));
+        }
+
+        // Source filter
+        match f.source_filter {
+            SourceFilter::All => {}
+            SourceFilter::Local => parts.push("source:local".into()),
+            SourceFilter::Remote => parts.push("source:remote".into()),
+            SourceFilter::SourceId(ref id) => parts.push(format!("source:{id}")),
+        }
+
+        if parts.is_empty() {
+            "Filters: none".to_string()
+        } else {
+            format!("Filters: {}", parts.join(" | "))
+        }
+    }
 }
 
 // =========================================================================
@@ -1638,6 +1767,27 @@ pub enum CassMsg {
         x: u16,
         y: u16,
     },
+
+    // -- Analytics surface ------------------------------------------------
+    /// Switch to analytics surface (pushes Search onto back-stack).
+    AnalyticsEntered,
+    /// Navigate to a specific analytics subview.
+    AnalyticsViewChanged(AnalyticsView),
+    /// Pop the view stack (Esc from analytics returns to search).
+    ViewStackPopped,
+    /// Update analytics time range filter.
+    AnalyticsTimeRangeSet {
+        since_ms: Option<i64>,
+        until_ms: Option<i64>,
+    },
+    /// Update analytics agent filter.
+    AnalyticsAgentFilterSet(HashSet<String>),
+    /// Update analytics workspace filter.
+    AnalyticsWorkspaceFilterSet(HashSet<String>),
+    /// Update analytics source filter.
+    AnalyticsSourceFilterSet(SourceFilter),
+    /// Clear all analytics filters.
+    AnalyticsFiltersClearAll,
 
     // -- Lifecycle ---------------------------------------------------------
     /// Application quit requested.
@@ -2721,6 +2871,35 @@ impl super::ftui_adapter::Model for CassApp {
                     Some(PaletteAction::ReloadIndex) => {
                         ftui::Cmd::msg(CassMsg::IndexRefreshRequested)
                     }
+                    // -- Analytics palette actions ---
+                    Some(PaletteAction::AnalyticsDashboard) => ftui::Cmd::batch(vec![
+                        ftui::Cmd::msg(CassMsg::AnalyticsEntered),
+                        ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Dashboard)),
+                    ]),
+                    Some(PaletteAction::AnalyticsExplorer) => ftui::Cmd::batch(vec![
+                        ftui::Cmd::msg(CassMsg::AnalyticsEntered),
+                        ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Explorer)),
+                    ]),
+                    Some(PaletteAction::AnalyticsHeatmap) => ftui::Cmd::batch(vec![
+                        ftui::Cmd::msg(CassMsg::AnalyticsEntered),
+                        ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Heatmap)),
+                    ]),
+                    Some(PaletteAction::AnalyticsBreakdowns) => ftui::Cmd::batch(vec![
+                        ftui::Cmd::msg(CassMsg::AnalyticsEntered),
+                        ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Breakdowns)),
+                    ]),
+                    Some(PaletteAction::AnalyticsTools) => ftui::Cmd::batch(vec![
+                        ftui::Cmd::msg(CassMsg::AnalyticsEntered),
+                        ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Tools)),
+                    ]),
+                    Some(PaletteAction::AnalyticsCost) => ftui::Cmd::batch(vec![
+                        ftui::Cmd::msg(CassMsg::AnalyticsEntered),
+                        ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Cost)),
+                    ]),
+                    Some(PaletteAction::AnalyticsCoverage) => ftui::Cmd::batch(vec![
+                        ftui::Cmd::msg(CassMsg::AnalyticsEntered),
+                        ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Coverage)),
+                    ]),
                     None => ftui::Cmd::none(),
                 }
             }
@@ -3111,9 +3290,55 @@ impl super::ftui_adapter::Model for CassApp {
                 }
             }
 
+            // -- Analytics surface ---------------------------------------------
+            CassMsg::AnalyticsEntered => {
+                if self.surface != AppSurface::Analytics {
+                    self.view_stack.push(self.surface);
+                    self.surface = AppSurface::Analytics;
+                }
+                ftui::Cmd::none()
+            }
+            CassMsg::AnalyticsViewChanged(view) => {
+                self.analytics_view = view;
+                ftui::Cmd::none()
+            }
+            CassMsg::ViewStackPopped => {
+                if let Some(prev) = self.view_stack.pop() {
+                    self.surface = prev;
+                } else {
+                    self.surface = AppSurface::Search;
+                }
+                ftui::Cmd::none()
+            }
+            CassMsg::AnalyticsTimeRangeSet { since_ms, until_ms } => {
+                self.analytics_filters.since_ms = since_ms;
+                self.analytics_filters.until_ms = until_ms;
+                ftui::Cmd::none()
+            }
+            CassMsg::AnalyticsAgentFilterSet(agents) => {
+                self.analytics_filters.agents = agents;
+                ftui::Cmd::none()
+            }
+            CassMsg::AnalyticsWorkspaceFilterSet(workspaces) => {
+                self.analytics_filters.workspaces = workspaces;
+                ftui::Cmd::none()
+            }
+            CassMsg::AnalyticsSourceFilterSet(sf) => {
+                self.analytics_filters.source_filter = sf;
+                ftui::Cmd::none()
+            }
+            CassMsg::AnalyticsFiltersClearAll => {
+                self.analytics_filters = AnalyticsFilterState::default();
+                ftui::Cmd::none()
+            }
+
             // -- Lifecycle ----------------------------------------------------
             CassMsg::QuitRequested => {
                 // ESC unwind: check pending state before quitting
+                // If on analytics surface, pop back to search.
+                if self.surface == AppSurface::Analytics {
+                    return ftui::Cmd::msg(CassMsg::ViewStackPopped);
+                }
                 if self.show_consent_dialog {
                     self.show_consent_dialog = false;
                     return ftui::Cmd::none();
@@ -3227,129 +3452,74 @@ impl super::ftui_adapter::Model for CassApp {
             layout_area = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
         }
 
-        // ── Main vertical split: search bar | content | status ──────────
-        let vertical = Flex::vertical()
-            .constraints([
-                Constraint::Fixed(3), // Search bar
-                Constraint::Min(4),   // Content area (results + detail)
-                Constraint::Fixed(1), // Status footer
-            ])
-            .split(layout_area);
+        // ── Surface routing ──────────────────────────────────────────────
+        match self.surface {
+            AppSurface::Search => {
+                // ── Main vertical split: search bar | content | status ──
+                let vertical = Flex::vertical()
+                    .constraints([
+                        Constraint::Fixed(3), // Search bar
+                        Constraint::Min(4),   // Content area (results + detail)
+                        Constraint::Fixed(1), // Status footer
+                    ])
+                    .split(layout_area);
 
-        // ── Search bar ──────────────────────────────────────────────────
-        let query_title = format!(
-            "cass | {} | {:?}/{:?}",
-            self.theme_preset.name(),
-            self.search_mode,
-            self.match_mode
-        );
-        let query_block = Block::new()
-            .borders(Borders::ALL)
-            .border_type(border_type)
-            .title(&query_title)
-            .title_alignment(Alignment::Left)
-            .style(if self.focus_region == FocusRegion::Results {
-                pane_focused_style
-            } else {
-                pane_style
-            });
-        let query_inner = query_block.inner(vertical[0]);
-        query_block.render(vertical[0], frame);
-        if !query_inner.is_empty() {
-            if self.query.is_empty() {
-                Paragraph::new("\u{2502}<type to search>")
-                    .style(text_muted_style)
-                    .render(query_inner, frame);
-            } else {
-                // Render query with cursor indicator at cursor_pos.
-                let cpos = self.cursor_pos.min(self.query.len());
-                let display = format!("{}\u{2502}{}", &self.query[..cpos], &self.query[cpos..]);
-                let text_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
-                Paragraph::new(&*display)
-                    .style(text_style)
-                    .render(query_inner, frame);
-            };
-        }
+                // ── Search bar ──────────────────────────────────────────
+                let query_title = format!(
+                    "cass | {} | {:?}/{:?}",
+                    self.theme_preset.name(),
+                    self.search_mode,
+                    self.match_mode
+                );
+                let query_block = Block::new()
+                    .borders(Borders::ALL)
+                    .border_type(border_type)
+                    .title(&query_title)
+                    .title_alignment(Alignment::Left)
+                    .style(if self.focus_region == FocusRegion::Results {
+                        pane_focused_style
+                    } else {
+                        pane_style
+                    });
+                let query_inner = query_block.inner(vertical[0]);
+                query_block.render(vertical[0], frame);
+                if !query_inner.is_empty() {
+                    if self.query.is_empty() {
+                        Paragraph::new("\u{2502}<type to search>")
+                            .style(text_muted_style)
+                            .render(query_inner, frame);
+                    } else {
+                        let cpos = self.cursor_pos.min(self.query.len());
+                        let display =
+                            format!("{}\u{2502}{}", &self.query[..cpos], &self.query[cpos..]);
+                        let text_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
+                        Paragraph::new(&*display)
+                            .style(text_style)
+                            .render(query_inner, frame);
+                    };
+                }
 
-        // ── Content area: responsive layout ─────────────────────────────
-        let content_area = vertical[1];
+                // ── Content area: responsive layout ─────────────────────
+                let content_area = vertical[1];
 
-        let (hits, selected_idx) = if let Some(pane) = self.panes.get(self.active_pane) {
-            (&pane.hits[..], pane.selected)
-        } else {
-            (&self.results[..], 0)
-        };
+                let (hits, selected_idx) = if let Some(pane) = self.panes.get(self.active_pane) {
+                    (&pane.hits[..], pane.selected)
+                } else {
+                    (&self.results[..], 0)
+                };
 
-        match breakpoint {
-            LayoutBreakpoint::Wide => {
-                // Side-by-side: results (60%) | detail (40%)
-                let panes = Flex::horizontal()
-                    .constraints([Constraint::Percentage(60.0), Constraint::Percentage(40.0)])
-                    .gap(0)
-                    .split(content_area);
-                self.render_results_pane(
-                    frame,
-                    panes[0],
-                    hits,
-                    selected_idx,
-                    row_h,
-                    border_type,
-                    &styles,
-                    pane_style,
-                    pane_focused_style,
-                    row_style,
-                    row_alt_style,
-                    row_selected_style,
-                    text_muted_style,
-                );
-                self.render_detail_pane(
-                    frame,
-                    panes[1],
-                    border_type,
-                    &styles,
-                    pane_style,
-                    pane_focused_style,
-                    text_muted_style,
-                );
-            }
-            LayoutBreakpoint::Medium => {
-                // Side-by-side but with flexible ratio
-                let panes = Flex::horizontal()
-                    .constraints([Constraint::Min(40), Constraint::Min(32)])
-                    .gap(0)
-                    .split(content_area);
-                self.render_results_pane(
-                    frame,
-                    panes[0],
-                    hits,
-                    selected_idx,
-                    row_h,
-                    border_type,
-                    &styles,
-                    pane_style,
-                    pane_focused_style,
-                    row_style,
-                    row_alt_style,
-                    row_selected_style,
-                    text_muted_style,
-                );
-                self.render_detail_pane(
-                    frame,
-                    panes[1],
-                    border_type,
-                    &styles,
-                    pane_style,
-                    pane_focused_style,
-                    text_muted_style,
-                );
-            }
-            LayoutBreakpoint::Narrow => {
-                // Single pane: show whichever has focus
-                match self.focus_region {
-                    FocusRegion::Results => {
+                match breakpoint {
+                    LayoutBreakpoint::Wide => {
+                        let panes = Flex::horizontal()
+                            .constraints([
+                                Constraint::Percentage(60.0),
+                                Constraint::Percentage(40.0),
+                            ])
+                            .gap(0)
+                            .split(content_area);
                         self.render_results_pane(
                             frame,
-                            content_area,
+                            panes[0],
                             hits,
                             selected_idx,
                             row_h,
@@ -3362,11 +3532,9 @@ impl super::ftui_adapter::Model for CassApp {
                             row_selected_style,
                             text_muted_style,
                         );
-                    }
-                    FocusRegion::Detail => {
                         self.render_detail_pane(
                             frame,
-                            content_area,
+                            panes[1],
                             border_type,
                             &styles,
                             pane_style,
@@ -3374,35 +3542,164 @@ impl super::ftui_adapter::Model for CassApp {
                             text_muted_style,
                         );
                     }
+                    LayoutBreakpoint::Medium => {
+                        let panes = Flex::horizontal()
+                            .constraints([Constraint::Min(40), Constraint::Min(32)])
+                            .gap(0)
+                            .split(content_area);
+                        self.render_results_pane(
+                            frame,
+                            panes[0],
+                            hits,
+                            selected_idx,
+                            row_h,
+                            border_type,
+                            &styles,
+                            pane_style,
+                            pane_focused_style,
+                            row_style,
+                            row_alt_style,
+                            row_selected_style,
+                            text_muted_style,
+                        );
+                        self.render_detail_pane(
+                            frame,
+                            panes[1],
+                            border_type,
+                            &styles,
+                            pane_style,
+                            pane_focused_style,
+                            text_muted_style,
+                        );
+                    }
+                    LayoutBreakpoint::Narrow => match self.focus_region {
+                        FocusRegion::Results => {
+                            self.render_results_pane(
+                                frame,
+                                content_area,
+                                hits,
+                                selected_idx,
+                                row_h,
+                                border_type,
+                                &styles,
+                                pane_style,
+                                pane_focused_style,
+                                row_style,
+                                row_alt_style,
+                                row_selected_style,
+                                text_muted_style,
+                            );
+                        }
+                        FocusRegion::Detail => {
+                            self.render_detail_pane(
+                                frame,
+                                content_area,
+                                border_type,
+                                &styles,
+                                pane_style,
+                                pane_focused_style,
+                                text_muted_style,
+                            );
+                        }
+                    },
                 }
+
+                // ── Status footer ───────────────────────────────────────
+                let bp_label = match breakpoint {
+                    LayoutBreakpoint::Narrow => "narrow",
+                    LayoutBreakpoint::Medium => "med",
+                    LayoutBreakpoint::Wide => "wide",
+                };
+                let density_label = match self.density_mode {
+                    DensityMode::Compact => "compact",
+                    DensityMode::Cozy => "cozy",
+                    DensityMode::Spacious => "spacious",
+                };
+                let hits_for_status = if let Some(pane) = self.panes.get(self.active_pane) {
+                    pane.hits.len()
+                } else {
+                    self.results.len()
+                };
+                let status_line = if self.status.is_empty() {
+                    format!(
+                        " {} hits | {} | {} | {:?} | F2=theme D=density Ctrl+B=borders",
+                        hits_for_status, bp_label, density_label, styles.options.color_profile
+                    )
+                } else {
+                    format!(" {}", self.status)
+                };
+                Paragraph::new(&*status_line)
+                    .style(text_muted_style)
+                    .render(vertical[2], frame);
+            }
+
+            AppSurface::Analytics => {
+                // ── Analytics surface layout ─────────────────────────────
+                let vertical = Flex::vertical()
+                    .constraints([
+                        Constraint::Fixed(3), // Header / nav bar
+                        Constraint::Min(4),   // Content
+                        Constraint::Fixed(1), // Status footer
+                    ])
+                    .split(layout_area);
+
+                // ── Analytics header with view tabs ──────────────────────
+                let view_tabs: String = AnalyticsView::all()
+                    .iter()
+                    .map(|v| {
+                        if *v == self.analytics_view {
+                            format!("[{}]", v.label())
+                        } else {
+                            v.label().to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                let header_title = format!("cass analytics | {view_tabs}");
+                let header_block = Block::new()
+                    .borders(Borders::ALL)
+                    .border_type(border_type)
+                    .title(&header_title)
+                    .title_alignment(Alignment::Left)
+                    .style(pane_focused_style);
+                let header_inner = header_block.inner(vertical[0]);
+                header_block.render(vertical[0], frame);
+                if !header_inner.is_empty() {
+                    let filter_desc = self.analytics_filter_summary();
+                    Paragraph::new(&*filter_desc)
+                        .style(text_muted_style)
+                        .render(header_inner, frame);
+                }
+
+                // ── Analytics content placeholder ────────────────────────
+                let content_block = Block::new()
+                    .borders(Borders::ALL)
+                    .border_type(border_type)
+                    .title(self.analytics_view.label())
+                    .title_alignment(Alignment::Left)
+                    .style(pane_style);
+                let content_inner = content_block.inner(vertical[1]);
+                content_block.render(vertical[1], frame);
+                if !content_inner.is_empty() {
+                    let placeholder = format!(
+                        "Analytics {} view — placeholder\n\nEsc to return to search | Ctrl+P for palette",
+                        self.analytics_view.label()
+                    );
+                    Paragraph::new(&*placeholder)
+                        .style(text_muted_style)
+                        .render(content_inner, frame);
+                }
+
+                // ── Analytics status footer ──────────────────────────────
+                let analytics_status = format!(
+                    " Analytics: {} | Esc=back Ctrl+P=palette",
+                    self.analytics_view.label()
+                );
+                Paragraph::new(&*analytics_status)
+                    .style(text_muted_style)
+                    .render(vertical[2], frame);
             }
         }
-
-        // ── Status footer ───────────────────────────────────────────────
-        let bp_label = match breakpoint {
-            LayoutBreakpoint::Narrow => "narrow",
-            LayoutBreakpoint::Medium => "med",
-            LayoutBreakpoint::Wide => "wide",
-        };
-        let density_label = match self.density_mode {
-            DensityMode::Compact => "compact",
-            DensityMode::Cozy => "cozy",
-            DensityMode::Spacious => "spacious",
-        };
-        let status_line = if self.status.is_empty() {
-            format!(
-                " {} hits | {} | {} | {:?} | F2=theme D=density Ctrl+B=borders",
-                hits.len(),
-                bp_label,
-                density_label,
-                styles.options.color_profile
-            )
-        } else {
-            format!(" {}", self.status)
-        };
-        Paragraph::new(&*status_line)
-            .style(text_muted_style)
-            .render(vertical[2], frame);
 
         // ── Command palette overlay ──────────────────────────────────
         if self.palette_state.open {
@@ -4829,5 +5126,179 @@ mod tests {
         let lines = app.build_messages_lines(&hit, 80, &styles);
         // The content has "# Heading" which is markdown — should render it
         assert!(lines.len() > 5, "markdown should produce multiple lines");
+    }
+
+    // ==================== Analytics surface tests ====================
+
+    #[test]
+    fn analytics_entered_switches_surface() {
+        let mut app = CassApp::default();
+        assert_eq!(app.surface, AppSurface::Search);
+        assert!(app.view_stack.is_empty());
+
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert_eq!(app.surface, AppSurface::Analytics);
+        assert_eq!(app.view_stack, vec![AppSurface::Search]);
+    }
+
+    #[test]
+    fn analytics_entered_idempotent() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        // Should not push duplicate onto stack
+        assert_eq!(app.view_stack.len(), 1);
+        assert_eq!(app.surface, AppSurface::Analytics);
+    }
+
+    #[test]
+    fn analytics_view_changed_updates_subview() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert_eq!(app.analytics_view, AnalyticsView::Dashboard);
+
+        let _ = app.update(CassMsg::AnalyticsViewChanged(AnalyticsView::Heatmap));
+        assert_eq!(app.analytics_view, AnalyticsView::Heatmap);
+
+        let _ = app.update(CassMsg::AnalyticsViewChanged(AnalyticsView::Cost));
+        assert_eq!(app.analytics_view, AnalyticsView::Cost);
+    }
+
+    #[test]
+    fn view_stack_popped_returns_to_search() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert_eq!(app.surface, AppSurface::Analytics);
+
+        let _ = app.update(CassMsg::ViewStackPopped);
+        assert_eq!(app.surface, AppSurface::Search);
+        assert!(app.view_stack.is_empty());
+    }
+
+    #[test]
+    fn view_stack_popped_empty_defaults_to_search() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        // Stack is empty
+        let _ = app.update(CassMsg::ViewStackPopped);
+        assert_eq!(app.surface, AppSurface::Search);
+    }
+
+    #[test]
+    fn esc_from_analytics_pops_view_stack() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert_eq!(app.surface, AppSurface::Analytics);
+
+        // QuitRequested on analytics returns Cmd::msg(ViewStackPopped).
+        // Simulate the two-step dispatch:
+        let _ = app.update(CassMsg::QuitRequested);
+        let _ = app.update(CassMsg::ViewStackPopped);
+        assert_eq!(app.surface, AppSurface::Search);
+    }
+
+    #[test]
+    fn analytics_time_range_set() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsTimeRangeSet {
+            since_ms: Some(1000),
+            until_ms: Some(2000),
+        });
+        assert_eq!(app.analytics_filters.since_ms, Some(1000));
+        assert_eq!(app.analytics_filters.until_ms, Some(2000));
+    }
+
+    #[test]
+    fn analytics_agent_filter_set() {
+        let mut app = CassApp::default();
+        let agents: HashSet<String> = ["claude_code", "codex"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let _ = app.update(CassMsg::AnalyticsAgentFilterSet(agents.clone()));
+        assert_eq!(app.analytics_filters.agents, agents);
+    }
+
+    #[test]
+    fn analytics_workspace_filter_set() {
+        let mut app = CassApp::default();
+        let ws: HashSet<String> = ["proj_a"].iter().map(|s| s.to_string()).collect();
+        let _ = app.update(CassMsg::AnalyticsWorkspaceFilterSet(ws.clone()));
+        assert_eq!(app.analytics_filters.workspaces, ws);
+    }
+
+    #[test]
+    fn analytics_source_filter_set() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsSourceFilterSet(SourceFilter::Local));
+        assert_eq!(app.analytics_filters.source_filter, SourceFilter::Local);
+    }
+
+    #[test]
+    fn analytics_filters_clear_all() {
+        let mut app = CassApp::default();
+        app.analytics_filters.since_ms = Some(1000);
+        app.analytics_filters.agents.insert("claude_code".into());
+        app.analytics_filters.source_filter = SourceFilter::Remote;
+
+        let _ = app.update(CassMsg::AnalyticsFiltersClearAll);
+        assert!(app.analytics_filters.since_ms.is_none());
+        assert!(app.analytics_filters.agents.is_empty());
+        assert_eq!(app.analytics_filters.source_filter, SourceFilter::All);
+    }
+
+    #[test]
+    fn analytics_view_labels_all_unique() {
+        let views = AnalyticsView::all();
+        let labels: Vec<&str> = views.iter().map(|v| v.label()).collect();
+        let mut unique = labels.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(labels.len(), unique.len(), "all view labels must be unique");
+    }
+
+    #[test]
+    fn analytics_view_all_has_seven_entries() {
+        assert_eq!(AnalyticsView::all().len(), 7);
+    }
+
+    #[test]
+    fn analytics_filter_summary_empty() {
+        let app = CassApp::default();
+        assert_eq!(app.analytics_filter_summary(), "Filters: none");
+    }
+
+    #[test]
+    fn analytics_filter_summary_with_filters() {
+        let mut app = CassApp::default();
+        app.analytics_filters.since_ms = Some(1000);
+        app.analytics_filters.agents.insert("claude_code".into());
+        let summary = app.analytics_filter_summary();
+        assert!(summary.contains("since:1000"));
+        assert!(summary.contains("agents:claude_code"));
+    }
+
+    #[test]
+    fn palette_has_analytics_actions() {
+        let actions = default_actions();
+        let labels: Vec<&str> = actions.iter().map(|a| a.label.as_str()).collect();
+        assert!(labels.contains(&"Analytics: Dashboard"));
+        assert!(labels.contains(&"Analytics: Explorer"));
+        assert!(labels.contains(&"Analytics: Heatmap"));
+        assert!(labels.contains(&"Analytics: Breakdowns"));
+        assert!(labels.contains(&"Analytics: Tools"));
+        assert!(labels.contains(&"Analytics: Cost"));
+        assert!(labels.contains(&"Analytics: Coverage"));
+    }
+
+    #[test]
+    fn default_surface_is_search() {
+        let app = CassApp::default();
+        assert_eq!(app.surface, AppSurface::Search);
+        assert_eq!(app.analytics_view, AnalyticsView::Dashboard);
+        assert!(app.analytics_filters.agents.is_empty());
+        assert!(app.analytics_filters.workspaces.is_empty());
+        assert!(app.analytics_filters.since_ms.is_none());
+        assert!(app.analytics_filters.until_ms.is_none());
     }
 }
