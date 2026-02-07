@@ -114,6 +114,14 @@ pub struct AnalyticsChartData {
     pub unpriced_models: Vec<crate::analytics::UnpricedModel>,
     /// Percentage of token_usage rows with known pricing (0..100).
     pub pricing_coverage_pct: f64,
+
+    // ── Plans view ───────────────────────────────────────────
+    /// Per-agent plan message counts: `(agent_slug, plan_message_count)` sorted desc.
+    pub agent_plan_messages: Vec<(String, f64)>,
+    /// Plan message share (% of total messages that are plan messages).
+    pub plan_message_pct: f64,
+    /// Plan API token share (% of API tokens attributed to plans).
+    pub plan_api_token_share: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +371,38 @@ pub fn load_chart_data(
     if let Ok(status) = analytics::query::query_status(conn, &filter) {
         data.coverage_pct = status.coverage.api_token_coverage_pct;
         data.pricing_coverage_pct = status.coverage.pricing_coverage_pct;
+    }
+
+    // Per-agent plan message breakdown.
+    if let Ok(result) = analytics::query::query_breakdown(
+        conn,
+        &filter,
+        analytics::Dim::Agent,
+        analytics::Metric::PlanCount,
+        20,
+    ) {
+        data.agent_plan_messages = result
+            .rows
+            .iter()
+            .map(|r| (r.key.clone(), r.value as f64))
+            .collect();
+    }
+
+    // Derive plan share percentages from totals.
+    if data.total_messages > 0 {
+        data.plan_message_pct =
+            data.total_plan_messages as f64 / data.total_messages as f64 * 100.0;
+    }
+    if data.total_api_tokens > 0 {
+        // Plan API token share: sum of plan API tokens from timeseries totals.
+        // The totals are loaded from Track A timeseries above.
+        // We use daily_plan_messages as a proxy — a more accurate plan_api_tokens_total
+        // would require Track A plan_api_tokens_total column (from z9fse.14).
+        let plan_token_total: f64 = data.daily_plan_messages.iter().map(|(_, v)| *v).sum();
+        if plan_token_total > 0.0 && data.total_messages > 0 {
+            // Approximate: plan share ≈ plan messages / total messages (token-weighted approx).
+            data.plan_api_token_share = plan_token_total / data.total_messages as f64 * 100.0;
+        }
     }
 
     data
@@ -694,10 +734,11 @@ pub fn render_explorer(
     };
 
     let header_text = format!(
-        " Metric: {} ({})  |  {}  |  Overlay: {}  |  m/M=metric  g/G=group  o=overlay{}",
+        " {} ({})  |  {}  |  Zoom: {}  |  Overlay: {}  |  m/M g/G z/Z o{}",
         state.metric.label(),
         total_display,
         state.group_by.label(),
+        state.zoom.label(),
         state.overlay.label(),
         date_range,
     );
@@ -1366,6 +1407,11 @@ pub fn tools_row_count(data: &AnalyticsChartData) -> usize {
     data.tool_rows.len().min(max_visible)
 }
 
+/// Number of visible rows in the Coverage view (for selection bounds).
+pub fn coverage_row_count(data: &AnalyticsChartData) -> usize {
+    data.agent_tokens.len().min(10)
+}
+
 /// Render the Tools view: per-agent table with calls, messages, tokens, calls/1K, and trend.
 pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
     if data.tool_rows.is_empty() {
@@ -1748,6 +1794,87 @@ fn render_cost_sparkline(data: &AnalyticsChartData, area: Rect, frame: &mut ftui
     spark.render(spark_inner, frame);
 }
 
+/// Number of selectable rows in the Plans view (per-agent plan breakdown).
+pub fn plans_rows(data: &AnalyticsChartData) -> usize {
+    data.agent_plan_messages.len().min(15)
+}
+
+/// Render the Plans view: plan message breakdown by agent + plan token share.
+fn render_plans(data: &AnalyticsChartData, selection: usize, area: Rect, frame: &mut ftui::Frame) {
+    if area.height < 3 || area.width < 20 {
+        return;
+    }
+
+    let total_plan = data.total_plan_messages;
+    let total_msgs = data.total_messages;
+    let plan_pct = if total_msgs > 0 {
+        (total_plan as f64 / total_msgs as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Header
+    let header = format!(
+        " Plans: {} plan msgs / {} total ({:.1}%)  |  Up/Down=select  Enter=drilldown",
+        format_compact(total_plan),
+        format_compact(total_msgs),
+        plan_pct,
+    );
+    Paragraph::new(&*header)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 200)))
+        .render(
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: 1,
+            },
+            frame,
+        );
+
+    // Per-agent plan message rows.
+    let max_val = data
+        .agent_plan_messages
+        .first()
+        .map(|(_, v)| *v)
+        .unwrap_or(1.0)
+        .max(1.0);
+
+    for (i, (agent, count)) in data.agent_plan_messages.iter().enumerate().take(15) {
+        let y = area.y + 1 + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let bar_width = ((count / max_val) * (area.width as f64 * 0.5).max(1.0)) as u16;
+        let label = format!(" {:12} {:>8}", agent, format_compact(*count as i64));
+        let fg = if i == selection {
+            PackedRgba::rgb(255, 255, 100)
+        } else {
+            PackedRgba::rgb(255, 200, 0)
+        };
+        let row_area = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        };
+        // Bar
+        let bar_area = Rect {
+            x: area.x,
+            y,
+            width: bar_width.min(area.width),
+            height: 1,
+        };
+        Paragraph::new("")
+            .style(ftui::Style::new().bg(PackedRgba::rgb(80, 60, 0)))
+            .render(bar_area, frame);
+        // Label on top
+        Paragraph::new(&*label)
+            .style(ftui::Style::new().fg(fg))
+            .render(row_area, frame);
+    }
+}
+
 /// Render the Coverage view: overall bar + per-agent breakdown + daily sparkline.
 pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
     // Agent rows to show (up to 10).
@@ -1938,6 +2065,7 @@ pub struct ExplorerState {
     pub metric: ExplorerMetric,
     pub overlay: ExplorerOverlay,
     pub group_by: crate::analytics::GroupBy,
+    pub zoom: super::app::ExplorerZoom,
 }
 
 /// Dispatch rendering to the appropriate view function.
@@ -2015,7 +2143,23 @@ pub fn render_analytics_content(
                 render_selection_indicator(selection, row_count, chart_area, frame, false);
             }
         }
-        AnalyticsView::Coverage => render_coverage(data, area, frame),
+        AnalyticsView::Plans => {
+            render_plans(data, selection, area, frame);
+        }
+        AnalyticsView::Coverage => {
+            render_coverage(data, area, frame);
+            // Selection indicator offset by 2 for the coverage bar + 1 for table header.
+            let row_count = coverage_row_count(data);
+            if row_count > 0 && area.height > 3 {
+                let cov_content = Rect {
+                    x: area.x,
+                    y: area.y + 3, // 2-row coverage bar + 1-row table header
+                    width: area.width,
+                    height: area.height.saturating_sub(3),
+                };
+                render_selection_indicator(selection, row_count, cov_content, frame, false);
+            }
+        }
     }
 }
 
@@ -2142,6 +2286,7 @@ mod tests {
                 | AnalyticsView::Breakdowns
                 | AnalyticsView::Tools
                 | AnalyticsView::Cost
+                | AnalyticsView::Plans
                 | AnalyticsView::Coverage => {}
             }
         }
@@ -2318,5 +2463,50 @@ mod tests {
         };
         let line = tools_row_line(&row, 1.0, 80);
         assert!(line.contains("\u{2014}")); // em-dash for missing data
+    }
+
+    // ── Coverage view tests ──────────────────────────────────────────
+
+    #[test]
+    fn coverage_row_count_empty() {
+        let data = AnalyticsChartData::default();
+        assert_eq!(coverage_row_count(&data), 0);
+    }
+
+    #[test]
+    fn coverage_row_count_with_agents() {
+        let data = AnalyticsChartData {
+            agent_tokens: vec![
+                ("claude_code".to_string(), 1000.0),
+                ("codex".to_string(), 500.0),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(coverage_row_count(&data), 2);
+    }
+
+    #[test]
+    fn coverage_row_count_capped_at_10() {
+        let agents: Vec<(String, f64)> = (0..15)
+            .map(|i| (format!("agent_{i}"), 100.0 * (15 - i) as f64))
+            .collect();
+        let data = AnalyticsChartData {
+            agent_tokens: agents,
+            ..Default::default()
+        };
+        assert_eq!(coverage_row_count(&data), 10);
+    }
+
+    #[test]
+    fn coverage_color_thresholds() {
+        let green = coverage_color(80.0);
+        let yellow = coverage_color(50.0);
+        let red = coverage_color(30.0);
+        // Green for high coverage
+        assert_eq!(green, PackedRgba::rgb(80, 200, 80));
+        // Yellow for moderate
+        assert_eq!(yellow, PackedRgba::rgb(255, 200, 0));
+        // Red for low
+        assert_eq!(red, PackedRgba::rgb(255, 80, 80));
     }
 }

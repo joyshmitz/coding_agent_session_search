@@ -36,6 +36,7 @@ pub enum PaletteAction {
     AnalyticsBreakdowns,
     AnalyticsTools,
     AnalyticsCost,
+    AnalyticsPlans,
     AnalyticsCoverage,
 }
 
@@ -254,6 +255,11 @@ pub fn default_actions() -> Vec<PaletteItem> {
         PaletteAction::AnalyticsCost,
         "Analytics: Cost",
         "USD cost estimation",
+    ));
+    items.push(item(
+        PaletteAction::AnalyticsPlans,
+        "Analytics: Plans",
+        "Plan frequency + token share",
     ));
     items.push(item(
         PaletteAction::AnalyticsCoverage,

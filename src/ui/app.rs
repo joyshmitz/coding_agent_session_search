@@ -147,6 +147,8 @@ pub enum AnalyticsView {
     Tools,
     /// Cost estimation (USD) by model/provider.
     Cost,
+    /// Plan frequency + plan token share + trends.
+    Plans,
     /// Token measurement coverage diagnostics.
     Coverage,
 }
@@ -161,6 +163,7 @@ impl AnalyticsView {
             Self::Breakdowns => "Breakdowns",
             Self::Tools => "Tools",
             Self::Cost => "Cost",
+            Self::Plans => "Plans",
             Self::Coverage => "Coverage",
         }
     }
@@ -174,6 +177,7 @@ impl AnalyticsView {
             Self::Breakdowns,
             Self::Tools,
             Self::Cost,
+            Self::Plans,
             Self::Coverage,
         ]
     }
@@ -252,6 +256,61 @@ impl ExplorerOverlay {
             Self::ByAgent => Self::ByWorkspace,
             Self::ByWorkspace => Self::BySource,
             Self::BySource => Self::None,
+        }
+    }
+}
+
+/// Zoom presets for the Explorer time range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ExplorerZoom {
+    #[default]
+    All,
+    Day,
+    Week,
+    Month,
+    Quarter,
+}
+
+impl ExplorerZoom {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Day => "24h",
+            Self::Week => "7d",
+            Self::Month => "30d",
+            Self::Quarter => "90d",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Day,
+            Self::Day => Self::Week,
+            Self::Week => Self::Month,
+            Self::Month => Self::Quarter,
+            Self::Quarter => Self::All,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::All => Self::Quarter,
+            Self::Day => Self::All,
+            Self::Week => Self::Day,
+            Self::Month => Self::Week,
+            Self::Quarter => Self::Month,
+        }
+    }
+
+    /// Convert to `(since_ms, until_ms)` relative to now.
+    pub fn to_range(self) -> (Option<i64>, Option<i64>) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        match self {
+            Self::All => (None, None),
+            Self::Day => (Some(now_ms - 24 * 3600 * 1000), None),
+            Self::Week => (Some(now_ms - 7 * 24 * 3600 * 1000), None),
+            Self::Month => (Some(now_ms - 30 * 24 * 3600 * 1000), None),
+            Self::Quarter => (Some(now_ms - 90 * 24 * 3600 * 1000), None),
         }
     }
 }
@@ -820,6 +879,8 @@ pub struct CassApp {
     pub explorer_overlay: ExplorerOverlay,
     /// Explorer time-bucket granularity (Hour / Day / Week / Month).
     pub explorer_group_by: crate::analytics::GroupBy,
+    /// Explorer zoom preset (All / 24h / 7d / 30d / 90d).
+    pub explorer_zoom: ExplorerZoom,
     /// Active tab within the Breakdowns view.
     pub breakdown_tab: BreakdownTab,
     /// Active metric for the Heatmap view.
@@ -1027,6 +1088,7 @@ impl Default for CassApp {
             explorer_metric: ExplorerMetric::default(),
             explorer_overlay: ExplorerOverlay::default(),
             explorer_group_by: crate::analytics::GroupBy::Day,
+            explorer_zoom: ExplorerZoom::default(),
             breakdown_tab: BreakdownTab::default(),
             heatmap_metric: HeatmapMetric::default(),
             query: String::new(),
@@ -2986,8 +3048,10 @@ impl CassApp {
             }
             AnalyticsView::Tools => super::analytics_charts::tools_row_count(data),
             AnalyticsView::Cost => super::analytics_charts::cost_rows(data),
-            // Dashboard and Coverage have no selectable rows.
-            AnalyticsView::Dashboard | AnalyticsView::Coverage => 0,
+            AnalyticsView::Plans => data.agent_plan_messages.len(),
+            AnalyticsView::Coverage => super::analytics_charts::coverage_row_count(data),
+            // Dashboard has no selectable rows.
+            AnalyticsView::Dashboard => 0,
         }
     }
 
@@ -3087,8 +3151,28 @@ impl CassApp {
                     model: Some(model.clone()),
                 })
             }
-            // Dashboard and Coverage don't support drilldown.
-            AnalyticsView::Dashboard | AnalyticsView::Coverage => None,
+            AnalyticsView::Plans => {
+                // Drill into agent's plan-heavy sessions.
+                let (agent, _) = data.agent_plan_messages.get(idx)?;
+                Some(DrilldownContext {
+                    since_ms: base_since,
+                    until_ms: base_until,
+                    agent: Some(agent.clone()),
+                    model: None,
+                })
+            }
+            AnalyticsView::Coverage => {
+                // Drill into a specific agent's sessions.
+                let (agent, _) = data.agent_tokens.get(idx)?;
+                Some(DrilldownContext {
+                    since_ms: base_since,
+                    until_ms: base_until,
+                    agent: Some(agent.clone()),
+                    model: None,
+                })
+            }
+            // Dashboard doesn't support drilldown.
+            AnalyticsView::Dashboard => None,
         }
     }
 }
@@ -3513,6 +3597,8 @@ pub enum CassMsg {
     ExplorerOverlayCycled,
     /// Cycle the Explorer group-by granularity forward or backward.
     ExplorerGroupByCycled { forward: bool },
+    /// Cycle the Explorer zoom preset forward or backward.
+    ExplorerZoomCycled { forward: bool },
     /// Cycle the Breakdowns tab forward or backward.
     BreakdownTabCycled { forward: bool },
     /// Cycle the Heatmap metric forward or backward.
@@ -4205,6 +4291,12 @@ impl super::ftui_adapter::Model for CassApp {
                         }
                         "G" => {
                             return self.update(CassMsg::ExplorerGroupByCycled { forward: false });
+                        }
+                        "z" => {
+                            return self.update(CassMsg::ExplorerZoomCycled { forward: true });
+                        }
+                        "Z" => {
+                            return self.update(CassMsg::ExplorerZoomCycled { forward: false });
                         }
                         _ => {}
                     }
@@ -5261,6 +5353,10 @@ impl super::ftui_adapter::Model for CassApp {
                         ftui::Cmd::msg(CassMsg::AnalyticsEntered),
                         ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Cost)),
                     ]),
+                    Some(PaletteAction::AnalyticsPlans) => ftui::Cmd::batch(vec![
+                        ftui::Cmd::msg(CassMsg::AnalyticsEntered),
+                        ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Plans)),
+                    ]),
                     Some(PaletteAction::AnalyticsCoverage) => ftui::Cmd::batch(vec![
                         ftui::Cmd::msg(CassMsg::AnalyticsEntered),
                         ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Coverage)),
@@ -6112,6 +6208,18 @@ impl super::ftui_adapter::Model for CassApp {
                 self.analytics_cache = None;
                 ftui::Cmd::none()
             }
+            CassMsg::ExplorerZoomCycled { forward } => {
+                self.explorer_zoom = if forward {
+                    self.explorer_zoom.next()
+                } else {
+                    self.explorer_zoom.prev()
+                };
+                let (since_ms, until_ms) = self.explorer_zoom.to_range();
+                self.analytics_filters.since_ms = since_ms;
+                self.analytics_filters.until_ms = until_ms;
+                self.analytics_cache = None;
+                ftui::Cmd::none()
+            }
             CassMsg::BreakdownTabCycled { forward } => {
                 self.breakdown_tab = if forward {
                     self.breakdown_tab.next()
@@ -6592,6 +6700,7 @@ impl super::ftui_adapter::Model for CassApp {
                         metric: self.explorer_metric,
                         overlay: self.explorer_overlay,
                         group_by: self.explorer_group_by,
+                        zoom: self.explorer_zoom,
                     };
                     super::analytics_charts::render_analytics_content(
                         self.analytics_view,
@@ -8975,8 +9084,8 @@ mod tests {
     }
 
     #[test]
-    fn analytics_view_all_has_seven_entries() {
-        assert_eq!(AnalyticsView::all().len(), 7);
+    fn analytics_view_all_has_eight_entries() {
+        assert_eq!(AnalyticsView::all().len(), 8);
     }
 
     #[test]
@@ -10705,6 +10814,34 @@ mod tests {
         assert_eq!(app.analytics_selectable_count(), 1);
     }
 
+    #[test]
+    fn coverage_selectable_count_uses_agents() {
+        let mut app = CassApp::default();
+        app.analytics_view = AnalyticsView::Coverage;
+        let mut data = AnalyticsChartData::default();
+        data.agent_tokens = vec![("claude_code".into(), 1000.0), ("codex".into(), 500.0)];
+        app.analytics_cache = Some(data);
+        assert_eq!(app.analytics_selectable_count(), 2);
+    }
+
+    #[test]
+    fn build_drilldown_context_coverage_agent() {
+        let mut app = CassApp::default();
+        app.analytics_view = AnalyticsView::Coverage;
+        let mut data = AnalyticsChartData::default();
+        data.agent_tokens = vec![
+            ("claude_code".into(), 1000.0),
+            ("codex".into(), 500.0),
+            ("aider".into(), 200.0),
+        ];
+        app.analytics_cache = Some(data);
+        app.analytics_selection = 1;
+
+        let ctx = app.build_drilldown_context().expect("should build context");
+        assert_eq!(ctx.agent.as_deref(), Some("codex"));
+        assert!(ctx.model.is_none());
+    }
+
     // -- Explorer keyboard binding tests --
 
     #[test]
@@ -10808,6 +10945,44 @@ mod tests {
         assert!(
             app.analytics_cache.is_none(),
             "cache should be invalidated on group-by change"
+        );
+    }
+
+    #[test]
+    fn explorer_z_key_cycles_zoom_forward() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        assert_eq!(app.explorer_zoom, ExplorerZoom::All);
+        let _ = app.update(CassMsg::QueryChanged("z".to_string()));
+        assert_eq!(app.explorer_zoom, ExplorerZoom::Day);
+        let _ = app.update(CassMsg::QueryChanged("z".to_string()));
+        assert_eq!(app.explorer_zoom, ExplorerZoom::Week);
+        let _ = app.update(CassMsg::QueryChanged("z".to_string()));
+        assert_eq!(app.explorer_zoom, ExplorerZoom::Month);
+        let _ = app.update(CassMsg::QueryChanged("z".to_string()));
+        assert_eq!(app.explorer_zoom, ExplorerZoom::Quarter);
+        let _ = app.update(CassMsg::QueryChanged("z".to_string()));
+        assert_eq!(app.explorer_zoom, ExplorerZoom::All);
+    }
+
+    #[test]
+    fn explorer_zoom_change_updates_analytics_filters() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        app.analytics_cache = Some(AnalyticsChartData::default());
+        // Zoom to 7d — should set since_ms and invalidate cache.
+        let _ = app.update(CassMsg::ExplorerZoomCycled { forward: true }); // All → Day
+        let _ = app.update(CassMsg::ExplorerZoomCycled { forward: true }); // Day → Week
+        assert_eq!(app.explorer_zoom, ExplorerZoom::Week);
+        assert!(
+            app.analytics_filters.since_ms.is_some(),
+            "since_ms should be set for Week zoom"
+        );
+        assert!(
+            app.analytics_cache.is_none(),
+            "cache should be invalidated on zoom change"
         );
     }
 }

@@ -4950,6 +4950,7 @@ pub fn run_tui(
                                 | PaletteAction::AnalyticsBreakdowns
                                 | PaletteAction::AnalyticsTools
                                 | PaletteAction::AnalyticsCost
+                                | PaletteAction::AnalyticsPlans
                                 | PaletteAction::AnalyticsCoverage => {
                                     status =
                                         "Analytics views available in ftui mode only".to_string();
