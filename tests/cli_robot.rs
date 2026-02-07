@@ -1200,6 +1200,22 @@ fn diag_json_reports_paths_and_connectors() {
         json["connectors"].is_array(),
         "diag should include connectors array"
     );
+
+    let connector_names: HashSet<String> = json["connectors"]
+        .as_array()
+        .expect("connectors array")
+        .iter()
+        .filter_map(|entry| entry.get("name"))
+        .filter_map(|name| name.as_str())
+        .map(str::to_string)
+        .collect();
+
+    for expected in ["aider", "pi_agent", "factory", "openclaw", "claude_code"] {
+        assert!(
+            connector_names.contains(expected),
+            "diag connectors missing expected entry: {expected}"
+        );
+    }
 }
 
 #[test]
@@ -2168,6 +2184,47 @@ fn capabilities_json_includes_connectors() {
         connector_list.len() >= 4,
         "Should have at least 4 connectors"
     );
+}
+
+#[test]
+fn capabilities_connectors_cover_indexer_registry() {
+    // Prevent drift between the indexer connector registry and the capabilities contract.
+    let mut cmd = base_cmd();
+    cmd.args(["capabilities", "--json"]);
+
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+
+    let connectors = json["connectors"].as_array().expect("connectors array");
+    let connector_list: Vec<String> = connectors
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::to_string)
+        .collect();
+    let connector_set: HashSet<String> = connector_list.iter().cloned().collect();
+
+    assert_eq!(
+        connector_set.len(),
+        connector_list.len(),
+        "capabilities connector list should not contain duplicates"
+    );
+
+    let expected_from_registry: Vec<String> =
+        coding_agent_search::indexer::get_connector_factories()
+            .into_iter()
+            .map(|(slug, _)| match slug {
+                "claude" => "claude_code".to_string(),
+                other => other.to_string(),
+            })
+            .collect();
+
+    for expected in expected_from_registry {
+        assert!(
+            connector_set.contains(&expected),
+            "capabilities connector list missing registry connector: {expected}"
+        );
+    }
 }
 
 #[test]

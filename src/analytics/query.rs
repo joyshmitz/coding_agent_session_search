@@ -812,7 +812,7 @@ pub fn query_breakdown(
         .collect();
 
     let rows = if use_track_b {
-        read_breakdown_rows_track_b(&mut stmt, &param_refs, &metric)?
+        read_breakdown_rows_track_b(&mut stmt, &param_refs)?
     } else {
         read_breakdown_rows_track_a(&mut stmt, &param_refs, &metric)?
     };
@@ -978,7 +978,6 @@ fn read_breakdown_rows_track_a(
 fn read_breakdown_rows_track_b(
     stmt: &mut rusqlite::Statement<'_>,
     params: &[&dyn rusqlite::types::ToSql],
-    _metric: &Metric,
 ) -> AnalyticsResult<Vec<BreakdownRow>> {
     let rows_result = stmt
         .query_map(params, |row| {
@@ -996,9 +995,10 @@ fn read_breakdown_rows_track_b(
             let total_content_chars: i64 = row.get(11)?;
             let estimated_cost: f64 = row.get(12)?;
             // When the sort metric is a Real column (e.g. estimated_cost_usd),
-            // SQLite returns a float.  Read as f64 and truncate to i64.
+            // SQLite returns a float.  Round before converting to i64 to avoid
+            // truncation (e.g. $0.99 → 1 instead of 0).
             let sort_value: i64 = match row.get::<_, f64>(13) {
-                Ok(v) => v as i64,
+                Ok(v) => v.round() as i64,
                 Err(_) => row.get(13)?,
             };
 

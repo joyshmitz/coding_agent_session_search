@@ -408,7 +408,7 @@ fn check_schema_compatibility(path: &Path) -> std::result::Result<SchemaCheck, r
     }
 }
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = CURRENT_SCHEMA_VERSION;
 
 const MIGRATION_V1: &str = r"
 PRAGMA foreign_keys = ON;

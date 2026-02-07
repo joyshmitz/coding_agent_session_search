@@ -25,6 +25,7 @@ use indexer::IndexOptions;
 use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -7242,31 +7243,13 @@ fn run_diag(
     let home = dirs::home_dir().unwrap_or_default();
     let config_dir = dirs::config_dir().unwrap_or_default();
 
-    let codex_path = home.join(".codex/sessions");
-    let claude_path = home.join(".claude/projects");
-    let cline_path = config_dir.join("Code/User/globalStorage/saoudrizwan.claude-dev");
-    let gemini_path = home.join(".gemini/tmp");
-    let clawdbot_path = home.join(".clawdbot/sessions");
-    let vibe_path = home.join(".vibe/logs/session");
-    let opencode_path = home.join(".opencode");
-    let amp_path = config_dir.join("Code/User/globalStorage/sourcegraph.amp");
-    let cursor_path = crate::connectors::cursor::CursorConnector::app_support_dir()
-        .unwrap_or_else(|| home.join("Library/Application Support/Cursor/User"));
-    let chatgpt_path = crate::connectors::chatgpt::ChatGptConnector::app_support_dir()
-        .unwrap_or_else(|| home.join("Library/Application Support/com.openai.chat"));
-
-    let agent_paths: Vec<(&str, &std::path::Path, bool)> = vec![
-        ("codex", &codex_path, codex_path.exists()),
-        ("claude", &claude_path, claude_path.exists()),
-        ("cline", &cline_path, cline_path.exists()),
-        ("gemini", &gemini_path, gemini_path.exists()),
-        ("clawdbot", &clawdbot_path, clawdbot_path.exists()),
-        ("vibe", &vibe_path, vibe_path.exists()),
-        ("opencode", &opencode_path, opencode_path.exists()),
-        ("amp", &amp_path, amp_path.exists()),
-        ("cursor", &cursor_path, cursor_path.exists()),
-        ("chatgpt", &chatgpt_path, chatgpt_path.exists()),
-    ];
+    let agent_paths: Vec<(String, PathBuf, bool)> = diagnostics_connector_paths(&home, &config_dir)
+        .into_iter()
+        .map(|(name, path)| {
+            let exists = path.exists();
+            (name, path, exists)
+        })
+        .collect();
 
     let platform = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -7377,6 +7360,101 @@ fn fs_dir_size(path: &std::path::Path) -> u64 {
                 .sum()
         })
         .unwrap_or(0)
+}
+
+fn public_connector_slug(slug: &str) -> &str {
+    match slug {
+        // Public API contract uses claude_code even though indexer registry key is claude.
+        "claude" => "claude_code",
+        other => other,
+    }
+}
+
+fn capabilities_connector_names() -> Vec<String> {
+    // Preserve existing connector ordering for stable API contracts.
+    let preferred = [
+        "codex",
+        "claude_code",
+        "gemini",
+        "clawdbot",
+        "vibe",
+        "opencode",
+        "amp",
+        "cline",
+        "aider",
+        "cursor",
+        "chatgpt",
+        "pi_agent",
+        "factory",
+        "openclaw",
+    ];
+
+    let mut connectors: Vec<String> = preferred.iter().map(|name| (*name).to_string()).collect();
+    let mut seen: HashSet<String> = connectors.iter().cloned().collect();
+
+    // Append any connector newly registered in the indexer to prevent list drift.
+    for (slug, _) in crate::indexer::get_connector_factories() {
+        let public = public_connector_slug(slug).to_string();
+        if seen.insert(public.clone()) {
+            connectors.push(public);
+        }
+    }
+
+    connectors
+}
+
+fn diagnostics_connector_paths(
+    home: &std::path::Path,
+    config_dir: &std::path::Path,
+) -> Vec<(String, PathBuf)> {
+    let codex_home = dotenvy::var("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".codex"));
+    let gemini_home = dotenvy::var("GEMINI_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".gemini"));
+    let aider_path = dotenvy::var("CASS_AIDER_DATA_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".aider.chat.history.md"));
+    let pi_home = dotenvy::var("PI_CODING_AGENT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".pi/agent"));
+    let pi_path = if pi_home.join("sessions").exists() {
+        pi_home.join("sessions")
+    } else {
+        pi_home
+    };
+
+    let cursor_path = crate::connectors::cursor::CursorConnector::app_support_dir()
+        .unwrap_or_else(|| home.join("Library/Application Support/Cursor/User"));
+    let chatgpt_path = crate::connectors::chatgpt::ChatGptConnector::app_support_dir()
+        .unwrap_or_else(|| home.join("Library/Application Support/com.openai.chat"));
+
+    vec![
+        ("codex".to_string(), codex_home.join("sessions")),
+        ("claude_code".to_string(), home.join(".claude/projects")),
+        (
+            "cline".to_string(),
+            config_dir.join("Code/User/globalStorage/saoudrizwan.claude-dev"),
+        ),
+        ("gemini".to_string(), gemini_home.join("tmp")),
+        ("clawdbot".to_string(), home.join(".clawdbot/sessions")),
+        ("vibe".to_string(), home.join(".vibe/logs/session")),
+        ("opencode".to_string(), home.join(".opencode")),
+        (
+            "amp".to_string(),
+            config_dir.join("Code/User/globalStorage/sourcegraph.amp"),
+        ),
+        ("aider".to_string(), aider_path),
+        ("cursor".to_string(), cursor_path),
+        ("chatgpt".to_string(), chatgpt_path),
+        ("pi_agent".to_string(), pi_path),
+        ("factory".to_string(), home.join(".factory/sessions")),
+        (
+            "openclaw".to_string(),
+            home.join(".openclaw/agents/openclaw/sessions"),
+        ),
+    ]
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -9351,22 +9429,7 @@ fn run_capabilities(json: bool) -> CliResult<()> {
             "timeline_command".to_string(),
             "highlight_matches".to_string(),
         ],
-        connectors: vec![
-            "codex".to_string(),
-            "claude_code".to_string(),
-            "gemini".to_string(),
-            "clawdbot".to_string(),
-            "vibe".to_string(),
-            "opencode".to_string(),
-            "amp".to_string(),
-            "cline".to_string(),
-            "aider".to_string(),
-            "cursor".to_string(),
-            "chatgpt".to_string(),
-            "pi_agent".to_string(),
-            "factory".to_string(),
-            "openclaw".to_string(),
-        ],
+        connectors: capabilities_connector_names(),
         limits: CapabilitiesLimits {
             max_limit: 10000,
             max_content_length: 0, // 0 = unlimited
