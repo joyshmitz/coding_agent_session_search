@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::model::types::MessageRole;
 use crate::search::model_manager::SemanticAvailability;
 use crate::search::query::{QuerySuggestion, SearchFilters, SearchHit, SearchMode};
 use crate::sources::provenance::SourceFilter;
@@ -51,6 +52,7 @@ use ftui::widgets::block::{Alignment, Block};
 use ftui::widgets::borders::{BorderType, Borders};
 use ftui::widgets::paragraph::Paragraph;
 use ftui::widgets::{RenderItem, StatefulWidget, VirtualizedList, VirtualizedListState};
+use ftui_extras::markdown::{MarkdownRenderer, MarkdownTheme, is_likely_markdown};
 
 // ---------------------------------------------------------------------------
 // Re-export ftui primitives through the adapter
@@ -405,6 +407,8 @@ pub struct CassApp {
     pub modal_scroll: u16,
     /// Cached conversation for the currently selected result.
     pub cached_detail: Option<(String, ConversationView)>,
+    /// Whether word-wrap is enabled in the detail pane.
+    pub detail_wrap: bool,
 
     // -- Display & theming ------------------------------------------------
     /// Whether dark theme is active.
@@ -529,6 +533,7 @@ impl Default for CassApp {
             show_detail_modal: false,
             modal_scroll: 0,
             cached_detail: None,
+            detail_wrap: true,
             theme_dark: true,
             theme_preset: UiThemePreset::Dark,
             style_options: StyleOptions::from_env(),
@@ -695,7 +700,380 @@ impl CassApp {
         }
     }
 
-    /// Render the detail/preview pane.
+    /// Style for a message role (User/Agent/Tool/System).
+    fn role_style(role: &MessageRole, styles: &StyleContext) -> ftui::Style {
+        match role {
+            MessageRole::User => styles.style(style_system::STYLE_ROLE_USER),
+            MessageRole::Agent => styles.style(style_system::STYLE_ROLE_ASSISTANT),
+            MessageRole::Tool => styles.style(style_system::STYLE_ROLE_TOOL),
+            MessageRole::System => styles.style(style_system::STYLE_ROLE_SYSTEM),
+            MessageRole::Other(_) => styles.style(style_system::STYLE_TEXT_MUTED),
+        }
+    }
+
+    /// Role prefix symbol for message rendering.
+    fn role_prefix(role: &MessageRole) -> &'static str {
+        match role {
+            MessageRole::User => "\u{f061} ",     // arrow-right →
+            MessageRole::Agent => "\u{2713} ",    // checkmark ✓
+            MessageRole::Tool => "\u{2699} ",     // gear ⚙
+            MessageRole::System => "\u{2139} ",   // info ℹ
+            MessageRole::Other(_) => "\u{2022} ", // bullet •
+        }
+    }
+
+    /// Build rendered lines for Messages tab.
+    fn build_messages_lines(
+        &self,
+        hit: &SearchHit,
+        inner_width: u16,
+        styles: &StyleContext,
+    ) -> Vec<ftui::text::Line> {
+        let mut lines: Vec<ftui::text::Line> = Vec::new();
+
+        // Header: title + metadata
+        let title = if hit.title.is_empty() {
+            "(untitled)"
+        } else {
+            &hit.title
+        };
+        let header_style = styles.style(style_system::STYLE_TEXT_PRIMARY).bold();
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled(title.to_string(), header_style),
+        ]));
+
+        // Metadata line: agent, workspace, timestamp, score
+        let meta_style = styles.style(style_system::STYLE_TEXT_MUTED);
+        let ts_str = hit
+            .created_at
+            .map(|ts| {
+                chrono::DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| ts.to_string())
+            })
+            .unwrap_or_default();
+        let meta_text = format!(
+            "agent={} workspace={} score={:.3}{}",
+            hit.agent,
+            hit.workspace,
+            hit.score,
+            if ts_str.is_empty() {
+                String::new()
+            } else {
+                format!(" {ts_str}")
+            },
+        );
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled(meta_text, meta_style),
+        ]));
+
+        // Separator
+        let sep = "\u{2500}".repeat(inner_width.saturating_sub(2) as usize);
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled(sep, meta_style),
+        ]));
+
+        // If we have a cached conversation, render full messages
+        if let Some((_, ref cv)) = self.cached_detail {
+            let md_renderer = MarkdownRenderer::new(MarkdownTheme::default());
+
+            for msg in &cv.messages {
+                let role_s = Self::role_style(&msg.role, styles);
+                let prefix = Self::role_prefix(&msg.role);
+                let role_label = format!("{prefix}{}", msg.role);
+                let author_suffix = msg
+                    .author
+                    .as_ref()
+                    .map(|a| format!(" ({a})"))
+                    .unwrap_or_default();
+                let ts_label = msg
+                    .created_at
+                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                    .map(|dt| format!(" {}", dt.format("%H:%M:%S")))
+                    .unwrap_or_default();
+
+                // Role header line
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled(
+                        format!("{role_label}{author_suffix}{ts_label}"),
+                        role_s.bold(),
+                    ),
+                ]));
+
+                // Message content: auto-detect markdown
+                let content = msg.content.trim();
+                if !content.is_empty() {
+                    if is_likely_markdown(content).is_likely() {
+                        let rendered = md_renderer.render(content);
+                        for line in rendered.into_iter() {
+                            lines.push(line);
+                        }
+                    } else {
+                        // Plain text — wrap if enabled
+                        for text_line in content.lines() {
+                            if self.detail_wrap && !text_line.is_empty() {
+                                let w = inner_width.saturating_sub(2) as usize;
+                                for chunk in text_line
+                                    .as_bytes()
+                                    .chunks(w.max(20))
+                                    .map(|c| std::str::from_utf8(c).unwrap_or(""))
+                                {
+                                    lines.push(ftui::text::Line::from(chunk.to_string()));
+                                }
+                            } else {
+                                lines.push(ftui::text::Line::from(text_line.to_string()));
+                            }
+                        }
+                    }
+                }
+
+                // Blank line between messages
+                lines.push(ftui::text::Line::from(""));
+            }
+        } else {
+            // No cached conversation: show the hit's content directly
+            let content = if hit.content.is_empty() {
+                &hit.snippet
+            } else {
+                &hit.content
+            };
+            if is_likely_markdown(content).is_likely() {
+                let md_renderer = MarkdownRenderer::new(MarkdownTheme::default());
+                let rendered = md_renderer.render(content);
+                for line in rendered.into_iter() {
+                    lines.push(line);
+                }
+            } else {
+                for text_line in content.lines() {
+                    lines.push(ftui::text::Line::from(text_line.to_string()));
+                }
+            }
+        }
+
+        lines
+    }
+
+    /// Build rendered lines for Snippets tab.
+    fn build_snippets_lines(
+        &self,
+        hit: &SearchHit,
+        styles: &StyleContext,
+    ) -> Vec<ftui::text::Line> {
+        let mut lines: Vec<ftui::text::Line> = Vec::new();
+        let header_style = styles.style(style_system::STYLE_TEXT_PRIMARY).bold();
+        let meta_style = styles.style(style_system::STYLE_TEXT_MUTED);
+
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("Snippets", header_style),
+        ]));
+        lines.push(ftui::text::Line::from(""));
+
+        // If we have a cached conversation, show per-message snippets
+        if let Some((_, ref cv)) = self.cached_detail {
+            let mut any = false;
+            for (i, msg) in cv.messages.iter().enumerate() {
+                if msg.snippets.is_empty() {
+                    continue;
+                }
+                any = true;
+                let role_s = Self::role_style(&msg.role, styles);
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled(
+                        format!("Message {} ({})", i + 1, msg.role),
+                        role_s.bold(),
+                    ),
+                ]));
+                for snippet in &msg.snippets {
+                    let path_str = snippet
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    if !path_str.is_empty() {
+                        lines.push(ftui::text::Line::from_spans(vec![
+                            ftui::text::Span::styled(format!("  {path_str}"), meta_style),
+                        ]));
+                    }
+                }
+                lines.push(ftui::text::Line::from(""));
+            }
+            if !any {
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("No snippets extracted.", meta_style),
+                ]));
+            }
+        } else {
+            // Fallback: show the search snippet
+            let snippet = &hit.snippet;
+            if snippet.is_empty() {
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("No snippet available.", meta_style),
+                ]));
+            } else {
+                for line in snippet.lines() {
+                    lines.push(ftui::text::Line::from(line.to_string()));
+                }
+            }
+        }
+
+        lines
+    }
+
+    /// Build rendered lines for Raw tab.
+    fn build_raw_lines(&self, hit: &SearchHit, styles: &StyleContext) -> Vec<ftui::text::Line> {
+        let mut lines: Vec<ftui::text::Line> = Vec::new();
+        let header_style = styles.style(style_system::STYLE_TEXT_PRIMARY).bold();
+        let code_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
+
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("Raw Data", header_style),
+        ]));
+        lines.push(ftui::text::Line::from(""));
+
+        // If we have a cached conversation, serialize the full conversation
+        if let Some((_, ref cv)) = self.cached_detail {
+            // Show conversation metadata as JSON
+            let json = serde_json::json!({
+                "agent": cv.convo.agent_slug,
+                "external_id": cv.convo.external_id,
+                "title": cv.convo.title,
+                "source_path": cv.convo.source_path.display().to_string(),
+                "started_at": cv.convo.started_at,
+                "ended_at": cv.convo.ended_at,
+                "approx_tokens": cv.convo.approx_tokens,
+                "source_id": cv.convo.source_id,
+                "origin_host": cv.convo.origin_host,
+                "message_count": cv.messages.len(),
+            });
+            if let Ok(pretty) = serde_json::to_string_pretty(&json) {
+                for line in pretty.lines() {
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(line.to_string(), code_style),
+                    ]));
+                }
+            }
+
+            // Per-message raw data
+            for (i, msg) in cv.messages.iter().enumerate() {
+                lines.push(ftui::text::Line::from(""));
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled(
+                        format!("--- Message {} ({}) ---", i + 1, msg.role),
+                        header_style,
+                    ),
+                ]));
+                let msg_json = serde_json::json!({
+                    "role": msg.role.to_string(),
+                    "author": msg.author,
+                    "created_at": msg.created_at,
+                    "content_length": msg.content.len(),
+                    "extra": msg.extra_json,
+                });
+                if let Ok(pretty) = serde_json::to_string_pretty(&msg_json) {
+                    for line in pretty.lines() {
+                        lines.push(ftui::text::Line::from_spans(vec![
+                            ftui::text::Span::styled(line.to_string(), code_style),
+                        ]));
+                    }
+                }
+            }
+        } else {
+            // Fallback: show the hit itself as JSON
+            let hit_json = serde_json::json!({
+                "title": hit.title,
+                "agent": hit.agent,
+                "workspace": hit.workspace,
+                "source_path": hit.source_path,
+                "score": hit.score,
+                "content_length": hit.content.len(),
+                "source_id": hit.source_id,
+                "origin_kind": hit.origin_kind,
+                "origin_host": hit.origin_host,
+                "created_at": hit.created_at,
+            });
+            if let Ok(pretty) = serde_json::to_string_pretty(&hit_json) {
+                for line in pretty.lines() {
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(line.to_string(), code_style),
+                    ]));
+                }
+            }
+        }
+
+        lines
+    }
+
+    /// Apply find-in-detail highlighting to rendered lines.
+    fn apply_find_highlight(
+        lines: &mut [ftui::text::Line],
+        query: &str,
+        current_match: usize,
+        _styles: &StyleContext,
+    ) -> Vec<u16> {
+        let highlight_style = ftui::Style::default()
+            .bg(ftui::PackedRgba::rgb(255, 255, 0))
+            .fg(ftui::PackedRgba::rgb(0, 0, 0));
+        let current_style = ftui::Style::default()
+            .bg(ftui::PackedRgba::rgb(255, 140, 0))
+            .fg(ftui::PackedRgba::rgb(0, 0, 0))
+            .bold();
+
+        if query.is_empty() {
+            return Vec::new();
+        }
+
+        let query_lower = query.to_lowercase();
+        let mut match_positions: Vec<u16> = Vec::new();
+        let mut match_idx = 0usize;
+
+        for (line_no, line) in lines.iter_mut().enumerate() {
+            let plain: String = line.spans().iter().map(|s| s.content.as_ref()).collect();
+            let plain_lower = plain.to_lowercase();
+
+            if plain_lower.contains(&query_lower) {
+                // Re-build the line with highlighted matches
+                let mut new_spans: Vec<ftui::text::Span<'static>> = Vec::new();
+                let mut pos = 0usize;
+                let bytes = plain.as_bytes();
+                let lower_bytes = plain_lower.as_bytes();
+                let q_bytes = query_lower.as_bytes();
+
+                while pos < bytes.len() {
+                    if pos + q_bytes.len() <= lower_bytes.len()
+                        && &lower_bytes[pos..pos + q_bytes.len()] == q_bytes
+                    {
+                        let style = if match_idx == current_match {
+                            current_style
+                        } else {
+                            highlight_style
+                        };
+                        let matched =
+                            String::from_utf8_lossy(&bytes[pos..pos + q_bytes.len()]).to_string();
+                        new_spans.push(ftui::text::Span::styled(matched, style));
+                        match_positions.push(line_no as u16);
+                        match_idx += 1;
+                        pos += q_bytes.len();
+                    } else {
+                        // Gather non-matching chars
+                        let start = pos;
+                        while pos < bytes.len()
+                            && (pos + q_bytes.len() > lower_bytes.len()
+                                || &lower_bytes[pos..pos + q_bytes.len()] != q_bytes)
+                        {
+                            pos += 1;
+                        }
+                        let chunk = String::from_utf8_lossy(&bytes[start..pos]).to_string();
+                        new_spans.push(ftui::text::Span::raw(chunk));
+                    }
+                }
+                *line = ftui::text::Line::from_spans(new_spans);
+            }
+        }
+
+        match_positions
+    }
+
+    /// Render the detail/preview pane with rich content (Messages/Snippets/Raw).
     #[allow(clippy::too_many_arguments)]
     fn render_detail_pane(
         &self,
@@ -707,15 +1085,19 @@ impl CassApp {
         pane_focused_style: ftui::Style,
         text_muted_style: ftui::Style,
     ) {
+        // Tab indicator and wrap status
         let tab_label = match self.detail_tab {
-            DetailTab::Messages => "Detail [Messages]",
-            DetailTab::Snippets => "Detail [Snippets]",
-            DetailTab::Raw => "Detail [Raw]",
+            DetailTab::Messages => "Detail [\u{25cf}Messages] Snippets  Raw",
+            DetailTab::Snippets => "Detail  Messages [\u{25cf}Snippets] Raw",
+            DetailTab::Raw => "Detail  Messages  Snippets [\u{25cf}Raw]",
         };
+        let wrap_indicator = if self.detail_wrap { " \u{21a9}" } else { "" };
+        let title = format!("{tab_label}{wrap_indicator}");
+
         let detail_block = Block::new()
             .borders(Borders::ALL)
             .border_type(border_type)
-            .title(tab_label)
+            .title(&title)
             .title_alignment(Alignment::Left)
             .style(if self.focus_region == FocusRegion::Detail {
                 pane_focused_style
@@ -729,23 +1111,92 @@ impl CassApp {
             return;
         }
 
+        // Reserve space for find bar if active
+        let (content_area, find_area) = if self.detail_find.is_some() {
+            let find_h = 1u16;
+            if inner.height <= find_h + 1 {
+                (inner, None)
+            } else {
+                let content = Rect::new(inner.x, inner.y, inner.width, inner.height - find_h);
+                let find = Rect::new(inner.x, inner.y + content.height, inner.width, find_h);
+                (content, Some(find))
+            }
+        } else {
+            (inner, None)
+        };
+
         if let Some(hit) = self.selected_hit() {
-            let preview = hit
-                .snippet
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("<no snippet available>");
-            let detail_line = format!(
-                "{}\n\nagent={} workspace={}\nscore={:.3}",
-                preview, hit.agent, hit.workspace, hit.score
-            );
-            Paragraph::new(&*detail_line)
+            // Build lines based on active tab
+            let mut lines = match self.detail_tab {
+                DetailTab::Messages => self.build_messages_lines(hit, content_area.width, styles),
+                DetailTab::Snippets => self.build_snippets_lines(hit, styles),
+                DetailTab::Raw => self.build_raw_lines(hit, styles),
+            };
+
+            // Apply find-in-detail highlighting
+            if let Some(ref find) = self.detail_find {
+                let _matches =
+                    Self::apply_find_highlight(&mut lines, &find.query, find.current, styles);
+            }
+
+            // Apply scroll offset — skip `detail_scroll` lines
+            let scroll = self.detail_scroll as usize;
+            let visible_height = content_area.height as usize;
+            let total_lines = lines.len();
+
+            // Clamp scroll
+            let effective_scroll = scroll.min(total_lines.saturating_sub(1));
+            let visible_lines: Vec<ftui::text::Line> = lines
+                .into_iter()
+                .skip(effective_scroll)
+                .take(visible_height)
+                .collect();
+
+            // Render the text
+            let text = ftui::text::Text::from_lines(visible_lines);
+            Paragraph::new(text)
                 .style(styles.style(style_system::STYLE_TEXT_PRIMARY))
-                .render(inner, frame);
+                .render(content_area, frame);
+
+            // Scroll position indicator in bottom-right if content exceeds viewport
+            if total_lines > visible_height {
+                let pct = if total_lines <= 1 {
+                    100
+                } else {
+                    (effective_scroll * 100) / (total_lines.saturating_sub(visible_height))
+                };
+                let indicator = format!(" {}/{} ({pct}%) ", effective_scroll + 1, total_lines);
+                let ind_w = indicator.len().min(content_area.width as usize);
+                let ind_x = content_area.x + content_area.width.saturating_sub(ind_w as u16);
+                let ind_y = content_area.y + content_area.height.saturating_sub(1);
+                let ind_area = Rect::new(ind_x, ind_y, ind_w as u16, 1);
+                let ind_style = styles.style(style_system::STYLE_TEXT_MUTED);
+                Paragraph::new(&*indicator)
+                    .style(ind_style)
+                    .render(ind_area, frame);
+            }
         } else {
             Paragraph::new("Select a result to preview context and metadata.")
                 .style(text_muted_style)
-                .render(inner, frame);
+                .render(content_area, frame);
+        }
+
+        // Render find bar if active
+        if let (Some(find), Some(find_rect)) = (&self.detail_find, find_area) {
+            let find_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
+            let match_info = if find.matches.is_empty() {
+                if find.query.is_empty() {
+                    String::new()
+                } else {
+                    " (no matches)".to_string()
+                }
+            } else {
+                format!(" ({}/{})", find.current + 1, find.matches.len())
+            };
+            let find_text = format!("/{}{}", find.query, match_info);
+            Paragraph::new(&*find_text)
+                .style(find_style)
+                .render(find_rect, frame);
         }
     }
 
@@ -1941,7 +2392,7 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::DetailWrapToggled => {
-                // TODO: track wrap state
+                self.detail_wrap = !self.detail_wrap;
                 ftui::Cmd::none()
             }
             CassMsg::DetailFindToggled => {
@@ -4187,5 +4638,196 @@ mod tests {
         assert_eq!(app.time_preset, TimePreset::All);
         assert!(app.filters.created_from.is_none());
         assert_eq!(app.filters.source_filter, SourceFilter::All);
+    }
+
+    // =====================================================================
+    // 2noh9.3.5 — Detail/preview view tests
+    // =====================================================================
+
+    #[test]
+    fn detail_wrap_toggle_flips_state() {
+        let mut app = CassApp::default();
+        assert!(app.detail_wrap, "default should be true");
+        let _ = app.update(CassMsg::DetailWrapToggled);
+        assert!(!app.detail_wrap);
+        let _ = app.update(CassMsg::DetailWrapToggled);
+        assert!(app.detail_wrap);
+    }
+
+    #[test]
+    fn detail_tab_changed_resets_scroll() {
+        let mut app = CassApp::default();
+        app.detail_scroll = 42;
+        let _ = app.update(CassMsg::DetailTabChanged(DetailTab::Snippets));
+        assert_eq!(app.detail_tab, DetailTab::Snippets);
+        assert_eq!(app.detail_scroll, 0, "should reset scroll on tab change");
+
+        app.detail_scroll = 10;
+        let _ = app.update(CassMsg::DetailTabChanged(DetailTab::Raw));
+        assert_eq!(app.detail_tab, DetailTab::Raw);
+        assert_eq!(app.detail_scroll, 0);
+    }
+
+    #[test]
+    fn detail_find_toggle_creates_and_clears_state() {
+        let mut app = CassApp::default();
+        assert!(app.detail_find.is_none());
+        let _ = app.update(CassMsg::DetailFindToggled);
+        assert!(app.detail_find.is_some());
+        let _ = app.update(CassMsg::DetailFindToggled);
+        assert!(app.detail_find.is_none());
+    }
+
+    #[test]
+    fn detail_find_query_changed_updates_state() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::DetailFindToggled);
+        let _ = app.update(CassMsg::DetailFindQueryChanged("hello".to_string()));
+        assert_eq!(app.detail_find.as_ref().unwrap().query, "hello");
+    }
+
+    #[test]
+    fn detail_find_navigation_wraps() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::DetailFindToggled);
+        if let Some(ref mut find) = app.detail_find {
+            find.query = "test".to_string();
+            find.matches = vec![5, 10, 20];
+            find.current = 0;
+        }
+        // Navigate forward
+        let _ = app.update(CassMsg::DetailFindNavigated { forward: true });
+        assert_eq!(app.detail_find.as_ref().unwrap().current, 1);
+        let _ = app.update(CassMsg::DetailFindNavigated { forward: true });
+        assert_eq!(app.detail_find.as_ref().unwrap().current, 2);
+        // Wrap around
+        let _ = app.update(CassMsg::DetailFindNavigated { forward: true });
+        assert_eq!(app.detail_find.as_ref().unwrap().current, 0);
+        // Navigate backward from 0 wraps to end
+        let _ = app.update(CassMsg::DetailFindNavigated { forward: false });
+        assert_eq!(app.detail_find.as_ref().unwrap().current, 2);
+    }
+
+    #[test]
+    fn detail_scrolled_clamps_to_zero() {
+        let mut app = CassApp::default();
+        app.detail_scroll = 5;
+        let _ = app.update(CassMsg::DetailScrolled { delta: -10 });
+        assert_eq!(app.detail_scroll, 0, "should clamp at zero");
+    }
+
+    #[test]
+    fn detail_scrolled_increments() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::DetailScrolled { delta: 3 });
+        assert_eq!(app.detail_scroll, 3);
+        let _ = app.update(CassMsg::DetailScrolled { delta: 5 });
+        assert_eq!(app.detail_scroll, 8);
+    }
+
+    fn make_test_hit() -> SearchHit {
+        SearchHit {
+            title: "Test Conversation".into(),
+            snippet: "Hello **world**\nThis is a test".into(),
+            content: "# Heading\n\nSome **bold** text\n\n```rust\nfn main() {}\n```".into(),
+            content_hash: 42,
+            score: 0.95,
+            agent: "claude_code".into(),
+            source_path: "/test/session.jsonl".into(),
+            workspace: "/projects/test".into(),
+            workspace_original: None,
+            created_at: Some(1700000000),
+            line_number: None,
+            match_type: Default::default(),
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+        }
+    }
+
+    #[test]
+    fn build_messages_lines_produces_output() {
+        let app = CassApp::default();
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_messages_lines(&hit, 80, &styles);
+        assert!(
+            !lines.is_empty(),
+            "should produce at least header + content"
+        );
+        // Should have at least 3 lines: title, metadata, separator
+        assert!(lines.len() >= 3);
+    }
+
+    #[test]
+    fn build_snippets_lines_produces_output() {
+        let app = CassApp::default();
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_snippets_lines(&hit, &styles);
+        assert!(!lines.is_empty(), "should produce snippet lines");
+    }
+
+    #[test]
+    fn build_raw_lines_produces_json() {
+        let app = CassApp::default();
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_raw_lines(&hit, &styles);
+        // Raw tab should contain JSON-like content
+        let text: String = lines
+            .iter()
+            .map(|l| {
+                l.spans()
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("claude_code"), "should show agent in JSON");
+        assert!(text.contains("score"), "should include score key in JSON");
+    }
+
+    #[test]
+    fn apply_find_highlight_marks_matches() {
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let mut lines = vec![
+            ftui::text::Line::from("Hello world"),
+            ftui::text::Line::from("World is great"),
+            ftui::text::Line::from("No match here"),
+        ];
+        let matches = CassApp::apply_find_highlight(&mut lines, "world", 0, &styles);
+        assert_eq!(matches.len(), 2, "should find 'world' in 2 lines");
+    }
+
+    #[test]
+    fn detail_opened_in_non_query_mode_sets_modal() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::PaneFilter;
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(app.show_detail_modal, "should open modal");
+    }
+
+    #[test]
+    fn detail_closed_resets_focus() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        app.focus_region = FocusRegion::Detail;
+        let _ = app.update(CassMsg::DetailClosed);
+        assert!(!app.show_detail_modal);
+        assert_eq!(app.focus_region, FocusRegion::Results);
+    }
+
+    #[test]
+    fn detail_messages_with_markdown_content_renders() {
+        let mut app = CassApp::default();
+        let hit = make_test_hit();
+        // Set cached_detail to None — should fall back to hit content
+        app.cached_detail = None;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_messages_lines(&hit, 80, &styles);
+        // The content has "# Heading" which is markdown — should render it
+        assert!(lines.len() > 5, "markdown should produce multiple lines");
     }
 }
