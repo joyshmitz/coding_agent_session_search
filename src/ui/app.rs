@@ -1766,6 +1766,12 @@ pub struct CassApp {
     /// Active pane split drag state for mouse-based resize.
     pub pane_split_drag: Option<PaneSplitDragState>,
 
+    // -- Input smoothness (jitter / hover stabilization) ----------------------
+    /// Last mouse position for jitter detection (suppresses sub-threshold drag noise).
+    pub last_mouse_pos: Option<(u16, u16)>,
+    /// Timestamp of last saved-view drag hover change (for stabilization).
+    pub drag_hover_settled_at: Option<Instant>,
+
     // -- Lazy-loaded services ---------------------------------------------
     /// Data directory used for runtime state/index operations.
     pub data_dir: PathBuf,
@@ -1923,6 +1929,8 @@ impl Default for CassApp {
             last_split_handle_area: RefCell::new(None),
             last_saved_view_row_areas: RefCell::new(Vec::new()),
             pane_split_drag: None,
+            last_mouse_pos: None,
+            drag_hover_settled_at: None,
             data_dir: crate::default_data_dir(),
             db_path: crate::default_db_path(),
             db_reader: None,
@@ -5946,6 +5954,16 @@ pub trait PersistenceService: Send + Sync {
 
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(60);
 const STATE_SAVE_DEBOUNCE: Duration = Duration::from_millis(450);
+
+/// Minimum distance (in terminal cells) for a drag event to be considered
+/// meaningful. Events with movement below this threshold are discarded to
+/// prevent jitter from touchpad noise and sub-cell pointer motion.
+const DRAG_JITTER_THRESHOLD: u16 = 2;
+
+/// Minimum time (ms) a drag hover must remain on a new row before the hover
+/// index updates. Prevents rapid flickering when dragging across thin row
+/// boundaries.
+const DRAG_HOVER_SETTLE_MS: u64 = 80;
 const TUI_STATE_FILE_NAME: &str = "tui_state.json";
 const QUERY_HISTORY_CAP: usize = 50;
 
@@ -8793,6 +8811,30 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::batch(cmds)
             }
             CassMsg::MouseEvent { kind, x, y } => {
+                // ── Drag jitter filter ──────────────────────────────
+                // Suppress LeftDrag events where the pointer hasn't moved enough
+                // to matter. This eliminates touchpad/sub-cell noise.
+                if kind == MouseEventKind::LeftDrag
+                    && let Some((lx, ly)) = self.last_mouse_pos
+                {
+                    let dx = (x as i32 - lx as i32).unsigned_abs() as u16;
+                    let dy = (y as i32 - ly as i32).unsigned_abs() as u16;
+                    if dx < DRAG_JITTER_THRESHOLD && dy < DRAG_JITTER_THRESHOLD {
+                        return ftui::Cmd::none(); // sub-threshold motion
+                    }
+                }
+                // Update last-known mouse position for future jitter checks.
+                match kind {
+                    MouseEventKind::LeftClick | MouseEventKind::LeftDrag => {
+                        self.last_mouse_pos = Some((x, y));
+                    }
+                    MouseEventKind::LeftRelease => {
+                        self.last_mouse_pos = None;
+                        self.drag_hover_settled_at = None;
+                    }
+                    _ => {}
+                }
+
                 let region = self.hit_test(x, y);
 
                 if self.show_saved_views_modal {
@@ -8809,8 +8851,21 @@ impl super::ftui_adapter::Model for CassApp {
                         (MouseEventKind::LeftDrag, MouseHitRegion::SavedViewRow { row_idx }) => {
                             let idx = row_idx.min(self.saved_views.len().saturating_sub(1));
                             if let Some(drag) = self.saved_view_drag.as_mut() {
-                                drag.hover_idx = idx;
-                                self.saved_views_selection = idx;
+                                // Hover stabilization: only update if pointer has
+                                // remained on the new row long enough to settle.
+                                if idx != drag.hover_idx {
+                                    let now = Instant::now();
+                                    let settled = self.drag_hover_settled_at.is_some_and(|t| {
+                                        t.elapsed() >= Duration::from_millis(DRAG_HOVER_SETTLE_MS)
+                                    });
+                                    if settled {
+                                        drag.hover_idx = idx;
+                                        self.saved_views_selection = idx;
+                                        self.drag_hover_settled_at = Some(now);
+                                    } else if self.drag_hover_settled_at.is_none() {
+                                        self.drag_hover_settled_at = Some(now);
+                                    }
+                                }
                             }
                             return ftui::Cmd::none();
                         }
@@ -14619,6 +14674,109 @@ mod tests {
         assert!(
             !matches!(cmd, ftui::Cmd::None),
             "scroll outside tracked regions should still produce SelectionMoved"
+        );
+    }
+
+    // =========================================================================
+    // Input smoothness (drag jitter / hover stabilization) tests
+    // =========================================================================
+
+    #[test]
+    fn drag_jitter_filter_suppresses_small_movements() {
+        use ftui::Model;
+        let mut app = CassApp::default();
+        // Simulate initial click at (50, 10)
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: 50,
+            y: 10,
+        });
+        assert_eq!(app.last_mouse_pos, Some((50, 10)));
+
+        // Drag by 1 pixel (below threshold of 2) — should be suppressed
+        let cmd = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftDrag,
+            x: 51,
+            y: 10,
+        });
+        // Position should NOT update (event was filtered)
+        assert_eq!(app.last_mouse_pos, Some((50, 10)));
+        assert!(matches!(cmd, ftui::Cmd::None));
+    }
+
+    #[test]
+    fn drag_above_threshold_is_accepted() {
+        use ftui::Model;
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: 50,
+            y: 10,
+        });
+
+        // Drag by 3 pixels (above threshold of 2) — should be accepted
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftDrag,
+            x: 53,
+            y: 10,
+        });
+        // Position SHOULD update
+        assert_eq!(app.last_mouse_pos, Some((53, 10)));
+    }
+
+    #[test]
+    fn mouse_release_clears_tracking_state() {
+        use ftui::Model;
+        let mut app = CassApp::default();
+        app.last_mouse_pos = Some((50, 10));
+        app.drag_hover_settled_at = Some(Instant::now());
+
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftRelease,
+            x: 50,
+            y: 10,
+        });
+        assert!(app.last_mouse_pos.is_none());
+        assert!(app.drag_hover_settled_at.is_none());
+    }
+
+    #[test]
+    fn first_drag_event_without_prior_click_is_not_filtered() {
+        use ftui::Model;
+        let mut app = CassApp::default();
+        assert!(app.last_mouse_pos.is_none());
+
+        // First drag with no prior click — no previous position to compare, so not filtered
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftDrag,
+            x: 50,
+            y: 10,
+        });
+        assert_eq!(app.last_mouse_pos, Some((50, 10)));
+    }
+
+    #[test]
+    fn drag_hover_settle_fields_initialized_to_none() {
+        let app = CassApp::default();
+        assert!(app.last_mouse_pos.is_none());
+        assert!(app.drag_hover_settled_at.is_none());
+    }
+
+    #[test]
+    fn scroll_events_are_not_jitter_filtered() {
+        use ftui::Model;
+        let mut app = CassApp::default();
+        app.last_mouse_pos = Some((50, 10));
+
+        // Scroll events should never be filtered even if mouse is tracked
+        let cmd = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            x: 50,
+            y: 10,
+        });
+        assert!(
+            !matches!(cmd, ftui::Cmd::None),
+            "scroll should not be filtered"
         );
     }
 
