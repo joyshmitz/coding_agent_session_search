@@ -118,6 +118,232 @@ impl FooterHintCandidate {
 }
 
 // =========================================================================
+// Animation infrastructure (bead 2noh9.4.14)
+// =========================================================================
+
+/// Spring-based animation durations / presets.
+pub mod anim_config {
+    use std::time::Duration;
+
+    /// Focus flash settle time (spring-based, replaces 220ms linear).
+    pub const FOCUS_FLASH_DURATION: Duration = Duration::from_millis(300);
+    /// Peek badge display duration before fade-out.
+    pub const PEEK_BADGE_DURATION: Duration = Duration::from_millis(800);
+    /// Stagger delay between consecutive result items.
+    pub const STAGGER_DELAY: Duration = Duration::from_millis(30);
+    /// Maximum number of items that receive stagger animation.
+    pub const MAX_ANIMATED_ITEMS: usize = 15;
+    /// Modal open/close spring duration.
+    pub const MODAL_SPRING_DURATION: Duration = Duration::from_millis(250);
+    /// Panel resize interpolation duration.
+    pub const PANEL_RESIZE_DURATION: Duration = Duration::from_millis(180);
+}
+
+/// Centralized animation state for all spring-based animations in the TUI.
+///
+/// All springs are ticked on every `CassMsg::Tick`.  When `enabled` is false
+/// (CASS_DISABLE_ANIMATIONS=1), springs snap instantly to their targets.
+#[derive(Debug)]
+pub struct AnimationState {
+    /// Master kill-switch: `false` when `CASS_DISABLE_ANIMATIONS=1`.
+    pub enabled: bool,
+    /// Focus flash spring (0→1 = flash active → settled).
+    pub focus_flash: super::ftui_adapter::Spring,
+    /// Peek badge spring (0→1 = badge visible → hidden).
+    pub peek_badge: super::ftui_adapter::Spring,
+    /// Panel resize spring (current → target split ratio, 0.0–1.0).
+    pub panel_ratio: super::ftui_adapter::Spring,
+    /// Modal open spring (0 = closed, 1 = fully open).
+    pub modal_open: super::ftui_adapter::Spring,
+    /// Result list reveal progress per slot (up to MAX_ANIMATED_ITEMS).
+    pub reveal_springs: Vec<super::ftui_adapter::Spring>,
+    /// Whether a reveal sequence is actively playing.
+    pub reveal_active: bool,
+}
+
+impl Default for AnimationState {
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+
+impl AnimationState {
+    /// Create a new animation state.  Pass `false` to disable all animations.
+    pub fn new(enabled: bool) -> Self {
+        use super::ftui_adapter::Spring;
+        Self {
+            enabled,
+            focus_flash: Spring::new(1.0, 1.0)
+                .with_stiffness(280.0)
+                .with_damping(22.0),
+            peek_badge: Spring::new(0.0, 0.0)
+                .with_stiffness(200.0)
+                .with_damping(20.0),
+            panel_ratio: Spring::new(0.7, 0.7)
+                .with_stiffness(300.0)
+                .with_damping(26.0),
+            modal_open: Spring::new(0.0, 0.0)
+                .with_stiffness(350.0)
+                .with_damping(24.0),
+            reveal_springs: Vec::new(),
+            reveal_active: false,
+        }
+    }
+
+    /// Read CASS_DISABLE_ANIMATIONS from environment.
+    pub fn from_env() -> Self {
+        let disabled = std::env::var("CASS_DISABLE_ANIMATIONS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        Self::new(!disabled)
+    }
+
+    /// Tick all active springs by `dt`.  If animations are disabled, snap to targets.
+    pub fn tick(&mut self, dt: std::time::Duration) {
+        use super::ftui_adapter::Animation;
+        if !self.enabled {
+            // Snap all springs to rest instantly.
+            self.focus_flash = super::ftui_adapter::Spring::new(
+                self.focus_flash.target(),
+                self.focus_flash.target(),
+            );
+            self.peek_badge = super::ftui_adapter::Spring::new(
+                self.peek_badge.target(),
+                self.peek_badge.target(),
+            );
+            self.panel_ratio = super::ftui_adapter::Spring::new(
+                self.panel_ratio.target(),
+                self.panel_ratio.target(),
+            );
+            self.modal_open = super::ftui_adapter::Spring::new(
+                self.modal_open.target(),
+                self.modal_open.target(),
+            );
+            for s in &mut self.reveal_springs {
+                *s = super::ftui_adapter::Spring::new(s.target(), s.target());
+            }
+            self.reveal_active = false;
+            return;
+        }
+        self.focus_flash.tick(dt);
+        self.peek_badge.tick(dt);
+        self.panel_ratio.tick(dt);
+        self.modal_open.tick(dt);
+        let mut all_done = true;
+        for s in &mut self.reveal_springs {
+            s.tick(dt);
+            if !s.is_at_rest() {
+                all_done = false;
+            }
+        }
+        if self.reveal_active && all_done {
+            self.reveal_active = false;
+        }
+    }
+
+    /// Trigger a focus flash (spring from 0→1).
+    pub fn trigger_focus_flash(&mut self) {
+        self.focus_flash = super::ftui_adapter::Spring::new(0.0, 1.0)
+            .with_stiffness(280.0)
+            .with_damping(22.0);
+    }
+
+    /// Show peek badge (spring to 1), will need explicit hide.
+    pub fn show_peek_badge(&mut self) {
+        self.peek_badge.set_target(1.0);
+    }
+
+    /// Hide peek badge (spring to 0).
+    pub fn hide_peek_badge(&mut self) {
+        self.peek_badge.set_target(0.0);
+    }
+
+    /// Animate panel split ratio to a new target.
+    pub fn set_panel_ratio(&mut self, target: f64) {
+        self.panel_ratio.set_target(target);
+    }
+
+    /// Open a modal (spring to 1).
+    pub fn open_modal(&mut self) {
+        self.modal_open.set_target(1.0);
+    }
+
+    /// Close a modal (spring to 0).
+    pub fn close_modal(&mut self) {
+        self.modal_open.set_target(0.0);
+    }
+
+    /// Start a staggered reveal for `count` result items.
+    pub fn start_reveal(&mut self, count: usize) {
+        use super::ftui_adapter::Spring;
+        let n = count.min(anim_config::MAX_ANIMATED_ITEMS);
+        self.reveal_springs.clear();
+        for i in 0..n {
+            // Each item starts at 0 (hidden) and springs to 1 (visible).
+            // Slight stagger by decreasing stiffness for later items.
+            let stiffness = 320.0 - (i as f64 * 8.0).min(160.0);
+            self.reveal_springs.push(
+                Spring::new(0.0, 1.0)
+                    .with_stiffness(stiffness)
+                    .with_damping(22.0),
+            );
+        }
+        self.reveal_active = true;
+    }
+
+    /// Get the reveal progress for item at index (0.0 = hidden, 1.0 = visible).
+    pub fn reveal_progress(&self, idx: usize) -> f64 {
+        if !self.enabled || !self.reveal_active {
+            return 1.0;
+        }
+        self.reveal_springs
+            .get(idx)
+            .map(|s| s.position().clamp(0.0, 1.0))
+            .unwrap_or(1.0)
+    }
+
+    /// Get the focus flash progress (0.0 = just triggered, 1.0 = settled).
+    pub fn focus_flash_progress(&self) -> f32 {
+        if !self.enabled {
+            return 1.0;
+        }
+        self.focus_flash.position().clamp(0.0, 1.0) as f32
+    }
+
+    /// Get the peek badge visibility (0.0 = hidden, 1.0 = fully visible).
+    pub fn peek_badge_progress(&self) -> f32 {
+        if !self.enabled {
+            return if self.peek_badge.target() > 0.5 {
+                1.0
+            } else {
+                0.0
+            };
+        }
+        self.peek_badge.position().clamp(0.0, 1.0) as f32
+    }
+
+    /// Get the modal open progress (0.0 = closed, 1.0 = fully open).
+    pub fn modal_progress(&self) -> f32 {
+        if !self.enabled {
+            return if self.modal_open.target() > 0.5 {
+                1.0
+            } else {
+                0.0
+            };
+        }
+        self.modal_open.position().clamp(0.0, 1.0) as f32
+    }
+
+    /// Get the animated panel split ratio.
+    pub fn panel_ratio_value(&self) -> f64 {
+        if !self.enabled {
+            return self.panel_ratio.target();
+        }
+        self.panel_ratio.position()
+    }
+}
+
+// =========================================================================
 // Enums (ported from tui.rs, canonical for ftui)
 // =========================================================================
 
@@ -851,6 +1077,39 @@ pub struct SavedView {
 }
 
 // =========================================================================
+// Screenshot export formats
+// =========================================================================
+
+/// Output format for TUI screenshot export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenshotFormat {
+    /// Self-contained HTML with inline CSS styles.
+    Html,
+    /// Scalable vector graphics.
+    Svg,
+    /// Plain text (no ANSI codes).
+    Text,
+}
+
+impl ScreenshotFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Html => "html",
+            Self::Svg => "svg",
+            Self::Text => "txt",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Html => "HTML",
+            Self::Svg => "SVG",
+            Self::Text => "Text",
+        }
+    }
+}
+
+// =========================================================================
 // CassApp — the ftui Model
 // =========================================================================
 
@@ -989,6 +1248,10 @@ pub struct CassApp {
     pub show_export_modal: bool,
     /// State of the export modal form.
     pub export_modal_state: Option<ExportModalState>,
+    /// Pending screenshot capture (set in update, consumed in view).
+    pub screenshot_pending: Option<ScreenshotFormat>,
+    /// Buffer for screenshot data captured during view() (RefCell for &self access).
+    pub screenshot_result: RefCell<Option<(ScreenshotFormat, String)>>,
     /// Whether the bulk actions modal is visible.
     pub show_bulk_modal: bool,
     /// Whether the saved views manager modal is visible.
@@ -1029,11 +1292,13 @@ pub struct CassApp {
     pub undo_history: UndoHistory,
 
     // -- Animation & timing -----------------------------------------------
-    /// Start time of the reveal animation.
+    /// Spring-based animation state (focus flash, reveal, modal, panel).
+    pub anim: AnimationState,
+    /// Start time of the reveal animation (legacy, kept for tui.rs compat).
     pub reveal_anim_start: Option<Instant>,
-    /// End time of the focus-flash indicator.
+    /// End time of the focus-flash indicator (legacy, kept for tui.rs compat).
     pub focus_flash_until: Option<Instant>,
-    /// End time of the peek badge indicator.
+    /// End time of the peek badge indicator (legacy, kept for tui.rs compat).
     pub peek_badge_until: Option<Instant>,
     /// Last tick timestamp for animation frame delta.
     pub last_tick: Instant,
@@ -1137,6 +1402,8 @@ impl Default for CassApp {
             help_pinned: false,
             show_export_modal: false,
             export_modal_state: None,
+            screenshot_pending: None,
+            screenshot_result: RefCell::new(None),
             show_bulk_modal: false,
             show_saved_views_modal: false,
             saved_views_selection: 0,
@@ -1163,6 +1430,7 @@ impl Default for CassApp {
             },
             toast_manager: ToastManager::default(),
             undo_history: UndoHistory::default(),
+            anim: AnimationState::from_env(),
             reveal_anim_start: None,
             focus_flash_until: None,
             peek_badge_until: None,
@@ -3604,6 +3872,14 @@ pub enum CassMsg {
     /// Cycle the Heatmap metric forward or backward.
     HeatmapMetricCycled { forward: bool },
 
+    // -- Screenshot export -------------------------------------------------
+    /// Capture a screenshot of the current TUI state.
+    ScreenshotRequested(ScreenshotFormat),
+    /// Screenshot file was written successfully.
+    ScreenshotCompleted(PathBuf),
+    /// Screenshot export failed.
+    ScreenshotFailed(String),
+
     // -- Lifecycle ---------------------------------------------------------
     /// Application quit requested.
     QuitRequested,
@@ -4627,6 +4903,7 @@ impl super::ftui_adapter::Model for CassApp {
                 };
                 self.focus_flash_until =
                     Some(Instant::now() + std::time::Duration::from_millis(220));
+                self.anim.trigger_focus_flash();
                 ftui::Cmd::none()
             }
             CassMsg::FocusDirectional { direction } => {
@@ -5111,6 +5388,7 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 self.peek_badge_until =
                     Some(Instant::now() + std::time::Duration::from_millis(1500));
+                self.anim.show_peek_badge();
                 ftui::Cmd::none()
             }
             CassMsg::ResultsRefreshed => ftui::Cmd::msg(CassMsg::SearchRequested),
@@ -5361,6 +5639,15 @@ impl super::ftui_adapter::Model for CassApp {
                         ftui::Cmd::msg(CassMsg::AnalyticsEntered),
                         ftui::Cmd::msg(CassMsg::AnalyticsViewChanged(AnalyticsView::Coverage)),
                     ]),
+                    Some(PaletteAction::ScreenshotHtml) => {
+                        ftui::Cmd::msg(CassMsg::ScreenshotRequested(ScreenshotFormat::Html))
+                    }
+                    Some(PaletteAction::ScreenshotSvg) => {
+                        ftui::Cmd::msg(CassMsg::ScreenshotRequested(ScreenshotFormat::Svg))
+                    }
+                    Some(PaletteAction::ScreenshotText) => {
+                        ftui::Cmd::msg(CassMsg::ScreenshotRequested(ScreenshotFormat::Text))
+                    }
                     None => ftui::Cmd::none(),
                 }
             }
@@ -5498,6 +5785,29 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::ExportFailed(err) => {
                 self.status = format!("Export failed: {err}");
                 ftui::Cmd::none()
+            }
+
+            // -- Screenshot export --------------------------------------------
+            CassMsg::ScreenshotRequested(format) => {
+                self.screenshot_pending = Some(format);
+                // The buffer capture happens in view(); on the next Tick we
+                // pick it up and write the file.
+                ftui::Cmd::none()
+            }
+            CassMsg::ScreenshotCompleted(path) => {
+                self.status = format!("Screenshot saved: {}", path.display());
+                let msg = format!("Saved to {}", path.display());
+                ftui::Cmd::msg(CassMsg::ToastShown {
+                    message: msg,
+                    toast_type: crate::ui::components::toast::ToastType::Success,
+                })
+            }
+            CassMsg::ScreenshotFailed(err) => {
+                self.status = format!("Screenshot failed: {err}");
+                ftui::Cmd::msg(CassMsg::ToastShown {
+                    message: format!("Screenshot failed: {err}"),
+                    toast_type: crate::ui::components::toast::ToastType::Error,
+                })
             }
 
             // -- Consent dialog -----------------------------------------------
@@ -5943,12 +6253,16 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::Tick => {
                 self.spinner_frame = self.spinner_frame.wrapping_add(1);
-                self.last_tick = Instant::now();
-                // Clear expired flash indicators
-                if self.focus_flash_until.is_some_and(|t| Instant::now() > t) {
+                let now = Instant::now();
+                let dt = now.duration_since(self.last_tick);
+                self.last_tick = now;
+                // Tick spring-based animations.
+                self.anim.tick(dt);
+                // Clear expired legacy flash indicators.
+                if self.focus_flash_until.is_some_and(|t| now > t) {
                     self.focus_flash_until = None;
                 }
-                if self.peek_badge_until.is_some_and(|t| Instant::now() > t) {
+                if self.peek_badge_until.is_some_and(|t| now > t) {
                     self.peek_badge_until = None;
                 }
                 // Poll update-check channel once per tick.
@@ -5982,6 +6296,11 @@ impl super::ftui_adapter::Model for CassApp {
                     cmds.push(ftui::Cmd::msg(CassMsg::SearchRequested));
                 }
                 cmds.push(ftui::Cmd::msg(CassMsg::ToastTick));
+                // Pick up screenshot buffer captured during view().
+                if let Some((format, content)) = self.screenshot_result.borrow_mut().take() {
+                    self.screenshot_pending = None;
+                    cmds.push(write_screenshot_file(format, content));
+                }
                 if cmds.len() == 1 {
                     return cmds.remove(0);
                 }
@@ -6803,12 +7122,50 @@ impl super::ftui_adapter::Model for CassApp {
         if self.palette_state.open {
             self.render_palette_overlay(frame, area, &styles);
         }
+
+        // ── Screenshot capture (runs after all rendering completes) ──
+        if let Some(format) = self.screenshot_pending {
+            let exported =
+                match format {
+                    ScreenshotFormat::Html => ftui_extras::export::HtmlExporter::default()
+                        .export(&frame.buffer, frame.pool),
+                    ScreenshotFormat::Svg => ftui_extras::export::SvgExporter::default()
+                        .export(&frame.buffer, frame.pool),
+                    ScreenshotFormat::Text => {
+                        ftui_extras::export::TextExporter::plain().export(&frame.buffer, frame.pool)
+                    }
+                };
+            *self.screenshot_result.borrow_mut() = Some((format, exported));
+        }
     }
 }
 
 // =========================================================================
 // Entry Point
 // =========================================================================
+
+/// Write a screenshot file to ~/Downloads and emit a completion or failure message.
+fn write_screenshot_file(format: ScreenshotFormat, content: String) -> ftui::Cmd<CassMsg> {
+    ftui::Cmd::msg(write_screenshot_file_sync(format, content))
+}
+
+fn write_screenshot_file_sync(format: ScreenshotFormat, content: String) -> CassMsg {
+    let downloads = dirs::download_dir().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Downloads")
+    });
+    if let Err(e) = std::fs::create_dir_all(&downloads) {
+        return CassMsg::ScreenshotFailed(format!("Cannot create dir: {e}"));
+    }
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("cass_screenshot_{ts}.{}", format.extension());
+    let path = downloads.join(&filename);
+    match std::fs::write(&path, content.as_bytes()) {
+        Ok(()) => CassMsg::ScreenshotCompleted(path),
+        Err(e) => CassMsg::ScreenshotFailed(format!("Write failed: {e}")),
+    }
+}
 
 /// Background task: export a session to HTML.
 ///
@@ -10984,5 +11341,102 @@ mod tests {
             app.analytics_cache.is_none(),
             "cache should be invalidated on zoom change"
         );
+    }
+
+    // -- Animation state tests (2noh9.4.14) ---------------------------------
+
+    #[test]
+    fn animation_state_default_enabled() {
+        let anim = AnimationState::default();
+        assert!(anim.enabled);
+        assert!((anim.focus_flash_progress() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn animation_state_disabled_snaps() {
+        let mut anim = AnimationState::new(false);
+        anim.trigger_focus_flash();
+        anim.tick(std::time::Duration::from_millis(1));
+        assert!((anim.focus_flash_progress() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn animation_focus_flash_converges() {
+        let mut anim = AnimationState::new(true);
+        anim.trigger_focus_flash();
+        assert!(anim.focus_flash_progress() < 0.1);
+        for _ in 0..60 {
+            anim.tick(std::time::Duration::from_millis(16));
+        }
+        assert!(anim.focus_flash_progress() > 0.9);
+    }
+
+    #[test]
+    fn animation_reveal_stagger() {
+        let mut anim = AnimationState::new(true);
+        anim.start_reveal(5);
+        assert!(anim.reveal_active);
+        assert_eq!(anim.reveal_springs.len(), 5);
+        assert!(anim.reveal_progress(0) < 0.1);
+        for _ in 0..60 {
+            anim.tick(std::time::Duration::from_millis(16));
+        }
+        for i in 0..5 {
+            assert!(anim.reveal_progress(i) > 0.9, "item {i} should be revealed");
+        }
+    }
+
+    #[test]
+    fn animation_modal_open_close() {
+        let mut anim = AnimationState::new(true);
+        assert!(anim.modal_progress() < 0.1);
+        anim.open_modal();
+        for _ in 0..60 {
+            anim.tick(std::time::Duration::from_millis(16));
+        }
+        assert!(anim.modal_progress() > 0.9);
+        anim.close_modal();
+        for _ in 0..60 {
+            anim.tick(std::time::Duration::from_millis(16));
+        }
+        assert!(anim.modal_progress() < 0.1);
+    }
+
+    #[test]
+    fn animation_panel_ratio() {
+        let mut anim = AnimationState::new(true);
+        assert!((anim.panel_ratio_value() - 0.7).abs() < 0.01);
+        anim.set_panel_ratio(0.5);
+        for _ in 0..60 {
+            anim.tick(std::time::Duration::from_millis(16));
+        }
+        assert!(
+            (anim.panel_ratio_value() - 0.5).abs() < 0.05,
+            "panel ratio should converge to 0.5, got {}",
+            anim.panel_ratio_value()
+        );
+    }
+
+    #[test]
+    fn animation_peek_badge() {
+        let mut anim = AnimationState::new(true);
+        assert!(anim.peek_badge_progress() < 0.1);
+        anim.show_peek_badge();
+        for _ in 0..60 {
+            anim.tick(std::time::Duration::from_millis(16));
+        }
+        assert!(anim.peek_badge_progress() > 0.9);
+        anim.hide_peek_badge();
+        for _ in 0..60 {
+            anim.tick(std::time::Duration::from_millis(16));
+        }
+        assert!(anim.peek_badge_progress() < 0.1);
+    }
+
+    #[test]
+    fn animation_disabled_reveal_returns_1() {
+        let anim = AnimationState::new(false);
+        assert!((anim.reveal_progress(0) - 1.0).abs() < 0.01);
+        assert!((anim.reveal_progress(99) - 1.0).abs() < 0.01);
     }
 }

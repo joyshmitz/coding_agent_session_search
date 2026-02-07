@@ -38,6 +38,10 @@ pub enum PaletteAction {
     AnalyticsCost,
     AnalyticsPlans,
     AnalyticsCoverage,
+    // -- Screenshot export ------------------------------------------------
+    ScreenshotHtml,
+    ScreenshotSvg,
+    ScreenshotText,
 }
 
 /// Render-ready descriptor for an action.
@@ -265,6 +269,22 @@ pub fn default_actions() -> Vec<PaletteItem> {
         PaletteAction::AnalyticsCoverage,
         "Analytics: Coverage",
         "Token coverage diagnostics",
+    ));
+    // -- Screenshot export commands -----------------------------------------
+    items.push(item(
+        PaletteAction::ScreenshotHtml,
+        "Screenshot: HTML",
+        "Capture TUI as HTML",
+    ));
+    items.push(item(
+        PaletteAction::ScreenshotSvg,
+        "Screenshot: SVG",
+        "Capture TUI as SVG",
+    ));
+    items.push(item(
+        PaletteAction::ScreenshotText,
+        "Screenshot: Text",
+        "Capture TUI as plain text",
     ));
     // Slots 1-9
     for slot in 1..=9 {

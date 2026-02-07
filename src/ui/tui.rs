@@ -4955,6 +4955,12 @@ pub fn run_tui(
                                     status =
                                         "Analytics views available in ftui mode only".to_string();
                                 }
+                                PaletteAction::ScreenshotHtml
+                                | PaletteAction::ScreenshotSvg
+                                | PaletteAction::ScreenshotText => {
+                                    status =
+                                        "Screenshot export available in ftui mode only".to_string();
+                                }
                             }
                             palette_state.open = false;
                         }

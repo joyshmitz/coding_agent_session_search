@@ -11,3 +11,11 @@ pub use ftui::{
     App, Cmd, Event, Frame, KeyCode, KeyEvent, Model, Modifiers, Program, RuntimeDiffConfig,
     ScreenMode, SessionOptions, Style, TerminalSession, TerminalWriter, Theme, UiAnchor,
 };
+
+// ---------------------------------------------------------------------------
+// Animation primitives (ftui-core)
+// ---------------------------------------------------------------------------
+pub use ftui::core::animation::presets as anim_presets;
+pub use ftui::core::animation::{
+    Animation, AnimationGroup, Callbacks, Spring, StaggerMode, Timeline, stagger_offsets,
+};
