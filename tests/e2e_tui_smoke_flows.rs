@@ -1733,3 +1733,102 @@ fn tui_pty_inline_mode_no_altscreen() {
 
     tracker.complete();
 }
+
+// =============================================================================
+// Macro Recording Tests
+// =============================================================================
+
+#[test]
+fn tui_pty_record_macro_creates_file() {
+    let _guard_lock = tui_flow_guard();
+    let trace = trace_id();
+    let tracker = tracker_for("tui_pty_record_macro_creates_file");
+    let _trace_guard = tracker.trace_env_guard();
+    let env = prepare_ftui_pty_env(&trace, &tracker);
+
+    let macro_path = env.data_dir.join("test_recording.macro");
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 40,
+            cols: 130,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open PTY");
+
+    let reader = pair.master.try_clone_reader().expect("clone PTY reader");
+    let (captured, reader_handle) = spawn_reader(reader);
+    let mut writer = pair.master.take_writer().expect("take PTY writer");
+
+    let launch_start = tracker.start("macro_record", Some("Launching TUI with --record-macro"));
+    let mut tui_cmd = CommandBuilder::new(cass_bin_path());
+    tui_cmd.arg("tui");
+    tui_cmd.arg("--record-macro");
+    tui_cmd.arg(macro_path.to_string_lossy().as_ref());
+    apply_ftui_env(&mut tui_cmd, &env);
+    let mut tui_child = pair
+        .slave
+        .spawn_command(tui_cmd)
+        .expect("spawn TUI with macro recording");
+
+    let saw_startup = wait_for_output_growth(&captured, 0, 32, PTY_STARTUP_TIMEOUT);
+    assert!(
+        saw_startup,
+        "Did not observe startup output in macro recording PTY"
+    );
+
+    // Type a few keys to generate macro events
+    thread::sleep(Duration::from_millis(300));
+    send_key_sequence(&mut *writer, b"j"); // Move down
+    thread::sleep(Duration::from_millis(200));
+    send_key_sequence(&mut *writer, b"k"); // Move up
+    thread::sleep(Duration::from_millis(200));
+
+    send_key_sequence(&mut *writer, b"\x1b"); // ESC to quit
+    let status = wait_for_child_exit(&mut *tui_child, PTY_EXIT_TIMEOUT);
+    tracker.end(
+        "macro_record",
+        Some("Macro recording quit complete"),
+        launch_start,
+    );
+    assert!(
+        status.success(),
+        "TUI with macro recording exited unsuccessfully: {status}"
+    );
+
+    drop(writer);
+    drop(pair);
+    let _ = reader_handle.join();
+    let raw = captured.lock().expect("capture lock").clone();
+    save_artifact("pty_macro_record_output.raw", &trace, &raw);
+
+    // Verify macro file was created
+    assert!(
+        macro_path.exists(),
+        "Macro file should exist at: {}",
+        macro_path.display()
+    );
+
+    // Verify macro file has content (header + at least one event)
+    let content = fs::read_to_string(&macro_path).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert!(
+        lines.len() >= 2,
+        "Macro file should have header + events, got {} lines",
+        lines.len()
+    );
+    assert!(
+        lines[0].contains("\"type\":\"header\""),
+        "First line should be header, got: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("\"type\":\"event\""),
+        "Second line should be event, got: {}",
+        lines[1]
+    );
+
+    tracker.complete();
+}

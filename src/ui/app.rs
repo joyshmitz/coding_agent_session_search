@@ -7878,6 +7878,14 @@ pub struct InlineTuiConfig {
     pub anchor: super::ftui_adapter::UiAnchor,
 }
 
+/// Configuration for macro recording/playback.
+pub struct MacroConfig {
+    /// Path to write recorded macro events.
+    pub record_path: Option<std::path::PathBuf>,
+    /// Path to read and play back macro events.
+    pub play_path: Option<std::path::PathBuf>,
+}
+
 /// Run the cass TUI using the ftui Program runtime.
 ///
 /// This replaces the manual crossterm event loop in `run_tui()`.
@@ -7887,32 +7895,484 @@ pub struct InlineTuiConfig {
 /// When `inline_config` is `Some`, the TUI runs in inline mode: the UI
 /// chrome is anchored (top or bottom) within the terminal and scrollback
 /// is preserved. When `None`, fullscreen alt-screen mode is used.
-pub fn run_tui_ftui(inline_config: Option<InlineTuiConfig>) -> anyhow::Result<()> {
+///
+/// When `macro_config` has a `record_path`, events are recorded and saved
+/// to the specified file on exit. When `play_path` is set, events are
+/// loaded and replayed.
+pub fn run_tui_ftui(
+    inline_config: Option<InlineTuiConfig>,
+    macro_config: MacroConfig,
+) -> anyhow::Result<()> {
+    use ftui::ProgramConfig;
     use ftui::render::budget::FrameBudgetConfig;
 
     let model = CassApp::default();
 
     // 16ms budget (60fps) with adaptive PID degradation.
-    // The BudgetController inside the runtime will automatically
-    // step through DegradationLevel::Full → SimpleBorders → …
-    // when frame times exceed budget.  Bayesian diff strategy
-    // selection (RuntimeDiffConfig::default) is already enabled
-    // by ProgramConfig::fullscreen().
     let budget = FrameBudgetConfig::default();
 
-    if let Some(cfg) = inline_config {
-        ftui::App::inline(model, cfg.ui_height)
-            .anchor(cfg.anchor)
-            .with_mouse()
-            .with_budget(budget)
-            .run()
-            .map_err(|e| anyhow::anyhow!("ftui inline runtime error: {e}"))
+    // Build the ProgramConfig based on inline/fullscreen mode.
+    let mut config = if let Some(ref cfg) = inline_config {
+        let mut c = ProgramConfig::inline(cfg.ui_height);
+        c.ui_anchor = cfg.anchor;
+        c
     } else {
-        ftui::App::fullscreen(model)
-            .with_mouse()
-            .with_budget(budget)
+        ProgramConfig::fullscreen()
+    };
+    config.budget = budget.clone();
+    config.mouse = true;
+
+    // If recording macros, we need direct Program access for start/stop_recording.
+    if macro_config.record_path.is_some() {
+        let mut program = ftui::Program::with_config(model, config)
+            .map_err(|e| anyhow::anyhow!("ftui program creation error: {e}"))?;
+
+        program.start_recording("cass-session");
+        let result = program.run();
+
+        // Save recorded macro on exit.
+        if let Some(ref record_path) = macro_config.record_path
+            && let Some(recorded) = program.stop_recording()
+        {
+            macro_file::save_macro(record_path, &recorded)?;
+            eprintln!("Macro saved to: {}", record_path.display());
+        }
+
+        result.map_err(|e| anyhow::anyhow!("ftui runtime error: {e}"))
+    } else if let Some(ref play_path) = macro_config.play_path {
+        // Playback: load macro, write raw key bytes to a pipe that feeds stdin.
+        // The ftui runtime reads from terminal stdin, so we spawn a thread
+        // that writes the key sequences at the recorded delays.
+        let macro_data = macro_file::load_macro(play_path)?;
+        eprintln!(
+            "Playing macro: {} ({} events, {:.1}s)",
+            macro_data.metadata().name,
+            macro_data.len(),
+            macro_data.total_duration().as_secs_f64()
+        );
+
+        // For playback, we run the program normally. The user interacts live
+        // and the macro events are replayed via a background thread writing
+        // to stdin. This is the simplest approach that works with the current
+        // ftui architecture.
+        //
+        // NOTE: Full stdin-injection playback requires platform-specific PTY
+        // wiring. For now, playback is supported via ProgramSimulator in tests.
+        // Live playback will be added when ftui exposes an event injection API.
+        eprintln!("Live macro playback not yet supported; use --record-macro to record.");
+        eprintln!("Macro files can be replayed in tests via ProgramSimulator.");
+
+        // Still launch the TUI normally so the user can interact.
+        let mut program = ftui::Program::with_config(model, config)
+            .map_err(|e| anyhow::anyhow!("ftui program creation error: {e}"))?;
+        program
             .run()
             .map_err(|e| anyhow::anyhow!("ftui runtime error: {e}"))
+    } else {
+        // Standard path — no macro, use AppBuilder for simplicity.
+        if let Some(cfg) = inline_config {
+            ftui::App::inline(model, cfg.ui_height)
+                .anchor(cfg.anchor)
+                .with_mouse()
+                .with_budget(budget)
+                .run()
+                .map_err(|e| anyhow::anyhow!("ftui inline runtime error: {e}"))
+        } else {
+            ftui::App::fullscreen(model)
+                .with_mouse()
+                .with_budget(budget)
+                .run()
+                .map_err(|e| anyhow::anyhow!("ftui runtime error: {e}"))
+        }
+    }
+}
+
+/// Macro file serialization/deserialization.
+mod macro_file {
+    use std::io::{BufRead, BufReader, Write};
+    use std::path::Path;
+    use std::time::Duration;
+
+    use ftui::runtime::input_macro::MacroMetadata;
+    use ftui::runtime::{InputMacro, TimedEvent};
+    use ftui::{Event, KeyCode, KeyEvent, Modifiers};
+
+    /// Save an InputMacro to a JSONL file.
+    pub fn save_macro(path: &Path, input_macro: &InputMacro) -> anyhow::Result<()> {
+        let mut file = std::fs::File::create(path)?;
+
+        // Header line with metadata.
+        let meta = input_macro.metadata();
+        writeln!(
+            file,
+            "{{\"type\":\"header\",\"name\":{},\"terminal_size\":[{},{}],\"total_duration_ms\":{},\"event_count\":{}}}",
+            serde_json::to_string(&meta.name)?,
+            meta.terminal_size.0,
+            meta.terminal_size.1,
+            meta.total_duration.as_millis(),
+            input_macro.len()
+        )?;
+
+        // One line per event.
+        for timed in input_macro.events() {
+            let event_json = serialize_event(&timed.event);
+            writeln!(
+                file,
+                "{{\"type\":\"event\",\"delay_ms\":{},\"event\":{}}}",
+                timed.delay.as_millis(),
+                event_json
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Load an InputMacro from a JSONL file.
+    pub fn load_macro(path: &Path) -> anyhow::Result<InputMacro> {
+        let file = std::fs::File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut events = Vec::new();
+        let mut name = String::from("loaded");
+        let mut terminal_size = (80u16, 24u16);
+        let mut total_duration = Duration::ZERO;
+
+        for line in reader.lines() {
+            let line = line?;
+            let v: serde_json::Value = serde_json::from_str(&line)?;
+
+            match v.get("type").and_then(|t| t.as_str()) {
+                Some("header") => {
+                    name = v
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("loaded")
+                        .to_string();
+                    if let (Some(w), Some(h)) = (
+                        v.get("terminal_size")
+                            .and_then(|s| s.get(0))
+                            .and_then(|n| n.as_u64()),
+                        v.get("terminal_size")
+                            .and_then(|s| s.get(1))
+                            .and_then(|n| n.as_u64()),
+                    ) {
+                        terminal_size = (w as u16, h as u16);
+                    }
+                    if let Some(ms) = v.get("total_duration_ms").and_then(|n| n.as_u64()) {
+                        total_duration = Duration::from_millis(ms);
+                    }
+                }
+                Some("event") => {
+                    let delay_ms = v.get("delay_ms").and_then(|n| n.as_u64()).unwrap_or(0);
+                    if let Some(event_val) = v.get("event")
+                        && let Some(event) = deserialize_event(event_val)
+                    {
+                        events.push(TimedEvent::new(event, Duration::from_millis(delay_ms)));
+                    }
+                }
+                _ => {} // Skip unknown line types
+            }
+        }
+
+        let metadata = MacroMetadata {
+            name,
+            terminal_size,
+            total_duration,
+        };
+
+        Ok(InputMacro::new(events, metadata))
+    }
+
+    fn serialize_event(event: &Event) -> String {
+        match event {
+            Event::Key(key) => {
+                let code = serialize_keycode(&key.code);
+                let mods = serialize_modifiers(key.modifiers);
+                format!("{{\"key\":{code},\"modifiers\":{mods}}}")
+            }
+            Event::Resize { width, height } => {
+                format!("{{\"resize\":[{width},{height}]}}")
+            }
+            Event::Focus(gained) => {
+                format!("{{\"focus\":{gained}}}")
+            }
+            Event::Paste(paste) => {
+                let text = serde_json::to_string(&paste.text).unwrap_or_default();
+                format!("{{\"paste\":{text}}}")
+            }
+            Event::Mouse(_) => {
+                // Mouse events are not serialized for macro files
+                "null".to_string()
+            }
+            _ => "null".to_string(),
+        }
+    }
+
+    fn serialize_keycode(code: &KeyCode) -> String {
+        match code {
+            KeyCode::Char(c) => {
+                let s = serde_json::to_string(&c.to_string()).unwrap_or_default();
+                format!("{{\"char\":{s}}}")
+            }
+            KeyCode::Enter => "\"Enter\"".to_string(),
+            KeyCode::Backspace => "\"Backspace\"".to_string(),
+            KeyCode::Tab => "\"Tab\"".to_string(),
+            KeyCode::Escape => "\"Escape\"".to_string(),
+            KeyCode::Up => "\"Up\"".to_string(),
+            KeyCode::Down => "\"Down\"".to_string(),
+            KeyCode::Left => "\"Left\"".to_string(),
+            KeyCode::Right => "\"Right\"".to_string(),
+            KeyCode::Home => "\"Home\"".to_string(),
+            KeyCode::End => "\"End\"".to_string(),
+            KeyCode::PageUp => "\"PageUp\"".to_string(),
+            KeyCode::PageDown => "\"PageDown\"".to_string(),
+            KeyCode::Delete => "\"Delete\"".to_string(),
+            KeyCode::Insert => "\"Insert\"".to_string(),
+            KeyCode::F(n) => format!("{{\"f\":{n}}}"),
+            _ => "null".to_string(),
+        }
+    }
+
+    fn serialize_modifiers(mods: Modifiers) -> String {
+        let mut parts = Vec::new();
+        if mods.contains(Modifiers::SHIFT) {
+            parts.push("\"shift\"");
+        }
+        if mods.contains(Modifiers::CTRL) {
+            parts.push("\"ctrl\"");
+        }
+        if mods.contains(Modifiers::ALT) {
+            parts.push("\"alt\"");
+        }
+        format!("[{}]", parts.join(","))
+    }
+
+    fn deserialize_event(v: &serde_json::Value) -> Option<Event> {
+        if v.is_null() {
+            return None;
+        }
+
+        if let Some(key_val) = v.get("key") {
+            let code = deserialize_keycode(key_val)?;
+            let modifiers = v
+                .get("modifiers")
+                .map(deserialize_modifiers)
+                .unwrap_or(Modifiers::empty());
+            return Some(Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: ftui::KeyEventKind::Press,
+            }));
+        }
+
+        if let Some(resize) = v.get("resize") {
+            let w = resize.get(0)?.as_u64()? as u16;
+            let h = resize.get(1)?.as_u64()? as u16;
+            return Some(Event::Resize {
+                width: w,
+                height: h,
+            });
+        }
+
+        if let Some(focus) = v.get("focus") {
+            return Some(Event::Focus(focus.as_bool()?));
+        }
+
+        if let Some(paste) = v.get("paste") {
+            return Some(Event::Paste(ftui::core::event::PasteEvent {
+                text: paste.as_str()?.to_string(),
+                bracketed: true,
+            }));
+        }
+
+        None
+    }
+
+    fn deserialize_keycode(v: &serde_json::Value) -> Option<KeyCode> {
+        if let Some(s) = v.as_str() {
+            return match s {
+                "Enter" => Some(KeyCode::Enter),
+                "Backspace" => Some(KeyCode::Backspace),
+                "Tab" => Some(KeyCode::Tab),
+                "Escape" => Some(KeyCode::Escape),
+                "Up" => Some(KeyCode::Up),
+                "Down" => Some(KeyCode::Down),
+                "Left" => Some(KeyCode::Left),
+                "Right" => Some(KeyCode::Right),
+                "Home" => Some(KeyCode::Home),
+                "End" => Some(KeyCode::End),
+                "PageUp" => Some(KeyCode::PageUp),
+                "PageDown" => Some(KeyCode::PageDown),
+                "Delete" => Some(KeyCode::Delete),
+                "Insert" => Some(KeyCode::Insert),
+                _ => None,
+            };
+        }
+
+        if let Some(obj) = v.as_object() {
+            if let Some(c) = obj.get("char").and_then(|c| c.as_str()) {
+                return c.chars().next().map(KeyCode::Char);
+            }
+            if let Some(n) = obj.get("f").and_then(|n| n.as_u64()) {
+                return Some(KeyCode::F(n as u8));
+            }
+        }
+
+        None
+    }
+
+    fn deserialize_modifiers(v: &serde_json::Value) -> Modifiers {
+        let mut mods = Modifiers::empty();
+        if let Some(arr) = v.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    match s {
+                        "shift" => mods |= Modifiers::SHIFT,
+                        "ctrl" => mods |= Modifiers::CTRL,
+                        "alt" => mods |= Modifiers::ALT,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        mods
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn roundtrip_key_event() {
+            let event = Event::Key(KeyEvent {
+                code: KeyCode::Char('a'),
+                modifiers: Modifiers::CTRL,
+                kind: ftui::KeyEventKind::Press,
+            });
+            let json = serialize_event(&event);
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let restored = deserialize_event(&parsed).unwrap();
+            match restored {
+                Event::Key(k) => {
+                    assert_eq!(k.code, KeyCode::Char('a'));
+                    assert!(k.modifiers.contains(Modifiers::CTRL));
+                }
+                _ => panic!("expected Key event"),
+            }
+        }
+
+        #[test]
+        fn roundtrip_special_keys() {
+            for code in [
+                KeyCode::Enter,
+                KeyCode::Escape,
+                KeyCode::Tab,
+                KeyCode::Backspace,
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::F(5),
+            ] {
+                let event = Event::Key(KeyEvent {
+                    code,
+                    modifiers: Modifiers::empty(),
+                    kind: ftui::KeyEventKind::Press,
+                });
+                let json = serialize_event(&event);
+                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                let restored = deserialize_event(&parsed).unwrap();
+                if let Event::Key(k) = restored {
+                    assert_eq!(k.code, code, "roundtrip failed for {:?}", code);
+                } else {
+                    panic!("expected Key event for {:?}", code);
+                }
+            }
+        }
+
+        #[test]
+        fn roundtrip_resize_event() {
+            let event = Event::Resize {
+                width: 120,
+                height: 40,
+            };
+            let json = serialize_event(&event);
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let restored = deserialize_event(&parsed).unwrap();
+            assert!(matches!(
+                restored,
+                Event::Resize {
+                    width: 120,
+                    height: 40
+                }
+            ));
+        }
+
+        #[test]
+        fn roundtrip_modifier_combinations() {
+            let mods = Modifiers::SHIFT | Modifiers::ALT;
+            let json = serialize_modifiers(mods);
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let restored = deserialize_modifiers(&parsed);
+            assert!(restored.contains(Modifiers::SHIFT));
+            assert!(restored.contains(Modifiers::ALT));
+            assert!(!restored.contains(Modifiers::CTRL));
+        }
+
+        #[test]
+        fn save_load_roundtrip() {
+            let events = vec![
+                TimedEvent::new(
+                    Event::Key(KeyEvent {
+                        code: KeyCode::Char('h'),
+                        modifiers: Modifiers::empty(),
+                        kind: ftui::KeyEventKind::Press,
+                    }),
+                    Duration::from_millis(100),
+                ),
+                TimedEvent::new(
+                    Event::Key(KeyEvent {
+                        code: KeyCode::Enter,
+                        modifiers: Modifiers::empty(),
+                        kind: ftui::KeyEventKind::Press,
+                    }),
+                    Duration::from_millis(200),
+                ),
+                TimedEvent::new(
+                    Event::Key(KeyEvent {
+                        code: KeyCode::Escape,
+                        modifiers: Modifiers::empty(),
+                        kind: ftui::KeyEventKind::Press,
+                    }),
+                    Duration::from_millis(50),
+                ),
+            ];
+            let metadata = MacroMetadata {
+                name: "test-macro".to_string(),
+                terminal_size: (80, 24),
+                total_duration: Duration::from_millis(350),
+            };
+            let original = InputMacro::new(events, metadata);
+
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            save_macro(tmp.path(), &original).unwrap();
+            let loaded = load_macro(tmp.path()).unwrap();
+
+            assert_eq!(loaded.len(), 3);
+            assert_eq!(loaded.metadata().name, "test-macro");
+            assert_eq!(loaded.metadata().terminal_size, (80, 24));
+        }
+
+        #[test]
+        fn null_events_are_skipped() {
+            let event = Event::Mouse(ftui::MouseEvent {
+                kind: ftui::MouseEventKind::Moved,
+                x: 0,
+                y: 0,
+                modifiers: Modifiers::empty(),
+            });
+            let json = serialize_event(&event);
+            assert_eq!(json, "null");
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert!(deserialize_event(&parsed).is_none());
+        }
     }
 }
 

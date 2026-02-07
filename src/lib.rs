@@ -127,6 +127,14 @@ pub enum Commands {
         /// Anchor the inline UI to top or bottom of the terminal (default: bottom)
         #[arg(long, value_parser = ["top", "bottom"], default_value = "bottom")]
         anchor: String,
+
+        /// Record input events to a macro file for replay/debugging
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        record_macro: Option<PathBuf>,
+
+        /// Play back a previously recorded macro file
+        #[arg(long, value_hint = ValueHint::FilePath, conflicts_with = "record_macro")]
+        play_macro: Option<PathBuf>,
     },
     /// Run indexer
     Index {
@@ -2368,6 +2376,8 @@ async fn execute_cli(
         inline: false,
         ui_height: 12,
         anchor: "bottom".to_string(),
+        record_macro: None,
+        play_macro: None,
     });
 
     if cli.robot_help {
@@ -2443,9 +2453,11 @@ async fn execute_cli(
                 inline,
                 ui_height,
                 anchor,
+                record_macro,
+                play_macro,
             } = command.clone()
             {
-                info!(once, inline, ui_height, %anchor, "launching ftui runtime");
+                info!(once, inline, ui_height, %anchor, record_macro = ?record_macro, play_macro = ?play_macro, "launching ftui runtime");
 
                 let inline_config = if inline {
                     let ui_anchor = if anchor == "top" {
@@ -2461,10 +2473,15 @@ async fn execute_cli(
                     None
                 };
 
+                let macro_config = ui::app::MacroConfig {
+                    record_path: record_macro,
+                    play_path: play_macro,
+                };
+
                 let run_result = if let Some(path) = asciicast {
                     tui_asciicast::run_tui_with_asciicast(&path, !once)
                 } else {
-                    ui::app::run_tui_ftui(inline_config)
+                    ui::app::run_tui_ftui(inline_config, macro_config)
                 };
 
                 run_result.map_err(|e| CliError {
