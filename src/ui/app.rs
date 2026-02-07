@@ -800,11 +800,13 @@ pub enum FocusRegion {
 /// Responsive layout breakpoint based on terminal width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayoutBreakpoint {
-    /// <100 cols: single pane with tab switching
+    /// <80 cols: single pane with tab switching (very tight)
     Narrow,
-    /// 100-159 cols: stacked results/detail with adjustable ratio
+    /// 80-119 cols: single pane, but with detail peek strip on right
+    MediumNarrow,
+    /// 120-159 cols: side-by-side results/detail with tight ratio
     Medium,
-    /// >=160 cols: side-by-side results + detail panes
+    /// >=160 cols: comfortable side-by-side results + detail panes
     Wide,
 }
 
@@ -813,8 +815,10 @@ impl LayoutBreakpoint {
     pub fn from_width(cols: u16) -> Self {
         if cols >= 160 {
             Self::Wide
-        } else if cols >= 100 {
+        } else if cols >= 120 {
             Self::Medium
+        } else if cols >= 80 {
+            Self::MediumNarrow
         } else {
             Self::Narrow
         }
@@ -3702,8 +3706,9 @@ impl CassApp {
             InspectorTab::Layout => {
                 let bp = LayoutBreakpoint::from_width(area.width);
                 let bp_str = match bp {
-                    LayoutBreakpoint::Narrow => "Narrow (<100)",
-                    LayoutBreakpoint::Medium => "Medium (100-159)",
+                    LayoutBreakpoint::Narrow => "Narrow (<80)",
+                    LayoutBreakpoint::MediumNarrow => "MedNarrow (80-119)",
+                    LayoutBreakpoint::Medium => "Medium (120-159)",
                     LayoutBreakpoint::Wide => "Wide (>=160)",
                 };
                 let lines = [
@@ -9734,7 +9739,41 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     LayoutBreakpoint::Medium => {
                         let (results_area, detail_area, split_handle) =
-                            self.split_content_area(content_area, 40, 32);
+                            self.split_content_area(content_area, 45, 32);
+                        *self.last_split_handle_area.borrow_mut() = split_handle;
+                        self.render_results_pane(
+                            frame,
+                            results_area,
+                            hits,
+                            selected_idx,
+                            row_h,
+                            border_type,
+                            adaptive_borders,
+                            &styles,
+                            pane_style,
+                            pane_focused_style,
+                            row_style,
+                            row_alt_style,
+                            row_selected_style,
+                            text_muted_style,
+                        );
+                        self.render_detail_pane(
+                            frame,
+                            detail_area,
+                            border_type,
+                            adaptive_borders,
+                            &styles,
+                            pane_style,
+                            pane_focused_style,
+                            text_muted_style,
+                        );
+                    }
+                    LayoutBreakpoint::MediumNarrow => {
+                        // 80-119 cols: side-by-side with tight detail pane.
+                        // Give results priority; detail gets 25-col minimum
+                        // which is enough for wrapped message previews.
+                        let (results_area, detail_area, split_handle) =
+                            self.split_content_area(content_area, 35, 25);
                         *self.last_split_handle_area.borrow_mut() = split_handle;
                         self.render_results_pane(
                             frame,
@@ -9800,6 +9839,7 @@ impl super::ftui_adapter::Model for CassApp {
                 // ── Status footer ───────────────────────────────────────
                 let bp_label = match breakpoint {
                     LayoutBreakpoint::Narrow => "narrow",
+                    LayoutBreakpoint::MediumNarrow => "med-n",
                     LayoutBreakpoint::Medium => "med",
                     LayoutBreakpoint::Wide => "wide",
                 };
@@ -14023,8 +14063,8 @@ mod tests {
         let text = ftui_harness::buffer_to_text(&buf);
         assert!(text.contains("cass"), "should show app title");
         assert!(
-            text.contains("narrow"),
-            "80-col should show narrow breakpoint"
+            text.contains("med-n"),
+            "80-col should show medium-narrow breakpoint"
         );
     }
 
@@ -14807,6 +14847,67 @@ mod tests {
         assert!(
             app.last_detail_area.borrow().is_none(),
             "detail area should be None in narrow layout with results focus"
+        );
+    }
+
+    // =====================================================================
+    // Layout breakpoint classification tests
+    // =====================================================================
+
+    #[test]
+    fn breakpoint_narrow_below_80() {
+        assert_eq!(LayoutBreakpoint::from_width(40), LayoutBreakpoint::Narrow);
+        assert_eq!(LayoutBreakpoint::from_width(79), LayoutBreakpoint::Narrow);
+    }
+
+    #[test]
+    fn breakpoint_medium_narrow_80_to_119() {
+        assert_eq!(
+            LayoutBreakpoint::from_width(80),
+            LayoutBreakpoint::MediumNarrow
+        );
+        assert_eq!(
+            LayoutBreakpoint::from_width(100),
+            LayoutBreakpoint::MediumNarrow
+        );
+        assert_eq!(
+            LayoutBreakpoint::from_width(119),
+            LayoutBreakpoint::MediumNarrow
+        );
+    }
+
+    #[test]
+    fn breakpoint_medium_120_to_159() {
+        assert_eq!(LayoutBreakpoint::from_width(120), LayoutBreakpoint::Medium);
+        assert_eq!(LayoutBreakpoint::from_width(140), LayoutBreakpoint::Medium);
+        assert_eq!(LayoutBreakpoint::from_width(159), LayoutBreakpoint::Medium);
+    }
+
+    #[test]
+    fn breakpoint_wide_160_plus() {
+        assert_eq!(LayoutBreakpoint::from_width(160), LayoutBreakpoint::Wide);
+        assert_eq!(LayoutBreakpoint::from_width(200), LayoutBreakpoint::Wide);
+        assert_eq!(LayoutBreakpoint::from_width(300), LayoutBreakpoint::Wide);
+    }
+
+    #[test]
+    fn breakpoint_zero_is_narrow() {
+        assert_eq!(LayoutBreakpoint::from_width(0), LayoutBreakpoint::Narrow);
+    }
+
+    #[test]
+    fn medium_narrow_renders_both_panes() {
+        let app = app_with_hits(5);
+        // 100 cols = MediumNarrow: should render both results and detail
+        render_at_degradation(&app, 100, 24, ftui::render::budget::DegradationLevel::Full);
+
+        assert!(
+            app.last_results_inner.borrow().is_some(),
+            "results inner should be recorded in medium-narrow layout"
+        );
+        assert!(
+            app.last_detail_area.borrow().is_some(),
+            "detail area should be recorded in medium-narrow layout (both panes visible)"
         );
     }
 
