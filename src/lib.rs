@@ -7436,6 +7436,13 @@ fn diagnostics_connector_paths(
     let gemini_home = dotenvy::var("GEMINI_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home.join(".gemini"));
+    let opencode_path = dotenvy::var("OPENCODE_STORAGE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| home.join(".local/share"))
+                .join("opencode/storage")
+        });
     let aider_path = dotenvy::var("CASS_AIDER_DATA_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home.join(".aider.chat.history.md"));
@@ -7463,7 +7470,7 @@ fn diagnostics_connector_paths(
         ("gemini".to_string(), gemini_home.join("tmp")),
         ("clawdbot".to_string(), home.join(".clawdbot/sessions")),
         ("vibe".to_string(), home.join(".vibe/logs/session")),
-        ("opencode".to_string(), home.join(".opencode")),
+        ("opencode".to_string(), opencode_path),
         (
             "amp".to_string(),
             config_dir.join("Code/User/globalStorage/sourcegraph.amp"),
