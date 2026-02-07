@@ -82,3 +82,8 @@ session_export_test.html
 tests/fixtures/search_demo_data/*.db-shm
 tests/fixtures/search_demo_data/*.db-wal
 session_export.html
+
+# Local sqlite artifacts in repo root
+/storage.sqlite3
+/storage.sqlite3-wal
+/storage.sqlite3-shm
