@@ -174,6 +174,22 @@ pub struct AnalyticsFilterState {
     pub source_filter: SourceFilter,
 }
 
+/// Context passed when drilling down from an analytics selection into search.
+///
+/// Captures the time-range boundaries and dimensional filter implied by the
+/// selected chart element (bucket, row, or heatmap day).
+#[derive(Clone, Debug, Default)]
+pub struct DrilldownContext {
+    /// Start of the selected bucket's time window (ms epoch, inclusive).
+    pub since_ms: Option<i64>,
+    /// End of the selected bucket's time window (ms epoch, exclusive).
+    pub until_ms: Option<i64>,
+    /// Agent slug to filter by (from breakdowns / tools selection).
+    pub agent: Option<String>,
+    /// Model family to filter by (from cost / models selection).
+    pub model: Option<String>,
+}
+
 // Re-export from the analytics_charts module.
 pub use super::analytics_charts::AnalyticsChartData;
 
@@ -340,6 +356,69 @@ impl ResultsGrouping {
             Self::Workspace => Self::Flat,
             Self::Flat => Self::Agent,
         }
+    }
+}
+
+/// Snapshot of undoable state for undo/redo (Ctrl+Z / Ctrl+Y).
+#[derive(Clone, Debug)]
+pub struct UndoEntry {
+    pub description: &'static str,
+    pub query: String,
+    pub cursor_pos: usize,
+    pub filters: SearchFilters,
+    pub time_preset: TimePreset,
+    pub ranking_mode: RankingMode,
+    pub grouping_mode: ResultsGrouping,
+}
+
+/// Fixed-capacity undo/redo history.
+#[derive(Clone, Debug)]
+pub struct UndoHistory {
+    pub undo_stack: Vec<UndoEntry>,
+    pub redo_stack: Vec<UndoEntry>,
+    pub max_depth: usize,
+}
+
+impl Default for UndoHistory {
+    fn default() -> Self {
+        Self {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            max_depth: 100,
+        }
+    }
+}
+
+impl UndoHistory {
+    /// Push a new snapshot. Clears redo stack.
+    pub fn push(&mut self, entry: UndoEntry) {
+        self.redo_stack.clear();
+        self.undo_stack.push(entry);
+        if self.undo_stack.len() > self.max_depth {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    /// Pop the most recent undo entry, moving current state to redo.
+    pub fn pop_undo(&mut self, current: UndoEntry) -> Option<UndoEntry> {
+        let entry = self.undo_stack.pop()?;
+        self.redo_stack.push(current);
+        Some(entry)
+    }
+
+    /// Pop the most recent redo entry, moving current state to undo.
+    pub fn pop_redo(&mut self, current: UndoEntry) -> Option<UndoEntry> {
+        let entry = self.redo_stack.pop()?;
+        self.undo_stack.push(current);
+        Some(entry)
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
     }
 }
 
@@ -546,6 +625,8 @@ pub struct CassApp {
     pub analytics_filters: AnalyticsFilterState,
     /// Cached analytics chart data (loaded when entering analytics surface).
     pub analytics_cache: Option<AnalyticsChartData>,
+    /// Current selection index within the active analytics subview (for drilldown).
+    pub analytics_selection: usize,
 
     // -- Search & query ---------------------------------------------------
     /// Current search query text.
@@ -685,6 +766,10 @@ pub struct CassApp {
     /// Toast notification manager.
     pub toast_manager: ToastManager,
 
+    // -- Undo/redo --------------------------------------------------------
+    /// History stack for query/filter state undo/redo (Ctrl+Z / Ctrl+Y).
+    pub undo_history: UndoHistory,
+
     // -- Animation & timing -----------------------------------------------
     /// Start time of the reveal animation.
     pub reveal_anim_start: Option<Instant>,
@@ -812,6 +897,7 @@ impl Default for CassApp {
                 }
             },
             toast_manager: ToastManager::default(),
+            undo_history: UndoHistory::default(),
             reveal_anim_start: None,
             focus_flash_until: None,
             peek_badge_until: None,
@@ -952,6 +1038,50 @@ impl CassApp {
         let len = self.saved_views.len() as i32;
         let next = self.saved_views_selection as i32 + delta;
         self.saved_views_selection = next.rem_euclid(len) as usize;
+    }
+
+    /// Capture the current undoable state as an `UndoEntry`.
+    fn capture_undo_state(&self, description: &'static str) -> UndoEntry {
+        UndoEntry {
+            description,
+            query: self.query.clone(),
+            cursor_pos: self.cursor_pos,
+            filters: self.filters.clone(),
+            time_preset: self.time_preset,
+            ranking_mode: self.ranking_mode,
+            grouping_mode: self.grouping_mode,
+        }
+    }
+
+    /// Restore undoable state from an `UndoEntry`, triggering a search if filters changed.
+    fn restore_undo_state(&mut self, entry: UndoEntry) -> ftui::Cmd<CassMsg> {
+        let filters_changed = self.filters != entry.filters
+            || self.ranking_mode != entry.ranking_mode
+            || self.grouping_mode != entry.grouping_mode;
+        let query_changed = self.query != entry.query;
+
+        self.query = entry.query;
+        self.cursor_pos = entry.cursor_pos;
+        self.filters = entry.filters;
+        self.time_preset = entry.time_preset;
+        self.ranking_mode = entry.ranking_mode;
+        self.grouping_mode = entry.grouping_mode;
+
+        if filters_changed {
+            self.regroup_panes();
+        }
+
+        if query_changed || filters_changed {
+            ftui::Cmd::msg(CassMsg::SearchRequested)
+        } else {
+            ftui::Cmd::none()
+        }
+    }
+
+    /// Push current state onto undo stack before a mutation.
+    fn push_undo(&mut self, description: &'static str) {
+        let entry = self.capture_undo_state(description);
+        self.undo_history.push(entry);
     }
 
     /// Re-group results into panes using the current `grouping_mode`.
@@ -2542,6 +2672,11 @@ pub enum CassMsg {
     /// Page-level scroll.
     PageScrolled { delta: i32 },
 
+    /// Undo the last query/filter change (Ctrl+Z).
+    Undo,
+    /// Redo the last undone change (Ctrl+Y).
+    Redo,
+
     /// Cycle the results grouping mode (Agent → Conversation → Workspace → Flat).
     GroupingCycled,
     /// Jump to the next/previous day boundary in results.
@@ -3044,6 +3179,11 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     // -- Borders --------------------------------------------------
                     KeyCode::Char('b') if ctrl => CassMsg::BordersToggled,
 
+                    // -- Undo/redo ------------------------------------------------
+                    KeyCode::Char('z') if ctrl && shift => CassMsg::Redo,
+                    KeyCode::Char('Z') if ctrl => CassMsg::Redo,
+                    KeyCode::Char('z') if ctrl => CassMsg::Undo,
+
                     // -- Line editing ---------------------------------------------
                     KeyCode::Char('u') if ctrl => CassMsg::QueryCleared,
                     KeyCode::Char('w') if ctrl => CassMsg::QueryWordDeleted,
@@ -3438,6 +3578,7 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::tick(SEARCH_DEBOUNCE)
             }
             CassMsg::QueryCleared => {
+                self.push_undo("Clear query");
                 self.query.clear();
                 self.cursor_pos = 0;
                 self.dirty_since = Some(Instant::now());
@@ -3449,6 +3590,7 @@ impl super::ftui_adapter::Model for CassApp {
                 // Delete word backward from cursor (Ctrl+W): trim trailing
                 // whitespace before cursor, then delete to word boundary.
                 if self.cursor_pos > 0 {
+                    self.push_undo("Delete word");
                     let before = &self.query[..self.cursor_pos];
                     let trimmed = before.trim_end();
                     let new_end = trimmed
@@ -3567,28 +3709,34 @@ impl super::ftui_adapter::Model for CassApp {
 
             // -- Filters ------------------------------------------------------
             CassMsg::FilterAgentSet(agents) => {
+                self.push_undo("Set agent filter");
                 self.filters.agents = agents;
                 ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::FilterWorkspaceSet(workspaces) => {
+                self.push_undo("Set workspace filter");
                 self.filters.workspaces = workspaces;
                 ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::FilterTimeSet { from, to } => {
+                self.push_undo("Set time filter");
                 self.filters.created_from = from;
                 self.filters.created_to = to;
                 ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::FilterSourceSet(source) => {
+                self.push_undo("Set source filter");
                 self.filters.source_filter = source;
                 ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::FiltersClearAll => {
+                self.push_undo("Clear all filters");
                 self.filters = SearchFilters::default();
                 self.time_preset = TimePreset::All;
                 ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::TimePresetCycled => {
+                self.push_undo("Cycle time preset");
                 self.time_preset = self.time_preset.next();
                 let now = chrono::Utc::now().timestamp();
                 let (from, to) = match self.time_preset {
@@ -3603,6 +3751,7 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::SourceFilterCycled => {
+                self.push_undo("Cycle source filter");
                 self.filters.source_filter = self.filters.source_filter.cycle();
                 self.status = format!(
                     "Source: {}",
@@ -3753,8 +3902,35 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
 
+            // -- Undo/redo ----------------------------------------------------
+            CassMsg::Undo => {
+                let current = self.capture_undo_state("current");
+                if let Some(entry) = self.undo_history.pop_undo(current) {
+                    let desc = entry.description;
+                    let cmd = self.restore_undo_state(entry);
+                    self.status = format!("Undo: {desc}");
+                    cmd
+                } else {
+                    self.status = "Nothing to undo".to_string();
+                    ftui::Cmd::none()
+                }
+            }
+            CassMsg::Redo => {
+                let current = self.capture_undo_state("current");
+                if let Some(entry) = self.undo_history.pop_redo(current) {
+                    let desc = entry.description;
+                    let cmd = self.restore_undo_state(entry);
+                    self.status = format!("Redo: {desc}");
+                    cmd
+                } else {
+                    self.status = "Nothing to redo".to_string();
+                    ftui::Cmd::none()
+                }
+            }
+
             // -- Grouping & timeline -----------------------------------------
             CassMsg::GroupingCycled => {
+                self.push_undo("Cycle grouping");
                 self.grouping_mode = self.grouping_mode.next();
                 self.regroup_panes();
                 self.status = format!("Grouping: {}", self.grouping_mode.label());
@@ -4908,6 +5084,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::ViewLoaded(slot) => {
                 use crate::ui::components::toast::{Toast, ToastType};
                 if let Some(view) = self.saved_views.iter().find(|v| v.slot == slot).cloned() {
+                    self.push_undo("Load saved view");
                     self.filters.agents = view.agents.clone();
                     self.filters.workspaces = view.workspaces.clone();
                     self.filters.created_from = view.created_from;
@@ -9188,5 +9365,220 @@ mod tests {
             app.active_pane, 0,
             "active_pane should be clamped after regroup"
         );
+    }
+
+    // =====================================================================
+    // 2noh9.4.11 — Undo/redo
+    // =====================================================================
+
+    #[test]
+    fn undo_history_push_and_pop() {
+        let mut hist = UndoHistory::default();
+        let e1 = UndoEntry {
+            description: "edit 1",
+            query: "hello".into(),
+            cursor_pos: 5,
+            filters: SearchFilters::default(),
+            time_preset: TimePreset::All,
+            ranking_mode: RankingMode::default(),
+            grouping_mode: ResultsGrouping::Agent,
+        };
+        hist.push(e1);
+        assert!(hist.can_undo());
+        assert!(!hist.can_redo());
+
+        let current = UndoEntry {
+            description: "current",
+            query: "world".into(),
+            cursor_pos: 5,
+            filters: SearchFilters::default(),
+            time_preset: TimePreset::All,
+            ranking_mode: RankingMode::default(),
+            grouping_mode: ResultsGrouping::Agent,
+        };
+        let restored = hist.pop_undo(current).unwrap();
+        assert_eq!(restored.query, "hello");
+        assert!(!hist.can_undo());
+        assert!(hist.can_redo());
+    }
+
+    #[test]
+    fn undo_history_redo_after_undo() {
+        let mut hist = UndoHistory::default();
+        let e1 = UndoEntry {
+            description: "edit",
+            query: "before".into(),
+            cursor_pos: 6,
+            filters: SearchFilters::default(),
+            time_preset: TimePreset::All,
+            ranking_mode: RankingMode::default(),
+            grouping_mode: ResultsGrouping::Agent,
+        };
+        hist.push(e1);
+
+        let current = UndoEntry {
+            description: "current",
+            query: "after".into(),
+            cursor_pos: 5,
+            filters: SearchFilters::default(),
+            time_preset: TimePreset::All,
+            ranking_mode: RankingMode::default(),
+            grouping_mode: ResultsGrouping::Agent,
+        };
+        let _ = hist.pop_undo(current);
+
+        let re_current = UndoEntry {
+            description: "re_current",
+            query: "before".into(),
+            cursor_pos: 6,
+            filters: SearchFilters::default(),
+            time_preset: TimePreset::All,
+            ranking_mode: RankingMode::default(),
+            grouping_mode: ResultsGrouping::Agent,
+        };
+        let redone = hist.pop_redo(re_current).unwrap();
+        assert_eq!(redone.query, "after");
+    }
+
+    #[test]
+    fn undo_history_push_clears_redo() {
+        let mut hist = UndoHistory::default();
+        let e1 = UndoEntry {
+            description: "e1",
+            query: "a".into(),
+            cursor_pos: 1,
+            filters: SearchFilters::default(),
+            time_preset: TimePreset::All,
+            ranking_mode: RankingMode::default(),
+            grouping_mode: ResultsGrouping::Agent,
+        };
+        hist.push(e1);
+        let current = UndoEntry {
+            description: "cur",
+            query: "b".into(),
+            cursor_pos: 1,
+            filters: SearchFilters::default(),
+            time_preset: TimePreset::All,
+            ranking_mode: RankingMode::default(),
+            grouping_mode: ResultsGrouping::Agent,
+        };
+        let _ = hist.pop_undo(current);
+        assert!(hist.can_redo());
+
+        // New push clears redo.
+        let e2 = UndoEntry {
+            description: "e2",
+            query: "c".into(),
+            cursor_pos: 1,
+            filters: SearchFilters::default(),
+            time_preset: TimePreset::All,
+            ranking_mode: RankingMode::default(),
+            grouping_mode: ResultsGrouping::Agent,
+        };
+        hist.push(e2);
+        assert!(!hist.can_redo());
+    }
+
+    #[test]
+    fn undo_history_respects_max_depth() {
+        let mut hist = UndoHistory {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            max_depth: 3,
+        };
+        for i in 0..5 {
+            hist.push(UndoEntry {
+                description: "push",
+                query: format!("q{i}"),
+                cursor_pos: i,
+                filters: SearchFilters::default(),
+                time_preset: TimePreset::All,
+                ranking_mode: RankingMode::default(),
+                grouping_mode: ResultsGrouping::Agent,
+            });
+        }
+        assert_eq!(hist.undo_stack.len(), 3);
+        assert_eq!(hist.undo_stack[0].query, "q2", "oldest should be evicted");
+    }
+
+    #[test]
+    fn undo_msg_restores_query_state() {
+        let mut app = CassApp::default();
+        app.query = "hello".into();
+        app.cursor_pos = 5;
+        let _ = app.update(CassMsg::QueryCleared);
+        assert_eq!(app.query, "");
+
+        let _ = app.update(CassMsg::Undo);
+        assert_eq!(app.query, "hello");
+        assert_eq!(app.cursor_pos, 5);
+    }
+
+    #[test]
+    fn redo_msg_restores_after_undo() {
+        let mut app = CassApp::default();
+        app.query = "test".into();
+        app.cursor_pos = 4;
+        let _ = app.update(CassMsg::QueryCleared);
+        assert_eq!(app.query, "");
+
+        let _ = app.update(CassMsg::Undo);
+        assert_eq!(app.query, "test");
+
+        let _ = app.update(CassMsg::Redo);
+        assert_eq!(app.query, "");
+    }
+
+    #[test]
+    fn undo_filter_change_restores_agents() {
+        let mut app = CassApp::default();
+        assert!(app.filters.agents.is_empty());
+
+        let agents: HashSet<String> = ["claude_code".to_string()].into_iter().collect();
+        let _ = app.update(CassMsg::FilterAgentSet(agents));
+        assert_eq!(app.filters.agents.len(), 1);
+
+        let _ = app.update(CassMsg::Undo);
+        assert!(app.filters.agents.is_empty());
+    }
+
+    #[test]
+    fn undo_nothing_sets_status() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::Undo);
+        assert!(app.status.contains("Nothing to undo"));
+    }
+
+    #[test]
+    fn redo_nothing_sets_status() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::Redo);
+        assert!(app.status.contains("Nothing to redo"));
+    }
+
+    #[test]
+    fn undo_grouping_cycle_restores_mode() {
+        let mut app = CassApp::default();
+        assert_eq!(app.grouping_mode, ResultsGrouping::Agent);
+        let _ = app.update(CassMsg::GroupingCycled);
+        assert_eq!(app.grouping_mode, ResultsGrouping::Conversation);
+        let _ = app.update(CassMsg::Undo);
+        assert_eq!(app.grouping_mode, ResultsGrouping::Agent);
+    }
+
+    #[test]
+    fn undo_clear_all_filters_restores_state() {
+        let mut app = CassApp::default();
+        let agents: HashSet<String> = ["codex".to_string()].into_iter().collect();
+        app.filters.agents = agents.clone();
+        app.time_preset = TimePreset::Week;
+
+        let _ = app.update(CassMsg::FiltersClearAll);
+        assert!(app.filters.agents.is_empty());
+        assert_eq!(app.time_preset, TimePreset::All);
+
+        let _ = app.update(CassMsg::Undo);
+        assert_eq!(app.filters.agents, agents);
+        assert_eq!(app.time_preset, TimePreset::Week);
     }
 }
