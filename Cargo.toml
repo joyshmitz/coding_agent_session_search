@@ -44,6 +44,7 @@ regex = "*"
 reqwest = { version = "*", default-features = false, features = ["json", "rustls", "blocking", "multipart"] }
 ratatui = { version = "*", features = ["crossterm"] }
 crossterm = "*"
+portable-pty = "*"
 # FrankenTUI migration foundation (bead 2noh9.2.1).
 # Strategy: pin a Git revision for reproducible CI builds while ftui tags are still in flux.
 ftui = { git = "https://github.com/Dicklesworthstone/frankentui", rev = "f0ad8a6d9b016ce6a000dc5e1461e1411aee1441", version = "*" }
@@ -119,7 +120,6 @@ assert_cmd = "*"
 predicates = "*"
 insta = { version = "*", features = ["yaml", "json"] }
 ftui-harness = { git = "https://github.com/Dicklesworthstone/frankentui", rev = "f0ad8a6d9b016ce6a000dc5e1461e1411aee1441", version = "*" }
-portable-pty = "*"
 criterion = "*"
 once_cell = "*"
 serial_test = "*"

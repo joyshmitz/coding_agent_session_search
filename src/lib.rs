@@ -2497,15 +2497,16 @@ async fn execute_cli(
                     );
                 }
 
-                let legacy_progress = if !once && matches!(runtime, TuiRuntime::Legacy) {
-                    let bg_data_dir = log_dir.clone();
-                    let bg_db = cli.db.clone();
-                    let progress = std::sync::Arc::new(indexer::IndexingProgress::default());
-                    spawn_background_indexer(bg_data_dir, bg_db, Some(progress.clone()));
-                    Some(progress)
-                } else {
-                    None
-                };
+                let legacy_progress =
+                    if asciicast.is_none() && !once && matches!(runtime, TuiRuntime::Legacy) {
+                        let bg_data_dir = log_dir.clone();
+                        let bg_db = cli.db.clone();
+                        let progress = std::sync::Arc::new(indexer::IndexingProgress::default());
+                        spawn_background_indexer(bg_data_dir, bg_db, Some(progress.clone()));
+                        Some(progress)
+                    } else {
+                        None
+                    };
 
                 let run_result = if let Some(path) = asciicast {
                     tui_asciicast::run_tui_with_asciicast(&path, !once)

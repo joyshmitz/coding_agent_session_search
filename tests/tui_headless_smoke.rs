@@ -277,6 +277,32 @@ fn tui_data_dir_flag_recognized() {
     cmd.assert().success();
 }
 
+#[test]
+fn tui_headless_asciicast_creates_recording_file() {
+    // Test: --asciicast writes a valid asciicast v2 file in headless once mode
+    let tmp = TempDir::new().unwrap();
+    let data_dir = setup_indexed_data_dir(tmp.path());
+    let cast_path = tmp.path().join("captures").join("smoke.cast");
+
+    let mut cmd = base_cmd(tmp.path());
+    cmd.args([
+        "tui",
+        "--once",
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "--asciicast",
+        cast_path.to_str().unwrap(),
+    ]);
+    cmd.assert().success();
+
+    assert!(cast_path.exists(), "Expected asciicast file to exist");
+    let cast = fs::read_to_string(&cast_path).expect("read asciicast file");
+    assert!(
+        cast.contains("\"version\":2"),
+        "Asciicast header must declare v2 format"
+    );
+}
+
 // ============================================================
 // Integration with Other Commands
 // ============================================================
