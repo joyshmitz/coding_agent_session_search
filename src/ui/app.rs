@@ -159,6 +159,77 @@ impl AnalyticsView {
     }
 }
 
+/// Metric to display in the Explorer view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ExplorerMetric {
+    #[default]
+    ApiTokens,
+    ContentTokens,
+    Messages,
+    ToolCalls,
+    PlanMessages,
+    Cost,
+}
+
+impl ExplorerMetric {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ApiTokens => "API Tokens",
+            Self::ContentTokens => "Content Tokens",
+            Self::Messages => "Messages",
+            Self::ToolCalls => "Tool Calls",
+            Self::PlanMessages => "Plan Messages",
+            Self::Cost => "Cost (USD)",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::ApiTokens => Self::ContentTokens,
+            Self::ContentTokens => Self::Messages,
+            Self::Messages => Self::ToolCalls,
+            Self::ToolCalls => Self::PlanMessages,
+            Self::PlanMessages => Self::Cost,
+            Self::Cost => Self::ApiTokens,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::ApiTokens => Self::Cost,
+            Self::ContentTokens => Self::ApiTokens,
+            Self::Messages => Self::ContentTokens,
+            Self::ToolCalls => Self::Messages,
+            Self::PlanMessages => Self::ToolCalls,
+            Self::Cost => Self::PlanMessages,
+        }
+    }
+}
+
+/// Overlay mode for the Explorer view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ExplorerOverlay {
+    #[default]
+    None,
+    ByAgent,
+}
+
+impl ExplorerOverlay {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "No Overlay",
+            Self::ByAgent => "By Agent",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::ByAgent,
+            Self::ByAgent => Self::None,
+        }
+    }
+}
+
 /// Analytics-specific filter state (persisted within the analytics surface).
 #[derive(Clone, Debug, Default)]
 pub struct AnalyticsFilterState {
@@ -627,6 +698,10 @@ pub struct CassApp {
     pub analytics_cache: Option<AnalyticsChartData>,
     /// Current selection index within the active analytics subview (for drilldown).
     pub analytics_selection: usize,
+    /// Explorer metric selector state.
+    pub explorer_metric: ExplorerMetric,
+    /// Explorer overlay mode.
+    pub explorer_overlay: ExplorerOverlay,
 
     // -- Search & query ---------------------------------------------------
     /// Current search query text.
@@ -826,6 +901,9 @@ impl Default for CassApp {
             analytics_view: AnalyticsView::default(),
             analytics_filters: AnalyticsFilterState::default(),
             analytics_cache: None,
+            analytics_selection: 0,
+            explorer_metric: ExplorerMetric::default(),
+            explorer_overlay: ExplorerOverlay::default(),
             query: String::new(),
             filters: SearchFilters::default(),
             results: Vec::new(),
@@ -1053,12 +1131,12 @@ impl CassApp {
         }
     }
 
-    /// Restore undoable state from an `UndoEntry`, triggering a search if filters changed.
+    /// Restore undoable state from an `UndoEntry`, triggering a search if query/filters changed.
     fn restore_undo_state(&mut self, entry: UndoEntry) -> ftui::Cmd<CassMsg> {
-        let filters_changed = self.filters != entry.filters
-            || self.ranking_mode != entry.ranking_mode
-            || self.grouping_mode != entry.grouping_mode;
-        let query_changed = self.query != entry.query;
+        let search_changed = self.query != entry.query
+            || self.filters != entry.filters
+            || self.ranking_mode != entry.ranking_mode;
+        let grouping_changed = self.grouping_mode != entry.grouping_mode;
 
         self.query = entry.query;
         self.cursor_pos = entry.cursor_pos;
@@ -1067,11 +1145,11 @@ impl CassApp {
         self.ranking_mode = entry.ranking_mode;
         self.grouping_mode = entry.grouping_mode;
 
-        if filters_changed {
+        if grouping_changed {
             self.regroup_panes();
         }
 
-        if query_changed || filters_changed {
+        if search_changed {
             ftui::Cmd::msg(CassMsg::SearchRequested)
         } else {
             ftui::Cmd::none()
@@ -2581,6 +2659,148 @@ impl CassApp {
             format!("Filters: {}", parts.join(" | "))
         }
     }
+
+    /// Number of selectable items in the current analytics subview.
+    fn analytics_selectable_count(&self) -> usize {
+        let data = match &self.analytics_cache {
+            Some(d) => d,
+            None => return 0,
+        };
+        match self.analytics_view {
+            AnalyticsView::Explorer => data.daily_tokens.len(),
+            AnalyticsView::Heatmap => data.heatmap_days.len(),
+            AnalyticsView::Breakdowns => data.agent_tokens.len().min(8),
+            AnalyticsView::Tools => data.agent_tool_calls.len().min(10),
+            AnalyticsView::Cost => data.model_tokens.len().min(10),
+            // Dashboard and Coverage have no selectable rows.
+            AnalyticsView::Dashboard | AnalyticsView::Coverage => 0,
+        }
+    }
+
+    /// Build a [`DrilldownContext`] from the current analytics view and selection.
+    ///
+    /// Returns `None` for views without selectable items or when the cache is empty.
+    fn build_drilldown_context(&self) -> Option<DrilldownContext> {
+        let data = self.analytics_cache.as_ref()?;
+        let idx = self.analytics_selection;
+
+        // Inherit global analytics filters as the base.
+        let base_since = self.analytics_filters.since_ms;
+        let base_until = self.analytics_filters.until_ms;
+
+        match self.analytics_view {
+            AnalyticsView::Explorer => {
+                // Drill into a specific day bucket.
+                let (label, _) = data.daily_tokens.get(idx)?;
+                let (since, until) = day_label_to_epoch_range(label)?;
+                Some(DrilldownContext {
+                    since_ms: Some(since),
+                    until_ms: Some(until),
+                    agent: None,
+                    model: None,
+                })
+            }
+            AnalyticsView::Heatmap => {
+                // Drill into a specific heatmap day.
+                let (label, _) = data.heatmap_days.get(idx)?;
+                let (since, until) = day_label_to_epoch_range(label)?;
+                Some(DrilldownContext {
+                    since_ms: Some(since),
+                    until_ms: Some(until),
+                    agent: None,
+                    model: None,
+                })
+            }
+            AnalyticsView::Breakdowns => {
+                // Drill into a specific agent.
+                let (agent, _) = data.agent_tokens.get(idx)?;
+                Some(DrilldownContext {
+                    since_ms: base_since,
+                    until_ms: base_until,
+                    agent: Some(agent.clone()),
+                    model: None,
+                })
+            }
+            AnalyticsView::Tools => {
+                // Drill into a specific agent (tools are keyed by agent).
+                let (agent, _) = data.agent_tool_calls.get(idx)?;
+                Some(DrilldownContext {
+                    since_ms: base_since,
+                    until_ms: base_until,
+                    agent: Some(agent.clone()),
+                    model: None,
+                })
+            }
+            AnalyticsView::Cost => {
+                // Drill into a specific model family.
+                let (model, _) = data.model_tokens.get(idx)?;
+                Some(DrilldownContext {
+                    since_ms: base_since,
+                    until_ms: base_until,
+                    agent: None,
+                    model: Some(model.clone()),
+                })
+            }
+            // Dashboard and Coverage don't support drilldown.
+            AnalyticsView::Dashboard | AnalyticsView::Coverage => None,
+        }
+    }
+}
+
+/// Convert a day label (e.g. "2026-02-06") to an epoch-ms range `[start, end)`.
+///
+/// Returns `None` if the label doesn't parse as a valid date.
+fn day_label_to_epoch_range(label: &str) -> Option<(i64, i64)> {
+    // Parse YYYY-MM-DD (the format produced by bucketing::day_id_to_date).
+    let parts: Vec<&str> = label.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year: i32 = parts[0].parse().ok()?;
+    let month: u32 = parts[1].parse().ok()?;
+    let day: u32 = parts[2].parse().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    fn is_leap_year(y: i32) -> bool {
+        (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+    }
+    fn days_in_month(y: i32, m: u32) -> u32 {
+        match m {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if is_leap_year(y) => 29,
+            2 => 28,
+            _ => 0,
+        }
+    }
+    if day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+
+    // Compute days since Unix epoch using a simple Gregorian calendar.
+    // We use a well-known algorithm to convert y/m/d → days since epoch.
+    fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+        let y = y as i64;
+        let m = m as i64;
+        let d = d as i64;
+        let era: i64;
+        let yoe: i64;
+        let doy: i64;
+        let doe: i64;
+
+        let (y2, m2) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+        era = if y2 >= 0 { y2 / 400 } else { (y2 - 399) / 400 };
+        yoe = y2 - era * 400;
+        doy = (153 * m2 + 2) / 5 + d - 1;
+        doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146097 + doe - 719468
+    }
+
+    let start_days = days_from_civil(year, month, day);
+    let start_ms = start_days * 86_400_000;
+    let end_ms = start_ms + 86_400_000;
+    Some((start_ms, end_ms))
 }
 
 // =========================================================================
@@ -2942,6 +3162,14 @@ pub enum CassMsg {
     AnalyticsSourceFilterSet(SourceFilter),
     /// Clear all analytics filters.
     AnalyticsFiltersClearAll,
+    /// Drilldown from analytics selection into the search view.
+    AnalyticsDrilldown(DrilldownContext),
+    /// Move selection within the current analytics subview.
+    AnalyticsSelectionMoved { delta: i32 },
+    /// Cycle the Explorer metric forward or backward.
+    ExplorerMetricCycled { forward: bool },
+    /// Cycle the Explorer overlay mode.
+    ExplorerOverlayCycled,
 
     // -- Lifecycle ---------------------------------------------------------
     /// Application quit requested.
@@ -3553,6 +3781,38 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 CassMsg::SourceFilterSelected(_) => {}
                 _ => return ftui::Cmd::none(),
+            }
+        }
+
+        // -- Analytics surface interception -----------------------------------
+        // When on the analytics surface, remap navigation/selection messages to
+        // analytics-specific variants so Enter drills down and Up/Down moves
+        // the analytics selection rather than the search results pane.
+        if self.surface == AppSurface::Analytics {
+            match &msg {
+                CassMsg::SelectionMoved { delta } => {
+                    return self.update(CassMsg::AnalyticsSelectionMoved { delta: *delta });
+                }
+                CassMsg::DetailOpened | CassMsg::QuerySubmitted => {
+                    // Enter triggers drilldown from the current selection.
+                    if let Some(ctx) = self.build_drilldown_context() {
+                        return self.update(CassMsg::AnalyticsDrilldown(ctx));
+                    }
+                    // No drilldown available (Dashboard / Coverage) — no-op.
+                    return ftui::Cmd::none();
+                }
+                CassMsg::CursorMoved { delta } => {
+                    // Left/Right cycles analytics view tabs.
+                    let views = AnalyticsView::all();
+                    if let Some(cur_idx) = views.iter().position(|v| *v == self.analytics_view) {
+                        let next = (cur_idx as i32 + delta).rem_euclid(views.len() as i32) as usize;
+                        self.analytics_view = views[next];
+                        self.analytics_selection = 0; // reset selection on view change
+                    }
+                    return ftui::Cmd::none();
+                }
+                // Let other messages (analytics-specific, lifecycle, etc.) fall through.
+                _ => {}
             }
         }
 
@@ -5331,6 +5591,7 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::AnalyticsViewChanged(view) => {
                 self.analytics_view = view;
+                self.analytics_selection = 0; // reset selection on view change
                 ftui::Cmd::none()
             }
             CassMsg::ViewStackPopped => {
@@ -5365,6 +5626,73 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::AnalyticsFiltersClearAll => {
                 self.analytics_filters = AnalyticsFilterState::default();
                 self.analytics_cache = None;
+                ftui::Cmd::none()
+            }
+            CassMsg::AnalyticsSelectionMoved { delta } => {
+                let count = self.analytics_selectable_count();
+                if count > 0 {
+                    let cur = self.analytics_selection as i32;
+                    let next = (cur + delta).rem_euclid(count as i32) as usize;
+                    self.analytics_selection = next;
+                }
+                ftui::Cmd::none()
+            }
+            CassMsg::AnalyticsDrilldown(ctx) => {
+                let DrilldownContext {
+                    since_ms,
+                    until_ms,
+                    agent,
+                    model,
+                } = ctx;
+                tracing::debug!(
+                    since_ms = ?since_ms,
+                    until_ms = ?until_ms,
+                    agent = ?agent,
+                    model = ?model,
+                    "analytics drilldown requested"
+                );
+
+                // Push analytics surface onto the back-stack.
+                self.view_stack.push(AppSurface::Analytics);
+                self.surface = AppSurface::Search;
+
+                // Convert drilldown context into search filters.
+                self.filters.created_from = since_ms;
+                self.filters.created_to = until_ms;
+
+                // Start from analytics filters to avoid leaking stale search filters.
+                self.filters.agents = self.analytics_filters.agents.clone();
+                self.filters.workspaces = self.analytics_filters.workspaces.clone();
+                self.filters.source_filter = self.analytics_filters.source_filter.clone();
+                self.filters.session_paths.clear();
+
+                // Apply selected dimension filter (agent) on top of inherited globals.
+                if let Some(agent) = agent {
+                    self.filters.agents.clear();
+                    self.filters.agents.insert(agent);
+                }
+                // Clear query — user types next.
+                self.query.clear();
+                self.cursor_pos = 0;
+                self.input_mode = InputMode::Query;
+
+                self.status = if let Some(model) = model {
+                    format!("Drilldown from analytics (model: {model}) — type a query or browse")
+                } else {
+                    "Drilldown from analytics — type a query or browse".to_string()
+                };
+                ftui::Cmd::msg(CassMsg::SearchRequested)
+            }
+            CassMsg::ExplorerMetricCycled { forward } => {
+                self.explorer_metric = if forward {
+                    self.explorer_metric.next()
+                } else {
+                    self.explorer_metric.prev()
+                };
+                ftui::Cmd::none()
+            }
+            CassMsg::ExplorerOverlayCycled => {
+                self.explorer_overlay = self.explorer_overlay.next();
                 ftui::Cmd::none()
             }
 
@@ -5832,9 +6160,15 @@ impl super::ftui_adapter::Model for CassApp {
                 if render_content && !content_inner.is_empty() {
                     let empty_data = AnalyticsChartData::default();
                     let chart_data = self.analytics_cache.as_ref().unwrap_or(&empty_data);
+                    let explorer_state = super::analytics_charts::ExplorerState {
+                        metric: self.explorer_metric,
+                        overlay: self.explorer_overlay,
+                    };
                     super::analytics_charts::render_analytics_content(
                         self.analytics_view,
                         chart_data,
+                        &explorer_state,
+                        self.analytics_selection,
                         content_inner,
                         frame,
                     );
@@ -5846,9 +6180,19 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     format!(" | deg:{}", degradation.as_str())
                 };
+                let drilldown_hint = if self.analytics_selectable_count() > 0 {
+                    format!(
+                        " | [{}/{}] Enter=drilldown",
+                        self.analytics_selection + 1,
+                        self.analytics_selectable_count()
+                    )
+                } else {
+                    String::new()
+                };
                 let analytics_status = format!(
-                    " Analytics: {} | Esc=back Ctrl+P=palette{}",
+                    " Analytics: {} | \u{2190}\u{2192}=views \u{2191}\u{2193}=select{} Esc=back{}",
                     self.analytics_view.label(),
+                    drilldown_hint,
                     analytics_deg_tag
                 );
                 Paragraph::new(&*analytics_status)
@@ -6674,6 +7018,46 @@ mod tests {
             .find(|v| v.slot == 1)
             .and_then(|v| v.label.as_deref());
         assert_eq!(label, Some("Pinned"));
+    }
+
+    #[test]
+    fn saved_views_quit_requests_close_modal_before_app_quit() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::ViewSaved(1));
+        let _ = app.update(CassMsg::SavedViewsOpened);
+        assert!(app.show_saved_views_modal);
+
+        let cmd = app.update(CassMsg::QuitRequested);
+        if let Some(msg) = extract_msg(cmd) {
+            let _ = app.update(msg);
+        }
+
+        assert!(!app.show_saved_views_modal);
+    }
+
+    #[test]
+    fn saved_view_rename_quit_cancels_rename_but_keeps_modal_open() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::ViewSaved(1));
+        let _ = app.update(CassMsg::SavedViewsOpened);
+        let _ = app.update(CassMsg::SavedViewRenameStarted);
+        let _ = app.update(CassMsg::QueryChanged("Temp Label".to_string()));
+        assert!(app.saved_view_rename_mode);
+        assert!(!app.saved_view_rename_buffer.is_empty());
+
+        let cmd = app.update(CassMsg::QuitRequested);
+        assert!(matches!(cmd, ftui::Cmd::None));
+        assert!(app.show_saved_views_modal);
+        assert!(!app.saved_view_rename_mode);
+        assert!(app.saved_view_rename_buffer.is_empty());
+    }
+
+    #[test]
+    fn load_empty_saved_view_slot_sets_warning_status() {
+        let mut app = CassApp::default();
+        let cmd = app.update(CassMsg::ViewLoaded(9));
+        assert!(matches!(cmd, ftui::Cmd::None));
+        assert!(app.status.contains("No saved view in slot 9"));
     }
 
     // ==================== Search bar UX tests (2noh9.3.2) ====================
@@ -8036,6 +8420,67 @@ mod tests {
         assert!(app.analytics_filters.since_ms.is_none());
         assert!(app.analytics_filters.agents.is_empty());
         assert_eq!(app.analytics_filters.source_filter, SourceFilter::All);
+    }
+
+    #[test]
+    fn analytics_drilldown_inherits_filters_and_clears_stale_search_filters() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+
+        // Seed stale search filters that should be replaced by analytics filters.
+        app.filters.agents.insert("stale-agent".into());
+        app.filters.workspaces.insert("/stale/ws".into());
+        app.filters.source_filter = SourceFilter::Remote;
+        app.filters
+            .session_paths
+            .insert("/tmp/stale-session.jsonl".into());
+
+        app.analytics_filters.since_ms = Some(10_000);
+        app.analytics_filters.until_ms = Some(20_000);
+        app.analytics_filters.agents.insert("claude_code".into());
+        app.analytics_filters
+            .workspaces
+            .insert("/analytics/ws".into());
+        app.analytics_filters.source_filter = SourceFilter::Local;
+
+        let _ = app.update(CassMsg::AnalyticsDrilldown(DrilldownContext {
+            since_ms: Some(30_000),
+            until_ms: Some(40_000),
+            agent: None,
+            model: None,
+        }));
+
+        assert_eq!(app.surface, AppSurface::Search);
+        assert_eq!(app.filters.created_from, Some(30_000));
+        assert_eq!(app.filters.created_to, Some(40_000));
+        assert_eq!(app.filters.agents, app.analytics_filters.agents);
+        assert_eq!(app.filters.workspaces, app.analytics_filters.workspaces);
+        assert_eq!(
+            app.filters.source_filter,
+            app.analytics_filters.source_filter
+        );
+        assert!(
+            app.filters.session_paths.is_empty(),
+            "drilldown should clear chained session_paths"
+        );
+    }
+
+    #[test]
+    fn analytics_drilldown_agent_dimension_overrides_inherited_agent_filters() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_filters.agents.insert("claude_code".into());
+        app.analytics_filters.agents.insert("cursor".into());
+
+        let _ = app.update(CassMsg::AnalyticsDrilldown(DrilldownContext {
+            since_ms: None,
+            until_ms: None,
+            agent: Some("codex".into()),
+            model: None,
+        }));
+
+        let expected: HashSet<String> = ["codex"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(app.filters.agents, expected);
     }
 
     #[test]
