@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::search::model_manager::SemanticAvailability;
 use crate::search::query::{QuerySuggestion, SearchFilters, SearchHit, SearchMode};
 use crate::sources::provenance::SourceFilter;
 use crate::storage::sqlite::SqliteStorage;
@@ -51,6 +52,23 @@ use ftui::widgets::paragraph::Paragraph;
 // ---------------------------------------------------------------------------
 use super::ftui_adapter::{Constraint, Flex, Rect};
 use super::style_system::{self, StyleContext, StyleOptions, UiThemePreset};
+use ftui::widgets::focus::{FocusId, FocusManager};
+
+/// Well-known focus node IDs for the cass TUI layout.
+pub mod focus_ids {
+    use super::FocusId;
+    pub const SEARCH_BAR: FocusId = 1;
+    pub const RESULTS_LIST: FocusId = 2;
+    pub const DETAIL_PANE: FocusId = 3;
+    pub const COMMAND_PALETTE: FocusId = 10;
+    pub const HELP_OVERLAY: FocusId = 11;
+    pub const EXPORT_MODAL: FocusId = 12;
+    pub const CONSENT_DIALOG: FocusId = 13;
+    pub const GROUP_PALETTE: u32 = 100;
+    pub const GROUP_HELP: u32 = 101;
+    pub const GROUP_EXPORT: u32 = 102;
+    pub const GROUP_CONSENT: u32 = 103;
+}
 
 // =========================================================================
 // Enums (ported from tui.rs, canonical for ftui)
@@ -221,8 +239,10 @@ pub struct CassApp {
     pub input_mode: InputMode,
     /// Ephemeral input buffer for filter prompts.
     pub input_buffer: String,
-    /// Which pane region has keyboard focus.
+    /// Which pane region has keyboard focus (legacy compat).
     pub focus_region: FocusRegion,
+    /// FocusGraph-based navigation manager.
+    pub focus_manager: FocusManager,
     /// Cursor position within query history.
     pub history_cursor: Option<usize>,
     /// Past query strings (most recent first), deduplicated.
@@ -277,6 +297,8 @@ pub struct CassApp {
     pub show_bulk_modal: bool,
     /// Whether the consent dialog (model download) is visible.
     pub show_consent_dialog: bool,
+    /// Semantic search availability state.
+    pub semantic_availability: SemanticAvailability,
     /// Whether the source filter popup menu is open.
     pub source_filter_menu_open: bool,
     /// Command palette state.
@@ -297,6 +319,8 @@ pub struct CassApp {
     pub last_tick: Instant,
     /// When state became dirty (for debounced persistence).
     pub dirty_since: Option<Instant>,
+    /// When query/filters changed (for debounced search, 60ms).
+    pub search_dirty_since: Option<Instant>,
     /// Current spinner frame index.
     pub spinner_frame: usize,
 
@@ -343,6 +367,7 @@ impl Default for CassApp {
             input_mode: InputMode::Query,
             input_buffer: String::new(),
             focus_region: FocusRegion::default(),
+            focus_manager: FocusManager::new(),
             history_cursor: None,
             query_history: VecDeque::with_capacity(50),
             pane_filter: None,
@@ -366,6 +391,7 @@ impl Default for CassApp {
             export_modal_state: None,
             show_bulk_modal: false,
             show_consent_dialog: false,
+            semantic_availability: SemanticAvailability::NotInstalled,
             source_filter_menu_open: false,
             palette_state: PaletteState::new(default_actions()),
             toast_manager: ToastManager::default(),
@@ -374,6 +400,7 @@ impl Default for CassApp {
             peek_badge_until: None,
             last_tick: Instant::now(),
             dirty_since: None,
+            search_dirty_since: None,
             spinner_frame: 0,
             saved_views: Vec::new(),
             last_detail_area: None,
@@ -721,6 +748,10 @@ pub enum CassMsg {
     // -- Query & search ---------------------------------------------------
     /// User typed or edited the query string.
     QueryChanged(String),
+    /// User cleared the entire query line (Ctrl+U).
+    QueryCleared,
+    /// User deleted word-backward (Ctrl+W).
+    QueryWordDeleted,
     /// User requested immediate search (Enter or debounce expired).
     SearchRequested,
     /// Async search completed with results.
@@ -913,6 +944,8 @@ pub enum CassMsg {
     ModelDownloadFailed(String),
     /// User cancelled the active download.
     ModelDownloadCancelled,
+    /// User accepted hash mode fallback (no ML model).
+    HashModeAccepted,
 
     // -- Source filter menu ------------------------------------------------
     /// Toggle the source filter popup menu.
@@ -1129,6 +1162,9 @@ pub trait PersistenceService: Send + Sync {
     fn reset(&self) -> Result<(), String>;
 }
 
+const _SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(60);
+const _QUERY_HISTORY_CAP: usize = 50;
+
 // =========================================================================
 // From<Event> — convert ftui terminal events into CassMsg
 // =========================================================================
@@ -1207,6 +1243,10 @@ impl From<super::ftui_adapter::Event> for CassMsg {
 
                     // -- Borders --------------------------------------------------
                     KeyCode::Char('b') if ctrl => CassMsg::BordersToggled,
+
+                    // -- Line editing ---------------------------------------------
+                    KeyCode::Char('u') if ctrl => CassMsg::QueryCleared,
+                    KeyCode::Char('w') if ctrl => CassMsg::QueryWordDeleted,
 
                     // -- Density --------------------------------------------------
                     KeyCode::Char('d') if ctrl => CassMsg::DensityModeCycled,
@@ -1319,6 +1359,20 @@ impl super::ftui_adapter::Model for CassApp {
     }
 
     fn update(&mut self, msg: CassMsg) -> ftui::Cmd<CassMsg> {
+        // Consent dialog intercepts D/H keys and blocks other query input
+        if self.show_consent_dialog {
+            if let CassMsg::QueryChanged(ref text) = msg {
+                if text.eq_ignore_ascii_case("d") {
+                    return self.update(CassMsg::ModelDownloadAccepted);
+                }
+                if text.eq_ignore_ascii_case("h") {
+                    return self.update(CassMsg::HashModeAccepted);
+                }
+                // Ignore other query input while consent dialog is open
+                return ftui::Cmd::none();
+            }
+        }
+
         match msg {
             // -- Terminal event passthrough (unused, events come as CassMsg) ---
             CassMsg::TerminalEvent(_) => ftui::Cmd::none(),

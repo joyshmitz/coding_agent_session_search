@@ -159,6 +159,166 @@ Related issues: coding_agent_session_search-2noh9.1.4, coding_agent_session_sear
 - Includes explicit decisions for model structure, focus strategy, reactive usage, and built-in widget adoption.
 - Includes a concrete gap policy so implementation beads can proceed without reopening architecture debates.
 
+## Analytics Dashboard IA & Interaction Spec (coding_agent_session_search-2noh9.4.18.1)
+
+Status: finalized draft  
+Owner: CoralLantern  
+Related analytics beads: `z9fse.12`, `z9fse.6`, `z9fse.10`, `z9fse.11`  
+Time semantics: UTC-only for v1
+
+### Scope and Constraints
+
+- Defines a single interaction contract for ftui analytics surfaces so CLI + TUI semantics do not drift.
+- Uses rollup-first queries by default; deep/fact scans are explicit opt-in paths.
+- Requires full keyboard operation; mouse is an enhancement only.
+- Keeps existing search workflows central: analytics drilldown must jump into the main Search surface with pre-applied filters.
+
+### Information Architecture
+
+Top-level analytics entry points:
+
+- Command palette entries:
+  - `Analytics: Dashboard`
+  - `Analytics: Explorer`
+  - `Analytics: Heatmap`
+  - `Analytics: Breakdowns`
+  - `Analytics: Tools`
+  - `Analytics: Cost Models`
+  - `Analytics: Coverage`
+- Global hotkey: `Alt+A` (fallback `g a` chord)
+
+Analytics subviews:
+
+| View | Primary Goal | Core Widgets | Primary Data Source |
+|---|---|---|---|
+| Dashboard | At-a-glance health and trend deltas | KPI tiles + sparklines + top movers | `usage_daily`, `token_daily_stats`, cost rollups |
+| Explorer | Time-series comparison and overlays | Line/area chart + overlay legend + cursor tooltip | rollups by bucket (hour/day/week/month) |
+| Heatmap | Calendar activity scan | Calendar heatmap + legend + day cursor | daily rollups |
+| Breakdowns | Ranked dimensions and trends | Virtualized sortable table + per-row sparkline | grouped rollups |
+| Tools | Tool usage efficiency | per-tool table + trend strip + jump action | `tool_usage_hourly/daily`, `tool_calls_detail` |
+| Cost Models | Model/provider spend behavior | stacked token/cost bars + model table | pricing + model rollups |
+| Coverage | Data quality visibility | coverage matrix + warning list | API coverage counters + connector health |
+
+### Layout and Minimum Terminal Sizes
+
+- Recommended: `>= 160x44` for full analytics layout with side panels.
+- Supported baseline: `>= 120x36` with compressed sidebars.
+- Narrow mode (`< 120 cols`): single-primary-pane with drawer overlays for filters and legend.
+- Hard minimum for reliable operation: `100x30`; below this, show inline "expand terminal" guidance.
+
+### Global Filters (Persisted While in Analytics)
+
+Filter ribbon (top) plus collapsible filter drawer (narrow mode):
+
+- Time range:
+  - presets: today, 7d, 30d, 90d, YTD, all
+  - custom: since/until
+- Agent: multi-select with fuzzy match
+- Workspace: multi-select with fuzzy match
+- Source: all/local/remote/source-id
+- Optional advanced: role filter for message role segmentation
+
+Persistence rules:
+
+- Analytics filters persist separately from general search ad hoc filters.
+- On leaving analytics and returning in the same session, previous analytics filter state is restored.
+- On app restart, last analytics filter state is restored from `tui_state.json`-compatible persistence.
+
+### Drilldown Semantics (Contract)
+
+- `Enter` on a chart point, heatmap day, or KPI delta opens Search view with inherited filters:
+  - time bucket mapped to `created_from/created_to`
+  - analytics agent/workspace/source selections applied
+  - query left empty by default
+- `Enter` on a breakdown row opens Search with inherited filters plus row dimension:
+  - examples: `agent=codex`, `workspace=<id>`, `tool_name=Read`
+- Drilldown always pushes a view-stack entry.
+- `Esc` returns to prior analytics view without losing filter context.
+
+### Keyboard Model
+
+Global within analytics:
+
+- `Tab` / `Shift+Tab`: cycle analytics subviews
+- `g`: open analytics-local "go to view" selector
+- `/`: open filter/search within the active analytics view
+- `Enter`: drilldown to Search
+- `Esc`: back (pop view stack)
+- `?`: analytics-context help overlay
+
+Explorer-specific:
+
+- `Left/Right`: move bucket cursor
+- `Up/Down`: cycle overlay dimension (agent/workspace/source/model)
+- `[` / `]`: previous/next metric
+
+Breakdowns-specific:
+
+- `s`: cycle sort column
+- `r`: reverse sort direction
+- `Space`: pin/unpin selected row for comparison
+
+### Command Palette Contract
+
+Required command entries:
+
+- `Analytics: Dashboard`
+- `Analytics: Explorer`
+- `Analytics: Heatmap`
+- `Analytics: Breakdowns`
+- `Analytics: Tools`
+- `Analytics: Cost Models`
+- `Analytics: Coverage`
+- `Analytics: Reset Filters`
+- `Analytics: Jump to Search (Current Scope)`
+
+### Data Semantics and Definitions
+
+- All bucketing in v1 is UTC.
+- Week definition: ISO week (Mon-Sun).
+- Month definition: calendar month UTC.
+- Costs are marked as:
+  - measured (API cost data present)
+  - estimated (derived from pricing table)
+  - unavailable (insufficient metadata)
+- Coverage panel must disclose when metrics are partially estimated or stale.
+
+### Dependency Mapping to Analytics Beads
+
+| UI Capability | Dependency Bead | Why |
+|---|---|---|
+| Shared analytics query semantics across CLI/TUI | `z9fse.12` | prevents drift and duplicated logic |
+| Tool breakdown and trends | `z9fse.6` | provides per-tool rollups and fact linkage |
+| USD cost estimations and labels | `z9fse.10` | powers cost/cost-model surfaces |
+| Stable model attribution dimensions | `z9fse.11` | enables model/provider grouping consistency |
+
+### Snapshot and PTY Test Targets
+
+Snapshot targets (ftui-harness):
+
+- Dashboard default state with 30d preset
+- Explorer with agent overlay active
+- Heatmap with legend + selected day
+- Breakdowns sorted by descending tokens
+- Tools view with selected tool row and trend sparkline
+- Coverage matrix with at least one warning badge
+
+PTY e2e flow targets:
+
+- Launch TUI -> open analytics (`Alt+A`) -> switch Dashboard -> Explorer -> Heatmap.
+- Apply filters (time + agent + source) and verify ribbon state.
+- Perform drilldown with `Enter` and verify Search is scoped correctly.
+- Use `Esc` back-stack unwind and confirm prior analytics state restored.
+- Exit cleanly with no terminal corruption.
+
+### Acceptance Criteria
+
+- IA is explicit enough for implementation without reopening interaction design.
+- Keymap + command palette entries are specified and non-conflicting.
+- Drilldown behavior is deterministic and reversible (`Esc`).
+- Dependencies on `z9fse.12`, `.6`, `.10`, `.11` are explicit and actionable.
+- Test targets are concrete for both snapshot and PTY coverage.
+
 ## Finalized Interaction Contract (coding_agent_session_search-2noh9.1.5)
 
 > Status: **finalized**
