@@ -309,12 +309,14 @@ fn make_codex_fixture(root: &Path) {
     let sessions = root.join("sessions/2025/11/21");
     fs::create_dir_all(&sessions).unwrap();
     let file = sessions.join("rollout-1.jsonl");
-    let sample = r#"{"role":"user","timestamp":1700000000000,"content":"hello world"}
-{"role":"assistant","timestamp":1700000001000,"content":"hi there, how can I help?"}
-{"role":"user","timestamp":1700000002000,"content":"search for authentication bugs"}
-{"role":"assistant","timestamp":1700000003000,"content":"I found several authentication issues in the codebase."}
-{"role":"user","timestamp":1700000004000,"content":"fix the session timeout"}
-{"role":"assistant","timestamp":1700000005000,"content":"The session timeout has been updated to 30 minutes."}
+    // Modern Codex envelope format expected by src/connectors/codex.rs.
+    let sample = r#"{"type":"session_meta","timestamp":1700000000000,"payload":{"cwd":"/tmp/cass-test"}}
+{"type":"event_msg","timestamp":1700000000100,"payload":{"type":"user_message","message":"hello world"}}
+{"type":"response_item","timestamp":1700000000200,"payload":{"role":"assistant","content":"hi there, how can I help?"}}
+{"type":"event_msg","timestamp":1700000000300,"payload":{"type":"user_message","message":"search for authentication bugs"}}
+{"type":"response_item","timestamp":1700000000400,"payload":{"role":"assistant","content":"I found several authentication issues in the codebase."}}
+{"type":"event_msg","timestamp":1700000000500,"payload":{"type":"user_message","message":"fix the session timeout"}}
+{"type":"response_item","timestamp":1700000000600,"payload":{"role":"assistant","content":"The session timeout has been updated to 30 minutes."}}
 "#;
     fs::write(file, sample).unwrap();
 }
@@ -539,6 +541,14 @@ fn tui_pty_search_detail_and_quit_flow() {
         saw_detail,
         "Did not observe output growth after detail-open key in PTY search flow"
     );
+    assert!(
+        !wait_for_output_contains(
+            &captured,
+            "No active result to view.",
+            Duration::from_millis(200)
+        ),
+        "Detail-open key failed because no active result was selected"
+    );
 
     send_key_sequence(&mut *writer, b"\x1b"); // close detail modal/back
     thread::sleep(Duration::from_millis(200));
@@ -610,6 +620,18 @@ fn tui_pty_performance_guardrails_smoke() {
             "perf search query failed for '{query}': {}",
             truncate_output(&output.stderr, 500)
         );
+        if idx == 0 {
+            let parsed: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("parse search json");
+            let total_matches = parsed
+                .get("total_matches")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            assert!(
+                total_matches > 0,
+                "Fixture regression: expected search query '{query}' to return hits, got total_matches={total_matches}"
+            );
+        }
         search_latencies_ms.push(run_start.elapsed().as_millis() as u64);
     }
 
@@ -670,6 +692,14 @@ fn tui_pty_performance_guardrails_smoke() {
     assert!(
         saw_detail,
         "No PTY output growth after detail-open key during perf flow"
+    );
+    assert!(
+        !wait_for_output_contains(
+            &captured,
+            "No active result to view.",
+            Duration::from_millis(200)
+        ),
+        "Detail-open key failed because no active result was selected during perf flow"
     );
 
     send_key_sequence(&mut *writer, b"\x1b");
