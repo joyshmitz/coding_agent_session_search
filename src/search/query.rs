@@ -5704,15 +5704,19 @@ mod tests {
 
     #[test]
     fn is_tool_invocation_noise_detects_noise() {
-        // Short tool invocations are noise
-        assert!(is_tool_invocation_noise("[Tool: Bash]"));
-        assert!(is_tool_invocation_noise("[Tool: Read]"));
+        // "[Tool: Name]" is now kept (users search for tool usage)
+        assert!(!is_tool_invocation_noise("[Tool: Bash]"));
+        assert!(!is_tool_invocation_noise("[Tool: Read]"));
+
+        // Empty tool names are noise
+        assert!(is_tool_invocation_noise("[Tool:]"));
+        assert!(is_tool_invocation_noise("[Tool: ]"));
 
         // Useful content should NOT be filtered
         assert!(!is_tool_invocation_noise("[Tool: Bash - Check status]"));
         assert!(!is_tool_invocation_noise("  [Tool: Grep - Search files]  "));
 
-        // Very short tool markers
+        // Very short tool markers (< 20 chars with "tool" prefix)
         assert!(is_tool_invocation_noise("[tool]"));
         assert!(is_tool_invocation_noise("tool: Bash"));
     }
@@ -5726,8 +5730,12 @@ mod tests {
 
     #[test]
     fn is_tool_invocation_noise_detects_tool_markers() {
-        assert!(is_tool_invocation_noise("[Tool: Bash]"));
-        assert!(is_tool_invocation_noise("[Tool: Read]"));
+        // "[Tool: Name]" is now kept (searchable tool usage)
+        assert!(!is_tool_invocation_noise("[Tool: Bash]"));
+        assert!(!is_tool_invocation_noise("[Tool: Read]"));
+
+        // Empty names are still noise
+        assert!(is_tool_invocation_noise("[Tool:]"));
 
         // Useful content allowed
         assert!(!is_tool_invocation_noise("[Tool: Bash - Check status]"));
@@ -5873,8 +5881,8 @@ mod tests {
             SearchHit {
                 title: "title1".into(),
                 snippet: "snip1".into(),
-                content: "[Tool: Bash]".into(), // noise (short)
-                content_hash: stable_content_hash("[Tool: Bash]"),
+                content: "[Tool:]".into(), // noise (empty tool name)
+                content_hash: stable_content_hash("[Tool:]"),
                 score: 1.0,
                 source_path: "a.jsonl".into(),
                 agent: "agent".into(),

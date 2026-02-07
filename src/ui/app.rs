@@ -99,6 +99,8 @@ pub const SAVED_VIEWS_MODAL_TITLE: &str = " Saved Views ";
 
 /// Number of selected items before requiring double-press confirmation.
 pub const OPEN_CONFIRM_THRESHOLD: usize = 12;
+const PANEL_RATIO_MIN: f64 = 0.25;
+const PANEL_RATIO_MAX: f64 = 0.75;
 const FOOTER_HINT_ROOT_ID: HelpId = HelpId(1_000_000);
 const FOOTER_HINT_WIDE_MIN_WIDTH: u16 = 100;
 const FOOTER_HINT_MEDIUM_MIN_WIDTH: u16 = 60;
@@ -1258,6 +1260,8 @@ pub struct CassApp {
     pub show_saved_views_modal: bool,
     /// Current selected index inside saved views manager.
     pub saved_views_selection: usize,
+    /// Active drag state while reordering saved views with the mouse.
+    pub saved_view_drag: Option<SavedViewDragState>,
     /// Whether the saved views manager is currently renaming a slot.
     pub saved_view_rename_mode: bool,
     /// Rename buffer used while editing saved view labels.
@@ -1327,6 +1331,14 @@ pub struct CassApp {
     pub last_pill_rects: RefCell<Vec<(Rect, Pill)>>,
     /// Last rendered status footer area.
     pub last_status_area: RefCell<Option<Rect>>,
+    /// Last rendered content area (results/detail container).
+    pub last_content_area: RefCell<Option<Rect>>,
+    /// Last rendered pane split handle hit area.
+    pub last_split_handle_area: RefCell<Option<Rect>>,
+    /// Last rendered saved-view list row hit areas.
+    pub last_saved_view_row_areas: RefCell<Vec<(Rect, usize)>>,
+    /// Active pane split drag state for mouse-based resize.
+    pub pane_split_drag: Option<PaneSplitDragState>,
 
     // -- Lazy-loaded services ---------------------------------------------
     /// Database reader (initialized on first use).
@@ -1407,6 +1419,7 @@ impl Default for CassApp {
             show_bulk_modal: false,
             show_saved_views_modal: false,
             saved_views_selection: 0,
+            saved_view_drag: None,
             saved_view_rename_mode: false,
             saved_view_rename_buffer: String::new(),
             show_consent_dialog: false,
@@ -1445,6 +1458,10 @@ impl Default for CassApp {
             last_pane_rects: RefCell::new(Vec::new()),
             last_pill_rects: RefCell::new(Vec::new()),
             last_status_area: RefCell::new(None),
+            last_content_area: RefCell::new(None),
+            last_split_handle_area: RefCell::new(None),
+            last_saved_view_row_areas: RefCell::new(Vec::new()),
+            pane_split_drag: None,
             db_reader: None,
             known_workspaces: None,
             search_service: None,
@@ -1488,6 +1505,24 @@ impl CassApp {
 
     /// Determine which UI region a mouse coordinate falls in.
     fn hit_test(&self, x: u16, y: u16) -> MouseHitRegion {
+        if self.show_saved_views_modal {
+            if let Some((_, row_idx)) = self
+                .last_saved_view_row_areas
+                .borrow()
+                .iter()
+                .find(|(rect, _)| rect.contains(x, y))
+            {
+                return MouseHitRegion::SavedViewRow { row_idx: *row_idx };
+            }
+            return MouseHitRegion::None;
+        }
+
+        if let Some(rect) = *self.last_split_handle_area.borrow()
+            && rect.contains(x, y)
+        {
+            return MouseHitRegion::SplitHandle;
+        }
+
         // Check results inner area first (most common click target).
         if let Some(rect) = *self.last_results_inner.borrow()
             && rect.contains(x, y)
@@ -1551,7 +1586,16 @@ impl CassApp {
         }
 
         if self.surface == AppSurface::Analytics {
-            return "analytics";
+            return match self.analytics_view {
+                AnalyticsView::Dashboard => "analytics:dashboard",
+                AnalyticsView::Explorer => "analytics:explorer",
+                AnalyticsView::Heatmap => "analytics:heatmap",
+                AnalyticsView::Breakdowns => "analytics:breakdowns",
+                AnalyticsView::Tools => "analytics:tools",
+                AnalyticsView::Cost => "analytics:cost",
+                AnalyticsView::Plans => "analytics:plans",
+                AnalyticsView::Coverage => "analytics:coverage",
+            };
         }
 
         if self.input_mode != InputMode::Query {
@@ -1625,13 +1669,47 @@ impl CassApp {
                 push(shortcuts::DETAIL_CLOSE, "cancel", contextual.clone(), 2);
                 push(shortcuts::TAB_FOCUS, "next", contextual.clone(), 3);
             }
-            "analytics" => {
+            ctx if ctx.starts_with("analytics:") => {
+                // Common: view navigation + back
                 push("←/→", "views", contextual.clone(), 1);
-                if self.analytics_selectable_count() > 0 {
-                    push("↑/↓", "select", contextual.clone(), 2);
-                    push(shortcuts::DETAIL_OPEN, "drill", contextual.clone(), 3);
+
+                // Per-subview contextual hints
+                match self.analytics_view {
+                    AnalyticsView::Dashboard => {
+                        // Dashboard is read-only KPI wall — no special keys
+                    }
+                    AnalyticsView::Explorer => {
+                        push("m", "metric", contextual.clone(), 2);
+                        push("o", "overlay", contextual.clone(), 3);
+                        push("g", "group", contextual.clone(), 4);
+                        push("z", "zoom", contextual.clone(), 5);
+                    }
+                    AnalyticsView::Heatmap => {
+                        push("Tab", "metric", contextual.clone(), 2);
+                        if self.analytics_selectable_count() > 0 {
+                            push("↑/↓", "select", contextual.clone(), 3);
+                            push(shortcuts::DETAIL_OPEN, "drill", contextual.clone(), 4);
+                        }
+                    }
+                    AnalyticsView::Breakdowns => {
+                        push("Tab", "tab", contextual.clone(), 2);
+                        if self.analytics_selectable_count() > 0 {
+                            push("↑/↓", "select", contextual.clone(), 3);
+                            push(shortcuts::DETAIL_OPEN, "drill", contextual.clone(), 4);
+                        }
+                    }
+                    AnalyticsView::Tools
+                    | AnalyticsView::Cost
+                    | AnalyticsView::Plans
+                    | AnalyticsView::Coverage => {
+                        if self.analytics_selectable_count() > 0 {
+                            push("↑/↓", "select", contextual.clone(), 2);
+                            push(shortcuts::DETAIL_OPEN, "drill", contextual.clone(), 3);
+                        }
+                    }
                 }
-                push(shortcuts::DETAIL_CLOSE, "back", contextual.clone(), 4);
+
+                push(shortcuts::DETAIL_CLOSE, "back", contextual.clone(), 10);
             }
             "modal" => {
                 push(shortcuts::TAB_FOCUS, "next", contextual.clone(), 1);
@@ -1661,7 +1739,7 @@ impl CassApp {
         let budget = Self::footer_hint_budget(width);
         let context_key = self.footer_hint_context_key();
         let mut ranker = HintRanker::new(RankerConfig {
-            hysteresis: 0.0,
+            hysteresis: 0.15,
             voi_weight: 0.0,
             lambda: 0.02,
             ..RankerConfig::default()
@@ -1758,6 +1836,85 @@ impl CassApp {
         let len = self.saved_views.len() as i64;
         let next = self.saved_views_selection as i64 + delta as i64;
         self.saved_views_selection = next.rem_euclid(len) as usize;
+    }
+
+    fn reorder_saved_views(&mut self, from_idx: usize, to_idx: usize) -> bool {
+        if self.saved_views.is_empty() || from_idx == to_idx {
+            return false;
+        }
+        if from_idx >= self.saved_views.len() || to_idx >= self.saved_views.len() {
+            return false;
+        }
+
+        self.sort_saved_views();
+        let mut ordered_slots: Vec<u8> = self.saved_views.iter().map(|v| v.slot).collect();
+        ordered_slots.sort_unstable();
+
+        let moved = self.saved_views.remove(from_idx);
+        self.saved_views.insert(to_idx, moved);
+        for (view, slot) in self.saved_views.iter_mut().zip(ordered_slots.into_iter()) {
+            view.slot = slot;
+        }
+        self.saved_views_selection = to_idx.min(self.saved_views.len().saturating_sub(1));
+        true
+    }
+
+    fn panel_ratio_from_mouse_x(&self, x: u16) -> Option<f64> {
+        let area = self.last_content_area.borrow().as_ref().copied()?;
+        if area.width < 4 {
+            return None;
+        }
+        let rel_x = x
+            .saturating_sub(area.x)
+            .min(area.width.saturating_sub(1))
+            .max(1);
+        let ratio = rel_x as f64 / area.width as f64;
+        Some(ratio.clamp(PANEL_RATIO_MIN, PANEL_RATIO_MAX))
+    }
+
+    fn apply_panel_ratio_from_mouse_x(&mut self, x: u16) -> bool {
+        let Some(ratio) = self.panel_ratio_from_mouse_x(x) else {
+            return false;
+        };
+        self.anim.set_panel_ratio(ratio);
+        self.dirty_since = Some(Instant::now());
+        true
+    }
+
+    fn split_content_area(
+        &self,
+        area: Rect,
+        min_left: u16,
+        min_right: u16,
+    ) -> (Rect, Rect, Option<Rect>) {
+        if area.width < 2 {
+            return (area, Rect::new(area.x, area.y, 0, area.height), None);
+        }
+
+        let width = area.width;
+        let ratio = self
+            .anim
+            .panel_ratio_value()
+            .clamp(PANEL_RATIO_MIN, PANEL_RATIO_MAX);
+        let mut left_w = ((width as f64) * ratio).round() as u16;
+        let lower = min_left.max(1).min(width.saturating_sub(1));
+        let upper = width
+            .saturating_sub(min_right.max(1))
+            .max(1)
+            .min(width.saturating_sub(1));
+        left_w = if lower <= upper {
+            left_w.clamp(lower, upper)
+        } else {
+            width / 2
+        };
+        left_w = left_w.clamp(1, width.saturating_sub(1));
+
+        let right_w = width.saturating_sub(left_w);
+        let left = Rect::new(area.x, area.y, left_w, area.height);
+        let right = Rect::new(area.x + left_w, area.y, right_w, area.height);
+        let handle = Rect::new(area.x + left_w.saturating_sub(1), area.y, 1, area.height);
+
+        (left, right, Some(handle))
     }
 
     /// Capture the current undoable state as an `UndoEntry`.
@@ -2888,6 +3045,7 @@ impl CassApp {
         let modal_w = 72u16.min(area.width.saturating_sub(2));
         let modal_h = 18u16.min(area.height.saturating_sub(2));
         if modal_w == 0 || modal_h == 0 {
+            self.last_saved_view_row_areas.borrow_mut().clear();
             return;
         }
 
@@ -2912,11 +3070,13 @@ impl CassApp {
         let inner = outer.inner(modal_area);
         outer.render(modal_area, frame);
         if inner.is_empty() {
+            self.last_saved_view_row_areas.borrow_mut().clear();
             return;
         }
 
         let mut rows = self.saved_views.clone();
         rows.sort_by_key(|v| v.slot);
+        self.last_saved_view_row_areas.borrow_mut().clear();
 
         let footer_h = if self.saved_view_rename_mode { 2 } else { 1 };
         let list_h = inner.height.saturating_sub(footer_h).max(1);
@@ -2931,11 +3091,15 @@ impl CassApp {
             .render(list_area, frame);
         } else {
             let selected = self.saved_views_selection.min(rows.len().saturating_sub(1));
+            let drag_hover = self.saved_view_drag.map(|d| d.hover_idx);
             let visible = list_area.height as usize;
             let start = selected.saturating_sub(visible.saturating_sub(1));
             for (row, view) in rows.iter().enumerate().skip(start).take(visible) {
                 let y = list_area.y + (row - start) as u16;
                 let row_area = Rect::new(list_area.x, y, list_area.width, 1);
+                self.last_saved_view_row_areas
+                    .borrow_mut()
+                    .push((row_area, row));
                 let marker = if row == selected { "> " } else { "  " };
                 let label = view
                     .label
@@ -2951,7 +3115,7 @@ impl CassApp {
                     view.workspaces.len(),
                     view.source_filter
                 );
-                let style = if row == selected {
+                let style = if row == selected || drag_hover == Some(row) {
                     selected_style
                 } else {
                     text_style
@@ -2986,9 +3150,11 @@ impl CassApp {
                     frame,
                 );
         } else {
-            Paragraph::new("Enter=load · R=rename · D=delete · C=clear all · Esc=close")
-                .style(muted_style)
-                .render(footer_area, frame);
+            Paragraph::new(
+                "Enter=load · drag=move · R=rename · D=delete · C=clear all · Esc=close",
+            )
+            .style(muted_style)
+            .render(footer_area, frame);
         }
     }
 
@@ -3896,10 +4062,21 @@ pub enum FocusDirection {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedViewDragState {
+    pub from_idx: usize,
+    pub hover_idx: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneSplitDragState;
+
 /// Mouse event kinds (simplified from crossterm/ftui).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseEventKind {
     LeftClick,
+    LeftDrag,
+    LeftRelease,
     RightClick,
     ScrollUp,
     ScrollDown,
@@ -3908,6 +4085,10 @@ pub enum MouseEventKind {
 /// Region identified by mouse hit-testing against last-rendered layout rects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MouseHitRegion {
+    /// Drag handle between results and detail panes.
+    SplitHandle,
+    /// Row in the saved views manager list.
+    SavedViewRow { row_idx: usize },
     /// Click/scroll landed in the results list. `item_idx` is the absolute item index.
     Results { item_idx: usize },
     /// Click/scroll landed in the detail pane.
@@ -4218,6 +4399,16 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                         x: mouse.x,
                         y: mouse.y,
                     },
+                    Mek::Drag(MouseButton::Left) => CassMsg::MouseEvent {
+                        kind: MouseEventKind::LeftDrag,
+                        x: mouse.x,
+                        y: mouse.y,
+                    },
+                    Mek::Up(MouseButton::Left) => CassMsg::MouseEvent {
+                        kind: MouseEventKind::LeftRelease,
+                        x: mouse.x,
+                        y: mouse.y,
+                    },
                     Mek::Down(MouseButton::Right) => CassMsg::MouseEvent {
                         kind: MouseEventKind::RightClick,
                         x: mouse.x,
@@ -4416,6 +4607,7 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     CassMsg::QuitRequested => {
                         self.saved_view_rename_mode = false;
+                        self.saved_view_drag = None;
                         self.saved_view_rename_buffer.clear();
                         self.status = "Cancelled saved view rename".to_string();
                         return ftui::Cmd::none();
@@ -4458,7 +4650,8 @@ impl super::ftui_adapter::Model for CassApp {
                 | CassMsg::SavedViewDeletedSelected
                 | CassMsg::SavedViewsCleared
                 | CassMsg::SavedViewsClosed
-                | CassMsg::SavedViewsOpened => {}
+                | CassMsg::SavedViewsOpened
+                | CassMsg::MouseEvent { .. } => {}
                 _ => return ftui::Cmd::none(),
             }
         }
@@ -6006,6 +6199,7 @@ impl super::ftui_adapter::Model for CassApp {
                 self.sort_saved_views();
                 self.clamp_saved_views_selection();
                 self.show_saved_views_modal = true;
+                self.saved_view_drag = None;
                 self.saved_view_rename_mode = false;
                 self.saved_view_rename_buffer.clear();
                 if self.saved_views.is_empty() {
@@ -6017,6 +6211,7 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::SavedViewsClosed => {
                 self.show_saved_views_modal = false;
+                self.saved_view_drag = None;
                 self.saved_view_rename_mode = false;
                 self.saved_view_rename_buffer.clear();
                 self.status = "Saved views manager closed".to_string();
@@ -6029,6 +6224,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::SavedViewLoadedSelected => {
                 if let Some(slot) = self.selected_saved_view_slot() {
                     self.show_saved_views_modal = false;
+                    self.saved_view_drag = None;
                     self.saved_view_rename_mode = false;
                     self.saved_view_rename_buffer.clear();
                     return ftui::Cmd::msg(CassMsg::ViewLoaded(slot));
@@ -6043,6 +6239,7 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::SavedViewRenameStarted => {
                 if let Some(slot) = self.selected_saved_view_slot() {
+                    self.saved_view_drag = None;
                     self.saved_view_rename_mode = true;
                     self.saved_view_rename_buffer =
                         self.selected_saved_view_label().unwrap_or_default();
@@ -6073,10 +6270,12 @@ impl super::ftui_adapter::Model for CassApp {
                         ));
                     }
                     self.saved_view_rename_mode = false;
+                    self.saved_view_drag = None;
                     self.saved_view_rename_buffer.clear();
                     self.dirty_since = Some(Instant::now());
                 } else {
                     self.saved_view_rename_mode = false;
+                    self.saved_view_drag = None;
                     self.saved_view_rename_buffer.clear();
                     self.status = "No saved view selected".to_string();
                 }
@@ -6087,6 +6286,7 @@ impl super::ftui_adapter::Model for CassApp {
                 if let Some(slot) = self.selected_saved_view_slot() {
                     self.saved_views.retain(|v| v.slot != slot);
                     self.clamp_saved_views_selection();
+                    self.saved_view_drag = None;
                     self.saved_view_rename_mode = false;
                     self.saved_view_rename_buffer.clear();
                     self.dirty_since = Some(Instant::now());
@@ -6105,6 +6305,7 @@ impl super::ftui_adapter::Model for CassApp {
                 let count = self.saved_views.len();
                 self.saved_views.clear();
                 self.saved_views_selection = 0;
+                self.saved_view_drag = None;
                 self.saved_view_rename_mode = false;
                 self.saved_view_rename_buffer.clear();
                 self.dirty_since = Some(Instant::now());
@@ -6249,6 +6450,7 @@ impl super::ftui_adapter::Model for CassApp {
             // -- Window & terminal --------------------------------------------
             CassMsg::Resized { .. } => {
                 // Frame dimensions update automatically via ftui runtime
+                self.pane_split_drag = None;
                 ftui::Cmd::none()
             }
             CassMsg::Tick => {
@@ -6308,7 +6510,67 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::MouseEvent { kind, x, y } => {
                 let region = self.hit_test(x, y);
+
+                if self.show_saved_views_modal {
+                    match (kind, region) {
+                        (MouseEventKind::LeftClick, MouseHitRegion::SavedViewRow { row_idx }) => {
+                            let idx = row_idx.min(self.saved_views.len().saturating_sub(1));
+                            self.saved_views_selection = idx;
+                            self.saved_view_drag = Some(SavedViewDragState {
+                                from_idx: idx,
+                                hover_idx: idx,
+                            });
+                            return ftui::Cmd::none();
+                        }
+                        (MouseEventKind::LeftDrag, MouseHitRegion::SavedViewRow { row_idx }) => {
+                            let idx = row_idx.min(self.saved_views.len().saturating_sub(1));
+                            if let Some(drag) = self.saved_view_drag.as_mut() {
+                                drag.hover_idx = idx;
+                                self.saved_views_selection = idx;
+                            }
+                            return ftui::Cmd::none();
+                        }
+                        (MouseEventKind::LeftDrag, _) => return ftui::Cmd::none(),
+                        (MouseEventKind::LeftRelease, MouseHitRegion::SavedViewRow { row_idx }) => {
+                            if let Some(drag) = self.saved_view_drag.take() {
+                                let to_idx = row_idx.min(self.saved_views.len().saturating_sub(1));
+                                if self.reorder_saved_views(drag.from_idx, to_idx) {
+                                    self.status =
+                                        format!("Moved saved view to position {}", to_idx + 1);
+                                    self.dirty_since = Some(Instant::now());
+                                }
+                            }
+                            return ftui::Cmd::none();
+                        }
+                        (MouseEventKind::LeftRelease, _) => {
+                            self.saved_view_drag = None;
+                            return ftui::Cmd::none();
+                        }
+                        _ => return ftui::Cmd::none(),
+                    }
+                }
+
+                if kind == MouseEventKind::LeftClick
+                    && !matches!(region, MouseHitRegion::SplitHandle)
+                {
+                    self.pane_split_drag = None;
+                }
+
                 match (kind, region) {
+                    // ── Pane split drag: click + drag divider ───────
+                    (MouseEventKind::LeftClick, MouseHitRegion::SplitHandle) => {
+                        self.pane_split_drag = Some(PaneSplitDragState);
+                        let _ = self.apply_panel_ratio_from_mouse_x(x);
+                        ftui::Cmd::none()
+                    }
+                    (MouseEventKind::LeftDrag, _) if self.pane_split_drag.is_some() => {
+                        let _ = self.apply_panel_ratio_from_mouse_x(x);
+                        ftui::Cmd::none()
+                    }
+                    (MouseEventKind::LeftRelease, _) => {
+                        self.pane_split_drag = None;
+                        ftui::Cmd::none()
+                    }
                     // ── Scroll in results ────────────────────────────
                     (MouseEventKind::ScrollUp, MouseHitRegion::Results { .. }) => {
                         ftui::Cmd::msg(CassMsg::SelectionMoved { delta: -3 })
@@ -6395,6 +6657,7 @@ impl super::ftui_adapter::Model for CassApp {
 
             // -- Analytics surface ---------------------------------------------
             CassMsg::AnalyticsEntered => {
+                self.pane_split_drag = None;
                 if self.surface != AppSurface::Analytics {
                     self.view_stack.push(self.surface);
                     self.surface = AppSurface::Analytics;
@@ -6417,6 +6680,7 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::ViewStackPopped => {
+                self.pane_split_drag = None;
                 if let Some(prev) = self.view_stack.pop() {
                     self.surface = prev;
                 } else {
@@ -6581,9 +6845,11 @@ impl super::ftui_adapter::Model for CassApp {
                     if self.saved_view_rename_mode {
                         self.saved_view_rename_mode = false;
                         self.saved_view_rename_buffer.clear();
+                        self.saved_view_drag = None;
                         self.status = "Cancelled saved view rename".to_string();
                     } else {
                         self.show_saved_views_modal = false;
+                        self.saved_view_drag = None;
                         self.status = "Saved views manager closed".to_string();
                     }
                     return ftui::Cmd::none();
@@ -6798,10 +7064,12 @@ impl super::ftui_adapter::Model for CassApp {
 
                 // ── Content area: responsive layout ─────────────────────
                 let content_area = vertical[1];
+                *self.last_content_area.borrow_mut() = Some(content_area);
 
                 // Reset hit regions — they'll be repopulated by render_*_pane().
                 *self.last_results_inner.borrow_mut() = None;
                 *self.last_detail_area.borrow_mut() = None;
+                *self.last_split_handle_area.borrow_mut() = None;
 
                 let (hits, selected_idx) = if let Some(pane) = self.panes.get(self.active_pane) {
                     (&pane.hits[..], pane.selected)
@@ -6811,16 +7079,12 @@ impl super::ftui_adapter::Model for CassApp {
 
                 match breakpoint {
                     LayoutBreakpoint::Wide => {
-                        let panes = Flex::horizontal()
-                            .constraints([
-                                Constraint::Percentage(60.0),
-                                Constraint::Percentage(40.0),
-                            ])
-                            .gap(0)
-                            .split(content_area);
+                        let (results_area, detail_area, split_handle) =
+                            self.split_content_area(content_area, 50, 34);
+                        *self.last_split_handle_area.borrow_mut() = split_handle;
                         self.render_results_pane(
                             frame,
-                            panes[0],
+                            results_area,
                             hits,
                             selected_idx,
                             row_h,
@@ -6836,7 +7100,7 @@ impl super::ftui_adapter::Model for CassApp {
                         );
                         self.render_detail_pane(
                             frame,
-                            panes[1],
+                            detail_area,
                             border_type,
                             adaptive_borders,
                             &styles,
@@ -6846,13 +7110,12 @@ impl super::ftui_adapter::Model for CassApp {
                         );
                     }
                     LayoutBreakpoint::Medium => {
-                        let panes = Flex::horizontal()
-                            .constraints([Constraint::Min(40), Constraint::Min(32)])
-                            .gap(0)
-                            .split(content_area);
+                        let (results_area, detail_area, split_handle) =
+                            self.split_content_area(content_area, 40, 32);
+                        *self.last_split_handle_area.borrow_mut() = split_handle;
                         self.render_results_pane(
                             frame,
-                            panes[0],
+                            results_area,
                             hits,
                             selected_idx,
                             row_h,
@@ -6868,7 +7131,7 @@ impl super::ftui_adapter::Model for CassApp {
                         );
                         self.render_detail_pane(
                             frame,
-                            panes[1],
+                            detail_area,
                             border_type,
                             adaptive_borders,
                             &styles,
@@ -6961,6 +7224,9 @@ impl super::ftui_adapter::Model for CassApp {
                 *self.last_results_inner.borrow_mut() = None;
                 *self.last_detail_area.borrow_mut() = None;
                 *self.last_status_area.borrow_mut() = None;
+                *self.last_content_area.borrow_mut() = None;
+                *self.last_split_handle_area.borrow_mut() = None;
+                self.last_saved_view_row_areas.borrow_mut().clear();
 
                 // ── Analytics surface layout ─────────────────────────────
                 let vertical = Flex::vertical()
@@ -7112,6 +7378,8 @@ impl super::ftui_adapter::Model for CassApp {
 
         if self.show_saved_views_modal {
             self.render_saved_views_overlay(frame, area, &styles);
+        } else {
+            self.last_saved_view_row_areas.borrow_mut().clear();
         }
 
         if self.source_filter_menu_open {
@@ -10163,6 +10431,78 @@ mod tests {
     }
 
     #[test]
+    fn contextual_footer_hints_analytics_dashboard_no_special_keys() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Dashboard;
+        let hints = app.build_contextual_footer_hints(120);
+        assert!(hints.contains("←/→=views"));
+        // Dashboard is read-only — no metric/overlay/tab hints
+        assert!(!hints.contains("m=metric"));
+        assert!(!hints.contains("Tab=tab"));
+    }
+
+    #[test]
+    fn contextual_footer_hints_analytics_explorer_shows_controls() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        let hints = app.build_contextual_footer_hints(120);
+        assert!(hints.contains("←/→=views"), "missing views hint");
+        assert!(hints.contains("m=metric"), "missing metric hint");
+        assert!(hints.contains("o=overlay"), "missing overlay hint");
+        assert!(hints.contains("g=group"), "missing group hint");
+    }
+
+    #[test]
+    fn contextual_footer_hints_analytics_heatmap_shows_tab_metric() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Heatmap;
+        let hints = app.build_contextual_footer_hints(120);
+        assert!(hints.contains("←/→=views"));
+        assert!(
+            hints.contains("Tab=metric"),
+            "missing metric hint for heatmap"
+        );
+    }
+
+    #[test]
+    fn contextual_footer_hints_analytics_breakdowns_shows_tab() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Breakdowns;
+        let hints = app.build_contextual_footer_hints(120);
+        assert!(hints.contains("←/→=views"));
+        assert!(hints.contains("Tab=tab"), "missing tab hint for breakdowns");
+    }
+
+    #[test]
+    fn contextual_footer_hints_analytics_context_key_per_subview() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+
+        for (view, expected_key) in [
+            (AnalyticsView::Dashboard, "analytics:dashboard"),
+            (AnalyticsView::Explorer, "analytics:explorer"),
+            (AnalyticsView::Heatmap, "analytics:heatmap"),
+            (AnalyticsView::Breakdowns, "analytics:breakdowns"),
+            (AnalyticsView::Tools, "analytics:tools"),
+            (AnalyticsView::Cost, "analytics:cost"),
+            (AnalyticsView::Plans, "analytics:plans"),
+            (AnalyticsView::Coverage, "analytics:coverage"),
+        ] {
+            app.analytics_view = view;
+            assert_eq!(
+                app.footer_hint_context_key(),
+                expected_key,
+                "wrong context key for {:?}",
+                view
+            );
+        }
+    }
+
+    #[test]
     fn search_title_adapts_to_width() {
         let app = CassApp::default();
 
@@ -10346,6 +10686,21 @@ mod tests {
     }
 
     #[test]
+    fn hit_test_returns_split_handle_when_present() {
+        let app = app_with_hits(5);
+        render_at_degradation(&app, 180, 24, ftui::render::budget::DegradationLevel::Full);
+
+        let handle = app
+            .last_split_handle_area
+            .borrow()
+            .as_ref()
+            .copied()
+            .expect("split handle should be recorded in wide layout");
+        let region = app.hit_test(handle.x, handle.y);
+        assert_eq!(region, MouseHitRegion::SplitHandle);
+    }
+
+    #[test]
     fn mouse_click_in_results_moves_selection() {
         use ftui::Model;
         let mut app = app_with_hits(10);
@@ -10480,6 +10835,127 @@ mod tests {
     fn mouse_event_kind_has_right_click() {
         assert_ne!(MouseEventKind::LeftClick, MouseEventKind::RightClick);
         assert_ne!(MouseEventKind::RightClick, MouseEventKind::ScrollUp);
+        assert_ne!(MouseEventKind::LeftDrag, MouseEventKind::LeftRelease);
+    }
+
+    #[test]
+    fn mouse_drag_on_split_handle_updates_panel_ratio_target() {
+        use ftui::Model;
+        let mut app = app_with_hits(25);
+        render_at_degradation(&app, 180, 24, ftui::render::budget::DegradationLevel::Full);
+
+        let handle = app
+            .last_split_handle_area
+            .borrow()
+            .as_ref()
+            .copied()
+            .expect("split handle should be recorded");
+        let content = app
+            .last_content_area
+            .borrow()
+            .as_ref()
+            .copied()
+            .expect("content area should be recorded");
+        let start_ratio = app.anim.panel_ratio.target();
+        let drag_x = content.x + content.width.saturating_mul(3) / 10;
+
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: handle.x,
+            y: handle.y,
+        });
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftDrag,
+            x: drag_x,
+            y: handle.y,
+        });
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftRelease,
+            x: drag_x,
+            y: handle.y,
+        });
+
+        let updated_ratio = app.anim.panel_ratio.target();
+        assert!(
+            (updated_ratio - start_ratio).abs() > 0.01,
+            "panel ratio target should change after drag (before={start_ratio}, after={updated_ratio})"
+        );
+        assert!(
+            app.pane_split_drag.is_none(),
+            "split drag state should clear on release"
+        );
+    }
+
+    #[test]
+    fn saved_views_mouse_drag_reorders_rows() {
+        use ftui::Model;
+
+        let mut app = CassApp::default();
+        app.saved_views = vec![
+            SavedView {
+                slot: 1,
+                label: Some("One".to_string()),
+                agents: HashSet::new(),
+                workspaces: HashSet::new(),
+                created_from: None,
+                created_to: None,
+                ranking: RankingMode::Balanced,
+                source_filter: SourceFilter::All,
+            },
+            SavedView {
+                slot: 2,
+                label: Some("Two".to_string()),
+                agents: HashSet::new(),
+                workspaces: HashSet::new(),
+                created_from: None,
+                created_to: None,
+                ranking: RankingMode::Balanced,
+                source_filter: SourceFilter::All,
+            },
+            SavedView {
+                slot: 3,
+                label: Some("Three".to_string()),
+                agents: HashSet::new(),
+                workspaces: HashSet::new(),
+                created_from: None,
+                created_to: None,
+                ranking: RankingMode::Balanced,
+                source_filter: SourceFilter::All,
+            },
+        ];
+
+        let _ = app.update(CassMsg::SavedViewsOpened);
+        render_at_degradation(&app, 120, 30, ftui::render::budget::DegradationLevel::Full);
+
+        let row_areas = app.last_saved_view_row_areas.borrow().clone();
+        assert_eq!(row_areas.len(), 3, "should capture row areas for drag");
+        let from = row_areas[0].0;
+        let to = row_areas[2].0;
+
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: from.x + 1,
+            y: from.y,
+        });
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftDrag,
+            x: to.x + 1,
+            y: to.y,
+        });
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftRelease,
+            x: to.x + 1,
+            y: to.y,
+        });
+
+        let labels: Vec<String> = app
+            .saved_views
+            .iter()
+            .map(|view| view.label.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(labels, vec!["Two", "Three", "One"]);
+        assert_eq!(app.saved_views_selection, 2);
+        assert!(app.saved_view_drag.is_none());
     }
 
     #[test]
@@ -11340,6 +11816,396 @@ mod tests {
         assert!(
             app.analytics_cache.is_none(),
             "cache should be invalidated on zoom change"
+        );
+    }
+
+    // -- Analytics UI test suite (2noh9.4.18.11) -----------------------------
+
+    /// Helper to create a CassApp in analytics mode with representative data.
+    fn analytics_app_with_data(view: AnalyticsView) -> CassApp {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = view;
+
+        let mut data = AnalyticsChartData::default();
+        // Populate representative fixture data
+        data.total_messages = 5000;
+        data.total_api_tokens = 1_200_000;
+        data.total_tool_calls = 3000;
+        data.total_content_tokens = 800_000;
+        data.total_plan_messages = 200;
+        data.total_cost_usd = 42.57;
+        data.coverage_pct = 85.0;
+        data.pricing_coverage_pct = 72.0;
+        data.plan_message_pct = 4.0;
+        data.plan_api_token_share = 6.5;
+        data.agent_tokens = vec![
+            ("claude_code".into(), 600_000.0),
+            ("codex".into(), 300_000.0),
+            ("aider".into(), 200_000.0),
+            ("gemini".into(), 100_000.0),
+        ];
+        data.agent_messages = vec![
+            ("claude_code".into(), 2500.0),
+            ("codex".into(), 1500.0),
+            ("aider".into(), 700.0),
+            ("gemini".into(), 300.0),
+        ];
+        data.agent_tool_calls = vec![
+            ("claude_code".into(), 1800.0),
+            ("codex".into(), 800.0),
+            ("aider".into(), 300.0),
+            ("gemini".into(), 100.0),
+        ];
+        data.workspace_tokens = vec![("cass".into(), 700_000.0), ("other".into(), 500_000.0)];
+        data.workspace_messages = vec![("cass".into(), 3000.0), ("other".into(), 2000.0)];
+        data.source_tokens = vec![("local".into(), 900_000.0), ("remote".into(), 300_000.0)];
+        data.source_messages = vec![("local".into(), 3500.0), ("remote".into(), 1500.0)];
+        data.model_tokens = vec![
+            ("claude-opus-4-6".into(), 500_000.0),
+            ("claude-sonnet-4-5".into(), 400_000.0),
+            ("gpt-4o".into(), 300_000.0),
+        ];
+        data.model_cost = vec![
+            ("claude-opus-4-6".into(), 20.0),
+            ("claude-sonnet-4-5".into(), 12.0),
+            ("gpt-4o".into(), 10.57),
+        ];
+        data.model_messages = vec![
+            ("claude-opus-4-6".into(), 1500.0),
+            ("claude-sonnet-4-5".into(), 2000.0),
+            ("gpt-4o".into(), 1500.0),
+        ];
+        data.daily_tokens = vec![
+            ("2026-02-01".into(), 200_000.0),
+            ("2026-02-02".into(), 180_000.0),
+            ("2026-02-03".into(), 250_000.0),
+            ("2026-02-04".into(), 170_000.0),
+            ("2026-02-05".into(), 200_000.0),
+            ("2026-02-06".into(), 100_000.0),
+            ("2026-02-07".into(), 100_000.0),
+        ];
+        data.daily_messages = vec![
+            ("2026-02-01".into(), 800.0),
+            ("2026-02-02".into(), 700.0),
+            ("2026-02-03".into(), 900.0),
+            ("2026-02-04".into(), 600.0),
+            ("2026-02-05".into(), 700.0),
+            ("2026-02-06".into(), 650.0),
+            ("2026-02-07".into(), 650.0),
+        ];
+        data.daily_content_tokens = data.daily_tokens.clone();
+        data.daily_tool_calls = vec![
+            ("2026-02-01".into(), 500.0),
+            ("2026-02-02".into(), 400.0),
+            ("2026-02-03".into(), 600.0),
+            ("2026-02-04".into(), 350.0),
+            ("2026-02-05".into(), 450.0),
+            ("2026-02-06".into(), 350.0),
+            ("2026-02-07".into(), 350.0),
+        ];
+        data.daily_plan_messages = vec![
+            ("2026-02-01".into(), 30.0),
+            ("2026-02-02".into(), 25.0),
+            ("2026-02-03".into(), 40.0),
+            ("2026-02-04".into(), 20.0),
+            ("2026-02-05".into(), 35.0),
+            ("2026-02-06".into(), 25.0),
+            ("2026-02-07".into(), 25.0),
+        ];
+        data.daily_cost = vec![
+            ("2026-02-01".into(), 7.0),
+            ("2026-02-02".into(), 6.0),
+            ("2026-02-03".into(), 8.5),
+            ("2026-02-04".into(), 5.5),
+            ("2026-02-05".into(), 6.0),
+            ("2026-02-06".into(), 5.0),
+            ("2026-02-07".into(), 4.57),
+        ];
+        data.heatmap_days = vec![
+            ("2026-02-01".into(), 0.8),
+            ("2026-02-02".into(), 0.6),
+            ("2026-02-03".into(), 1.0),
+            ("2026-02-04".into(), 0.5),
+            ("2026-02-05".into(), 0.7),
+            ("2026-02-06".into(), 0.4),
+            ("2026-02-07".into(), 0.3),
+        ];
+        data.agent_plan_messages = vec![
+            ("claude_code".into(), 120.0),
+            ("codex".into(), 50.0),
+            ("aider".into(), 30.0),
+        ];
+        app.analytics_cache = Some(data);
+        app
+    }
+
+    #[test]
+    fn analytics_render_all_subviews_no_panic_80x24() {
+        for &view in AnalyticsView::all() {
+            let app = analytics_app_with_data(view);
+            let buf =
+                render_at_degradation(&app, 80, 24, ftui::render::budget::DegradationLevel::Full);
+            let text = ftui_harness::buffer_to_text(&buf);
+            assert!(
+                !text.trim().is_empty(),
+                "{:?} view at 80x24 should render non-empty content",
+                view
+            );
+        }
+    }
+
+    #[test]
+    fn analytics_render_all_subviews_no_panic_120x40() {
+        for &view in AnalyticsView::all() {
+            let app = analytics_app_with_data(view);
+            let buf =
+                render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
+            let text = ftui_harness::buffer_to_text(&buf);
+            assert!(
+                !text.trim().is_empty(),
+                "{:?} view at 120x40 should render non-empty content",
+                view
+            );
+        }
+    }
+
+    #[test]
+    fn analytics_render_empty_data_no_panic() {
+        // All views should survive with empty AnalyticsChartData.
+        for &view in AnalyticsView::all() {
+            let mut app = CassApp::default();
+            app.surface = AppSurface::Analytics;
+            app.analytics_view = view;
+            app.analytics_cache = Some(AnalyticsChartData::default());
+            let buf =
+                render_at_degradation(&app, 80, 24, ftui::render::budget::DegradationLevel::Full);
+            let text = ftui_harness::buffer_to_text(&buf);
+            assert!(
+                !text.trim().is_empty(),
+                "{:?} view with empty data should render without panic",
+                view
+            );
+        }
+    }
+
+    #[test]
+    fn analytics_render_no_cache_no_panic() {
+        // All views should survive without any analytics_cache (loading state).
+        for &view in AnalyticsView::all() {
+            let mut app = CassApp::default();
+            app.surface = AppSurface::Analytics;
+            app.analytics_view = view;
+            app.analytics_cache = None;
+            let buf =
+                render_at_degradation(&app, 80, 24, ftui::render::budget::DegradationLevel::Full);
+            let text = ftui_harness::buffer_to_text(&buf);
+            assert!(
+                !text.trim().is_empty(),
+                "{:?} view with no cache should render without panic",
+                view
+            );
+        }
+    }
+
+    #[test]
+    fn analytics_dashboard_render_shows_kpi_labels() {
+        let app = analytics_app_with_data(AnalyticsView::Dashboard);
+        let buf =
+            render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        // Dashboard KPI tiles should include recognizable metric labels.
+        assert!(
+            text.contains("Messages")
+                || text.contains("messages")
+                || text.contains("5,000")
+                || text.contains("5.0K"),
+            "Dashboard should display message-related KPI, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn analytics_explorer_render_shows_metric_label() {
+        let app = analytics_app_with_data(AnalyticsView::Explorer);
+        let buf =
+            render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        // Explorer header should show the current metric.
+        assert!(
+            text.contains("API Tokens") || text.contains("Api") || text.contains("Tokens"),
+            "Explorer should show metric label, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn analytics_render_degradation_levels_no_panic() {
+        use ftui::render::budget::DegradationLevel;
+        // Skeleton/EssentialOnly may intentionally suppress all content — just
+        // assert no panic for those. Full through NoStyling should produce
+        // visible output.
+        let visible_levels = [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::NoStyling,
+        ];
+        let suppress_levels = [DegradationLevel::EssentialOnly, DegradationLevel::Skeleton];
+        for &view in AnalyticsView::all() {
+            for &level in &visible_levels {
+                let app = analytics_app_with_data(view);
+                let buf = render_at_degradation(&app, 80, 24, level);
+                let text = ftui_harness::buffer_to_text(&buf);
+                assert!(
+                    !text.trim().is_empty(),
+                    "{:?} at degradation {:?} should render visible content",
+                    view,
+                    level
+                );
+            }
+            // Just ensure no panic at extreme degradation.
+            for &level in &suppress_levels {
+                let app = analytics_app_with_data(view);
+                let _ = render_at_degradation(&app, 80, 24, level);
+            }
+        }
+    }
+
+    #[test]
+    fn analytics_render_perf_guard() {
+        // All 8 subviews rendering at 120x40 should complete within a generous budget.
+        // This is a catastrophic regression detector, not a micro-benchmark.
+        let start = std::time::Instant::now();
+        for &view in AnalyticsView::all() {
+            let app = analytics_app_with_data(view);
+            let _ =
+                render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
+        }
+        let elapsed = start.elapsed();
+        // All 8 views should render within 2 seconds total (very generous).
+        assert!(
+            elapsed.as_millis() < 2000,
+            "rendering all 8 analytics views took {:?} — exceeds 2s budget",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn analytics_navigation_full_cycle_through_all_views() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert_eq!(app.surface, AppSurface::Analytics);
+        assert_eq!(app.analytics_view, AnalyticsView::Dashboard);
+
+        // Cycle forward through all 8 views using CursorMoved (← → keys)
+        let expected = [
+            AnalyticsView::Explorer,
+            AnalyticsView::Heatmap,
+            AnalyticsView::Breakdowns,
+            AnalyticsView::Tools,
+            AnalyticsView::Cost,
+            AnalyticsView::Plans,
+            AnalyticsView::Coverage,
+            AnalyticsView::Dashboard, // wraps around
+        ];
+        for expected_view in expected {
+            let _ = app.update(CassMsg::CursorMoved { delta: 1 });
+            assert_eq!(
+                app.analytics_view, expected_view,
+                "forward cycle should reach {:?}",
+                expected_view
+            );
+        }
+    }
+
+    #[test]
+    fn analytics_navigation_backward_cycle() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+
+        // Go backward from Dashboard -> Coverage
+        let _ = app.update(CassMsg::CursorMoved { delta: -1 });
+        assert_eq!(app.analytics_view, AnalyticsView::Coverage);
+
+        let _ = app.update(CassMsg::CursorMoved { delta: -1 });
+        assert_eq!(app.analytics_view, AnalyticsView::Plans);
+    }
+
+    #[test]
+    fn analytics_selection_per_view_with_data() {
+        // Views with selectable data should accept selection changes.
+        let selectable_views = [
+            AnalyticsView::Explorer,
+            AnalyticsView::Heatmap,
+            AnalyticsView::Breakdowns,
+            AnalyticsView::Tools,
+            AnalyticsView::Cost,
+            AnalyticsView::Plans,
+            AnalyticsView::Coverage,
+        ];
+        for view in selectable_views {
+            let mut app = analytics_app_with_data(view);
+            let count = app.analytics_selectable_count();
+            if count > 0 {
+                let _ = app.update(CassMsg::AnalyticsSelectionMoved { delta: 1 });
+                assert_eq!(
+                    app.analytics_selection, 1,
+                    "{:?} view should allow selection movement",
+                    view
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn analytics_drilldown_from_each_selectable_view() {
+        let views_with_drilldown = [
+            AnalyticsView::Heatmap,
+            AnalyticsView::Breakdowns,
+            AnalyticsView::Tools,
+            AnalyticsView::Cost,
+            AnalyticsView::Plans,
+            AnalyticsView::Coverage,
+        ];
+        for view in views_with_drilldown {
+            let app = analytics_app_with_data(view);
+            if app.analytics_selectable_count() > 0 {
+                let ctx = app.build_drilldown_context();
+                assert!(
+                    ctx.is_some(),
+                    "{:?} with data should produce a drilldown context",
+                    view
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn analytics_filter_persistence_across_view_changes() {
+        let mut app = analytics_app_with_data(AnalyticsView::Dashboard);
+        // Set a filter
+        app.analytics_filters.agents.insert("claude_code".into());
+        let _ = app.update(CassMsg::CursorMoved { delta: 1 }); // → Explorer
+        assert!(
+            app.analytics_filters.agents.contains("claude_code"),
+            "agent filter should persist across view changes"
+        );
+        let _ = app.update(CassMsg::CursorMoved { delta: 1 }); // → Heatmap
+        assert!(
+            app.analytics_filters.agents.contains("claude_code"),
+            "agent filter should persist across multiple view changes"
+        );
+    }
+
+    #[test]
+    fn analytics_view_change_resets_selection_to_zero() {
+        let mut app = analytics_app_with_data(AnalyticsView::Explorer);
+        // Move selection forward
+        let _ = app.update(CassMsg::AnalyticsSelectionMoved { delta: 3 });
+        assert!(app.analytics_selection > 0);
+        // Change view — selection should reset
+        let _ = app.update(CassMsg::CursorMoved { delta: 1 });
+        assert_eq!(
+            app.analytics_selection, 0,
+            "selection should reset on view change"
         );
     }
 

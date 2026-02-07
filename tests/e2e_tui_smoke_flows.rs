@@ -436,8 +436,15 @@ fn tui_pty_help_overlay_open_close_flow() {
         "Did not observe startup output before help overlay interaction"
     );
 
+    let before_help_open_len = captured.lock().expect("capture lock").len();
     send_key_sequence(&mut *writer, b"?"); // open help overlay
+    let saw_help_open =
+        wait_for_output_growth(&captured, before_help_open_len, 8, Duration::from_secs(4));
     thread::sleep(Duration::from_millis(180));
+    assert!(
+        saw_help_open,
+        "Did not observe output growth after help overlay open key"
+    );
     assert!(
         child
             .try_wait()
@@ -446,8 +453,15 @@ fn tui_pty_help_overlay_open_close_flow() {
         "App exited after '?' instead of opening help overlay"
     );
 
+    let before_help_close_len = captured.lock().expect("capture lock").len();
     send_key_sequence(&mut *writer, b"\x1b"); // close help (should not quit app)
+    let saw_help_close =
+        wait_for_output_growth(&captured, before_help_close_len, 8, Duration::from_secs(4));
     thread::sleep(Duration::from_millis(200));
+    assert!(
+        saw_help_close,
+        "Did not observe output growth after first ESC to close help overlay"
+    );
     assert!(
         child
             .try_wait()
@@ -469,6 +483,24 @@ fn tui_pty_help_overlay_open_close_flow() {
     let _ = reader_handle.join();
     let raw = captured.lock().expect("capture lock").clone();
     save_artifact("pty_help_overlay_output.raw", &trace, &raw);
+    let summary = serde_json::json!({
+        "trace_id": trace,
+        "test": "tui_pty_help_overlay_open_close_flow",
+        "saw_help_open_growth": saw_help_open,
+        "saw_help_close_growth": saw_help_close,
+        "captured_bytes": raw.len(),
+    });
+    save_artifact(
+        "pty_help_overlay_summary.json",
+        &trace,
+        serde_json::to_string_pretty(&summary)
+            .expect("serialize help-overlay summary")
+            .as_bytes(),
+    );
+    assert!(
+        !raw.is_empty(),
+        "Expected non-empty PTY capture for help-overlay flow"
+    );
 
     tracker.complete();
 }
@@ -517,6 +549,10 @@ fn tui_pty_search_detail_and_quit_flow() {
     );
     thread::sleep(Duration::from_millis(180));
 
+    // Move focus from query input to results list so `v` is interpreted as detail action.
+    send_key_sequence(&mut *writer, b"\t");
+    thread::sleep(Duration::from_millis(120));
+
     let before_open_len = captured.lock().expect("capture lock").len();
     send_key_sequence(&mut *writer, b"v"); // open raw-detail modal for selected result
     let saw_detail = wait_for_output_growth(&captured, before_open_len, 8, Duration::from_secs(6));
@@ -525,9 +561,10 @@ fn tui_pty_search_detail_and_quit_flow() {
         "Did not observe output growth after detail-open attempt in PTY search flow"
     );
 
-    // First ESC may either close a modal (if opened) or quit directly.
+    // First ESC may close the detail modal or quit directly depending on active pane/modal.
     send_key_sequence(&mut *writer, b"\x1b");
     thread::sleep(Duration::from_millis(200));
+    let mut esc_presses = 1u64;
     let status = match child
         .try_wait()
         .expect("poll child after first ESC in search flow")
@@ -535,6 +572,7 @@ fn tui_pty_search_detail_and_quit_flow() {
         Some(status) => status,
         None => {
             send_key_sequence(&mut *writer, b"\x1b");
+            esc_presses += 1;
             wait_for_child_exit(&mut *child, PTY_EXIT_TIMEOUT)
         }
     };
@@ -548,6 +586,20 @@ fn tui_pty_search_detail_and_quit_flow() {
     let _ = reader_handle.join();
     let raw = captured.lock().expect("capture lock").clone();
     save_artifact("pty_search_detail_output.raw", &trace, &raw);
+    let summary = serde_json::json!({
+        "trace_id": trace,
+        "test": "tui_pty_search_detail_and_quit_flow",
+        "saw_detail_growth": saw_detail,
+        "esc_presses_to_exit": esc_presses,
+        "captured_bytes": raw.len(),
+    });
+    save_artifact(
+        "pty_search_detail_summary.json",
+        &trace,
+        serde_json::to_string_pretty(&summary)
+            .expect("serialize search-detail summary")
+            .as_bytes(),
+    );
     assert!(
         !raw.is_empty(),
         "Expected non-empty PTY capture for search flow"

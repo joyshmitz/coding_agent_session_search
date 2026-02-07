@@ -572,21 +572,31 @@ mod tests {
     #[test]
     fn looks_like_opencode_storage_with_session_dir() {
         let dir = TempDir::new().unwrap();
+        // Requires both session AND message subdirs
         fs::create_dir_all(dir.path().join("session")).unwrap();
+        assert!(!looks_like_opencode_storage(dir.path()));
+        fs::create_dir_all(dir.path().join("message")).unwrap();
         assert!(looks_like_opencode_storage(dir.path()));
     }
 
     #[test]
     fn looks_like_opencode_storage_with_message_dir() {
         let dir = TempDir::new().unwrap();
+        // Requires both session AND message subdirs
         fs::create_dir_all(dir.path().join("message")).unwrap();
+        assert!(!looks_like_opencode_storage(dir.path()));
+        fs::create_dir_all(dir.path().join("session")).unwrap();
         assert!(looks_like_opencode_storage(dir.path()));
     }
 
     #[test]
     fn looks_like_opencode_storage_with_part_dir() {
         let dir = TempDir::new().unwrap();
+        // part alone is not enough; need session + message
         fs::create_dir_all(dir.path().join("part")).unwrap();
+        assert!(!looks_like_opencode_storage(dir.path()));
+        fs::create_dir_all(dir.path().join("session")).unwrap();
+        fs::create_dir_all(dir.path().join("message")).unwrap();
         assert!(looks_like_opencode_storage(dir.path()));
     }
 

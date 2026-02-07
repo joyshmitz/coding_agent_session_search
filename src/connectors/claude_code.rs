@@ -349,6 +349,15 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Create a test-ready Claude directory structure.
+    /// Includes a `projects` marker subdir so `looks_like_root()` returns true
+    /// and the connector scans only the temp dir instead of the real ~/.claude/projects.
+    fn make_test_claude_dir(base: &std::path::Path) -> PathBuf {
+        let claude_dir = base.join(".claude");
+        fs::create_dir_all(claude_dir.join("projects")).unwrap();
+        claude_dir
+    }
+
     // =========================================================================
     // Constructor tests
     // =========================================================================
@@ -391,8 +400,7 @@ mod tests {
     #[test]
     fn scan_parses_jsonl_user_and_assistant_messages() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"user","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Hello Claude"}}
@@ -420,8 +428,7 @@ mod tests {
     #[test]
     fn scan_extracts_session_metadata() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"user","cwd":"/projects/myapp","sessionId":"sess-123","gitBranch":"main","message":{"role":"user","content":"Test message"}}"#;
@@ -440,8 +447,7 @@ mod tests {
     #[test]
     fn scan_extracts_model_as_author() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"assistant","message":{"role":"assistant","content":"Response","model":"claude-3-opus"}}"#;
@@ -460,8 +466,7 @@ mod tests {
     #[test]
     fn scan_parses_iso8601_timestamp() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"user","timestamp":"2025-11-15T14:30:00.123Z","message":{"role":"user","content":"Test"}}"#;
@@ -480,8 +485,7 @@ mod tests {
     #[test]
     fn scan_handles_array_content() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = json!({
@@ -509,8 +513,7 @@ mod tests {
     #[test]
     fn scan_skips_empty_content() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"user","message":{"role":"user","content":""}}
@@ -531,8 +534,7 @@ mod tests {
     #[test]
     fn scan_skips_non_user_assistant_types() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"summary","content":"Session summary"}
@@ -553,8 +555,7 @@ mod tests {
     #[test]
     fn scan_reindexes_messages_sequentially() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"user","message":{"role":"user","content":"Message 1"}}
@@ -579,8 +580,7 @@ mod tests {
     #[test]
     fn scan_parses_json_messages_array() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.json");
         let content = json!({
@@ -606,8 +606,7 @@ mod tests {
     #[test]
     fn scan_json_extracts_title() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.json");
         let content = json!({
@@ -629,8 +628,7 @@ mod tests {
     #[test]
     fn scan_json_uses_type_as_role_fallback() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.json");
         let content = json!({
@@ -651,8 +649,7 @@ mod tests {
     #[test]
     fn scan_json_uses_text_as_content_fallback() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.json");
         let content = json!({
@@ -673,8 +670,7 @@ mod tests {
     #[test]
     fn scan_json_uses_time_as_timestamp_fallback() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.json");
         let content = json!({
@@ -699,8 +695,7 @@ mod tests {
     #[test]
     fn scan_title_from_first_user_message_jsonl() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"assistant","message":{"role":"assistant","content":"I can help"}}
@@ -718,8 +713,7 @@ mod tests {
     #[test]
     fn scan_title_truncates_to_100_chars() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let long_message = "x".repeat(200);
         let session_file = claude_dir.join("session.jsonl");
@@ -739,8 +733,7 @@ mod tests {
     #[test]
     fn scan_title_uses_first_line_only() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"user","message":{"role":"user","content":"First line\nSecond line\nThird line"}}"#;
@@ -756,8 +749,7 @@ mod tests {
     #[test]
     fn scan_title_fallback_to_workspace_name() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // Only assistant message, no user message for title
         let session_file = claude_dir.join("session.jsonl");
@@ -779,8 +771,7 @@ mod tests {
     #[test]
     fn scan_empty_directory_returns_empty() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let connector = ClaudeCodeConnector::new();
         let ctx = ScanContext::local_default(claude_dir.clone(), None);
@@ -792,8 +783,7 @@ mod tests {
     #[test]
     fn scan_skips_malformed_jsonl_lines() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"not valid json
@@ -814,8 +804,7 @@ mod tests {
     #[test]
     fn scan_skips_malformed_json_files() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // Create a malformed JSON file
         let bad_file = claude_dir.join("bad.json");
@@ -840,8 +829,7 @@ mod tests {
     #[test]
     fn scan_handles_empty_messages_array() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.json");
         let content = json!({
@@ -861,7 +849,7 @@ mod tests {
     #[test]
     fn scan_processes_subdirectories() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
+        let claude_dir = make_test_claude_dir(dir.path());
         let subdir = claude_dir.join("project1");
         fs::create_dir_all(&subdir).unwrap();
 
@@ -880,8 +868,7 @@ mod tests {
     #[test]
     fn scan_skips_non_session_files() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // Create various non-session files
         fs::write(claude_dir.join("config.toml"), "").unwrap();
@@ -907,8 +894,7 @@ mod tests {
     #[test]
     fn scan_handles_claude_extension() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.claude");
         let content = json!({
@@ -930,8 +916,7 @@ mod tests {
     #[test]
     fn scan_sets_external_id_from_filename() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("unique-session-id.jsonl");
         let content = r#"{"type":"user","message":{"role":"user","content":"Test"}}"#;
@@ -950,8 +935,7 @@ mod tests {
     #[test]
     fn scan_sets_agent_slug_to_claude_code() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"user","message":{"role":"user","content":"Test"}}"#;
@@ -967,8 +951,7 @@ mod tests {
     #[test]
     fn scan_preserves_original_json_in_extra() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"user","customField":"customValue","message":{"role":"user","content":"Test"}}"#;
@@ -984,8 +967,7 @@ mod tests {
     #[test]
     fn scan_tracks_started_and_ended_timestamps() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("session.jsonl");
         let content = r#"{"type":"user","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"First"}}
@@ -1006,8 +988,7 @@ mod tests {
     #[test]
     fn scan_multiple_files_returns_multiple_conversations() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // Create two session files
         for i in 1..=3 {
@@ -1107,8 +1088,7 @@ mod tests {
     #[test]
     fn truncated_jsonl_mid_json_returns_partial_results() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // First line is valid, second line is truncated mid-JSON
         let session_file = claude_dir.join("truncated.jsonl");
@@ -1133,8 +1113,7 @@ mod tests {
     #[test]
     fn truncated_mid_utf8_does_not_panic() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // Valid JSONL line followed by bytes that start a multi-byte UTF-8
         // sequence but are truncated (U+1F600 = F0 9F 98 80, truncate after 2 bytes)
@@ -1165,8 +1144,7 @@ mod tests {
     #[test]
     fn invalid_utf8_skips_corrupted_lines() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         let session_file = claude_dir.join("invalid_utf8.jsonl");
         let mut bytes = Vec::new();
@@ -1205,8 +1183,7 @@ mod tests {
     #[test]
     fn empty_file_returns_no_conversations() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // Completely empty JSONL file
         let session_file = claude_dir.join("empty.jsonl");
@@ -1231,8 +1208,7 @@ mod tests {
     #[test]
     fn whitespace_only_file_returns_no_conversations() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // JSONL file with only whitespace and newlines
         let session_file = claude_dir.join("whitespace.jsonl");
@@ -1256,8 +1232,7 @@ mod tests {
     #[test]
     fn json_type_mismatch_skips_gracefully() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // JSONL lines where expected objects are wrong types
         let session_file = claude_dir.join("type_mismatch.jsonl");
@@ -1297,8 +1272,7 @@ mod tests {
     #[test]
     fn deeply_nested_json_does_not_stack_overflow() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // Build JSON with 1000+ levels of nesting in the content field
         // serde_json has a default recursion limit of 128, so this tests
@@ -1337,8 +1311,7 @@ mod tests {
     #[test]
     fn large_message_body_handled_without_oom() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // Create a JSONL file with a 1MB message body to verify streaming works
         let large_content = "x".repeat(1_000_000);
@@ -1366,8 +1339,7 @@ mod tests {
     #[test]
     fn large_json_file_over_100mb_is_skipped() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // For JSON format, files > 100MB should be skipped.
         // We can't create a real 100MB file in a unit test efficiently,
@@ -1393,8 +1365,7 @@ mod tests {
     #[test]
     fn null_bytes_embedded_in_content_handled() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // JSON allows \u0000 escape for null bytes in strings
         let session_file = claude_dir.join("null_bytes.jsonl");
@@ -1426,8 +1397,7 @@ mod tests {
     #[test]
     fn bom_marker_at_file_start_handled() {
         let dir = TempDir::new().unwrap();
-        let claude_dir = dir.path().join(".claude");
-        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
 
         // UTF-8 BOM: EF BB BF
         let session_file = claude_dir.join("bom.jsonl");
