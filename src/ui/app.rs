@@ -27,6 +27,7 @@
 //!   Renders current state to ftui Frame
 //! ```
 
+use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,6 +49,7 @@ use ftui::widgets::Widget;
 use ftui::widgets::block::{Alignment, Block};
 use ftui::widgets::borders::{BorderType, Borders};
 use ftui::widgets::paragraph::Paragraph;
+use ftui::widgets::{RenderItem, StatefulWidget, VirtualizedList, VirtualizedListState};
 
 // ---------------------------------------------------------------------------
 // Re-export ftui primitives through the adapter
@@ -184,6 +186,87 @@ pub struct AgentPane {
     pub total_count: usize,
 }
 
+/// A search result item prepared for rendering in a VirtualizedList.
+///
+/// Carries all context needed by `RenderItem::render()` so the item can
+/// self-render without access to the parent `CassApp`.
+#[derive(Clone, Debug)]
+pub struct ResultItem {
+    /// 1-based display index.
+    pub index: usize,
+    /// The underlying search hit.
+    pub hit: SearchHit,
+    /// Row height (from density mode: 1=compact, 2=cozy, 3=spacious).
+    pub row_height: u16,
+    /// Whether this is an even-indexed row (for alternating stripes).
+    pub even: bool,
+    /// Maximum content width available.
+    pub max_width: u16,
+    /// Whether the item is queued for multi-open (Ctrl+Enter).
+    pub queued: bool,
+}
+
+impl RenderItem for ResultItem {
+    fn render(&self, area: Rect, frame: &mut super::ftui_adapter::Frame, selected: bool) {
+        let hit = &self.hit;
+        let location = if let Some(line) = hit.line_number {
+            format!("{}:{line}", hit.source_path)
+        } else {
+            hit.source_path.clone()
+        };
+        let title = if hit.title.trim().is_empty() {
+            "<untitled>"
+        } else {
+            hit.title.trim()
+        };
+
+        // Selection and queue indicator prefix
+        let sel_mark = if selected { "\u{25b6} " } else { "  " };
+        let queue_mark = if self.queued { "\u{2713}" } else { " " };
+
+        match self.row_height {
+            1 => {
+                // Compact: single line
+                let text = format!(
+                    "{sel_mark}{queue_mark}{:>2}. {title} [{location}]",
+                    self.index
+                );
+                Paragraph::new(&*text).render(area, frame);
+            }
+            2 => {
+                // Cozy: title + metadata
+                let line1 = format!("{sel_mark}{queue_mark}{:>2}. {title}", self.index);
+                let line2 = format!("      {location} | {:.1}", hit.score);
+                let text = format!("{line1}\n{line2}");
+                Paragraph::new(&*text).render(area, frame);
+            }
+            _ => {
+                // Spacious: title + snippet + metadata
+                let line1 = format!("{sel_mark}{queue_mark}{:>2}. {title}", self.index);
+                let snippet_preview = hit
+                    .snippet
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("");
+                let max_snip = (area.width as usize).saturating_sub(6);
+                let snip = if snippet_preview.len() > max_snip {
+                    &snippet_preview[..max_snip.saturating_sub(3)]
+                } else {
+                    snippet_preview
+                };
+                let line2 = format!("      {snip}");
+                let line3 = format!("      {} | {location} | {:.1}", hit.agent, hit.score);
+                let text = format!("{line1}\n{line2}\n{line3}");
+                Paragraph::new(&*text).render(area, frame);
+            }
+        }
+    }
+
+    fn height(&self) -> u16 {
+        self.row_height
+    }
+}
+
 /// Persisted filters+ranking for a saved-view slot.
 #[derive(Clone, Debug)]
 pub struct SavedView {
@@ -221,6 +304,8 @@ pub struct CassApp {
     pub pane_scroll_offset: usize,
     /// Items shown per pane.
     pub per_pane_limit: usize,
+    /// Virtualized list state for the active results pane (RefCell for view-time mutation).
+    pub results_list_state: RefCell<VirtualizedListState>,
     /// Whether wildcard fallback was triggered for the current query.
     pub wildcard_fallback: bool,
     /// Did-you-mean / filter suggestions for the current query.
@@ -369,6 +454,7 @@ impl Default for CassApp {
             active_pane: 0,
             pane_scroll_offset: 0,
             per_pane_limit: 10,
+            results_list_state: RefCell::new(VirtualizedListState::new()),
             wildcard_fallback: false,
             suggestions: Vec::new(),
             last_search_ms: None,
@@ -473,7 +559,7 @@ impl CassApp {
             && !self.palette_state.open
     }
 
-    /// Render the results list pane with density-aware row heights.
+    /// Render the results list pane using VirtualizedList for O(visible) rendering.
     #[allow(clippy::too_many_arguments)]
     fn render_results_pane(
         &self,
@@ -486,8 +572,8 @@ impl CassApp {
         styles: &StyleContext,
         pane_style: ftui::Style,
         pane_focused_style: ftui::Style,
-        row_style: ftui::Style,
-        row_alt_style: ftui::Style,
+        _row_style: ftui::Style,
+        _row_alt_style: ftui::Style,
         row_selected_style: ftui::Style,
         text_muted_style: ftui::Style,
     ) {
@@ -516,67 +602,28 @@ impl CassApp {
             return;
         }
 
-        // Density-aware row rendering
-        let visible_rows = (inner.height / row_h) as usize;
-        let max_rows = visible_rows.min(hits.len());
+        // Build ResultItem wrappers for VirtualizedList rendering.
+        let items: Vec<ResultItem> = hits
+            .iter()
+            .enumerate()
+            .map(|(i, hit)| ResultItem {
+                index: i + 1,
+                hit: hit.clone(),
+                row_height: row_h,
+                even: i % 2 == 0,
+                max_width: inner.width,
+                queued: self.selected.contains(&(self.active_pane, i)),
+            })
+            .collect();
 
-        for (row, hit) in hits.iter().enumerate().take(max_rows) {
-            let location = if let Some(line) = hit.line_number {
-                format!("{}:{line}", hit.source_path)
-            } else {
-                hit.source_path.clone()
-            };
-            let title = if hit.title.trim().is_empty() {
-                "<untitled>"
-            } else {
-                hit.title.trim()
-            };
+        let list = VirtualizedList::new(&items)
+            .fixed_height(row_h)
+            .highlight_style(row_selected_style)
+            .show_scrollbar(true);
 
-            let style = if row == selected_idx {
-                row_selected_style
-            } else if row.is_multiple_of(2) {
-                row_style
-            } else {
-                row_alt_style
-            };
-
-            let row_area = Rect::new(inner.x, inner.y + (row as u16) * row_h, inner.width, row_h);
-
-            match self.density_mode {
-                DensityMode::Compact => {
-                    // Single line: number + title + location
-                    let row_text = format!("{:>2}. {} [{}]", row + 1, title, location);
-                    Paragraph::new(&*row_text)
-                        .style(style)
-                        .render(row_area, frame);
-                }
-                DensityMode::Cozy => {
-                    // Two lines: title on first, metadata on second
-                    let line1 = format!("{:>2}. {}", row + 1, title);
-                    let line2 = format!("    {} | {:.1}", location, hit.score);
-                    let text = format!("{line1}\n{line2}");
-                    Paragraph::new(&*text).style(style).render(row_area, frame);
-                }
-                DensityMode::Spacious => {
-                    // Three lines: title, snippet preview, metadata
-                    let line1 = format!("{:>2}. {}", row + 1, title);
-                    let snippet_preview = hit
-                        .snippet
-                        .lines()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or("");
-                    let snip = if snippet_preview.len() > inner.width as usize - 4 {
-                        &snippet_preview[..inner.width as usize - 7]
-                    } else {
-                        snippet_preview
-                    };
-                    let line2 = format!("    {snip}");
-                    let line3 = format!("    {} | {} | {:.1}", hit.agent, location, hit.score);
-                    let text = format!("{line1}\n{line2}\n{line3}");
-                    Paragraph::new(&*text).style(style).render(row_area, frame);
-                }
-            }
-        }
+        let mut state = self.results_list_state.borrow_mut();
+        state.select(Some(selected_idx));
+        list.render(inner, frame, &mut state);
 
         // Render role gutter markers if a11y mode is on
         if styles.options.a11y {
@@ -1578,6 +1625,10 @@ impl super::ftui_adapter::Model for CassApp {
 
                 self.results = hits;
                 self.status = format!("{} results in {}ms", self.results.len(), elapsed_ms);
+                // Reset scroll to top for new results.
+                let mut state = self.results_list_state.borrow_mut();
+                state.scroll_to_top();
+                state.select(Some(0));
                 ftui::Cmd::none()
             }
             CassMsg::SearchFailed(err) => {
@@ -1677,19 +1728,34 @@ impl super::ftui_adapter::Model for CassApp {
             // -- Navigation ---------------------------------------------------
             CassMsg::SelectionMoved { delta } => {
                 if let Some(pane) = self.panes.get_mut(self.active_pane) {
-                    let new_sel = pane.selected as i32 + delta;
-                    pane.selected =
-                        new_sel.clamp(0, pane.hits.len().saturating_sub(1) as i32) as usize;
+                    let total = pane.hits.len();
+                    let mut state = self.results_list_state.borrow_mut();
+                    state.select(Some(pane.selected));
+                    if delta > 0 {
+                        for _ in 0..delta {
+                            state.select_next(total);
+                        }
+                    } else {
+                        for _ in 0..delta.unsigned_abs() {
+                            state.select_previous(total);
+                        }
+                    }
+                    pane.selected = state.selected.unwrap_or(0);
                 }
                 ftui::Cmd::none()
             }
             CassMsg::SelectionJumped { to_end } => {
                 if let Some(pane) = self.panes.get_mut(self.active_pane) {
-                    pane.selected = if to_end {
-                        pane.hits.len().saturating_sub(1)
+                    let total = pane.hits.len();
+                    let mut state = self.results_list_state.borrow_mut();
+                    if to_end {
+                        state.scroll_to_bottom(total);
+                        pane.selected = total.saturating_sub(1);
                     } else {
-                        0
-                    };
+                        state.scroll_to_top();
+                        pane.selected = 0;
+                    }
+                    state.select(Some(pane.selected));
                 }
                 ftui::Cmd::none()
             }
@@ -1726,10 +1792,15 @@ impl super::ftui_adapter::Model for CassApp {
                     let new_scroll = self.detail_scroll as i32 + (delta * 20);
                     self.detail_scroll = new_scroll.max(0) as u16;
                 } else if let Some(pane) = self.panes.get_mut(self.active_pane) {
-                    let page_size = self.per_pane_limit as i32;
-                    let new_sel = pane.selected as i32 + (delta * page_size);
-                    pane.selected =
-                        new_sel.clamp(0, pane.hits.len().saturating_sub(1) as i32) as usize;
+                    let total = pane.hits.len();
+                    let mut state = self.results_list_state.borrow_mut();
+                    if delta > 0 {
+                        state.page_down(total);
+                    } else {
+                        state.page_up(total);
+                    }
+                    // Sync pane selection with VirtualizedListState
+                    pane.selected = state.selected.unwrap_or(0);
                 }
                 ftui::Cmd::none()
             }
@@ -3497,5 +3568,200 @@ mod tests {
             debug.contains("None"),
             "expected Cmd::None without service, got: {debug}"
         );
+    }
+
+    // ==================== VirtualizedList integration tests ====================
+
+    #[test]
+    fn result_item_render_item_height_matches_density() {
+        let hit = SearchHit {
+            title: "Test".into(),
+            snippet: "snippet".into(),
+            content: "content".into(),
+            content_hash: 0,
+            score: 0.9,
+            agent: "claude_code".into(),
+            source_path: "/a".into(),
+            workspace: "/w".into(),
+            workspace_original: None,
+            created_at: None,
+            line_number: None,
+            match_type: Default::default(),
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+        };
+        for (density_h, expected) in [(1u16, 1u16), (2, 2), (3, 3)] {
+            let item = ResultItem {
+                index: 1,
+                hit: hit.clone(),
+                row_height: density_h,
+                even: true,
+                max_width: 80,
+                queued: false,
+            };
+            assert_eq!(item.height(), expected, "density {density_h}");
+        }
+    }
+
+    #[test]
+    fn selection_moved_syncs_virtualized_state() {
+        let mut app = CassApp::default();
+        app.panes.push(AgentPane {
+            agent: "claude_code".into(),
+            hits: vec![
+                SearchHit {
+                    title: "A".into(),
+                    snippet: "".into(),
+                    content: "".into(),
+                    content_hash: 0,
+                    score: 1.0,
+                    agent: "claude_code".into(),
+                    source_path: "/a".into(),
+                    workspace: "/w".into(),
+                    workspace_original: None,
+                    created_at: None,
+                    line_number: None,
+                    match_type: Default::default(),
+                    source_id: "local".into(),
+                    origin_kind: "local".into(),
+                    origin_host: None,
+                },
+                SearchHit {
+                    title: "B".into(),
+                    snippet: "".into(),
+                    content: "".into(),
+                    content_hash: 1,
+                    score: 0.9,
+                    agent: "claude_code".into(),
+                    source_path: "/b".into(),
+                    workspace: "/w".into(),
+                    workspace_original: None,
+                    created_at: None,
+                    line_number: None,
+                    match_type: Default::default(),
+                    source_id: "local".into(),
+                    origin_kind: "local".into(),
+                    origin_host: None,
+                },
+                SearchHit {
+                    title: "C".into(),
+                    snippet: "".into(),
+                    content: "".into(),
+                    content_hash: 2,
+                    score: 0.8,
+                    agent: "claude_code".into(),
+                    source_path: "/c".into(),
+                    workspace: "/w".into(),
+                    workspace_original: None,
+                    created_at: None,
+                    line_number: None,
+                    match_type: Default::default(),
+                    source_id: "local".into(),
+                    origin_kind: "local".into(),
+                    origin_host: None,
+                },
+            ],
+            selected: 0,
+            total_count: 3,
+        });
+        app.active_pane = 0;
+
+        // Move down twice
+        let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        assert_eq!(app.panes[0].selected, 1);
+        let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        assert_eq!(app.panes[0].selected, 2);
+
+        // Move up once
+        let _ = app.update(CassMsg::SelectionMoved { delta: -1 });
+        assert_eq!(app.panes[0].selected, 1);
+
+        // Jump to end
+        let _ = app.update(CassMsg::SelectionJumped { to_end: true });
+        assert_eq!(app.panes[0].selected, 2);
+
+        // Jump to start
+        let _ = app.update(CassMsg::SelectionJumped { to_end: false });
+        assert_eq!(app.panes[0].selected, 0);
+
+        // VirtualizedListState should be in sync
+        let state = app.results_list_state.borrow();
+        assert_eq!(state.selected, Some(0));
+    }
+
+    #[test]
+    fn search_completed_resets_scroll_state() {
+        let mut app = CassApp::default();
+        // Set up some scroll state
+        {
+            let mut state = app.results_list_state.borrow_mut();
+            state.select(Some(5));
+        }
+        let hits = vec![SearchHit {
+            title: "New".into(),
+            snippet: "".into(),
+            content: "".into(),
+            content_hash: 0,
+            score: 1.0,
+            agent: "claude_code".into(),
+            source_path: "/a".into(),
+            workspace: "/w".into(),
+            workspace_original: None,
+            created_at: None,
+            line_number: None,
+            match_type: Default::default(),
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+        }];
+        let _ = app.update(CassMsg::SearchCompleted {
+            hits,
+            elapsed_ms: 10,
+            suggestions: vec![],
+            wildcard_fallback: false,
+        });
+        let state = app.results_list_state.borrow();
+        assert_eq!(state.selected, Some(0), "should reset to first item");
+        assert_eq!(state.scroll_offset(), 0, "should scroll to top");
+    }
+
+    #[test]
+    fn queued_items_render_with_checkmark() {
+        let hit = SearchHit {
+            title: "Test".into(),
+            snippet: "".into(),
+            content: "".into(),
+            content_hash: 0,
+            score: 0.9,
+            agent: "claude_code".into(),
+            source_path: "/a".into(),
+            workspace: "/w".into(),
+            workspace_original: None,
+            created_at: None,
+            line_number: None,
+            match_type: Default::default(),
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+        };
+        let queued_item = ResultItem {
+            index: 1,
+            hit: hit.clone(),
+            row_height: 1,
+            even: true,
+            max_width: 80,
+            queued: true,
+        };
+        let not_queued = ResultItem {
+            index: 1,
+            hit,
+            row_height: 1,
+            even: true,
+            max_width: 80,
+            queued: false,
+        };
+        assert!(queued_item.queued);
+        assert!(!not_queued.queued);
     }
 }
