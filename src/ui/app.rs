@@ -15887,4 +15887,228 @@ mod tests {
         // After export, the main preset should match the editor preset.
         assert_eq!(app.theme_preset, editor_preset);
     }
+
+    // =========================================================================
+    // Sources management tests (2noh9.4.9)
+    // =========================================================================
+
+    #[test]
+    fn sources_entered_switches_surface() {
+        let mut app = CassApp::default();
+        assert_eq!(app.surface, AppSurface::Search);
+
+        let _ = app.update(CassMsg::SourcesEntered);
+        assert_eq!(app.surface, AppSurface::Sources);
+        assert_eq!(app.view_stack, vec![AppSurface::Search]);
+    }
+
+    #[test]
+    fn sources_esc_pops_back_to_search() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::SourcesEntered);
+        assert_eq!(app.surface, AppSurface::Sources);
+
+        let _ = app.update(CassMsg::ViewStackPopped);
+        assert_eq!(app.surface, AppSurface::Search);
+    }
+
+    #[test]
+    fn sources_quit_requested_pops_back() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::SourcesEntered);
+        assert_eq!(app.surface, AppSurface::Sources);
+
+        // QuitRequested emits ViewStackPopped as a command.
+        // In tests, manually dispatch the second message.
+        let _ = app.update(CassMsg::QuitRequested);
+        let _ = app.update(CassMsg::ViewStackPopped);
+        assert_eq!(app.surface, AppSurface::Search);
+    }
+
+    #[test]
+    fn sources_selection_wraps() {
+        let mut app = CassApp::default();
+        app.sources_view.items = vec![
+            SourcesViewItem {
+                name: "local".into(),
+                kind: crate::sources::SourceKind::Local,
+                host: None,
+                schedule: "always".into(),
+                path_count: 0,
+                last_sync: None,
+                last_result: "n/a".into(),
+                files_synced: 0,
+                bytes_transferred: 0,
+                busy: false,
+                doctor_summary: None,
+                error: None,
+            },
+            SourcesViewItem {
+                name: "laptop".into(),
+                kind: crate::sources::SourceKind::Ssh,
+                host: Some("user@laptop".into()),
+                schedule: "daily".into(),
+                path_count: 2,
+                last_sync: None,
+                last_result: "never".into(),
+                files_synced: 0,
+                bytes_transferred: 0,
+                busy: false,
+                doctor_summary: None,
+                error: None,
+            },
+        ];
+        app.sources_view.selected = 0;
+
+        let _ = app.update(CassMsg::SourcesSelectionMoved { delta: 1 });
+        assert_eq!(app.sources_view.selected, 1);
+
+        let _ = app.update(CassMsg::SourcesSelectionMoved { delta: 1 });
+        assert_eq!(app.sources_view.selected, 0); // wraps
+
+        let _ = app.update(CassMsg::SourcesSelectionMoved { delta: -1 });
+        assert_eq!(app.sources_view.selected, 1); // wraps backward
+    }
+
+    #[test]
+    fn sources_sync_requested_marks_busy() {
+        let mut app = CassApp::default();
+        app.sources_view.items = vec![SourcesViewItem {
+            name: "laptop".into(),
+            kind: crate::sources::SourceKind::Ssh,
+            host: Some("user@laptop".into()),
+            schedule: "manual".into(),
+            path_count: 1,
+            last_sync: None,
+            last_result: "never".into(),
+            files_synced: 0,
+            bytes_transferred: 0,
+            busy: false,
+            doctor_summary: None,
+            error: None,
+        }];
+
+        let _ = app.update(CassMsg::SourceSyncRequested("laptop".into()));
+        assert!(app.sources_view.items[0].busy);
+        assert!(app.sources_view.status.contains("Syncing"));
+    }
+
+    #[test]
+    fn sources_sync_completed_clears_busy() {
+        let mut app = CassApp::default();
+        app.sources_view.items = vec![SourcesViewItem {
+            name: "laptop".into(),
+            kind: crate::sources::SourceKind::Ssh,
+            host: Some("user@laptop".into()),
+            schedule: "manual".into(),
+            path_count: 1,
+            last_sync: None,
+            last_result: "never".into(),
+            files_synced: 0,
+            bytes_transferred: 0,
+            busy: true,
+            doctor_summary: None,
+            error: None,
+        }];
+
+        let _ = app.update(CassMsg::SourceSyncCompleted {
+            source_name: "laptop".into(),
+            message: "Synced 42 files".into(),
+        });
+        assert!(!app.sources_view.items[0].busy);
+        assert_eq!(app.sources_view.status, "Synced 42 files");
+    }
+
+    #[test]
+    fn sources_doctor_completed_sets_summary() {
+        let mut app = CassApp::default();
+        app.sources_view.items = vec![SourcesViewItem {
+            name: "laptop".into(),
+            kind: crate::sources::SourceKind::Ssh,
+            host: Some("user@laptop".into()),
+            schedule: "manual".into(),
+            path_count: 1,
+            last_sync: None,
+            last_result: "never".into(),
+            files_synced: 0,
+            bytes_transferred: 0,
+            busy: true,
+            doctor_summary: None,
+            error: None,
+        }];
+
+        let _ = app.update(CassMsg::SourceDoctorCompleted {
+            source_name: "laptop".into(),
+            passed: 3,
+            warnings: 1,
+            failed: 0,
+        });
+        assert!(!app.sources_view.items[0].busy);
+        assert_eq!(app.sources_view.items[0].doctor_summary, Some((3, 1, 0)));
+        assert!(app.sources_view.status.contains("3 pass"));
+    }
+
+    #[test]
+    fn sources_view_renders_without_panic() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Sources;
+        app.sources_view.items = vec![SourcesViewItem {
+            name: "local".into(),
+            kind: crate::sources::SourceKind::Local,
+            host: None,
+            schedule: "always".into(),
+            path_count: 0,
+            last_sync: None,
+            last_result: "n/a".into(),
+            files_synced: 0,
+            bytes_transferred: 0,
+            busy: false,
+            doctor_summary: None,
+            error: None,
+        }];
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = ftui::Frame::new(80, 24, &mut pool);
+        app.view(&mut frame);
+        // No panic = pass.
+    }
+
+    #[test]
+    fn sources_key_suppresses_query_input() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Sources;
+
+        // Typing a random char should not modify the query.
+        let _ = app.update(CassMsg::QueryChanged("x".into()));
+        assert!(app.query.is_empty());
+    }
+
+    #[test]
+    fn sources_entered_idempotent() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::SourcesEntered);
+        let _ = app.update(CassMsg::SourcesEntered);
+        // Should not double-push onto view stack.
+        assert_eq!(app.view_stack.len(), 1);
+        assert_eq!(app.surface, AppSurface::Sources);
+    }
+
+    #[test]
+    fn sources_from_analytics_stacks_correctly() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert_eq!(app.surface, AppSurface::Analytics);
+
+        let _ = app.update(CassMsg::SourcesEntered);
+        assert_eq!(app.surface, AppSurface::Sources);
+        assert_eq!(
+            app.view_stack,
+            vec![AppSurface::Search, AppSurface::Analytics]
+        );
+
+        let _ = app.update(CassMsg::ViewStackPopped);
+        assert_eq!(app.surface, AppSurface::Analytics);
+
+        let _ = app.update(CassMsg::ViewStackPopped);
+        assert_eq!(app.surface, AppSurface::Search);
+    }
 }
