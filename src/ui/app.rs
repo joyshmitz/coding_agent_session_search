@@ -34,6 +34,8 @@ use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::time::Instant;
 
+use ftui::runtime::input_macro::{MacroPlayback, MacroRecorder};
+
 use crate::model::types::MessageRole;
 use crate::search::model_manager::SemanticAvailability;
 use crate::search::query::{QuerySuggestion, SearchFilters, SearchHit, SearchMode};
@@ -80,6 +82,26 @@ pub mod focus_ids {
     pub const GROUP_HELP: u32 = 101;
     pub const GROUP_EXPORT: u32 = 102;
     pub const GROUP_CONSENT: u32 = 103;
+}
+
+// =========================================================================
+// Thread-local raw event stash (for model-level macro recording)
+// =========================================================================
+
+thread_local! {
+    /// Stores the last raw ftui Event before it is converted to CassMsg.
+    /// Used by the macro recorder to capture events at the terminal level.
+    static RAW_EVENT_STASH: RefCell<Option<super::ftui_adapter::Event>> = const { RefCell::new(None) };
+}
+
+fn stash_raw_event(event: &super::ftui_adapter::Event) {
+    RAW_EVENT_STASH.with(|buf| {
+        *buf.borrow_mut() = Some(event.clone());
+    });
+}
+
+fn take_raw_event() -> Option<super::ftui_adapter::Event> {
+    RAW_EVENT_STASH.with(|buf| buf.borrow_mut().take())
 }
 
 // =========================================================================
@@ -1348,6 +1370,14 @@ pub struct CassApp {
     /// Search service for async query dispatch.
     pub search_service: Option<Arc<dyn SearchService>>,
 
+    // -- Macro recording/playback -----------------------------------------
+    /// Active macro recorder (when interactive recording is in progress).
+    pub macro_recorder: Option<MacroRecorder>,
+    /// Active macro playback scheduler (when replaying a macro).
+    pub macro_playback: Option<MacroPlayback>,
+    /// Whether to redact absolute paths when saving macros.
+    pub macro_redact_paths: bool,
+
     // -- Status line ------------------------------------------------------
     /// Footer status text.
     pub status: String,
@@ -1465,6 +1495,9 @@ impl Default for CassApp {
             db_reader: None,
             known_workspaces: None,
             search_service: None,
+            macro_recorder: None,
+            macro_playback: None,
+            macro_redact_paths: false,
             status: String::new(),
         }
     }
@@ -4328,6 +4361,14 @@ pub enum CassMsg {
     /// Screenshot export failed.
     ScreenshotFailed(String),
 
+    // -- Macro recording/playback -----------------------------------------
+    /// Toggle interactive macro recording (start/stop).
+    MacroRecordingToggled,
+    /// Macro recording saved to path.
+    MacroRecordingSaved(PathBuf),
+    /// Macro recording failed.
+    MacroRecordingFailed(String),
+
     // -- Lifecycle ---------------------------------------------------------
     /// Application quit requested.
     QuitRequested,
@@ -4508,6 +4549,9 @@ impl From<super::ftui_adapter::Event> for CassMsg {
     fn from(event: super::ftui_adapter::Event) -> Self {
         use super::ftui_adapter::{Event, KeyCode, Modifiers};
 
+        // Stash raw event for model-level macro recording.
+        stash_raw_event(&event);
+
         match event {
             Event::Key(key) => {
                 let ctrl = key.modifiers.contains(Modifiers::CTRL);
@@ -4557,6 +4601,9 @@ impl From<super::ftui_adapter::Event> for CassMsg {
 
                     // -- Search mode (Alt+S) --------------------------------------
                     KeyCode::Char('s') if alt => CassMsg::SearchModeCycled,
+
+                    // -- Macro recording (Alt+M) ----------------------------------
+                    KeyCode::Char('m') if alt => CassMsg::MacroRecordingToggled,
 
                     // -- Command palette ------------------------------------------
                     KeyCode::Char('p') if ctrl => CassMsg::PaletteOpened,
@@ -4731,6 +4778,13 @@ impl super::ftui_adapter::Model for CassApp {
     }
 
     fn update(&mut self, msg: CassMsg) -> ftui::Cmd<CassMsg> {
+        // Record raw event for model-level macro recording.
+        if let Some(ref mut recorder) = self.macro_recorder
+            && let Some(raw_event) = take_raw_event()
+        {
+            recorder.record_event(raw_event);
+        }
+
         // Consent dialog intercepts D/H keys and blocks other query input
         if self.show_consent_dialog
             && let CassMsg::QueryChanged(ref text) = msg
@@ -6123,6 +6177,9 @@ impl super::ftui_adapter::Model for CassApp {
                     Some(PaletteAction::ScreenshotText) => {
                         ftui::Cmd::msg(CassMsg::ScreenshotRequested(ScreenshotFormat::Text))
                     }
+                    Some(PaletteAction::MacroRecordingToggle) => {
+                        ftui::Cmd::msg(CassMsg::MacroRecordingToggled)
+                    }
                     None => ftui::Cmd::none(),
                 }
             }
@@ -6780,6 +6837,22 @@ impl super::ftui_adapter::Model for CassApp {
                     cmds.push(ftui::Cmd::msg(CassMsg::SearchRequested));
                 }
                 cmds.push(ftui::Cmd::msg(CassMsg::ToastTick));
+                // Advance macro playback and inject events as messages.
+                if let Some(ref mut playback) = self.macro_playback {
+                    let events = playback.advance(dt);
+                    for event in events {
+                        let msg = CassMsg::from(event);
+                        cmds.push(ftui::Cmd::msg(msg));
+                    }
+                    if playback.is_done() {
+                        self.macro_playback = None;
+                        self.toast_manager
+                            .push(crate::ui::components::toast::Toast::success(
+                                "Macro playback complete",
+                            ));
+                        self.status = "Macro playback finished".to_string();
+                    }
+                }
                 // Pick up screenshot buffer captured during view().
                 if let Some((format, content)) = self.screenshot_result.borrow_mut().take() {
                     self.screenshot_pending = None;
@@ -7176,6 +7249,70 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 ftui::Cmd::quit()
             }
+            // -- Macro recording/playback -----------------------------------------
+            CassMsg::MacroRecordingToggled => {
+                if self.macro_recorder.is_some() {
+                    // Stop recording and save.
+                    let recorder = self.macro_recorder.take().unwrap();
+                    let recorded = recorder.finish();
+                    let macro_dir = macro_save_dir();
+                    if let Err(e) = std::fs::create_dir_all(&macro_dir) {
+                        self.toast_manager
+                            .push(crate::ui::components::toast::Toast::error(format!(
+                                "Failed to create macro dir: {e}"
+                            )));
+                        return ftui::Cmd::none();
+                    }
+                    let filename = format!(
+                        "cass-macro-{}.jsonl",
+                        chrono::Local::now().format("%Y%m%d-%H%M%S")
+                    );
+                    let path = macro_dir.join(&filename);
+                    match macro_file::save_macro(&path, &recorded, self.macro_redact_paths) {
+                        Ok(()) => {
+                            self.toast_manager
+                                .push(crate::ui::components::toast::Toast::success(format!(
+                                    "Macro saved ({} events): {}",
+                                    recorded.len(),
+                                    path.display()
+                                )));
+                            self.status = format!("Macro saved: {}", path.display());
+                        }
+                        Err(e) => {
+                            self.toast_manager
+                                .push(crate::ui::components::toast::Toast::error(format!(
+                                    "Failed to save macro: {e}"
+                                )));
+                        }
+                    }
+                } else {
+                    // Start recording.
+                    let mut recorder = MacroRecorder::new("cass-interactive");
+                    // Try to capture terminal size for metadata.
+                    if let Ok((w, h)) = crossterm::terminal::size() {
+                        recorder = recorder.with_terminal_size(w, h);
+                    }
+                    self.macro_recorder = Some(recorder);
+                    self.toast_manager
+                        .push(crate::ui::components::toast::Toast::info(
+                            "Macro recording started (Alt+M to stop)",
+                        ));
+                    self.status = "Recording macro...".to_string();
+                }
+                ftui::Cmd::none()
+            }
+            CassMsg::MacroRecordingSaved(path) => {
+                self.status = format!("Macro saved: {}", path.display());
+                ftui::Cmd::none()
+            }
+            CassMsg::MacroRecordingFailed(err) => {
+                self.toast_manager
+                    .push(crate::ui::components::toast::Toast::error(format!(
+                        "Macro error: {err}"
+                    )));
+                ftui::Cmd::none()
+            }
+
             CassMsg::ForceQuit => ftui::Cmd::quit(),
         }
     }
@@ -7487,13 +7624,20 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     format!(" | src:{}", self.filters.source_filter)
                 };
+                let rec_tag = if self.macro_recorder.is_some() {
+                    " | \u{25CF} REC"
+                } else if self.macro_playback.is_some() {
+                    " | \u{25B6} PLAY"
+                } else {
+                    ""
+                };
                 let status_line = if self.status.is_empty() {
                     let hints = self.build_contextual_footer_hints(area.width);
                     format!(
-                        " {hits_for_status} hits | {bp_label} | {density_label}{source_tag}{degradation_tag}{sel_tag}{hints}",
+                        " {hits_for_status} hits | {bp_label} | {density_label}{source_tag}{degradation_tag}{sel_tag}{rec_tag}{hints}",
                     )
                 } else {
-                    format!(" {}{}{}", self.status, degradation_tag, sel_tag)
+                    format!(" {}{}{}{}", self.status, degradation_tag, sel_tag, rec_tag)
                 };
                 Paragraph::new(&*status_line)
                     .style(text_muted_style)
@@ -7886,6 +8030,14 @@ pub struct MacroConfig {
     pub play_path: Option<std::path::PathBuf>,
 }
 
+/// Default directory for interactively saved macros.
+fn macro_save_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("coding-agent-search")
+        .join("macros")
+}
+
 /// Run the cass TUI using the ftui Program runtime.
 ///
 /// This replaces the manual crossterm event loop in `run_tui()`.
@@ -7906,7 +8058,7 @@ pub fn run_tui_ftui(
     use ftui::ProgramConfig;
     use ftui::render::budget::FrameBudgetConfig;
 
-    let model = CassApp::default();
+    let mut model = CassApp::default();
 
     // 16ms budget (60fps) with adaptive PID degradation.
     let budget = FrameBudgetConfig::default();
@@ -7934,15 +8086,15 @@ pub fn run_tui_ftui(
         if let Some(ref record_path) = macro_config.record_path
             && let Some(recorded) = program.stop_recording()
         {
-            macro_file::save_macro(record_path, &recorded)?;
+            macro_file::save_macro(record_path, &recorded, false)?;
             eprintln!("Macro saved to: {}", record_path.display());
         }
 
         result.map_err(|e| anyhow::anyhow!("ftui runtime error: {e}"))
     } else if let Some(ref play_path) = macro_config.play_path {
-        // Playback: load macro, write raw key bytes to a pipe that feeds stdin.
-        // The ftui runtime reads from terminal stdin, so we spawn a thread
-        // that writes the key sequences at the recorded delays.
+        // Playback: load macro into model, which replays events via MacroPlayback
+        // on each Tick. The model converts macro events back to CassMsg and processes
+        // them as if the user had typed them.
         let macro_data = macro_file::load_macro(play_path)?;
         eprintln!(
             "Playing macro: {} ({} events, {:.1}s)",
@@ -7951,23 +8103,22 @@ pub fn run_tui_ftui(
             macro_data.total_duration().as_secs_f64()
         );
 
-        // For playback, we run the program normally. The user interacts live
-        // and the macro events are replayed via a background thread writing
-        // to stdin. This is the simplest approach that works with the current
-        // ftui architecture.
-        //
-        // NOTE: Full stdin-injection playback requires platform-specific PTY
-        // wiring. For now, playback is supported via ProgramSimulator in tests.
-        // Live playback will be added when ftui exposes an event injection API.
-        eprintln!("Live macro playback not yet supported; use --record-macro to record.");
-        eprintln!("Macro files can be replayed in tests via ProgramSimulator.");
+        model.macro_playback = Some(MacroPlayback::new(macro_data));
 
-        // Still launch the TUI normally so the user can interact.
-        let mut program = ftui::Program::with_config(model, config)
-            .map_err(|e| anyhow::anyhow!("ftui program creation error: {e}"))?;
-        program
-            .run()
-            .map_err(|e| anyhow::anyhow!("ftui runtime error: {e}"))
+        if let Some(cfg) = inline_config {
+            ftui::App::inline(model, cfg.ui_height)
+                .anchor(cfg.anchor)
+                .with_mouse()
+                .with_budget(budget)
+                .run()
+                .map_err(|e| anyhow::anyhow!("ftui inline runtime error: {e}"))
+        } else {
+            ftui::App::fullscreen(model)
+                .with_mouse()
+                .with_budget(budget)
+                .run()
+                .map_err(|e| anyhow::anyhow!("ftui runtime error: {e}"))
+        }
     } else {
         // Standard path — no macro, use AppBuilder for simplicity.
         if let Some(cfg) = inline_config {
@@ -7998,7 +8149,15 @@ mod macro_file {
     use ftui::{Event, KeyCode, KeyEvent, Modifiers};
 
     /// Save an InputMacro to a JSONL file.
-    pub fn save_macro(path: &Path, input_macro: &InputMacro) -> anyhow::Result<()> {
+    ///
+    /// When `redact_paths` is true, absolute directory paths in Paste events
+    /// are replaced with `~` to avoid leaking sensitive filesystem layout.
+    pub fn save_macro(
+        path: &Path,
+        input_macro: &InputMacro,
+        redact_paths: bool,
+    ) -> anyhow::Result<()> {
+        let home_dir = dirs::home_dir().unwrap_or_default();
         let mut file = std::fs::File::create(path)?;
 
         // Header line with metadata.
@@ -8015,7 +8174,12 @@ mod macro_file {
 
         // One line per event.
         for timed in input_macro.events() {
-            let event_json = serialize_event(&timed.event);
+            let event = if redact_paths {
+                redact_event_paths(&timed.event, &home_dir)
+            } else {
+                timed.event.clone()
+            };
+            let event_json = serialize_event(&event);
             writeln!(
                 file,
                 "{{\"type\":\"event\",\"delay_ms\":{},\"event\":{}}}",
@@ -8237,6 +8401,26 @@ mod macro_file {
         mods
     }
 
+    /// Replace absolute paths in Paste events with `~` to avoid leaking
+    /// sensitive filesystem layout in shared macro files.
+    fn redact_event_paths(event: &Event, home: &std::path::Path) -> Event {
+        match event {
+            Event::Paste(paste) => {
+                let home_str = home.to_string_lossy();
+                let redacted = if !home_str.is_empty() {
+                    paste.text.replace(home_str.as_ref(), "~")
+                } else {
+                    paste.text.clone()
+                };
+                Event::Paste(ftui::core::event::PasteEvent {
+                    text: redacted,
+                    bracketed: paste.bracketed,
+                })
+            }
+            other => other.clone(),
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -8352,7 +8536,7 @@ mod macro_file {
             let original = InputMacro::new(events, metadata);
 
             let tmp = tempfile::NamedTempFile::new().unwrap();
-            save_macro(tmp.path(), &original).unwrap();
+            save_macro(tmp.path(), &original, false).unwrap();
             let loaded = load_macro(tmp.path()).unwrap();
 
             assert_eq!(loaded.len(), 3);

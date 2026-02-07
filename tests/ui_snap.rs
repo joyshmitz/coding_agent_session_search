@@ -142,8 +142,16 @@ fn stripe_colors_have_subtle_contrast() {
     // Stripe colors should be similar but distinct - test RGB proximity
     let palette = ThemePalette::dark();
 
-    let (r1, g1, b1) = (palette.stripe_even.r(), palette.stripe_even.g(), palette.stripe_even.b());
-    let (r2, g2, b2) = (palette.stripe_odd.r(), palette.stripe_odd.g(), palette.stripe_odd.b());
+    let (r1, g1, b1) = (
+        palette.stripe_even.r(),
+        palette.stripe_even.g(),
+        palette.stripe_even.b(),
+    );
+    let (r2, g2, b2) = (
+        palette.stripe_odd.r(),
+        palette.stripe_odd.g(),
+        palette.stripe_odd.b(),
+    );
 
     // Calculate approximate color distance
     let dr = (r1 as i32 - r2 as i32).abs();
@@ -252,14 +260,26 @@ fn role_theme_returns_complete_styling() {
         let theme = palette.role_theme(role);
 
         // All fields should be valid colors (not transparent)
-        assert_ne!(theme.fg, PackedRgba::TRANSPARENT, "{role} should have fg color");
-        assert_ne!(theme.bg, PackedRgba::TRANSPARENT, "{role} should have bg color");
+        assert_ne!(
+            theme.fg,
+            PackedRgba::TRANSPARENT,
+            "{role} should have fg color"
+        );
+        assert_ne!(
+            theme.bg,
+            PackedRgba::TRANSPARENT,
+            "{role} should have bg color"
+        );
         assert_ne!(
             theme.border,
             PackedRgba::TRANSPARENT,
             "{role} should have border color"
         );
-        assert_ne!(theme.badge, PackedRgba::TRANSPARENT, "{role} should have badge color");
+        assert_ne!(
+            theme.badge,
+            PackedRgba::TRANSPARENT,
+            "{role} should have badge color"
+        );
     }
 }
 
@@ -395,7 +415,10 @@ fn contrast_ratio_black_white() {
 #[test]
 fn contrast_ratio_same_color() {
     // Same color should have ratio of 1:1
-    let ratio = contrast_ratio(PackedRgba::rgb(128, 128, 128), PackedRgba::rgb(128, 128, 128));
+    let ratio = contrast_ratio(
+        PackedRgba::rgb(128, 128, 128),
+        PackedRgba::rgb(128, 128, 128),
+    );
     assert!(
         (ratio - 1.0).abs() < 0.01,
         "same color ratio should be 1:1, got {ratio}"

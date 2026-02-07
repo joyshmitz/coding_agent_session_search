@@ -33,6 +33,8 @@ pub enum PaletteAction {
     ScreenshotHtml,
     ScreenshotSvg,
     ScreenshotText,
+    // -- Macro recording --------------------------------------------------
+    MacroRecordingToggle,
 }
 
 /// Render-ready descriptor for an action.
@@ -211,6 +213,12 @@ pub fn default_actions() -> Vec<PaletteItem> {
         PaletteAction::ScreenshotText,
         "Screenshot: Text",
         "Capture TUI as plain text",
+    ));
+    // -- Macro recording commands -------------------------------------------
+    items.push(item(
+        PaletteAction::MacroRecordingToggle,
+        "Toggle macro recording",
+        "Alt+M",
     ));
     // Slots 1-9
     for slot in 1..=9 {
