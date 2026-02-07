@@ -191,10 +191,7 @@ pub fn run_validation(conn: &Connection, config: &ValidateConfig) -> ValidationR
 /// Validate Track A: `usage_daily` aggregates must match `SUM(message_metrics)`.
 ///
 /// Returns `(checks, buckets_checked, buckets_total)`.
-fn validate_track_a(
-    conn: &Connection,
-    config: &ValidateConfig,
-) -> (Vec<Check>, usize, usize) {
+fn validate_track_a(conn: &Connection, config: &ValidateConfig) -> (Vec<Check>, usize, usize) {
     let mut checks = Vec::new();
 
     if !table_exists(conn, "usage_daily") || !table_exists(conn, "message_metrics") {
@@ -284,7 +281,7 @@ fn validate_track_a(
     if let Ok(mut stmt) = conn.prepare(&sql)
         && let Ok(rows) = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, i64>(0)?,   // day_id
+                row.get::<_, i64>(0)?,    // day_id
                 row.get::<_, String>(1)?, // agent_slug
                 row.get::<_, i64>(4)?,    // ud.content_tokens_est_total
                 row.get::<_, i64>(5)?,    // mm.sum_content
@@ -299,7 +296,18 @@ fn validate_track_a(
     {
         for row in rows.flatten() {
             checked += 1;
-            let (_day_id, _agent, ud_content, mm_content, ud_msgs, mm_msgs, ud_api, mm_api, ud_cov, mm_cov) = row;
+            let (
+                _day_id,
+                _agent,
+                ud_content,
+                mm_content,
+                ud_msgs,
+                mm_msgs,
+                ud_api,
+                mm_api,
+                ud_cov,
+                mm_cov,
+            ) = row;
             if ud_content != mm_content {
                 mismatches_content += 1;
             }
@@ -319,7 +327,11 @@ fn validate_track_a(
     checks.push(Check {
         id: "track_a.content_tokens_match".into(),
         ok: mismatches_content == 0,
-        severity: if mismatches_content > 0 { Severity::Error } else { Severity::Info },
+        severity: if mismatches_content > 0 {
+            Severity::Error
+        } else {
+            Severity::Info
+        },
         details: format!(
             "content_tokens_est_total: {mismatches_content}/{checked} buckets mismatched"
         ),
@@ -334,10 +346,12 @@ fn validate_track_a(
     checks.push(Check {
         id: "track_a.message_count_match".into(),
         ok: mismatches_msg_count == 0,
-        severity: if mismatches_msg_count > 0 { Severity::Error } else { Severity::Info },
-        details: format!(
-            "message_count: {mismatches_msg_count}/{checked} buckets mismatched"
-        ),
+        severity: if mismatches_msg_count > 0 {
+            Severity::Error
+        } else {
+            Severity::Info
+        },
+        details: format!("message_count: {mismatches_msg_count}/{checked} buckets mismatched"),
         suggested_action: if mismatches_msg_count > 0 {
             Some("Run 'cass analytics rebuild --track a'".into())
         } else {
@@ -349,10 +363,12 @@ fn validate_track_a(
     checks.push(Check {
         id: "track_a.api_tokens_match".into(),
         ok: mismatches_api == 0,
-        severity: if mismatches_api > 0 { Severity::Error } else { Severity::Info },
-        details: format!(
-            "api_tokens_total: {mismatches_api}/{checked} buckets mismatched"
-        ),
+        severity: if mismatches_api > 0 {
+            Severity::Error
+        } else {
+            Severity::Info
+        },
+        details: format!("api_tokens_total: {mismatches_api}/{checked} buckets mismatched"),
         suggested_action: if mismatches_api > 0 {
             Some("Run 'cass analytics rebuild --track a'".into())
         } else {
@@ -364,7 +380,11 @@ fn validate_track_a(
     checks.push(Check {
         id: "track_a.api_coverage_match".into(),
         ok: mismatches_api_cov == 0,
-        severity: if mismatches_api_cov > 0 { Severity::Warning } else { Severity::Info },
+        severity: if mismatches_api_cov > 0 {
+            Severity::Warning
+        } else {
+            Severity::Info
+        },
         details: format!(
             "api_coverage_message_count: {mismatches_api_cov}/{checked} buckets mismatched"
         ),
@@ -383,10 +403,7 @@ fn validate_track_a(
 // ---------------------------------------------------------------------------
 
 /// Validate Track B: `token_daily_stats` must match `SUM(token_usage)`.
-fn validate_track_b(
-    conn: &Connection,
-    config: &ValidateConfig,
-) -> (Vec<Check>, usize, usize) {
+fn validate_track_b(conn: &Connection, config: &ValidateConfig) -> (Vec<Check>, usize, usize) {
     let mut checks = Vec::new();
 
     if !table_exists(conn, "token_daily_stats") || !table_exists(conn, "token_usage") {
@@ -484,10 +501,10 @@ fn validate_track_b(
     if let Ok(mut stmt) = conn.prepare(&sql)
         && let Ok(rows) = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, i64>(4)?,  // tds.grand_total_tokens
-                row.get::<_, i64>(5)?,  // tu.sum_total
-                row.get::<_, i64>(6)?,  // tds.total_tool_calls
-                row.get::<_, i64>(7)?,  // tu.sum_tools
+                row.get::<_, i64>(4)?, // tds.grand_total_tokens
+                row.get::<_, i64>(5)?, // tu.sum_total
+                row.get::<_, i64>(6)?, // tds.total_tool_calls
+                row.get::<_, i64>(7)?, // tu.sum_tools
             ))
         })
     {
@@ -506,10 +523,12 @@ fn validate_track_b(
     checks.push(Check {
         id: "track_b.grand_total_match".into(),
         ok: mismatches_total == 0,
-        severity: if mismatches_total > 0 { Severity::Error } else { Severity::Info },
-        details: format!(
-            "grand_total_tokens: {mismatches_total}/{checked} buckets mismatched"
-        ),
+        severity: if mismatches_total > 0 {
+            Severity::Error
+        } else {
+            Severity::Info
+        },
+        details: format!("grand_total_tokens: {mismatches_total}/{checked} buckets mismatched"),
         suggested_action: if mismatches_total > 0 {
             Some("Run 'cass analytics rebuild --track all'".into())
         } else {
@@ -520,10 +539,12 @@ fn validate_track_b(
     checks.push(Check {
         id: "track_b.tool_calls_match".into(),
         ok: mismatches_tools == 0,
-        severity: if mismatches_tools > 0 { Severity::Warning } else { Severity::Info },
-        details: format!(
-            "total_tool_calls: {mismatches_tools}/{checked} buckets mismatched"
-        ),
+        severity: if mismatches_tools > 0 {
+            Severity::Warning
+        } else {
+            Severity::Info
+        },
+        details: format!("total_tool_calls: {mismatches_tools}/{checked} buckets mismatched"),
         suggested_action: if mismatches_tools > 0 {
             Some("Run 'cass analytics rebuild --track all'".into())
         } else {
@@ -621,85 +642,79 @@ fn validate_cross_track_drift(
 
     // Try compatible SQL (UNION-based).
     let query_result = conn.prepare(&sql_compat);
-    if let Ok(mut stmt) = query_result {
-        if let Ok(rows) = stmt.query_map([], |row| {
+    if let Ok(mut stmt) = query_result
+        && let Ok(rows) = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,    // day_id
-                row.get::<_, String>(1)?,  // agent_slug
-                row.get::<_, String>(2)?,  // source_id
-                row.get::<_, i64>(3)?,     // a_total
-                row.get::<_, i64>(4)?,     // b_total
+                row.get::<_, String>(1)?, // agent_slug
+                row.get::<_, String>(2)?, // source_id
+                row.get::<_, i64>(3)?,    // a_total
+                row.get::<_, i64>(4)?,    // b_total
             ))
-        }) {
-            for row in rows.flatten() {
-                drift_checked += 1;
-                let (day_id, agent_slug, source_id, a_total, b_total) = row;
-                let delta = a_total - b_total;
-                let denom = a_total.max(b_total).max(1);
-                let delta_pct = (delta.abs() as f64 / denom as f64) * 100.0;
+        })
+    {
+        for row in rows.flatten() {
+            drift_checked += 1;
+            let (day_id, agent_slug, source_id, a_total, b_total) = row;
+            let delta = a_total - b_total;
+            let denom = a_total.max(b_total).max(1);
+            let delta_pct = (delta.abs() as f64 / denom as f64) * 100.0;
 
-                if delta.abs() > config.drift_abs_threshold
-                    && delta_pct > config.drift_pct_threshold
-                {
-                    drift_count += 1;
-                    let likely_cause = if a_total > 0 && b_total == 0 {
-                        "Track B missing rows (rebuild needed or not yet ingested)"
-                    } else if b_total > 0 && a_total == 0 {
-                        "Track A missing rows (rebuild needed)"
-                    } else if a_total > b_total {
-                        "Track A higher — Track B may be stale or missing some messages"
-                    } else {
-                        "Track B higher — Track A may have been rebuilt recently without all data"
-                    };
+            if delta.abs() > config.drift_abs_threshold && delta_pct > config.drift_pct_threshold {
+                drift_count += 1;
+                let likely_cause = if a_total > 0 && b_total == 0 {
+                    "Track B missing rows (rebuild needed or not yet ingested)"
+                } else if b_total > 0 && a_total == 0 {
+                    "Track A missing rows (rebuild needed)"
+                } else if a_total > b_total {
+                    "Track A higher — Track B may be stale or missing some messages"
+                } else {
+                    "Track B higher — Track A may have been rebuilt recently without all data"
+                };
 
-                    entries.push(DriftEntry {
-                        day_id,
-                        agent_slug,
-                        source_id,
-                        track_a_total: a_total,
-                        track_b_total: b_total,
-                        delta,
-                        delta_pct: (delta_pct * 100.0).round() / 100.0,
-                        likely_cause: likely_cause.into(),
-                    });
-                }
+                entries.push(DriftEntry {
+                    day_id,
+                    agent_slug,
+                    source_id,
+                    track_a_total: a_total,
+                    track_b_total: b_total,
+                    delta,
+                    delta_pct: (delta_pct * 100.0).round() / 100.0,
+                    likely_cause: likely_cause.into(),
+                });
             }
         }
-    } else {
-        // If the UNION query also fails (shouldn't happen), try FULL OUTER JOIN.
-        if let Ok(mut stmt) = conn.prepare(&sql) {
-            if let Ok(rows) = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            }) {
-                for row in rows.flatten() {
-                    drift_checked += 1;
-                    let (day_id, agent_slug, source_id, a_total, b_total) = row;
-                    let delta = a_total - b_total;
-                    let denom = a_total.max(b_total).max(1);
-                    let delta_pct = (delta.abs() as f64 / denom as f64) * 100.0;
+    } else if let Ok(mut stmt) = conn.prepare(&sql)
+        && let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+    {
+        // Fallback: FULL OUTER JOIN (if UNION approach failed).
+        for row in rows.flatten() {
+            drift_checked += 1;
+            let (day_id, agent_slug, source_id, a_total, b_total) = row;
+            let delta = a_total - b_total;
+            let denom = a_total.max(b_total).max(1);
+            let delta_pct = (delta.abs() as f64 / denom as f64) * 100.0;
 
-                    if delta.abs() > config.drift_abs_threshold
-                        && delta_pct > config.drift_pct_threshold
-                    {
-                        drift_count += 1;
-                        entries.push(DriftEntry {
-                            day_id,
-                            agent_slug,
-                            source_id,
-                            track_a_total: a_total,
-                            track_b_total: b_total,
-                            delta,
-                            delta_pct: (delta_pct * 100.0).round() / 100.0,
-                            likely_cause: "drift detected (unknown cause)".into(),
-                        });
-                    }
-                }
+            if delta.abs() > config.drift_abs_threshold && delta_pct > config.drift_pct_threshold {
+                drift_count += 1;
+                entries.push(DriftEntry {
+                    day_id,
+                    agent_slug,
+                    source_id,
+                    track_a_total: a_total,
+                    track_b_total: b_total,
+                    delta,
+                    delta_pct: (delta_pct * 100.0).round() / 100.0,
+                    likely_cause: "drift detected (unknown cause)".into(),
+                });
             }
         }
     }
@@ -708,7 +723,11 @@ fn validate_cross_track_drift(
     checks.push(Check {
         id: "cross_track.drift".into(),
         ok: total_ok,
-        severity: if drift_count > 0 { Severity::Warning } else { Severity::Info },
+        severity: if drift_count > 0 {
+            Severity::Warning
+        } else {
+            Severity::Info
+        },
         details: format!(
             "Cross-track drift: {drift_count}/{drift_checked} day+agent+source slices drifted"
         ),
@@ -1134,11 +1153,7 @@ mod tests {
         assert!(
             report.all_ok(),
             "All checks should pass on consistent fixture: {:#?}",
-            report
-                .checks
-                .iter()
-                .filter(|c| !c.ok)
-                .collect::<Vec<_>>()
+            report.checks.iter().filter(|c| !c.ok).collect::<Vec<_>>()
         );
         assert!(report.drift.is_empty());
     }
@@ -1271,13 +1286,19 @@ mod tests {
     fn perf_query_guardrail_completes() {
         let conn = setup_track_a_fixture();
         let m = perf_query_guardrail(&conn);
-        assert!(m.within_budget, "Query should be within 500ms budget on fixture");
+        assert!(
+            m.within_budget,
+            "Query should be within 500ms budget on fixture"
+        );
     }
 
     #[test]
     fn perf_breakdown_guardrail_completes() {
         let conn = setup_track_a_fixture();
         let m = perf_breakdown_guardrail(&conn);
-        assert!(m.within_budget, "Breakdown should be within 200ms budget on fixture");
+        assert!(
+            m.within_budget,
+            "Breakdown should be within 200ms budget on fixture"
+        );
     }
 }
