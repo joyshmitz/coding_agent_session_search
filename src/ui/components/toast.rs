@@ -3,17 +3,13 @@
 //! Provides non-blocking notifications that auto-dismiss after a configurable duration.
 //! Supports coalescing of similar messages to prevent notification spam.
 
-use ratatui::{
-    Frame,
-    layout::{Alignment, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
-};
+use ftui::core::geometry::Rect;
+use ftui::render::cell::PackedRgba;
+use ratatui::style::Color;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use super::theme::ThemePalette;
+use super::theme::{ThemePalette, to_ratatui_color};
 
 /// Type of toast notification, determines styling and icon
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,13 +35,13 @@ impl ToastType {
         }
     }
 
-    /// Get the color for this toast type
+    /// Get the color for this toast type as a ratatui Color.
     pub fn color(self, palette: &ThemePalette) -> Color {
         match self {
-            Self::Info => palette.accent,
-            Self::Success => palette.user,            // Green-ish
-            Self::Warning => palette.system,          // Yellow/amber
-            Self::Error => Color::Rgb(247, 118, 142), // Red
+            Self::Info => to_ratatui_color(palette.accent),
+            Self::Success => to_ratatui_color(palette.user),
+            Self::Warning => to_ratatui_color(palette.system),
+            Self::Error => to_ratatui_color(PackedRgba::rgb(247, 118, 142)),
         }
     }
 
@@ -281,59 +277,6 @@ impl ToastManager {
         };
 
         Rect::new(x, y, toast_width, toast_height)
-    }
-}
-
-/// Render toasts to a frame
-pub fn render_toasts(frame: &mut Frame, manager: &ToastManager, palette: &ThemePalette) {
-    if manager.is_empty() {
-        return;
-    }
-
-    let area = manager.render_area(frame.area());
-    let toast_height = 3u16; // Each toast is 3 lines (border + content + border)
-
-    for (i, toast) in manager.visible().enumerate() {
-        let y_offset = i as u16 * toast_height;
-        if y_offset + toast_height > area.height {
-            break;
-        }
-
-        let toast_area = Rect::new(area.x, area.y + y_offset, area.width, toast_height);
-
-        // Clear the area first
-        frame.render_widget(Clear, toast_area);
-
-        // Build the toast content
-        let color = toast.toast_type.color(palette);
-        let icon = toast.toast_type.icon();
-
-        let count_suffix = if toast.count > 1 {
-            format!(" (x{})", toast.count)
-        } else {
-            String::new()
-        };
-
-        let content = Line::from(vec![
-            Span::styled(
-                format!("[{icon}] "),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(&toast.message, Style::default().fg(palette.fg)),
-            Span::styled(count_suffix, Style::default().fg(palette.hint)),
-        ]);
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(color))
-            .style(Style::default().bg(palette.surface));
-
-        let paragraph = Paragraph::new(content)
-            .block(block)
-            .wrap(Wrap { trim: true })
-            .alignment(Alignment::Left);
-
-        frame.render_widget(paragraph, toast_area);
     }
 }
 

@@ -2,16 +2,11 @@
 //! Displays current context (Agent › Workspace › Date) and ranking.
 //! Interactive elements allow direct clearing/changing of filters.
 
-use ftui::text::{Line, Span};
-use ftui::widgets::block::Block;
-use ftui::widgets::borders::Borders;
-use ftui::widgets::paragraph::Paragraph;
-use ftui::widgets::Widget;
-use ftui::{Frame, Style};
-use ftui::core::geometry::Rect;
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Paragraph};
 
 use crate::search::query::SearchFilters;
-use crate::ui::components::theme::ThemePalette;
+use crate::ui::components::theme::{ThemePalette, to_ratatui_color};
 use crate::ui::tui;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,7 +41,10 @@ pub fn render_breadcrumbs(
 
     // Helper to add a separator
     let add_sep = |spans: &mut Vec<Span>| {
-        spans.push(Span::styled(" › ", Style::new().fg(palette.hint)));
+        spans.push(Span::styled(
+            " › ",
+            Style::default().fg(to_ratatui_color(palette.hint)),
+        ));
     };
 
     // 1. Agent
@@ -62,11 +60,20 @@ pub fn render_breadcrumbs(
         }
     };
     let agent_style = if filters.agents.is_empty() {
-        Style::new().fg(palette.hint)
+        Style::default().fg(to_ratatui_color(palette.hint))
     } else {
-        Style::new().fg(palette.accent).bold()
+        Style::default()
+            .fg(to_ratatui_color(palette.accent))
+            .add_modifier(Modifier::BOLD)
     };
     spans.push(Span::styled(agent_text.clone(), agent_style));
+    // Simplified rect tracking: we just map the whole area for now since individual click
+    // handling requires precise text measurement which Paragraph doesn't easily expose
+    // in a way that maps 1:1 to screen coordinates without manual layout.
+    // For this iteration, we'll render the text and return generic hit areas if needed,
+    // or rely on the caller to handle general interaction.
+    // However, to support "crumb choosers", we really want distinct zones.
+    // Let's approximate width based on display width (not just char count).
     use unicode_width::UnicodeWidthStr;
 
     let mut current_x = area.x;
@@ -94,9 +101,11 @@ pub fn render_breadcrumbs(
         }
     };
     let ws_style = if filters.workspaces.is_empty() {
-        Style::new().fg(palette.hint)
+        Style::default().fg(to_ratatui_color(palette.hint))
     } else {
-        Style::new().fg(palette.accent).bold()
+        Style::default()
+            .fg(to_ratatui_color(palette.accent))
+            .add_modifier(Modifier::BOLD)
     };
     spans.push(Span::styled(ws_text.clone(), ws_style));
     let ws_width = measure_width(&ws_text);
@@ -120,9 +129,11 @@ pub fn render_breadcrumbs(
         ),
     };
     let date_style = if filters.created_from.is_none() && filters.created_to.is_none() {
-        Style::new().fg(palette.hint)
+        Style::default().fg(to_ratatui_color(palette.hint))
     } else {
-        Style::new().fg(palette.accent).bold()
+        Style::default()
+            .fg(to_ratatui_color(palette.accent))
+            .add_modifier(Modifier::BOLD)
     };
     spans.push(Span::styled(date_text.clone(), date_style));
     let date_width = measure_width(&date_text);
@@ -136,7 +147,12 @@ pub fn render_breadcrumbs(
 
     // 4. Ranking
     let rank_text = ranking_label(ranking);
-    spans.push(Span::styled(rank_text, Style::new().fg(palette.fg)));
+    // Ranking is always active, so we use a distinct color but maybe not bold unless changed?
+    // Let's keep it subtle but distinct.
+    spans.push(Span::styled(
+        rank_text,
+        Style::default().fg(to_ratatui_color(palette.fg)),
+    ));
     let rank_width = measure_width(rank_text);
     rects.push((
         Rect::new(current_x, area.y, rank_width, 1),
@@ -144,9 +160,9 @@ pub fn render_breadcrumbs(
     ));
 
     // Render
-    let para = Paragraph::new(Line::from_spans(spans))
-        .block(Block::new().style(Style::new().bg(palette.bg)));
-    para.render(area, f);
+    let para = Paragraph::new(Line::from(spans))
+        .block(Block::default().style(Style::default().bg(to_ratatui_color(palette.bg))));
+    f.render_widget(para, area);
 
     rects
 }

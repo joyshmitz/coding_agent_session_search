@@ -504,10 +504,7 @@ fn build_stylesheet(palette: &ThemePalette, is_dark: bool, flags: &ThemeFlags) -
             })
             .bold(),
     );
-    sheet.define(
-        style_ids::CHIP,
-        Style::new().fg(palette.accent_alt).bold(),
-    );
+    sheet.define(style_ids::CHIP, Style::new().fg(palette.accent_alt).bold());
     sheet.define(style_ids::KBD, Style::new().fg(palette.accent).bold());
     sheet.define(
         style_ids::CODE,
@@ -521,14 +518,8 @@ fn build_stylesheet(palette: &ThemePalette, is_dark: bool, flags: &ThemeFlags) -
     );
 
     // Zebra stripes
-    sheet.define(
-        style_ids::STRIPE_EVEN,
-        Style::new().bg(palette.stripe_even),
-    );
-    sheet.define(
-        style_ids::STRIPE_ODD,
-        Style::new().bg(palette.stripe_odd),
-    );
+    sheet.define(style_ids::STRIPE_EVEN, Style::new().bg(palette.stripe_even));
+    sheet.define(style_ids::STRIPE_ODD, Style::new().bg(palette.stripe_odd));
 
     // Gradients (only meaningful for dark presets with truecolor)
     if !flags.no_gradient {
