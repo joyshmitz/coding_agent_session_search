@@ -3252,10 +3252,8 @@ impl super::ftui_adapter::Model for CassApp {
                     match copy_to_clipboard(hit.content.as_str()) {
                         Ok(()) => {
                             self.status = "Copied content to clipboard".to_string();
-                            self.toast_manager.push(Toast::new(
-                                "Copied content".to_string(),
-                                ToastType::Success,
-                            ));
+                            self.toast_manager
+                                .push(Toast::new("Copied content".to_string(), ToastType::Success));
                         }
                         Err(e) => {
                             self.status = format!("Clipboard: {e}");
@@ -3265,6 +3263,26 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                 } else {
                     self.status = "No active result to copy.".to_string();
+                }
+                ftui::Cmd::none()
+            }
+            CassMsg::CopyQuery => {
+                use crate::ui::components::toast::{Toast, ToastType};
+                if self.query.is_empty() {
+                    self.status = "No query to copy.".to_string();
+                } else {
+                    match copy_to_clipboard(&self.query) {
+                        Ok(()) => {
+                            self.status = "Copied query to clipboard".to_string();
+                            self.toast_manager
+                                .push(Toast::new("Copied query".to_string(), ToastType::Success));
+                        }
+                        Err(e) => {
+                            self.status = format!("Clipboard: {e}");
+                            self.toast_manager
+                                .push(Toast::new(format!("Copy failed: {e}"), ToastType::Error));
+                        }
+                    }
                 }
                 ftui::Cmd::none()
             }
@@ -4814,15 +4832,6 @@ fn split_editor_command(editor: &str) -> (String, Vec<String>) {
     }
 }
 
-#[cfg(not(test))]
-fn command_exists(binary: &str) -> bool {
-    StdCommand::new("which")
-        .arg(binary)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 fn copy_to_clipboard(_text: &str) -> Result<(), String> {
     Ok(())
@@ -4835,8 +4844,8 @@ fn copy_to_clipboard(_text: &str) -> Result<(), String> {
 /// (pbcopy/wl-copy/xclip/xsel).
 #[cfg(not(test))]
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    use ftui_extras::clipboard::{Clipboard, ClipboardSelection};
     use ftui::TerminalCapabilities;
+    use ftui_extras::clipboard::{Clipboard, ClipboardSelection};
 
     if text.is_empty() {
         return Ok(());
@@ -7059,5 +7068,184 @@ mod tests {
         let buf = render_at_degradation(&app, 80, 24, ftui::render::budget::DegradationLevel::Full);
         let text = buffer_to_text(&buf);
         assert!(text.contains("Bulk Actions"));
+    }
+
+    // =====================================================================
+    // 2noh9.6.3 — Final UI polish
+    // =====================================================================
+
+    #[test]
+    fn render_80x24_no_panic() {
+        let app = CassApp::default();
+        let buf = render_at_degradation(&app, 80, 24, ftui::render::budget::DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(text.contains("cass"), "should show app title");
+        assert!(
+            text.contains("narrow"),
+            "80-col should show narrow breakpoint"
+        );
+    }
+
+    #[test]
+    fn render_40x12_no_panic() {
+        // Extreme small terminal — must not panic
+        let app = CassApp::default();
+        let _buf =
+            render_at_degradation(&app, 40, 12, ftui::render::budget::DegradationLevel::Full);
+    }
+
+    #[test]
+    fn render_1x1_no_panic() {
+        // Degenerate case
+        let app = CassApp::default();
+        let _buf = render_at_degradation(&app, 1, 1, ftui::render::budget::DegradationLevel::Full);
+    }
+
+    #[test]
+    fn status_footer_adapts_to_width() {
+        use ftui_harness::buffer_to_text;
+
+        let app = CassApp::default();
+
+        // Wide: shows full hints
+        let wide_text = ftui_harness::buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            ftui::render::budget::DegradationLevel::Full,
+        ));
+        assert!(
+            wide_text.contains("F2=theme"),
+            "wide footer should show full hints"
+        );
+
+        // Narrow: abbreviated hints
+        let narrow_text = ftui_harness::buffer_to_text(&render_at_degradation(
+            &app,
+            70,
+            24,
+            ftui::render::budget::DegradationLevel::Full,
+        ));
+        assert!(
+            !narrow_text.contains("F2=theme"),
+            "narrow footer should omit verbose hints"
+        );
+    }
+
+    #[test]
+    fn search_title_adapts_to_width() {
+        use ftui_harness::buffer_to_text;
+
+        let app = CassApp::default();
+
+        // Wide: shows theme name
+        let wide_text = ftui_harness::buffer_to_text(&render_at_degradation(
+            &app,
+            100,
+            24,
+            ftui::render::budget::DegradationLevel::Full,
+        ));
+        assert!(
+            wide_text.contains("Dark") || wide_text.contains("Light"),
+            "wide search title should show theme preset name"
+        );
+
+        // Narrow: just mode
+        let narrow_text = ftui_harness::buffer_to_text(&render_at_degradation(
+            &app,
+            60,
+            24,
+            ftui::render::budget::DegradationLevel::Full,
+        ));
+        assert!(
+            narrow_text.contains("lexical"),
+            "narrow search title should show mode"
+        );
+    }
+
+    #[test]
+    fn results_title_shows_selection_count() {
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(3);
+        let _ = app.update(CassMsg::SelectAllToggled);
+        let text = ftui_harness::buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            ftui::render::budget::DegradationLevel::Full,
+        ));
+        assert!(
+            text.contains("selected"),
+            "results title should show selection count when items selected"
+        );
+    }
+
+    #[test]
+    fn analytics_header_adapts_to_width() {
+        use ftui_harness::buffer_to_text;
+
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+
+        // Wide: shows all view tabs
+        let wide_text = ftui_harness::buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            ftui::render::budget::DegradationLevel::Full,
+        ));
+        assert!(
+            wide_text.contains("Dashboard"),
+            "wide analytics should show view tabs"
+        );
+
+        // Narrow: just current view
+        let narrow_text = ftui_harness::buffer_to_text(&render_at_degradation(
+            &app,
+            70,
+            24,
+            ftui::render::budget::DegradationLevel::Full,
+        ));
+        assert!(
+            narrow_text.contains("analytics"),
+            "narrow analytics should show label"
+        );
+    }
+
+    #[test]
+    fn adaptive_borders_reach_results_and_detail_panes() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let app = CassApp::default();
+
+        // At EssentialOnly, borders should be dropped from all panes
+        let essential = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::EssentialOnly,
+        ));
+        let full = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+
+        // Full should have more border characters than EssentialOnly
+        let full_border_chars = full
+            .chars()
+            .filter(|c| matches!(c, '─' | '│' | '┌' | '┐' | '└' | '┘' | '╭' | '╮' | '╯' | '╰'))
+            .count();
+        let essential_border_chars = essential
+            .chars()
+            .filter(|c| matches!(c, '─' | '│' | '┌' | '┐' | '└' | '┘' | '╭' | '╮' | '╯' | '╰'))
+            .count();
+        assert!(
+            full_border_chars > essential_border_chars,
+            "EssentialOnly should have fewer border characters than Full (full={full_border_chars}, essential={essential_border_chars})"
+        );
     }
 }
