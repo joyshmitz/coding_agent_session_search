@@ -2313,58 +2313,115 @@ impl ResultItem {
         elide_text(&parts.join(" | "), max_width)
     }
 
+    fn snippet_source(&self) -> &str {
+        let snippet = self.hit.snippet.trim();
+        if !snippet.is_empty() {
+            return snippet;
+        }
+        let content = self.hit.content.trim();
+        if !content.is_empty() {
+            return content;
+        }
+        let title = self.hit.title.trim();
+        if !title.is_empty() {
+            return title;
+        }
+        "<no snippet>"
+    }
+
+    fn char_boundary_at(text: &str, char_limit: usize) -> usize {
+        if char_limit == 0 {
+            return 0;
+        }
+        for (seen, (idx, ch)) in text.char_indices().enumerate() {
+            if seen + 1 == char_limit {
+                return idx + ch.len_utf8();
+            }
+        }
+        text.len()
+    }
+
+    fn wrap_break_index(line: &str, width: usize) -> usize {
+        let boundary = Self::char_boundary_at(line, width);
+        let mut last_whitespace = None;
+        for (idx, ch) in line[..boundary].char_indices() {
+            if ch.is_whitespace() {
+                last_whitespace = Some(idx);
+            }
+        }
+        last_whitespace.filter(|idx| *idx > 0).unwrap_or(boundary)
+    }
+
+    fn snippet_line_budget(&self, max_width: usize) -> usize {
+        let base: usize = match self.row_height {
+            0..=3 => 0,
+            4 => 1,
+            5 => 2,
+            _ => 3,
+        };
+        if base == 0 {
+            return 0;
+        }
+        if max_width < 28 {
+            base.saturating_sub(1).max(1)
+        } else {
+            base
+        }
+    }
+
+    fn compact_snippet_preview(&self, max_width: usize) -> Option<String> {
+        if max_width < 10 {
+            return None;
+        }
+        self.snippet_lines(max_width, 1).into_iter().next()
+    }
+
     fn snippet_lines(&self, max_width: usize, max_lines: usize) -> Vec<String> {
         if max_lines == 0 {
             return Vec::new();
         }
 
-        let source = if self.hit.snippet.trim().is_empty() {
-            self.hit.content.trim()
-        } else {
-            self.hit.snippet.trim()
-        };
+        let source = self.snippet_source();
         if source.is_empty() {
             return vec!["<no snippet>".to_string()];
         }
 
-        let width = max_width.max(20);
+        let width = max_width.max(8);
         let mut out: Vec<String> = Vec::new();
         for raw in source
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
         {
-            let mut line = String::new();
-            for word in raw.split_whitespace() {
-                if line.is_empty() {
-                    if word.chars().count() > width {
-                        out.push(elide_text(word, width));
-                    } else {
-                        line.push_str(word);
-                    }
-                } else {
-                    let candidate_len = line.chars().count() + 1 + word.chars().count();
-                    if candidate_len <= width {
-                        line.push(' ');
-                        line.push_str(word);
-                    } else {
-                        out.push(line);
-                        line = if word.chars().count() > width {
-                            elide_text(word, width)
-                        } else {
-                            word.to_string()
-                        };
-                    }
-                }
+            let mut remaining = raw;
+            while !remaining.is_empty() {
                 if out.len() >= max_lines {
                     return out;
                 }
-            }
-            if !line.is_empty() {
-                out.push(line);
+                if remaining.chars().count() <= width {
+                    out.push(remaining.to_string());
+                    break;
+                }
+                if out.len() + 1 >= max_lines {
+                    out.push(elide_text(remaining, width));
+                    return out;
+                }
+
+                let break_idx = Self::wrap_break_index(remaining, width);
+                if break_idx == 0 {
+                    out.push(elide_text(remaining, width));
+                    break;
+                }
+                let segment = remaining[..break_idx].trim_end();
+                if segment.is_empty() {
+                    out.push(elide_text(remaining, width));
+                    break;
+                }
+                out.push(segment.to_string());
+                remaining = remaining[break_idx..].trim_start();
             }
             if out.len() >= max_lines {
-                break;
+                return out;
             }
         }
 
@@ -2419,10 +2476,11 @@ impl RenderItem for ResultItem {
 
         // Line 2: score bar + source badge + metadata
         let score_bar = score_bar_str(hit.score);
+        let score_bar_chars = score_bar.chars().count();
         let source_badge = self.source_badge();
+        let source_badge_chars = source_badge.chars().count();
         let source_is_remote = hit.source_id != "local";
-        let meta = self.metadata_line(content_width.saturating_sub(20));
-        let meta_line = ftui::text::Line::from_spans(vec![
+        let mut meta_spans = vec![
             ftui::text::Span::styled("      ", bg_style),
             ftui::text::Span::styled(score_bar, self.score_style),
             ftui::text::Span::styled(" ", bg_style),
@@ -2434,8 +2492,27 @@ impl RenderItem for ResultItem {
                     self.source_local_style
                 },
             ),
-            ftui::text::Span::styled(format!(" {meta}"), self.text_muted_style),
-        ]);
+        ];
+        let compact_preview = if self.row_height <= 2 {
+            let used = 6 + score_bar_chars + 1 + source_badge_chars + 3;
+            self.compact_snippet_preview(content_width.saturating_sub(used))
+        } else {
+            None
+        };
+        if let Some(snippet_preview) = compact_preview {
+            meta_spans.push(ftui::text::Span::styled(" · ", self.text_muted_style));
+            meta_spans.push(ftui::text::Span::styled(
+                snippet_preview,
+                self.text_subtle_style,
+            ));
+        } else {
+            let meta = self.metadata_line(content_width.saturating_sub(20));
+            meta_spans.push(ftui::text::Span::styled(
+                format!(" {meta}"),
+                self.text_muted_style,
+            ));
+        }
+        let meta_line = ftui::text::Line::from_spans(meta_spans);
 
         let mut lines = vec![title_line, meta_line];
 
@@ -2450,7 +2527,7 @@ impl RenderItem for ResultItem {
         }
 
         if self.row_height >= 4 {
-            let snippet_budget = usize::from(self.row_height.saturating_sub(3));
+            let snippet_budget = self.snippet_line_budget(content_width.saturating_sub(6));
             let snippet_lines = self.snippet_lines(content_width.saturating_sub(6), snippet_budget);
             for snippet in snippet_lines {
                 lines.push(ftui::text::Line::from_spans(vec![
@@ -2583,6 +2660,76 @@ fn build_footer_hud_line(
     }
 
     ftui::text::Line::from_spans(spans)
+}
+
+/// Build the detail-pane find bar line with styled query + match-state segments.
+fn build_detail_find_bar_line(
+    find: &DetailFindState,
+    width: u16,
+    query_style: ftui::Style,
+    match_active_style: ftui::Style,
+    match_inactive_style: ftui::Style,
+) -> ftui::text::Line {
+    if width == 0 {
+        return ftui::text::Line::raw(String::new());
+    }
+
+    if find.query.is_empty() {
+        return ftui::text::Line::from_spans(vec![ftui::text::Span::styled(
+            elide_text("/ type to find", width as usize),
+            match_inactive_style,
+        )]);
+    }
+
+    let match_segments: Vec<(String, ftui::Style)> = if find.matches.is_empty() {
+        vec![
+            (" (".to_string(), match_inactive_style),
+            ("0".to_string(), match_active_style),
+            ("/0".to_string(), match_inactive_style),
+            (" no matches)".to_string(), match_inactive_style),
+        ]
+    } else {
+        vec![
+            (" (".to_string(), match_inactive_style),
+            ((find.current + 1).to_string(), match_active_style),
+            (format!("/{}", find.matches.len()), match_inactive_style),
+            (")".to_string(), match_inactive_style),
+        ]
+    };
+    let suffix_chars: usize = match_segments
+        .iter()
+        .map(|(text, _)| text.chars().count())
+        .sum();
+    let query_budget = (width as usize).saturating_sub(1 + suffix_chars);
+    if query_budget == 0 {
+        return ftui::text::Line::raw(elide_text(&format!("/{}", find.query), width as usize));
+    }
+
+    let query_text = elide_text(&find.query, query_budget);
+    let mut spans: Vec<ftui::text::Span<'static>> = vec![
+        ftui::text::Span::styled("/".to_string(), match_inactive_style),
+        ftui::text::Span::styled(query_text, query_style),
+    ];
+    for (text, style) in match_segments {
+        spans.push(ftui::text::Span::styled(text, style));
+    }
+    let line = ftui::text::Line::from_spans(spans);
+
+    let rendered_len: usize = line
+        .spans()
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum();
+    if rendered_len > width as usize {
+        let plain: String = line
+            .spans()
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        ftui::text::Line::raw(elide_text(&plain, width as usize))
+    } else {
+        line
+    }
 }
 
 fn summarize_filter_values(values: &HashSet<String>, empty_label: &str) -> String {
@@ -4134,9 +4281,10 @@ impl CassApp {
         }
     }
 
-    fn active_filter_pills(&self) -> Vec<Pill> {
+    fn filter_pills(&self) -> Vec<Pill> {
         let mut pills = Vec::new();
 
+        // Agent filter — active if set, inactive placeholder otherwise
         if !self.filters.agents.is_empty() {
             pills.push(Pill {
                 label: "agent".to_string(),
@@ -4144,7 +4292,16 @@ impl CassApp {
                 active: true,
                 editable: true,
             });
+        } else {
+            pills.push(Pill {
+                label: "agent".to_string(),
+                value: "any".to_string(),
+                active: false,
+                editable: true,
+            });
         }
+
+        // Workspace filter
         if !self.filters.workspaces.is_empty() {
             pills.push(Pill {
                 label: "ws".to_string(),
@@ -4152,7 +4309,50 @@ impl CassApp {
                 active: true,
                 editable: true,
             });
+        } else {
+            pills.push(Pill {
+                label: "ws".to_string(),
+                value: "any".to_string(),
+                active: false,
+                editable: true,
+            });
         }
+
+        // Time filter
+        if let Some(time) = format_time_chip(self.filters.created_from, self.filters.created_to) {
+            pills.push(Pill {
+                label: "time".to_string(),
+                value: time,
+                active: true,
+                editable: true,
+            });
+        } else {
+            pills.push(Pill {
+                label: "time".to_string(),
+                value: "all".to_string(),
+                active: false,
+                editable: true,
+            });
+        }
+
+        // Source filter
+        if !self.filters.source_filter.is_all() {
+            pills.push(Pill {
+                label: "source".to_string(),
+                value: self.filters.source_filter.to_string(),
+                active: true,
+                editable: true,
+            });
+        } else {
+            pills.push(Pill {
+                label: "source".to_string(),
+                value: "all".to_string(),
+                active: false,
+                editable: true,
+            });
+        }
+
+        // Pane filter — only shown when active (no inactive placeholder)
         if let Some(pane_filter) = self.pane_filter.as_deref().filter(|s| !s.trim().is_empty()) {
             pills.push(Pill {
                 label: "pane".to_string(),
@@ -4161,35 +4361,33 @@ impl CassApp {
                 editable: true,
             });
         }
-        if let Some(time) = format_time_chip(self.filters.created_from, self.filters.created_to) {
-            pills.push(Pill {
-                label: "time".to_string(),
-                value: time,
-                active: true,
-                editable: true,
-            });
-        }
-        if !self.filters.source_filter.is_all() {
-            pills.push(Pill {
-                label: "source".to_string(),
-                value: self.filters.source_filter.to_string(),
-                active: true,
-                editable: true,
-            });
-        }
 
         pills
     }
 
-    fn build_pills_row(&self, area: Rect, pills: &[Pill]) -> (String, Vec<(Rect, Pill)>) {
+    fn build_pills_row(
+        &self,
+        area: Rect,
+        pills: &[Pill],
+        active_style: ftui::Style,
+        inactive_style: ftui::Style,
+        label_style: ftui::Style,
+        separator_style: ftui::Style,
+    ) -> (ftui::text::Line, Vec<(Rect, Pill)>) {
         if area.is_empty() {
-            return (String::new(), Vec::new());
+            return (ftui::text::Line::from_spans(vec![]), Vec::new());
         }
         if pills.is_empty() {
-            return ("No active filters".to_string(), Vec::new());
+            return (
+                ftui::text::Line::from_spans(vec![ftui::text::Span::styled(
+                    "No active filters",
+                    separator_style,
+                )]),
+                Vec::new(),
+            );
         }
 
-        let mut text = String::new();
+        let mut spans: Vec<ftui::text::Span> = Vec::new();
         let mut rects: Vec<(Rect, Pill)> = Vec::new();
         let mut x = area.x;
         let end_x = area.x.saturating_add(area.width);
@@ -4199,7 +4397,7 @@ impl CassApp {
                 break;
             }
             if idx > 0 {
-                text.push(' ');
+                spans.push(ftui::text::Span::styled(" ", separator_style));
                 x = x.saturating_add(1);
             }
 
@@ -4210,15 +4408,41 @@ impl CassApp {
                 break;
             }
             let width = rendered.chars().count() as u16;
-            text.push_str(&rendered);
+
+            // Per-pill styling: label portion gets label_style, value gets active/inactive
+            let value_style = if pill.active {
+                active_style
+            } else {
+                inactive_style
+            };
+
+            // Split rendered text into label and value parts at the ':'
+            if let Some(colon_pos) = rendered.find(':') {
+                let label_part = &rendered[..=colon_pos];
+                let value_part = &rendered[colon_pos + 1..];
+                spans.push(ftui::text::Span::styled(
+                    label_part.to_string(),
+                    label_style,
+                ));
+                spans.push(ftui::text::Span::styled(
+                    value_part.to_string(),
+                    value_style,
+                ));
+            } else {
+                spans.push(ftui::text::Span::styled(rendered, value_style));
+            }
+
             rects.push((Rect::new(x, area.y, width, 1), pill.clone()));
             x = x.saturating_add(width);
         }
 
-        if text.is_empty() {
-            text.push_str("No active filters");
+        if spans.is_empty() {
+            spans.push(ftui::text::Span::styled(
+                "No active filters",
+                separator_style,
+            ));
         }
-        (text, rects)
+        (ftui::text::Line::from_spans(spans), rects)
     }
 
     fn breadcrumb_line(&self, width: u16) -> String {
@@ -4988,7 +5212,7 @@ impl CassApp {
 
         // Reserve space for find bar if active
         let (content_area, find_area) = if self.detail_find.is_some() {
-            let find_h = 1u16;
+            let find_h = if inner.height >= 4 { 2u16 } else { 1u16 };
             if inner.height <= find_h + 1 {
                 (inner, None)
             } else {
@@ -5070,20 +5294,59 @@ impl CassApp {
 
         // Render find bar if active
         if let (Some(find), Some(find_rect)) = (&self.detail_find, find_area) {
-            let find_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
-            let match_info = if find.matches.is_empty() {
-                if find.query.is_empty() {
-                    String::new()
-                } else {
-                    " (no matches)".to_string()
+            let container_style = styles.style(style_system::STYLE_DETAIL_FIND_CONTAINER);
+            let query_style = styles.style(style_system::STYLE_DETAIL_FIND_QUERY);
+            let match_active_style = styles.style(style_system::STYLE_DETAIL_FIND_MATCH_ACTIVE);
+            let match_inactive_style = styles.style(style_system::STYLE_DETAIL_FIND_MATCH_INACTIVE);
+
+            if find_rect.height > 1 {
+                let find_block = Block::new()
+                    .borders(Borders::TOP)
+                    .border_type(border_type)
+                    .border_style(if detail_focused {
+                        title_focused_style
+                    } else {
+                        title_unfocused_style
+                    })
+                    .style(container_style);
+                let find_inner = find_block.inner(find_rect);
+                find_block.render(find_rect, frame);
+
+                if !find_inner.is_empty() {
+                    let text_area = if find_inner.width > 2 {
+                        Rect::new(
+                            find_inner.x + 1,
+                            find_inner.y,
+                            find_inner.width - 2,
+                            find_inner.height,
+                        )
+                    } else {
+                        find_inner
+                    };
+                    let line = build_detail_find_bar_line(
+                        find,
+                        text_area.width,
+                        query_style,
+                        match_active_style,
+                        match_inactive_style,
+                    );
+                    Paragraph::new(ftui::text::Text::from_lines(vec![line]))
+                        .style(container_style)
+                        .render(text_area, frame);
                 }
             } else {
-                format!(" ({}/{})", find.current + 1, find.matches.len())
-            };
-            let find_text = format!("/{}{}", find.query, match_info);
-            Paragraph::new(&*find_text)
-                .style(find_style)
-                .render(find_rect, frame);
+                Block::new().style(container_style).render(find_rect, frame);
+                let line = build_detail_find_bar_line(
+                    find,
+                    find_rect.width,
+                    query_style,
+                    match_active_style,
+                    match_inactive_style,
+                );
+                Paragraph::new(ftui::text::Text::from_lines(vec![line]))
+                    .style(container_style)
+                    .render(find_rect, frame);
+            }
         }
     }
 
@@ -12001,17 +12264,20 @@ impl super::ftui_adapter::Model for CassApp {
                     Paragraph::new(query_line).render(query_row, frame);
 
                     if rows.len() > 1 {
-                        let pills = self.active_filter_pills();
-                        let (pill_text, pill_rects) = self.build_pills_row(rows[1], &pills);
+                        let pills = self.filter_pills();
+                        let pill_active_style = styles.style(style_system::STYLE_PILL_ACTIVE);
+                        let pill_inactive_style = styles.style(style_system::STYLE_PILL_INACTIVE);
+                        let pill_label_style = styles.style(style_system::STYLE_PILL_LABEL);
+                        let (pill_line, pill_rects) = self.build_pills_row(
+                            rows[1],
+                            &pills,
+                            pill_active_style,
+                            pill_inactive_style,
+                            pill_label_style,
+                            text_muted_style,
+                        );
                         *self.last_pill_rects.borrow_mut() = pill_rects;
-                        let pill_style = if pills.is_empty() {
-                            text_muted_style
-                        } else {
-                            styles.style(style_system::STYLE_PILL_ACTIVE)
-                        };
-                        Paragraph::new(elide_text(&pill_text, rows[1].width as usize))
-                            .style(pill_style)
-                            .render(rows[1], frame);
+                        Paragraph::new(pill_line).render(rows[1], frame);
                     }
 
                     if rows.len() > 2 {
@@ -15544,6 +15810,98 @@ mod tests {
         assert_eq!(remote_item.source_badge(), "[laptop]");
     }
 
+    #[test]
+    fn result_item_snippet_fallback_chain_prefers_snippet_then_content_then_title() {
+        let mut hit = make_test_hit();
+        hit.title = "Title fallback sentinel".to_string();
+        hit.snippet = "snippet sentinel primary".to_string();
+        hit.content = "content sentinel secondary".to_string();
+        let mut item = make_result_item(hit.clone(), DensityMode::Cozy.row_height());
+
+        assert_eq!(
+            item.snippet_lines(64, 1),
+            vec!["snippet sentinel primary".to_string()]
+        );
+
+        hit.snippet.clear();
+        item.hit = hit.clone();
+        assert_eq!(
+            item.snippet_lines(64, 1),
+            vec!["content sentinel secondary".to_string()]
+        );
+
+        hit.content.clear();
+        item.hit = hit;
+        assert_eq!(
+            item.snippet_lines(64, 1),
+            vec!["Title fallback sentinel".to_string()]
+        );
+    }
+
+    #[test]
+    fn result_item_snippet_wrapping_respects_narrow_width_without_empty_artifacts() {
+        let mut hit = make_test_hit();
+        hit.snippet =
+            "supercalifragilisticexpialidocious-token wraps-without-overflow and keeps context"
+                .to_string();
+        let item = make_result_item(hit, DensityMode::Spacious.row_height());
+        let lines = item.snippet_lines(14, 3);
+
+        assert_eq!(
+            lines.len(),
+            3,
+            "spacious budget should allow 3 snippet lines"
+        );
+        assert!(lines.iter().all(|line| !line.trim().is_empty()));
+        assert!(lines.iter().all(|line| line.chars().count() <= 14));
+    }
+
+    #[test]
+    fn compact_density_results_row_includes_inline_snippet_preview() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = CassApp::default();
+        let mut hit = make_test_hit();
+        hit.title = "Compact row title".to_string();
+        hit.snippet = "inline-preview-sentinel compact snippet payload".to_string();
+        hit.content = String::new();
+        app.panes.push(AgentPane {
+            agent: hit.agent.clone(),
+            total_count: 1,
+            hits: vec![hit],
+            selected: 0,
+        });
+        app.active_pane = 0;
+        app.density_mode = DensityMode::Compact;
+
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            text.contains("inline-preview-sentinel"),
+            "compact rows should surface inline snippet context"
+        );
+    }
+
+    #[test]
+    fn spacious_density_allocates_three_snippet_lines_when_width_allows() {
+        let mut hit = make_test_hit();
+        hit.snippet = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho".to_string();
+        let item = make_result_item(hit, DensityMode::Spacious.row_height());
+        let budget = item.snippet_line_budget(72);
+        let lines = item.snippet_lines(24, budget);
+
+        assert_eq!(
+            budget, 3,
+            "spacious rows should reserve three snippet lines"
+        );
+        assert_eq!(lines.len(), 3);
+    }
+
     // =====================================================================
     // 2noh9.3.3 — Filter UI tests
     // =====================================================================
@@ -15778,6 +16136,78 @@ mod tests {
     }
 
     #[test]
+    fn detail_find_bar_line_formats_query_and_match_state() {
+        let find = DetailFindState {
+            query: "needle".to_string(),
+            matches: vec![2, 4, 7],
+            current: 1,
+        };
+        let line = build_detail_find_bar_line(
+            &find,
+            80,
+            ftui::Style::default(),
+            ftui::Style::default(),
+            ftui::Style::default(),
+        );
+        let plain: String = line
+            .spans()
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(plain, "/needle (2/3)");
+    }
+
+    #[test]
+    fn detail_find_bar_line_uses_hint_for_empty_query() {
+        let find = DetailFindState::default();
+        let line = build_detail_find_bar_line(
+            &find,
+            24,
+            ftui::Style::default(),
+            ftui::Style::default(),
+            ftui::Style::default(),
+        );
+        let plain: String = line
+            .spans()
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            plain.contains("type to find"),
+            "empty query should show find hint"
+        );
+    }
+
+    #[test]
+    fn detail_find_bar_line_truncates_long_query_but_keeps_match_context() {
+        let find = DetailFindState {
+            query: "this-is-a-very-long-query-string-that-must-be-truncated".to_string(),
+            matches: vec![3, 8, 11],
+            current: 0,
+        };
+        let line = build_detail_find_bar_line(
+            &find,
+            28,
+            ftui::Style::default(),
+            ftui::Style::default(),
+            ftui::Style::default(),
+        );
+        let plain: String = line
+            .spans()
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            plain.chars().count() <= 28,
+            "find bar output must fit allotted width"
+        );
+        assert!(
+            plain.contains("(1/3)"),
+            "match context should remain visible after truncation"
+        );
+    }
+
+    #[test]
     fn detail_find_navigation_wraps() {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::DetailFindToggled);
@@ -15833,6 +16263,79 @@ mod tests {
             app.detail_scroll, 27,
             "should scroll to match line 30 minus 3"
         );
+    }
+
+    #[test]
+    fn detail_find_bar_render_shows_query_and_match_state_in_detail_pane() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(3);
+        app.detail_find = Some(DetailFindState {
+            query: "needle".to_string(),
+            matches: vec![2, 6, 9],
+            current: 1,
+        });
+
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            text.contains("/needle (2/3)"),
+            "detail pane should render styled find bar query + match state"
+        );
+    }
+
+    #[test]
+    fn detail_find_bar_render_preserves_match_context_on_narrow_widths() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(3);
+        app.detail_find = Some(DetailFindState {
+            query: "this-is-a-very-long-query-string-for-narrow-layout".to_string(),
+            matches: vec![2, 6, 9],
+            current: 0,
+        });
+
+        let text = buffer_to_text(&render_at_degradation(&app, 90, 24, DegradationLevel::Full));
+        assert!(
+            text.contains("(1/3)"),
+            "narrow layouts should keep current/total match context visible"
+        );
+    }
+
+    #[test]
+    fn detail_find_bar_render_remains_readable_across_degradation_levels() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        for level in [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::NoStyling,
+            DegradationLevel::EssentialOnly,
+        ] {
+            let mut app = app_with_hits(3);
+            app.detail_find = Some(DetailFindState {
+                query: "needle".to_string(),
+                matches: vec![2, 6, 9],
+                current: 1,
+            });
+
+            let text = buffer_to_text(&render_at_degradation(&app, 120, 24, level));
+            assert!(
+                text.contains("/needle"),
+                "detail find query should remain visible at degradation {level:?}"
+            );
+            assert!(
+                text.contains("(2/3)"),
+                "detail find match state should remain visible at degradation {level:?}"
+            );
+        }
     }
 
     #[test]
@@ -16001,6 +16504,28 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+        }
+    }
+
+    fn make_result_item(hit: SearchHit, row_height: u16) -> ResultItem {
+        ResultItem {
+            index: 1,
+            hit,
+            row_height,
+            even: true,
+            max_width: 120,
+            queued: false,
+            stripe_style: ftui::Style::default(),
+            selected_style: ftui::Style::default(),
+            agent_accent_style: ftui::Style::default(),
+            score_style: ftui::Style::default(),
+            text_primary_style: ftui::Style::default(),
+            text_muted_style: ftui::Style::default(),
+            text_subtle_style: ftui::Style::default(),
+            success_style: ftui::Style::default(),
+            source_local_style: ftui::Style::default(),
+            source_remote_style: ftui::Style::default(),
+            location_style: ftui::Style::default(),
         }
     }
 
@@ -17861,6 +18386,96 @@ mod tests {
         assert!(
             app.search_dirty_since.is_some(),
             "clearing a filter should trigger a debounced search"
+        );
+    }
+
+    #[test]
+    fn filter_pills_include_inactive_slots() {
+        let app = app_with_hits(5);
+        // No filters set — all slot pills should be inactive
+        let pills = app.filter_pills();
+        assert!(
+            pills.len() >= 4,
+            "should have at least 4 filter slot pills (agent, ws, time, source)"
+        );
+        assert!(
+            pills.iter().all(|p| !p.active),
+            "with no filters set, all pills should be inactive"
+        );
+    }
+
+    #[test]
+    fn filter_pills_mark_active_filters() {
+        let mut app = app_with_hits(5);
+        app.filters.agents.insert("codex".to_string());
+        let pills = app.filter_pills();
+        let agent_pill = pills.iter().find(|p| p.label == "agent").unwrap();
+        assert!(
+            agent_pill.active,
+            "agent pill should be active when filter is set"
+        );
+        let ws_pill = pills.iter().find(|p| p.label == "ws").unwrap();
+        assert!(
+            !ws_pill.active,
+            "ws pill should be inactive when filter is not set"
+        );
+    }
+
+    #[test]
+    fn build_pills_row_produces_per_pill_spans() {
+        let app = app_with_hits(5);
+        let active = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(255, 0, 0, 255));
+        let inactive =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(128, 128, 128, 255));
+        let label = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(200, 200, 200, 255));
+        let sep = ftui::Style::new();
+        let pills = vec![
+            Pill {
+                label: "agent".into(),
+                value: "codex".into(),
+                active: true,
+                editable: true,
+            },
+            Pill {
+                label: "ws".into(),
+                value: "any".into(),
+                active: false,
+                editable: true,
+            },
+        ];
+        let area = Rect::new(0, 0, 80, 1);
+        let (line, rects) = app.build_pills_row(area, &pills, active, inactive, label, sep);
+        assert_eq!(rects.len(), 2, "should have 2 pill rects");
+        // The line should have spans — label + value for each pill, plus separator
+        let spans = line.spans();
+        assert!(
+            spans.len() >= 4,
+            "should have at least 4 spans (label+value per pill), got {}",
+            spans.len()
+        );
+    }
+
+    #[test]
+    fn inactive_pill_click_opens_editor() {
+        use ftui::Model;
+        // With no agent filter set, clicking the inactive "agent:any" pill should open agent editor
+        let mut app = app_with_hits(5);
+        render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+        let rect = app
+            .last_pill_rects
+            .borrow()
+            .iter()
+            .find_map(|(rect, pill)| (pill.label == "agent").then_some(*rect))
+            .expect("agent pill should be rendered even when inactive");
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: rect.x,
+            y: rect.y,
+        });
+        assert_eq!(
+            app.input_mode,
+            InputMode::Agent,
+            "clicking inactive agent pill should enter agent input mode"
         );
     }
 

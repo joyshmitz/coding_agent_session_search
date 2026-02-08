@@ -56,6 +56,8 @@ pub const STYLE_SOURCE_LOCAL: &str = "source.local";
 pub const STYLE_SOURCE_REMOTE: &str = "source.remote";
 pub const STYLE_LOCATION: &str = "location";
 pub const STYLE_PILL_ACTIVE: &str = "pill.active";
+pub const STYLE_PILL_INACTIVE: &str = "pill.inactive";
+pub const STYLE_PILL_LABEL: &str = "pill.label";
 pub const STYLE_TAB_ACTIVE: &str = "tab.active";
 pub const STYLE_TAB_INACTIVE: &str = "tab.inactive";
 pub const STYLE_DETAIL_FIND_CONTAINER: &str = "detail.find.container";
@@ -1511,6 +1513,16 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
             .bg(to_packed(blend(resolved.surface, resolved.info, 0.25)))
             .bold(),
     );
+    sheet.define(
+        STYLE_PILL_INACTIVE,
+        Style::new()
+            .fg(to_packed(resolved.text_subtle))
+            .bg(to_packed(blend(resolved.surface, resolved.border, 0.15))),
+    );
+    sheet.define(
+        STYLE_PILL_LABEL,
+        Style::new().fg(to_packed(resolved.text_muted)).bold(),
+    );
 
     sheet.define(
         STYLE_TAB_ACTIVE,
@@ -2066,6 +2078,8 @@ mod tests {
             STYLE_KBD_KEY,
             STYLE_KBD_DESC,
             STYLE_PILL_ACTIVE,
+            STYLE_PILL_INACTIVE,
+            STYLE_PILL_LABEL,
             STYLE_TAB_ACTIVE,
             STYLE_TAB_INACTIVE,
             STYLE_DETAIL_FIND_CONTAINER,
@@ -2685,6 +2699,7 @@ mod tests {
     const CRITICAL_BG_TOKENS: &[&str] = &[
         STYLE_APP_ROOT,
         STYLE_PILL_ACTIVE,
+        STYLE_PILL_INACTIVE,
         STYLE_TAB_ACTIVE,
         STYLE_RESULT_ROW_SELECTED,
     ];
@@ -3537,6 +3552,113 @@ mod tests {
         );
     }
 
+    // -- Pill hierarchy tests (2dccg.8.3) ----------------------------------------
+
+    #[test]
+    fn pill_inactive_differs_from_pill_active() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let active = ctx.style(STYLE_PILL_ACTIVE);
+            let inactive = ctx.style(STYLE_PILL_INACTIVE);
+            assert_ne!(
+                active,
+                inactive,
+                "STYLE_PILL_INACTIVE must differ from STYLE_PILL_ACTIVE for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn pill_inactive_is_not_bold() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let inactive = ctx.style(STYLE_PILL_INACTIVE);
+            let is_bold = inactive
+                .attrs
+                .is_some_and(|a| a.contains(ftui::StyleFlags::BOLD));
+            assert!(
+                !is_bold,
+                "STYLE_PILL_INACTIVE should not be bold for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn pill_active_is_bold() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let active = ctx.style(STYLE_PILL_ACTIVE);
+            let is_bold = active
+                .attrs
+                .is_some_and(|a| a.contains(ftui::StyleFlags::BOLD));
+            assert!(
+                is_bold,
+                "STYLE_PILL_ACTIVE should be bold for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn pill_inactive_has_background_for_all_presets() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let inactive = ctx.style(STYLE_PILL_INACTIVE);
+            assert!(
+                inactive.bg.is_some(),
+                "STYLE_PILL_INACTIVE must have bg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn pill_label_has_foreground_and_bold() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let label = ctx.style(STYLE_PILL_LABEL);
+            assert!(
+                label.fg.is_some(),
+                "STYLE_PILL_LABEL must have fg for preset {}",
+                preset.name()
+            );
+            let is_bold = label
+                .attrs
+                .is_some_and(|a| a.contains(ftui::StyleFlags::BOLD));
+            assert!(
+                is_bold,
+                "STYLE_PILL_LABEL should be bold for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn pill_hierarchy_is_visually_ordered() {
+        // Active pills should be the most prominent (fg differs from inactive/label)
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let active = ctx.style(STYLE_PILL_ACTIVE);
+            let inactive = ctx.style(STYLE_PILL_INACTIVE);
+            let label = ctx.style(STYLE_PILL_LABEL);
+            // All three should be distinct
+            assert_ne!(
+                active.fg,
+                inactive.fg,
+                "pill active fg must differ from inactive fg for preset {}",
+                preset.name()
+            );
+            assert_ne!(
+                active.fg,
+                label.fg,
+                "pill active fg must differ from label fg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
     // -- MarkdownTheme integration tests (kr88h) --------------------------------
 
     #[test]
@@ -3653,6 +3775,8 @@ mod tests {
         ("STYLE_SOURCE_REMOTE", STYLE_SOURCE_REMOTE),
         ("STYLE_LOCATION", STYLE_LOCATION),
         ("STYLE_PILL_ACTIVE", STYLE_PILL_ACTIVE),
+        ("STYLE_PILL_INACTIVE", STYLE_PILL_INACTIVE),
+        ("STYLE_PILL_LABEL", STYLE_PILL_LABEL),
         ("STYLE_TAB_ACTIVE", STYLE_TAB_ACTIVE),
         ("STYLE_TAB_INACTIVE", STYLE_TAB_INACTIVE),
         ("STYLE_DETAIL_FIND_CONTAINER", STYLE_DETAIL_FIND_CONTAINER),
@@ -3684,6 +3808,8 @@ mod tests {
         "STYLE_DETAIL_FIND_QUERY",
         "STYLE_DETAIL_FIND_MATCH_ACTIVE",
         "STYLE_DETAIL_FIND_MATCH_INACTIVE",
+        // build_pills_row() applies label style per-span within pill construction
+        "STYLE_PILL_LABEL",
     ];
 
     #[test]
