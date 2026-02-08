@@ -38,6 +38,10 @@ pub const STYLE_ROLE_GUTTER_USER: &str = "role.gutter.user";
 pub const STYLE_ROLE_GUTTER_ASSISTANT: &str = "role.gutter.assistant";
 pub const STYLE_ROLE_GUTTER_TOOL: &str = "role.gutter.tool";
 pub const STYLE_ROLE_GUTTER_SYSTEM: &str = "role.gutter.system";
+pub const STYLE_TAB_ACTIVE: &str = "tab.active";
+pub const STYLE_TAB_INACTIVE: &str = "tab.inactive";
+pub const STYLE_KBD_KEY: &str = "kbd.key";
+pub const STYLE_KBD_DESC: &str = "kbd.desc";
 pub const THEME_CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -540,6 +544,22 @@ impl StyleContext {
 
     pub fn style(&self, name: &str) -> Style {
         self.sheet.get_or_default(name)
+    }
+
+    /// Return a bold accent style for an agent slug.
+    pub fn agent_accent_style(&self, _agent: &str) -> Style {
+        self.style(STYLE_ROLE_ASSISTANT).bold()
+    }
+
+    /// Return a score-magnitude style (high/mid/low).
+    pub fn score_style(&self, score: f32) -> Style {
+        if score >= 8.0 {
+            self.style(STYLE_STATUS_SUCCESS)
+        } else if score >= 5.0 {
+            self.style(STYLE_TEXT_PRIMARY)
+        } else {
+            self.style(STYLE_TEXT_MUTED)
+        }
     }
 
     pub fn contrast_report(&self) -> ThemeContrastReport {
