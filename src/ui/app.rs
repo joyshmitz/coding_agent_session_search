@@ -15253,6 +15253,115 @@ mod tests {
     }
 
     // =====================================================================
+    // 1mfw3.4.5 — Hit-region and focus invariants
+    // =====================================================================
+
+    #[test]
+    fn hit_regions_cleared_in_narrow_single_pane() {
+        let app = app_with_hits(3);
+        // 60 cols = Narrow, focus defaults to Results.
+        render_at_degradation(&app, 60, 24, ftui::render::budget::DegradationLevel::Full);
+        // Split handle must be None in narrow (no dual pane).
+        assert!(
+            app.last_split_handle_area.borrow().is_none(),
+            "narrow mode should never set split handle hit region"
+        );
+        // Results pane should be populated (it's the focused one).
+        assert!(
+            app.last_results_inner.borrow().is_some(),
+            "narrow mode should record results inner when focused"
+        );
+    }
+
+    #[test]
+    fn dual_pane_records_both_hit_regions() {
+        // All dual-pane breakpoints should record results, detail, AND split handle.
+        for w in [90, 130, 180] {
+            let app = app_with_hits(3);
+            render_at_degradation(&app, w, 24, ftui::render::budget::DegradationLevel::Full);
+            let bp = LayoutBreakpoint::from_width(w);
+            assert!(
+                app.last_results_inner.borrow().is_some(),
+                "dual_pane at w={w} ({bp:?}) should record results inner"
+            );
+            assert!(
+                app.last_detail_area.borrow().is_some(),
+                "dual_pane at w={w} ({bp:?}) should record detail area"
+            );
+            assert!(
+                app.last_split_handle_area.borrow().is_some(),
+                "dual_pane at w={w} ({bp:?}) should record split handle"
+            );
+        }
+    }
+
+    #[test]
+    fn focus_toggle_switches_region() {
+        let mut app = CassApp::default();
+        assert_eq!(app.focused_region(), FocusRegion::Results);
+        let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(app.focused_region(), FocusRegion::Detail);
+        let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(app.focused_region(), FocusRegion::Results);
+    }
+
+    #[test]
+    fn narrow_focus_toggle_swaps_visible_pane() {
+        let mut app = app_with_hits(3);
+        // Start in Results focus.
+        render_at_degradation(&app, 60, 24, ftui::render::budget::DegradationLevel::Full);
+        assert!(app.last_results_inner.borrow().is_some());
+        assert!(app.last_detail_area.borrow().is_none());
+
+        // Toggle focus to Detail.
+        let _ = app.update(CassMsg::FocusToggled);
+        render_at_degradation(&app, 60, 24, ftui::render::budget::DegradationLevel::Full);
+        assert!(
+            app.last_detail_area.borrow().is_some(),
+            "after focus toggle, narrow mode should show detail"
+        );
+    }
+
+    #[test]
+    fn analytics_surface_clears_search_regions() {
+        let mut app = app_with_hits(3);
+        // Render on search surface first to populate regions.
+        render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+        assert!(app.last_results_inner.borrow().is_some());
+
+        // Switch to analytics.
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+        assert!(
+            app.last_results_inner.borrow().is_none(),
+            "analytics surface should clear results inner"
+        );
+        assert!(
+            app.last_split_handle_area.borrow().is_none(),
+            "analytics surface should clear split handle"
+        );
+    }
+
+    #[test]
+    fn split_handle_absent_prevents_drag() {
+        let mut app = app_with_hits(3);
+        // Narrow mode: no split handle.
+        render_at_degradation(&app, 60, 24, ftui::render::budget::DegradationLevel::Full);
+
+        // Simulate a drag at a position that would be the split handle in dual mode.
+        // Since split handle is None, this should be a no-op (no pane_split_drag started).
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftDrag,
+            x: 30,
+            y: 10,
+        });
+        assert!(
+            app.pane_split_drag.is_none(),
+            "drag in narrow mode should not start split drag"
+        );
+    }
+
+    // =====================================================================
     // 1mfw3.4.4 — Ultra-narrow fallback
     // =====================================================================
 
