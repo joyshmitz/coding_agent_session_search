@@ -1,11 +1,17 @@
 //! FrankenTUI style-system scaffolding for cass.
 //!
 //! Centralizes:
-//! - theme preset selection
+//! - theme preset selection and [`ThemeColorOverrides`] (19 named color slots)
 //! - color profile downgrade (mono / ansi16 / ansi256 / truecolor)
 //! - env opt-outs (`NO_COLOR`, `CASS_NO_COLOR`, `CASS_NO_ICONS`, `CASS_NO_GRADIENT`)
 //! - accessibility text markers (`CASS_A11Y`)
-//! - semantic `StyleSheet` tokens used by upcoming ftui views
+//! - semantic `StyleSheet` tokens consumed by all ftui views
+//! - [`StyleContext`] facade for theme-aware style resolution in view code
+//!
+//! Widgets reference semantic token names (e.g. `STYLE_STATUS_SUCCESS`) rather
+//! than raw colors, so preset changes and color profile downgrades propagate
+//! automatically. The interactive theme editor (Ctrl+Shift+T in the TUI) writes
+//! [`ThemeColorOverrides`] to `~/.config/cass/theme.toml`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

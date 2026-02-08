@@ -26,6 +26,78 @@
 //!        ▼
 //!   Renders current state to ftui Frame
 //! ```
+//!
+//! # FrankenTUI UX Overhaul (1mfw3)
+//!
+//! This module underwent a comprehensive UX overhaul migrating from ratatui to ftui
+//! (a custom Elm-architecture framework). Key subsystems introduced:
+//!
+//! ## Command Palette
+//!
+//! Keyboard-first action dispatch via Ctrl+P / Alt+P. The palette provides fuzzy
+//! search over ~28 action variants grouped into 7 categories (Chrome, Filter, View,
+//! Analytics, Export, Recording, Sources). Filtering uses Bayesian-scored matching
+//! with six modes (All/Exact/Prefix/WordStart/Substring/Fuzzy) cycled via F9.
+//! See [`PaletteState`] in `components/palette.rs` for state, and
+//! [`PaletteLatencyStats`] for query performance instrumentation.
+//!
+//! **Design tradeoff**: Bayesian scoring adds ~50μs per keystroke but produces
+//! significantly better ranking than simple substring matching. The latency budget
+//! indicator (OK <200μs, WARN <1000μs, SLOW ≥1000μs) keeps this measurable.
+//! Alt+B toggles a micro-bench overlay showing queries/second throughput.
+//!
+//! ## Responsive Layout
+//!
+//! Terminal width drives [`LayoutBreakpoint`] (Narrow <80, MediumNarrow 80-119,
+//! Medium 120-159, Wide ≥160). Each breakpoint maps to concrete topology contracts:
+//! - [`SearchTopology`]: pane widths, split handle, dual-pane toggle
+//! - [`AnalyticsTopology`]: tab bar, filter summary, header rows, footer hints
+//! - [`VisibilityPolicy`]: theme label, hint slots/budget, saved-view path length
+//!
+//! Ultra-narrow terminals (<30 cols or <6 rows) get a "terminal too small" fallback
+//! rather than a broken layout.
+//!
+//! ## Analytics Explorer
+//!
+//! Eight views under [`AnalyticsView`]: Dashboard, Explorer, Heatmap, Breakdowns,
+//! Tools, Cost, Plans, Coverage. The Explorer view supports interactive cycling of:
+//! - [`ExplorerMetric`] (m/M): ApiTokens, ContentTokens, Messages, ToolCalls, etc.
+//! - [`ExplorerOverlay`] (o): None, ByAgent, ByWorkspace, BySource
+//! - [`ExplorerZoom`] (z/Z): All, 24h, 7d, 30d, 90d
+//! - GroupBy (g/G): Hour, Day, Week, Month
+//!
+//! Chart data is pre-computed via `load_chart_data()` in `analytics_charts.rs`.
+//!
+//! ## Inspector & Diagnostics
+//!
+//! Ctrl+Shift+I opens the inspector overlay with 7 tabs ([`InspectorTab`]):
+//! Timing, Layout, HitRegions, Resize, Diff, Budget, Timeline. Each tab renders
+//! from [`EvidenceSnapshots`], which are updated per-tick from ftui's evidence
+//! telemetry rather than re-parsing log files at render time.
+//!
+//! [`FrameTimingStats`] maintains a rolling ring buffer of frame durations for
+//! FPS calculation and jitter detection.
+//!
+//! ## Theme Editor
+//!
+//! Ctrl+Shift+T opens [`ThemeEditorState`] — a modal editor for 19 color slots
+//! ([`ThemeColorSlot`]). Supports hex input, preset cycling, WCAG contrast warnings,
+//! and export-to-disk. Changes apply live and revert on cancel.
+//!
+//! ## Key Bindings
+//!
+//! Modal interceptors form a priority stack: theme editor > inspector > palette >
+//! normal key handling. When a modal is open, it captures all input except its own
+//! dismiss/close messages, which must be explicitly passed through (not swallowed
+//! by `_ => Cmd::none()` wildcards).
+//!
+//! ## Test Coverage
+//!
+//! - 532 unit tests in this module (palette, latency, responsive, inspector, etc.)
+//! - 59 unit tests in `components/palette.rs`
+//! - 74 cross-workstream integration tests in `tests/cross_workstream_integration.rs`
+//! - Key regression suites: palette lifecycle, dispatch coverage for all 28 action
+//!   variants, responsive SIZE_MATRIX (16 entries), perf envelope checks
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet, VecDeque};
@@ -1132,17 +1204,37 @@ impl LayoutBreakpoint {
     }
 }
 
-/// Per-breakpoint sizing and truncation policy for the cockpit overlay (1mfw3.3.3).
+/// Per-breakpoint sizing and truncation policy for the cockpit overlay.
+///
+/// Design rationale (1mfw3.3.3): The inspector overlay must remain readable
+/// across terminal widths from 40 to 200+ columns. Rather than hard-coding
+/// dimensions, each `LayoutBreakpoint` × `CockpitMode` pair yields a topology
+/// that controls overlay size, label verbosity, and content density.
+///
+/// Key decisions:
+/// - Narrow (<80w) uses single-char tab labels (`T L H R D B G`) to fit in 42 cols.
+/// - `overlay_min_w=20` / `overlay_min_h=6` gates auto-disable for tiny terminals.
+/// - Expanded mode doubles timeline capacity vs Overlay for deeper inspection.
+/// - Footer hints are hidden on Narrow/Overlay to maximize content rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CockpitTopology {
+    /// Maximum width of the overlay box (clamped to available area).
     pub overlay_max_w: u16,
+    /// Maximum height of the overlay box.
     pub overlay_max_h: u16,
+    /// Below this width, the overlay is auto-disabled.
     pub overlay_min_w: u16,
+    /// Below this height, the overlay is auto-disabled.
     pub overlay_min_h: u16,
+    /// Use single-char abbreviations instead of full tab labels.
     pub use_short_labels: bool,
+    /// Show `[cockpit]`/`[expanded]` mode indicator in the title bar.
     pub show_mode_indicator: bool,
+    /// Max timeline events shown in the Timeline tab.
     pub max_timeline_events: u16,
+    /// Character budget for row labels (e.g. "Strategy", "Frame/Bgt").
     pub label_width: u16,
+    /// Whether to render the keyboard-hint footer row.
     pub show_footer_hint: bool,
 }
 
@@ -1157,7 +1249,12 @@ impl DensityMode {
     }
 }
 
-/// Active tab in the inspector overlay.
+/// Active tab in the inspector overlay (Ctrl+Shift+I).
+///
+/// 7 tabs covering rendering diagnostics (Timing/Layout/HitRegions),
+/// adaptive system evidence (Resize/Diff/Budget), and an event feed (Timeline).
+/// Cycle with Tab; cockpit mode (c key) focuses on Diff/Budget/Timeline.
+/// Each tab renders into `render_inspector_overlay()` via `match self.inspector_tab`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InspectorTab {
     #[default]
@@ -1439,8 +1536,13 @@ impl TimelineBuffer {
     }
 }
 
+/// Cached evidence telemetry snapshots, polled from global singletons on
 /// each tick. Inspector/cockpit panels read these during `view()` instead of
 /// parsing the JSONL evidence file at render time.
+///
+/// This pull-on-tick pattern avoids file I/O in the render path. The `refresh()`
+/// method is called once per tick in `update()`, keeping all evidence data at
+/// most one frame stale.
 #[derive(Debug, Clone, Default)]
 pub struct EvidenceSnapshots {
     /// Latest resize coalescer decision (regime, BOCPD evidence, applied size).
@@ -5140,10 +5242,18 @@ impl CassApp {
             ""
         };
         let title = format!(" {tab_header}{mode_indicator} ");
-        // Truncate title to fit within overlay width (leave room for border corners)
+        // Truncate title to fit within overlay width (leave room for border corners).
+        // Use char_indices to find a safe truncation point (no mid-char panics).
         let max_title_len = overlay_w.saturating_sub(2) as usize;
         let title = if title.len() > max_title_len {
-            let mut truncated = title[..max_title_len.saturating_sub(1)].to_string();
+            let cutoff = max_title_len.saturating_sub(1);
+            let safe_end = title
+                .char_indices()
+                .take_while(|(i, _)| *i <= cutoff)
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let mut truncated = title[..safe_end].to_string();
             truncated.push('\u{2026}'); // ellipsis
             truncated
         } else {

@@ -3,6 +3,12 @@
 //! Provides [`AnalyticsChartData`] (pre-computed chart data) and rendering
 //! functions that turn analytics query results into terminal-native
 //! visualizations using ftui-extras charts and canvas widgets.
+//!
+//! Chart data is loaded via `load_chart_data(db, filters, group_by)` — a single
+//! DB query path that all 8 analytics views share. Views consume
+//! pre-computed data during `view()` without further DB access.
+//! The Explorer view layer adds dimension overlays via `build_dimension_overlay()`
+//! for proportional breakdowns by agent/workspace/source.
 
 use ftui::render::cell::PackedRgba;
 use ftui::widgets::Widget;

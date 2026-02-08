@@ -34,6 +34,21 @@
 //! Each action maps to exactly one `CassMsg` dispatch (or batch). The mapping
 //! table in [`PaletteAction::target_msg_name`] documents the concrete target
 //! for every variant, ensuring no action is lost during migration.
+//!
+//! # Filter Modes (F9 cycling)
+//!
+//! [`PaletteMatchMode`] cycles through All → Exact → Prefix → WordStart →
+//! Substring → Fuzzy → All. Each mode trades recall for precision: All shows
+//! every action (useful for browsing), while Exact/Prefix are fast for users who
+//! know what they want. The Bayesian scorer in `app.rs` combines match-mode
+//! evidence with recency and frequency priors.
+//!
+//! # Test Coverage
+//!
+//! 59 unit tests in this module cover: match mode cycling, action serialization
+//! round-trips, group membership exhaustiveness, and default_actions() stability.
+//! 12 regression tests in `app.rs` cover: lifecycle, dispatch coverage for all
+//! 28 action variants, boundary wrapping, rapid open/close, and selection clamping.
 
 use crate::ui::shortcuts;
 
