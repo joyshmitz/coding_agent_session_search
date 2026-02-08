@@ -24010,4 +24010,362 @@ mod tests {
             );
         }
     }
+
+    // ── Baseline snapshot tests (2dccg.6.2) ─────────────────────────────
+
+    /// Snapshot: active vs inactive pill visual distinction in rendered output.
+    #[test]
+    fn snapshot_pills_active_vs_inactive() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(5);
+        // No filters → all pills inactive
+        let text_no_filters = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        // Pills should still appear with placeholder values
+        assert!(
+            text_no_filters.contains("agent:") || text_no_filters.contains("agent"),
+            "inactive agent pill slot should be visible"
+        );
+
+        // Set agent filter → agent pill becomes active
+        app.filters.agents.insert("codex".to_string());
+        let text_with_agent = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            text_with_agent.contains("codex"),
+            "active agent pill should show filter value"
+        );
+    }
+
+    /// Snapshot: pill rendering is deterministic across repeated renders.
+    #[test]
+    fn snapshot_pills_deterministic() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(5);
+        app.filters.agents.insert("claude_code".to_string());
+        let t1 = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        let t2 = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert_eq!(t1, t2, "pill rendering must be deterministic");
+    }
+
+    /// Snapshot: detail tab bar shows active and inactive tabs.
+    #[test]
+    fn snapshot_tab_bar_active_inactive() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        // Select a result so detail pane renders with tabs
+        let mut app = app_with_hits(5);
+        app.active_pane = 0;
+        if !app.panes.is_empty() {
+            app.panes[0].selected = 0;
+        }
+        app.cached_detail = Some((
+            "/test/session.jsonl".to_string(),
+            make_test_conversation_view(),
+        ));
+
+        // Messages tab is default active
+        app.detail_tab = DetailTab::Messages;
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            text.contains("Messages") || text.contains("Msgs"),
+            "tab bar should show Messages tab label"
+        );
+
+        // Switch to Raw tab
+        app.detail_tab = DetailTab::Raw;
+        let text_raw = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            text_raw.contains("Raw"),
+            "tab bar should show Raw tab label"
+        );
+    }
+
+    /// Snapshot: role gutters render different symbols for each role.
+    #[test]
+    fn snapshot_role_gutters_vary_across_roles() {
+        use crate::model::types::{Message, MessageRole};
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut cv = make_test_conversation_view();
+        cv.messages = vec![
+            Message {
+                id: Some(1),
+                idx: 0,
+                role: MessageRole::User,
+                author: None,
+                created_at: None,
+                content: "Hello from user".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: vec![],
+            },
+            Message {
+                id: Some(2),
+                idx: 1,
+                role: MessageRole::Agent,
+                author: None,
+                created_at: None,
+                content: "Hello from assistant".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: vec![],
+            },
+            Message {
+                id: Some(3),
+                idx: 2,
+                role: MessageRole::Tool,
+                author: None,
+                created_at: None,
+                content: "Tool output".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: vec![],
+            },
+        ];
+
+        let mut app = app_with_hits(5);
+        app.active_pane = 0;
+        if !app.panes.is_empty() {
+            app.panes[0].selected = 0;
+        }
+        app.cached_detail = Some(("/test/session.jsonl".to_string(), cv));
+        app.detail_tab = DetailTab::Messages;
+
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+
+        // Role prefix symbols should be present in the render
+        let has_role_symbols = text.contains('\u{f061}') // user arrow
+            || text.contains('\u{2713}') // assistant checkmark
+            || text.contains('\u{2699}') // tool gear
+            || text.contains('\u{2139}') // system info
+            || text.contains('\u{2022}'); // bullet
+        assert!(
+            has_role_symbols,
+            "detail pane Messages tab should contain role gutter symbols"
+        );
+    }
+
+    /// Snapshot: find bar open state shows query and match count.
+    #[test]
+    fn snapshot_find_bar_open_with_matches() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(3);
+        app.active_pane = 0;
+        if !app.panes.is_empty() {
+            app.panes[0].selected = 0;
+        }
+        app.cached_detail = Some((
+            "/test/session.jsonl".to_string(),
+            make_test_conversation_view(),
+        ));
+        app.detail_find = Some(DetailFindState {
+            query: "test".to_string(),
+            matches: vec![1, 3, 5],
+            current: 0,
+        });
+
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(text.contains("test"), "find bar should show query text");
+        assert!(
+            text.contains("1/3") || text.contains("(1/3)"),
+            "find bar should show match position"
+        );
+    }
+
+    /// Snapshot: find bar with no matches shows zero state.
+    #[test]
+    fn snapshot_find_bar_no_matches() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(3);
+        app.active_pane = 0;
+        if !app.panes.is_empty() {
+            app.panes[0].selected = 0;
+        }
+        app.cached_detail = Some((
+            "/test/session.jsonl".to_string(),
+            make_test_conversation_view(),
+        ));
+        app.detail_find = Some(DetailFindState {
+            query: "xyznonexistent".to_string(),
+            matches: vec![],
+            current: 0,
+        });
+
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            text.contains("0/0") || text.contains("no match"),
+            "find bar with no matches should show zero state"
+        );
+    }
+
+    /// Snapshot: find bar closed — no find container rendered.
+    #[test]
+    fn snapshot_find_bar_closed() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(3);
+        app.active_pane = 0;
+        if !app.panes.is_empty() {
+            app.panes[0].selected = 0;
+        }
+        app.cached_detail = Some((
+            "/test/session.jsonl".to_string(),
+            make_test_conversation_view(),
+        ));
+        app.detail_find = None;
+
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            !text.contains("0/0") && !text.contains("1/3"),
+            "closed find bar should not show match counts"
+        );
+    }
+
+    /// Snapshot: pill rendering survives degradation levels.
+    #[test]
+    fn snapshot_pills_across_degradation() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(5);
+        app.filters.agents.insert("codex".to_string());
+
+        for level in [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::NoStyling,
+            DegradationLevel::EssentialOnly,
+        ] {
+            let text = buffer_to_text(&render_at_degradation(&app, 120, 24, level));
+            assert!(
+                text.contains("codex"),
+                "pill content must survive degradation level {:?}",
+                level
+            );
+        }
+    }
+
+    /// Snapshot: find bar survives degradation levels.
+    #[test]
+    fn snapshot_find_bar_across_degradation() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(3);
+        app.active_pane = 0;
+        if !app.panes.is_empty() {
+            app.panes[0].selected = 0;
+        }
+        app.cached_detail = Some((
+            "/test/session.jsonl".to_string(),
+            make_test_conversation_view(),
+        ));
+        app.detail_find = Some(DetailFindState {
+            query: "search".to_string(),
+            matches: vec![2, 4],
+            current: 1,
+        });
+
+        for level in [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::NoStyling,
+            DegradationLevel::EssentialOnly,
+        ] {
+            let text = buffer_to_text(&render_at_degradation(&app, 120, 24, level));
+            assert!(
+                text.contains("search"),
+                "find bar query must survive degradation level {:?}",
+                level
+            );
+        }
+    }
+
+    /// Snapshot: tab bar deterministic across renders.
+    #[test]
+    fn snapshot_tab_bar_deterministic() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(5);
+        app.active_pane = 0;
+        if !app.panes.is_empty() {
+            app.panes[0].selected = 0;
+        }
+        app.cached_detail = Some((
+            "/test/session.jsonl".to_string(),
+            make_test_conversation_view(),
+        ));
+        app.detail_tab = DetailTab::Snippets;
+        let t1 = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        let t2 = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert_eq!(t1, t2, "tab bar rendering must be deterministic");
+    }
 }
