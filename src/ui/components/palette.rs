@@ -200,6 +200,148 @@ impl PaletteAction {
     }
 }
 
+/// Semantic result of executing a palette action. Decoupled from `CassMsg`
+/// so that palette.rs stays side-effect free and doesn't depend on app.rs.
+///
+/// The app-level adapter (`palette_result_to_cmd` in app.rs) translates these
+/// into concrete `Cmd<CassMsg>` dispatches.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PaletteResult {
+    /// Toggle the UI theme (light/dark).
+    ToggleTheme,
+    /// Cycle the density mode (compact/normal/relaxed).
+    CycleDensity,
+    /// Toggle the help strip visibility.
+    ToggleHelpStrip,
+    /// Open/check the update banner.
+    OpenUpdateBanner,
+    /// Enter an input mode for filtering.
+    EnterInputMode(InputModeTarget),
+    /// Set a time filter (epoch seconds).
+    SetTimeFilter { from: TimeFilterPreset },
+    /// Open the saved-views picker.
+    OpenSavedViews,
+    /// Save the current view to a numbered slot.
+    SaveViewSlot(u8),
+    /// Load a view from a numbered slot.
+    LoadViewSlot(u8),
+    /// Open the bulk-actions menu.
+    OpenBulkActions,
+    /// Reload/refresh the index.
+    ReloadIndex,
+    /// Navigate to an analytics sub-view (by name).
+    OpenAnalyticsView(AnalyticsTarget),
+    /// Request a screenshot export in the given format.
+    Screenshot(ScreenshotTarget),
+    /// Toggle macro recording on/off.
+    ToggleMacroRecording,
+    /// Enter sources management.
+    OpenSources,
+    /// No action (e.g. palette was empty when executed).
+    Noop,
+}
+
+/// Input mode the palette can request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputModeTarget {
+    Agent,
+    Workspace,
+    CreatedFrom,
+}
+
+/// Time filter presets the palette can apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeFilterPreset {
+    Today,
+    LastWeek,
+}
+
+/// Analytics sub-views addressable from the palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnalyticsTarget {
+    Dashboard,
+    Explorer,
+    Heatmap,
+    Breakdowns,
+    Tools,
+    Cost,
+    Plans,
+    Coverage,
+}
+
+/// Screenshot export formats addressable from the palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenshotTarget {
+    Html,
+    Svg,
+    Text,
+}
+
+impl PaletteAction {
+    /// Dispatch this action to a side-effect-free [`PaletteResult`].
+    ///
+    /// This is the adapter layer: palette semantics → app-level intent,
+    /// without depending on CassMsg or ftui. The app translates
+    /// `PaletteResult` into concrete `Cmd<CassMsg>` via `palette_result_to_cmd`.
+    pub fn dispatch(&self) -> PaletteResult {
+        match self {
+            // Chrome
+            Self::ToggleTheme => PaletteResult::ToggleTheme,
+            Self::ToggleDensity => PaletteResult::CycleDensity,
+            Self::ToggleHelpStrip => PaletteResult::ToggleHelpStrip,
+            Self::OpenUpdateBanner => PaletteResult::OpenUpdateBanner,
+            // Filters
+            Self::FilterAgent => PaletteResult::EnterInputMode(InputModeTarget::Agent),
+            Self::FilterWorkspace => PaletteResult::EnterInputMode(InputModeTarget::Workspace),
+            Self::FilterToday => PaletteResult::SetTimeFilter {
+                from: TimeFilterPreset::Today,
+            },
+            Self::FilterWeek => PaletteResult::SetTimeFilter {
+                from: TimeFilterPreset::LastWeek,
+            },
+            Self::FilterCustomDate => PaletteResult::EnterInputMode(InputModeTarget::CreatedFrom),
+            // Views
+            Self::OpenSavedViews => PaletteResult::OpenSavedViews,
+            Self::SaveViewSlot(slot) => PaletteResult::SaveViewSlot(*slot),
+            Self::LoadViewSlot(slot) => PaletteResult::LoadViewSlot(*slot),
+            Self::OpenBulkActions => PaletteResult::OpenBulkActions,
+            Self::ReloadIndex => PaletteResult::ReloadIndex,
+            // Analytics
+            Self::AnalyticsDashboard => {
+                PaletteResult::OpenAnalyticsView(AnalyticsTarget::Dashboard)
+            }
+            Self::AnalyticsExplorer => PaletteResult::OpenAnalyticsView(AnalyticsTarget::Explorer),
+            Self::AnalyticsHeatmap => PaletteResult::OpenAnalyticsView(AnalyticsTarget::Heatmap),
+            Self::AnalyticsBreakdowns => {
+                PaletteResult::OpenAnalyticsView(AnalyticsTarget::Breakdowns)
+            }
+            Self::AnalyticsTools => PaletteResult::OpenAnalyticsView(AnalyticsTarget::Tools),
+            Self::AnalyticsCost => PaletteResult::OpenAnalyticsView(AnalyticsTarget::Cost),
+            Self::AnalyticsPlans => PaletteResult::OpenAnalyticsView(AnalyticsTarget::Plans),
+            Self::AnalyticsCoverage => PaletteResult::OpenAnalyticsView(AnalyticsTarget::Coverage),
+            // Export
+            Self::ScreenshotHtml => PaletteResult::Screenshot(ScreenshotTarget::Html),
+            Self::ScreenshotSvg => PaletteResult::Screenshot(ScreenshotTarget::Svg),
+            Self::ScreenshotText => PaletteResult::Screenshot(ScreenshotTarget::Text),
+            // Recording
+            Self::MacroRecordingToggle => PaletteResult::ToggleMacroRecording,
+            // Sources
+            Self::Sources => PaletteResult::OpenSources,
+        }
+    }
+}
+
+/// Execute the currently selected palette action, returning a [`PaletteResult`].
+///
+/// Returns [`PaletteResult::Noop`] if the palette is empty or selection is out of bounds.
+pub fn execute_selected(state: &PaletteState) -> PaletteResult {
+    state
+        .filtered
+        .get(state.selected)
+        .map(|item| item.action.dispatch())
+        .unwrap_or(PaletteResult::Noop)
+}
+
 /// Render-ready descriptor for an action.
 #[derive(Clone, Debug)]
 pub struct PaletteItem {
@@ -1000,5 +1142,294 @@ mod tests {
                 a
             );
         }
+    }
+
+    // ==================== PaletteResult tests ====================
+
+    #[test]
+    fn palette_result_clone_and_eq() {
+        let r = PaletteResult::ToggleTheme;
+        assert_eq!(r.clone(), PaletteResult::ToggleTheme);
+    }
+
+    #[test]
+    fn palette_result_debug_format() {
+        let r = PaletteResult::EnterInputMode(InputModeTarget::Agent);
+        let s = format!("{:?}", r);
+        assert!(s.contains("EnterInputMode"));
+        assert!(s.contains("Agent"));
+    }
+
+    #[test]
+    fn palette_result_noop_variant() {
+        let r = PaletteResult::Noop;
+        assert_eq!(r, PaletteResult::Noop);
+    }
+
+    // ==================== dispatch() tests ====================
+
+    #[test]
+    fn dispatch_chrome_actions() {
+        assert_eq!(
+            PaletteAction::ToggleTheme.dispatch(),
+            PaletteResult::ToggleTheme
+        );
+        assert_eq!(
+            PaletteAction::ToggleDensity.dispatch(),
+            PaletteResult::CycleDensity
+        );
+        assert_eq!(
+            PaletteAction::ToggleHelpStrip.dispatch(),
+            PaletteResult::ToggleHelpStrip
+        );
+        assert_eq!(
+            PaletteAction::OpenUpdateBanner.dispatch(),
+            PaletteResult::OpenUpdateBanner
+        );
+    }
+
+    #[test]
+    fn dispatch_filter_actions() {
+        assert_eq!(
+            PaletteAction::FilterAgent.dispatch(),
+            PaletteResult::EnterInputMode(InputModeTarget::Agent)
+        );
+        assert_eq!(
+            PaletteAction::FilterWorkspace.dispatch(),
+            PaletteResult::EnterInputMode(InputModeTarget::Workspace)
+        );
+        assert_eq!(
+            PaletteAction::FilterToday.dispatch(),
+            PaletteResult::SetTimeFilter {
+                from: TimeFilterPreset::Today
+            }
+        );
+        assert_eq!(
+            PaletteAction::FilterWeek.dispatch(),
+            PaletteResult::SetTimeFilter {
+                from: TimeFilterPreset::LastWeek
+            }
+        );
+        assert_eq!(
+            PaletteAction::FilterCustomDate.dispatch(),
+            PaletteResult::EnterInputMode(InputModeTarget::CreatedFrom)
+        );
+    }
+
+    #[test]
+    fn dispatch_view_actions() {
+        assert_eq!(
+            PaletteAction::OpenSavedViews.dispatch(),
+            PaletteResult::OpenSavedViews
+        );
+        assert_eq!(
+            PaletteAction::OpenBulkActions.dispatch(),
+            PaletteResult::OpenBulkActions
+        );
+        assert_eq!(
+            PaletteAction::ReloadIndex.dispatch(),
+            PaletteResult::ReloadIndex
+        );
+    }
+
+    #[test]
+    fn dispatch_slot_actions_preserve_slot_number() {
+        for slot in 1..=9u8 {
+            assert_eq!(
+                PaletteAction::SaveViewSlot(slot).dispatch(),
+                PaletteResult::SaveViewSlot(slot)
+            );
+            assert_eq!(
+                PaletteAction::LoadViewSlot(slot).dispatch(),
+                PaletteResult::LoadViewSlot(slot)
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_analytics_actions() {
+        let cases = vec![
+            (
+                PaletteAction::AnalyticsDashboard,
+                AnalyticsTarget::Dashboard,
+            ),
+            (PaletteAction::AnalyticsExplorer, AnalyticsTarget::Explorer),
+            (PaletteAction::AnalyticsHeatmap, AnalyticsTarget::Heatmap),
+            (
+                PaletteAction::AnalyticsBreakdowns,
+                AnalyticsTarget::Breakdowns,
+            ),
+            (PaletteAction::AnalyticsTools, AnalyticsTarget::Tools),
+            (PaletteAction::AnalyticsCost, AnalyticsTarget::Cost),
+            (PaletteAction::AnalyticsPlans, AnalyticsTarget::Plans),
+            (PaletteAction::AnalyticsCoverage, AnalyticsTarget::Coverage),
+        ];
+        for (action, expected_target) in cases {
+            assert_eq!(
+                action.dispatch(),
+                PaletteResult::OpenAnalyticsView(expected_target),
+                "dispatch mismatch for {:?}",
+                expected_target
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_export_actions() {
+        assert_eq!(
+            PaletteAction::ScreenshotHtml.dispatch(),
+            PaletteResult::Screenshot(ScreenshotTarget::Html)
+        );
+        assert_eq!(
+            PaletteAction::ScreenshotSvg.dispatch(),
+            PaletteResult::Screenshot(ScreenshotTarget::Svg)
+        );
+        assert_eq!(
+            PaletteAction::ScreenshotText.dispatch(),
+            PaletteResult::Screenshot(ScreenshotTarget::Text)
+        );
+    }
+
+    #[test]
+    fn dispatch_recording_and_sources() {
+        assert_eq!(
+            PaletteAction::MacroRecordingToggle.dispatch(),
+            PaletteResult::ToggleMacroRecording
+        );
+        assert_eq!(
+            PaletteAction::Sources.dispatch(),
+            PaletteResult::OpenSources
+        );
+    }
+
+    #[test]
+    fn dispatch_exhaustive_all_26_actions() {
+        // Every action variant must dispatch without panic and return non-Noop.
+        let all: Vec<PaletteAction> = vec![
+            PaletteAction::ToggleTheme,
+            PaletteAction::ToggleDensity,
+            PaletteAction::ToggleHelpStrip,
+            PaletteAction::OpenUpdateBanner,
+            PaletteAction::FilterAgent,
+            PaletteAction::FilterWorkspace,
+            PaletteAction::FilterToday,
+            PaletteAction::FilterWeek,
+            PaletteAction::FilterCustomDate,
+            PaletteAction::OpenSavedViews,
+            PaletteAction::SaveViewSlot(1),
+            PaletteAction::LoadViewSlot(1),
+            PaletteAction::OpenBulkActions,
+            PaletteAction::ReloadIndex,
+            PaletteAction::AnalyticsDashboard,
+            PaletteAction::AnalyticsExplorer,
+            PaletteAction::AnalyticsHeatmap,
+            PaletteAction::AnalyticsBreakdowns,
+            PaletteAction::AnalyticsTools,
+            PaletteAction::AnalyticsCost,
+            PaletteAction::AnalyticsPlans,
+            PaletteAction::AnalyticsCoverage,
+            PaletteAction::ScreenshotHtml,
+            PaletteAction::ScreenshotSvg,
+            PaletteAction::ScreenshotText,
+            PaletteAction::MacroRecordingToggle,
+            PaletteAction::Sources,
+        ];
+        for action in &all {
+            let result = action.dispatch();
+            assert_ne!(
+                result,
+                PaletteResult::Noop,
+                "{:?} dispatched to Noop",
+                action
+            );
+        }
+    }
+
+    // ==================== execute_selected() tests ====================
+
+    #[test]
+    fn execute_selected_returns_noop_on_empty_state() {
+        let state = PaletteState::new(vec![]);
+        assert_eq!(execute_selected(&state), PaletteResult::Noop);
+    }
+
+    #[test]
+    fn execute_selected_returns_noop_on_out_of_bounds() {
+        let items = vec![item(PaletteAction::ToggleTheme, "Theme", "Toggle")];
+        let mut state = PaletteState::new(items);
+        state.selected = 5; // out of bounds
+        assert_eq!(execute_selected(&state), PaletteResult::Noop);
+    }
+
+    #[test]
+    fn execute_selected_dispatches_first_item() {
+        let items = vec![
+            item(PaletteAction::ToggleTheme, "Theme", "Toggle"),
+            item(PaletteAction::ReloadIndex, "Reload", "Refresh"),
+        ];
+        let state = PaletteState::new(items);
+        assert_eq!(execute_selected(&state), PaletteResult::ToggleTheme);
+    }
+
+    #[test]
+    fn execute_selected_dispatches_second_item() {
+        let items = vec![
+            item(PaletteAction::ToggleTheme, "Theme", "Toggle"),
+            item(PaletteAction::ReloadIndex, "Reload", "Refresh"),
+        ];
+        let mut state = PaletteState::new(items);
+        state.selected = 1;
+        assert_eq!(execute_selected(&state), PaletteResult::ReloadIndex);
+    }
+
+    #[test]
+    fn execute_selected_respects_filter() {
+        let items = vec![
+            item(PaletteAction::ToggleTheme, "Theme", "Toggle"),
+            item(PaletteAction::ReloadIndex, "Reload", "Refresh"),
+        ];
+        let mut state = PaletteState::new(items);
+        state.query = "reload".to_string();
+        state.refilter();
+        // After filtering, only "Reload" remains, selected=0.
+        assert_eq!(execute_selected(&state), PaletteResult::ReloadIndex);
+    }
+
+    #[test]
+    fn execute_selected_noop_after_no_match_filter() {
+        let items = vec![item(PaletteAction::ToggleTheme, "Theme", "Toggle")];
+        let mut state = PaletteState::new(items);
+        state.query = "zzz_no_match".to_string();
+        state.refilter();
+        assert_eq!(execute_selected(&state), PaletteResult::Noop);
+    }
+
+    #[test]
+    fn execute_selected_slot_preserves_value() {
+        let items = vec![item(PaletteAction::SaveViewSlot(7), "Save 7", "Ctrl+7")];
+        let state = PaletteState::new(items);
+        assert_eq!(execute_selected(&state), PaletteResult::SaveViewSlot(7));
+    }
+
+    // ==================== InputModeTarget/TimeFilterPreset/AnalyticsTarget/ScreenshotTarget ====================
+
+    #[test]
+    fn supporting_enums_derive_traits() {
+        // Clone + Copy + Debug + PartialEq + Eq
+        let imt = InputModeTarget::Agent;
+        assert_eq!(imt, imt);
+        let _ = format!("{:?}", imt);
+
+        let tfp = TimeFilterPreset::Today;
+        assert_eq!(tfp, tfp);
+        let _ = format!("{:?}", tfp);
+
+        let at = AnalyticsTarget::Dashboard;
+        assert_eq!(at, at);
+        let _ = format!("{:?}", at);
+
+        let st = ScreenshotTarget::Html;
+        assert_eq!(st, st);
+        let _ = format!("{:?}", st);
     }
 }
