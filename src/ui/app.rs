@@ -1057,6 +1057,63 @@ impl LayoutBreakpoint {
             Self::Wide => "Wide (>=160)",
         }
     }
+
+    /// Return the cockpit overlay topology for this breakpoint and mode.
+    pub fn cockpit_topology(self, mode: crate::ui::data::CockpitMode) -> CockpitTopology {
+        use crate::ui::data::CockpitMode;
+        match (self, mode) {
+            (Self::Narrow, CockpitMode::Overlay) => CockpitTopology {
+                overlay_max_w: 42, overlay_max_h: 10,
+                overlay_min_w: 20, overlay_min_h: 6,
+                use_short_labels: true, show_mode_indicator: false,
+                max_timeline_events: 3, label_width: 6, show_footer_hint: false,
+            },
+            (Self::Narrow, CockpitMode::Expanded) => CockpitTopology {
+                overlay_max_w: 42, overlay_max_h: 16,
+                overlay_min_w: 20, overlay_min_h: 6,
+                use_short_labels: true, show_mode_indicator: false,
+                max_timeline_events: 6, label_width: 6, show_footer_hint: true,
+            },
+            (Self::MediumNarrow, CockpitMode::Overlay) => CockpitTopology {
+                overlay_max_w: 56, overlay_max_h: 12,
+                overlay_min_w: 20, overlay_min_h: 6,
+                use_short_labels: false, show_mode_indicator: true,
+                max_timeline_events: 5, label_width: 8, show_footer_hint: true,
+            },
+            (Self::MediumNarrow, CockpitMode::Expanded) => CockpitTopology {
+                overlay_max_w: 56, overlay_max_h: 22,
+                overlay_min_w: 20, overlay_min_h: 6,
+                use_short_labels: false, show_mode_indicator: true,
+                max_timeline_events: 10, label_width: 8, show_footer_hint: true,
+            },
+            (Self::Medium | Self::Wide, CockpitMode::Overlay) => CockpitTopology {
+                overlay_max_w: 66, overlay_max_h: 16,
+                overlay_min_w: 20, overlay_min_h: 6,
+                use_short_labels: false, show_mode_indicator: true,
+                max_timeline_events: 8, label_width: 9, show_footer_hint: true,
+            },
+            (Self::Medium | Self::Wide, CockpitMode::Expanded) => CockpitTopology {
+                overlay_max_w: 72, overlay_max_h: 30,
+                overlay_min_w: 20, overlay_min_h: 6,
+                use_short_labels: false, show_mode_indicator: true,
+                max_timeline_events: 18, label_width: 9, show_footer_hint: true,
+            },
+        }
+    }
+}
+
+/// Per-breakpoint sizing and truncation policy for the cockpit overlay (1mfw3.3.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CockpitTopology {
+    pub overlay_max_w: u16,
+    pub overlay_max_h: u16,
+    pub overlay_min_w: u16,
+    pub overlay_min_h: u16,
+    pub use_short_labels: bool,
+    pub show_mode_indicator: bool,
+    pub max_timeline_events: u16,
+    pub label_width: u16,
+    pub show_footer_hint: bool,
 }
 
 impl DensityMode {
@@ -1100,6 +1157,19 @@ impl InspectorTab {
             Self::Diff => "Diff",
             Self::Budget => "Budget",
             Self::Timeline => "Log",
+        }
+    }
+
+    /// Single-character abbreviation for narrow terminal widths.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Timing => "T",
+            Self::Layout => "L",
+            Self::HitRegions => "H",
+            Self::Resize => "R",
+            Self::Diff => "D",
+            Self::Budget => "B",
+            Self::Timeline => "G",
         }
     }
 
@@ -4975,10 +5045,16 @@ impl CassApp {
         area: Rect,
         styles: &StyleContext,
     ) {
-        let overlay_w = 56u16.min(area.width.saturating_sub(2));
-        let overlay_h = 16u16.min(area.height.saturating_sub(2));
-        if overlay_w < 20 || overlay_h < 6 {
-            return; // Too narrow — auto-disable in small terminals
+        // Responsive overlay sizing driven by CockpitTopology (1mfw3.3.3).
+        let bp = LayoutBreakpoint::from_width(area.width);
+        let cockpit_mode = self.cockpit.mode;
+        let topo = bp.cockpit_topology(cockpit_mode);
+        let overlay_w = topo.overlay_max_w.min(area.width.saturating_sub(2));
+        // For low-height terminals, further clamp to 60% of available height
+        let height_cap = (area.height as u32 * 60 / 100).max(topo.overlay_min_h as u32) as u16;
+        let overlay_h = topo.overlay_max_h.min(height_cap).min(area.height.saturating_sub(2));
+        if overlay_w < topo.overlay_min_w || overlay_h < topo.overlay_min_h {
+            return; // Too small — auto-disable
         }
         let ox = area.x + area.width.saturating_sub(overlay_w + 1);
         let oy = area.y + area.height.saturating_sub(overlay_h + 1);
@@ -4992,8 +5068,8 @@ impl CassApp {
         // Clear background
         Block::new().style(bg_style).render(overlay_area, frame);
 
-        // Tab bar header
-        let tab_header: String = [
+        // Tab bar header — use short labels based on topology
+        let tabs = [
             InspectorTab::Timing,
             InspectorTab::Layout,
             InspectorTab::HitRegions,
@@ -5001,23 +5077,42 @@ impl CassApp {
             InspectorTab::Diff,
             InspectorTab::Budget,
             InspectorTab::Timeline,
-        ]
-        .iter()
-        .map(|t| {
-            if *t == self.inspector_tab {
-                format!("[{}]", t.label())
-            } else {
-                format!(" {} ", t.label())
+        ];
+        let tab_header: String = tabs
+            .iter()
+            .map(|t| {
+                let lbl = if topo.use_short_labels {
+                    t.short_label()
+                } else {
+                    t.label()
+                };
+                if *t == self.inspector_tab {
+                    format!("[{lbl}]")
+                } else {
+                    lbl.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Mode indicator: show cockpit mode + overlay/expanded when space permits
+        let mode_indicator = if self.cockpit.enabled && topo.show_mode_indicator {
+            match cockpit_mode {
+                crate::ui::data::CockpitMode::Overlay => " [cockpit]",
+                crate::ui::data::CockpitMode::Expanded => " [expanded]",
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-        let mode_indicator = if self.cockpit.enabled {
-            " [cockpit]"
         } else {
             ""
         };
         let title = format!(" {tab_header}{mode_indicator} ");
+        // Truncate title to fit within overlay width (leave room for border corners)
+        let max_title_len = overlay_w.saturating_sub(2) as usize;
+        let title = if title.len() > max_title_len {
+            let mut truncated = title[..max_title_len.saturating_sub(1)].to_string();
+            truncated.push('\u{2026}'); // ellipsis
+            truncated
+        } else {
+            title
+        };
 
         let block = Block::new()
             .borders(Borders::ALL)
@@ -5421,8 +5516,9 @@ impl CassApp {
                     let row = Rect::new(inner.x, y, inner.width, 1);
                     Paragraph::new(hdr).style(muted_style).render(row, frame);
                     y += 1;
-                    // Recent events, newest first
-                    for event in self.evidence.timeline.recent() {
+                    // Recent events, newest first, capped by topology
+                    let max_events = topo.max_timeline_events as usize;
+                    for event in self.evidence.timeline.recent().take(max_events) {
                         if y >= max_y {
                             break;
                         }
@@ -5440,16 +5536,25 @@ impl CassApp {
             }
         }
 
-        // Footer hint
-        let hint = if self.cockpit.enabled {
-            "^⇧I:close Tab:tab c:classic m:mode"
-        } else {
-            "^⇧I:close Tab:tab c:cockpit m:mode"
-        };
-        let hint_row = Rect::new(inner.x, max_y.saturating_sub(1), inner.width, 1);
-        Paragraph::new(hint)
-            .style(muted_style)
-            .render(hint_row, frame);
+        // Footer hint — only shown when topology permits
+        if topo.show_footer_hint {
+            let hint = if self.cockpit.enabled {
+                match self.cockpit.mode {
+                    crate::ui::data::CockpitMode::Overlay => {
+                        "^⇧I:close Tab:tab c:classic e:expand"
+                    }
+                    crate::ui::data::CockpitMode::Expanded => {
+                        "^⇧I:close Tab:tab c:classic e:shrink"
+                    }
+                }
+            } else {
+                "^⇧I:close Tab:tab c:cockpit m:mode"
+            };
+            let hint_row = Rect::new(inner.x, max_y.saturating_sub(1), inner.width, 1);
+            Paragraph::new(hint)
+                .style(muted_style)
+                .render(hint_row, frame);
+        }
     }
 
     // NOTE: render_palette_overlay() removed — rendering now delegated to
@@ -6722,6 +6827,8 @@ pub enum CassMsg {
     InspectorModeCycled,
     /// Toggle cockpit mode on/off within the inspector overlay.
     CockpitModeToggled,
+    /// Toggle cockpit between overlay and expanded display modes.
+    CockpitExpandToggled,
 
     // -- Help overlay -----------------------------------------------------
     /// Toggle the help overlay.
@@ -7981,6 +8088,10 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     return ftui::Cmd::none();
                 }
+                CassMsg::CockpitExpandToggled => {
+                    self.cockpit.mode = self.cockpit.mode.cycle();
+                    return ftui::Cmd::none();
+                }
                 // Redirect single-char keys to inspector actions when overlay is open
                 CassMsg::QueryChanged(text) if text == "m" => {
                     self.inspector_state.cycle_mode();
@@ -7988,6 +8099,9 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 CassMsg::QueryChanged(text) if text == "c" => {
                     return self.update(CassMsg::CockpitModeToggled);
+                }
+                CassMsg::QueryChanged(text) if text == "e" => {
+                    return self.update(CassMsg::CockpitExpandToggled);
                 }
                 _ => {}
             }
@@ -9591,6 +9705,10 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     self.inspector_tab = InspectorTab::Timing;
                 }
+                ftui::Cmd::none()
+            }
+            CassMsg::CockpitExpandToggled => {
+                self.cockpit.mode = self.cockpit.mode.cycle();
                 ftui::Cmd::none()
             }
 
@@ -13711,6 +13829,160 @@ mod tests {
         assert_eq!(app.palette_state.match_mode, PaletteMatchMode::Prefix);
         assert!(app.status.contains("Prefix"));
     }
+
+    // -- 1mfw3.1.6: Palette regression tests ----------------------------------
+    #[test]
+    fn palette_action_ordering_is_deterministic() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let a1: Vec<String> = app.palette_state.all_actions.iter().map(|a| a.label.clone()).collect();
+        assert!(!a1.is_empty());
+        let _ = app.update(CassMsg::PaletteClosed);
+        let _ = app.update(CassMsg::PaletteOpened);
+        let a2: Vec<String> = app.palette_state.all_actions.iter().map(|a| a.label.clone()).collect();
+        assert_eq!(a1, a2, "deterministic ordering");
+    }
+    #[test]
+    fn palette_lifecycle_open_query_navigate_execute() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.command_palette.is_visible());
+        let _ = app.update(CassMsg::PaletteQueryChanged("theme".into()));
+        assert_eq!(app.palette_state.query, "theme");
+        let _ = app.update(CassMsg::PaletteSelectionMoved { delta: 1 });
+        let _ = app.update(CassMsg::PaletteActionExecuted);
+        assert!(!app.command_palette.is_visible());
+        assert!(!app.show_palette_evidence);
+        assert!(!app.palette_latency.bench_mode);
+    }
+    #[test]
+    fn palette_lifecycle_filter_navigate_close() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        for _ in 0..6 { let _ = app.update(CassMsg::PaletteMatchModeCycled); }
+        assert_eq!(app.palette_state.match_mode, PaletteMatchMode::All);
+        let _ = app.update(CassMsg::PaletteSelectionMoved { delta: 2 });
+        let _ = app.update(CassMsg::PaletteClosed);
+        assert!(!app.command_palette.is_visible());
+    }
+    #[test]
+    fn palette_reopen_after_execute_resets() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let _ = app.update(CassMsg::PaletteQueryChanged("x".into()));
+        let _ = app.update(CassMsg::PaletteEvidenceToggled);
+        let _ = app.update(CassMsg::PaletteBenchToggled);
+        let _ = app.update(CassMsg::PaletteMatchModeCycled);
+        let _ = app.update(CassMsg::PaletteActionExecuted);
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert_eq!(app.palette_state.query, "");
+        assert_eq!(app.palette_state.selected, 0);
+        assert_eq!(app.palette_state.match_mode, PaletteMatchMode::All);
+        assert!(!app.show_palette_evidence);
+        assert!(!app.palette_latency.bench_mode);
+    }
+    #[test]
+    fn palette_navigate_boundaries_wrap() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let n = app.palette_state.filtered.len();
+        assert!(n > 0);
+        let _ = app.update(CassMsg::PaletteSelectionMoved { delta: -1 });
+        assert_eq!(app.palette_state.selected, n - 1);
+        let _ = app.update(CassMsg::PaletteSelectionMoved { delta: 1 });
+        assert_eq!(app.palette_state.selected, 0);
+    }
+    #[test]
+    fn palette_result_dispatch_all_variants() {
+        let mut app = CassApp::default();
+        for r in [
+            PaletteResult::ToggleTheme, PaletteResult::CycleDensity,
+            PaletteResult::ToggleHelpStrip, PaletteResult::OpenUpdateBanner,
+            PaletteResult::EnterInputMode(InputModeTarget::Agent),
+            PaletteResult::EnterInputMode(InputModeTarget::Workspace),
+            PaletteResult::EnterInputMode(InputModeTarget::CreatedFrom),
+            PaletteResult::SetTimeFilter { from: TimeFilterPreset::Today },
+            PaletteResult::SetTimeFilter { from: TimeFilterPreset::LastWeek },
+            PaletteResult::OpenSavedViews, PaletteResult::SaveViewSlot(1),
+            PaletteResult::LoadViewSlot(1), PaletteResult::OpenBulkActions,
+            PaletteResult::ReloadIndex,
+            PaletteResult::OpenAnalyticsView(AnalyticsTarget::Dashboard),
+            PaletteResult::OpenAnalyticsView(AnalyticsTarget::Explorer),
+            PaletteResult::OpenAnalyticsView(AnalyticsTarget::Heatmap),
+            PaletteResult::OpenAnalyticsView(AnalyticsTarget::Breakdowns),
+            PaletteResult::OpenAnalyticsView(AnalyticsTarget::Tools),
+            PaletteResult::OpenAnalyticsView(AnalyticsTarget::Cost),
+            PaletteResult::OpenAnalyticsView(AnalyticsTarget::Plans),
+            PaletteResult::OpenAnalyticsView(AnalyticsTarget::Coverage),
+            PaletteResult::Screenshot(ScreenshotTarget::Html),
+            PaletteResult::Screenshot(ScreenshotTarget::Svg),
+            PaletteResult::Screenshot(ScreenshotTarget::Text),
+            PaletteResult::ToggleMacroRecording, PaletteResult::OpenSources,
+            PaletteResult::Noop,
+        ] { let _ = app.palette_result_to_cmd(r); }
+    }
+    #[test]
+    fn palette_filter_mode_round_trip() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let init = app.palette_state.match_mode;
+        for exp in [PaletteMatchMode::Exact, PaletteMatchMode::Prefix,
+            PaletteMatchMode::WordStart, PaletteMatchMode::Substring,
+            PaletteMatchMode::Fuzzy, PaletteMatchMode::All] {
+            let _ = app.update(CassMsg::PaletteMatchModeCycled);
+            assert_eq!(app.palette_state.match_mode, exp);
+        }
+        assert_eq!(app.palette_state.match_mode, init);
+    }
+    #[test]
+    fn palette_zero_results_safe() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let total = app.palette_state.filtered.len();
+        assert!(total > 0);
+        let _ = app.update(CassMsg::PaletteQueryChanged("zzzzz_no_match".into()));
+        assert_eq!(app.palette_state.filtered.len(), 0);
+        let _ = app.update(CassMsg::PaletteQueryChanged(String::new()));
+        assert_eq!(app.palette_state.filtered.len(), total);
+    }
+    #[test]
+    fn palette_selection_clamps_on_filter() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        for _ in 0..10 { let _ = app.update(CassMsg::PaletteSelectionMoved { delta: 1 }); }
+        assert!(app.palette_state.selected > 0);
+        let _ = app.update(CassMsg::PaletteQueryChanged("theme".into()));
+        let n = app.palette_state.filtered.len();
+        assert!(app.palette_state.selected < n.max(1));
+    }
+    #[test]
+    fn palette_rapid_open_close_stable() {
+        let mut app = CassApp::default();
+        for _ in 0..10 {
+            let _ = app.update(CassMsg::PaletteOpened);
+            assert!(app.command_palette.is_visible());
+            let _ = app.update(CassMsg::PaletteClosed);
+            assert!(!app.command_palette.is_visible());
+        }
+        assert!(!app.show_palette_evidence);
+        assert!(!app.palette_latency.bench_mode);
+    }
+    #[test]
+    fn palette_esc_closes_before_quit() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let _ = app.update(CassMsg::PaletteClosed);
+        assert!(!app.command_palette.is_visible());
+        assert!(!app.show_palette_evidence);
+    }
+    #[test]
+    fn palette_actions_have_valid_labels() {
+        let app = CassApp::default();
+        for a in &app.palette_state.all_actions {
+            assert!(!a.label.is_empty(), "empty label for action={:?}", a.action);
+        }
+    }
+    // -- end 1mfw3.1.6 -------------------------------------------------------
 
     #[test]
     fn saved_views_modal_open_move_and_close() {
@@ -20943,6 +21215,438 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Responsive inspector sizing tests (1mfw3.3.3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn inspector_short_labels_are_single_char() {
+        let tabs = [
+            InspectorTab::Timing,
+            InspectorTab::Layout,
+            InspectorTab::HitRegions,
+            InspectorTab::Resize,
+            InspectorTab::Diff,
+            InspectorTab::Budget,
+            InspectorTab::Timeline,
+        ];
+        for tab in &tabs {
+            assert_eq!(tab.short_label().len(), 1, "{:?}", tab);
+        }
+    }
+
+    #[test]
+    fn inspector_short_labels_are_unique() {
+        let labels: Vec<&str> = [
+            InspectorTab::Timing,
+            InspectorTab::Layout,
+            InspectorTab::HitRegions,
+            InspectorTab::Resize,
+            InspectorTab::Diff,
+            InspectorTab::Budget,
+            InspectorTab::Timeline,
+        ]
+        .iter()
+        .map(|t| t.short_label())
+        .collect();
+        let unique: HashSet<&str> = labels.iter().copied().collect();
+        assert_eq!(labels.len(), unique.len());
+    }
+
+    #[test]
+    fn inspector_render_narrow_does_not_panic() {
+        use crate::ui::style_system::StyleOptions;
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let mut pool = ftui::GraphemePool::new();
+        // Narrow terminal: 60w × 25h → overlay_w=42
+        let mut frame = ftui::Frame::new(60, 25, &mut pool);
+        let area = Rect::new(0, 0, 60, 25);
+        app.render_inspector_overlay(&mut frame, area, &styles);
+    }
+
+    #[test]
+    fn inspector_render_medium_does_not_panic() {
+        use crate::ui::style_system::StyleOptions;
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let mut pool = ftui::GraphemePool::new();
+        // MediumNarrow terminal: 100w × 35h → overlay_w=56
+        let mut frame = ftui::Frame::new(100, 35, &mut pool);
+        let area = Rect::new(0, 0, 100, 35);
+        app.render_inspector_overlay(&mut frame, area, &styles);
+    }
+
+    #[test]
+    fn inspector_render_short_height_does_not_panic() {
+        use crate::ui::style_system::StyleOptions;
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let mut pool = ftui::GraphemePool::new();
+        // Short terminal: 120w × 15h → overlay_h=10
+        let mut frame = ftui::Frame::new(120, 15, &mut pool);
+        let area = Rect::new(0, 0, 120, 15);
+        app.render_inspector_overlay(&mut frame, area, &styles);
+    }
+
+    #[test]
+    fn inspector_auto_disables_tiny_terminal() {
+        use crate::ui::style_system::StyleOptions;
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let mut pool = ftui::GraphemePool::new();
+        // Tiny: 18w × 4h → overlay_w < 20, should auto-disable
+        let mut frame = ftui::Frame::new(18, 4, &mut pool);
+        let area = Rect::new(0, 0, 18, 4);
+        app.render_inspector_overlay(&mut frame, area, &styles);
+        // No panic = success (overlay is silently skipped)
+    }
+
+    // -----------------------------------------------------------------------
+    // Cockpit regression tests (1mfw3.3.4)
+    // -----------------------------------------------------------------------
+
+    /// Helper: builds an app with all evidence populated for regression testing.
+    fn app_with_full_evidence() -> CassApp {
+        use ftui::render::budget::{BudgetDecision, DegradationLevel};
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+
+        // Budget evidence
+        app.evidence.budget = Some(ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
+            frame_idx: 100,
+            decision: BudgetDecision::Hold,
+            controller_decision: BudgetDecision::Hold,
+            degradation_before: DegradationLevel::Full,
+            degradation_after: DegradationLevel::Full,
+            frame_time_us: 14000.0,
+            budget_us: 16000.0,
+            pid_output: 0.05,
+            e_value: 1.5,
+            frames_observed: 200,
+            frames_since_change: 50,
+            in_warmup: false,
+            conformal: None,
+        });
+
+        // Diff evidence
+        app.evidence.diff = Some(ftui::runtime::evidence_telemetry::DiffDecisionSnapshot {
+            event_idx: 5,
+            screen_mode: "Fullscreen".to_string(),
+            cols: 120,
+            rows: 40,
+            evidence: ftui::render::diff_strategy::StrategyEvidence {
+                strategy: ftui::render::diff_strategy::DiffStrategy::DirtyRows,
+                cost_full: 500.0,
+                cost_dirty: 150.0,
+                cost_redraw: 800.0,
+                posterior_mean: 0.2,
+                posterior_variance: 0.01,
+                alpha: 4.0,
+                beta: 16.0,
+                dirty_rows: 5,
+                total_rows: 40,
+                total_cells: 4800,
+                guard_reason: "",
+                hysteresis_applied: false,
+                hysteresis_ratio: 0.0,
+            },
+            span_count: 3,
+            span_coverage_pct: 0.6,
+            max_span_len: 40,
+            scan_cost_estimate: 200,
+            fallback_reason: String::new(),
+            tile_used: true,
+            tile_fallback: String::new(),
+            strategy_used: ftui::render::diff_strategy::DiffStrategy::DirtyRows,
+        });
+
+        // Resize evidence
+        let resize = Some(make_resize_snapshot(
+            1,
+            ftui::runtime::resize_coalescer::Regime::Steady,
+        ));
+        let budget_ref = app.evidence.budget.clone();
+        app.evidence.summary.update_from_raw(&resize, &budget_ref);
+        app.evidence.resize = resize;
+
+        // Feed timeline
+        app.evidence.timeline.update_from_snapshots(
+            &app.evidence.resize,
+            &app.evidence.diff,
+            &app.evidence.budget,
+        );
+
+        app
+    }
+
+    /// Dimensions matrix: (width, height, description)
+    const REGRESSION_SIZES: &[(u16, u16, &str)] = &[
+        (40, 12, "narrow-short"),
+        (60, 25, "narrow-normal"),
+        (80, 30, "medium_narrow"),
+        (100, 35, "medium_narrow-tall"),
+        (120, 40, "medium"),
+        (160, 50, "wide"),
+        (200, 60, "ultra_wide"),
+        (40, 8, "narrow-tiny_height"),
+        (120, 12, "medium-short"),
+    ];
+
+    #[test]
+    fn cockpit_all_tabs_no_panic_no_evidence() {
+        use crate::ui::style_system::StyleOptions;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let all_tabs = [
+            InspectorTab::Timing,
+            InspectorTab::Layout,
+            InspectorTab::HitRegions,
+            InspectorTab::Resize,
+            InspectorTab::Diff,
+            InspectorTab::Budget,
+            InspectorTab::Timeline,
+        ];
+        for &(w, h, desc) in REGRESSION_SIZES {
+            for tab in &all_tabs {
+                let mut app = CassApp::default();
+                app.show_inspector = true;
+                app.inspector_tab = *tab;
+                let mut pool = ftui::GraphemePool::new();
+                let mut frame = ftui::Frame::new(w, h, &mut pool);
+                let area = Rect::new(0, 0, w, h);
+                app.render_inspector_overlay(&mut frame, area, &styles);
+                // No panic = pass. Tag for diagnosis:
+                let _ = (desc, tab.label());
+            }
+        }
+    }
+
+    #[test]
+    fn cockpit_all_tabs_no_panic_with_evidence() {
+        use crate::ui::style_system::StyleOptions;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let all_tabs = [
+            InspectorTab::Timing,
+            InspectorTab::Layout,
+            InspectorTab::HitRegions,
+            InspectorTab::Resize,
+            InspectorTab::Diff,
+            InspectorTab::Budget,
+            InspectorTab::Timeline,
+        ];
+        for &(w, h, desc) in REGRESSION_SIZES {
+            for tab in &all_tabs {
+                let mut app = app_with_full_evidence();
+                app.inspector_tab = *tab;
+                let mut pool = ftui::GraphemePool::new();
+                let mut frame = ftui::Frame::new(w, h, &mut pool);
+                let area = Rect::new(0, 0, w, h);
+                app.render_inspector_overlay(&mut frame, area, &styles);
+                let _ = (desc, tab.label());
+            }
+        }
+    }
+
+    #[test]
+    fn cockpit_all_tabs_no_panic_cockpit_mode() {
+        use crate::ui::style_system::StyleOptions;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let all_tabs = [
+            InspectorTab::Timing,
+            InspectorTab::Layout,
+            InspectorTab::HitRegions,
+            InspectorTab::Resize,
+            InspectorTab::Diff,
+            InspectorTab::Budget,
+            InspectorTab::Timeline,
+        ];
+        for &(w, h, _desc) in REGRESSION_SIZES {
+            for tab in &all_tabs {
+                let mut app = app_with_full_evidence();
+                app.inspector_tab = *tab;
+                app.cockpit.enabled = true;
+                let mut pool = ftui::GraphemePool::new();
+                let mut frame = ftui::Frame::new(w, h, &mut pool);
+                let area = Rect::new(0, 0, w, h);
+                app.render_inspector_overlay(&mut frame, area, &styles);
+            }
+        }
+    }
+
+    #[test]
+    fn cockpit_degradation_levels_no_panic() {
+        use crate::ui::style_system::StyleOptions;
+        use ftui::render::budget::{BudgetDecision, DegradationLevel};
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let levels = [
+            (DegradationLevel::Full, DegradationLevel::Full),
+            (DegradationLevel::Full, DegradationLevel::SimpleBorders),
+            (DegradationLevel::SimpleBorders, DegradationLevel::NoStyling),
+            (DegradationLevel::SimpleBorders, DegradationLevel::NoStyling),
+            (DegradationLevel::EssentialOnly, DegradationLevel::Skeleton),
+        ];
+        for (before, after) in &levels {
+            let mut app = app_with_full_evidence();
+            app.inspector_tab = InspectorTab::Budget;
+            let b = app.evidence.budget.as_mut().unwrap();
+            b.degradation_before = *before;
+            b.degradation_after = *after;
+            b.decision = BudgetDecision::Degrade;
+            let mut pool = ftui::GraphemePool::new();
+            let mut frame = ftui::Frame::new(120, 40, &mut pool);
+            let area = Rect::new(0, 0, 120, 40);
+            app.render_inspector_overlay(&mut frame, area, &styles);
+        }
+    }
+
+    #[test]
+    fn cockpit_partial_evidence_diff_only() {
+        use crate::ui::style_system::StyleOptions;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        app.inspector_tab = InspectorTab::Diff;
+        app.evidence.diff = Some(ftui::runtime::evidence_telemetry::DiffDecisionSnapshot {
+            event_idx: 1,
+            screen_mode: "Fullscreen".to_string(),
+            cols: 80,
+            rows: 24,
+            evidence: ftui::render::diff_strategy::StrategyEvidence {
+                strategy: ftui::render::diff_strategy::DiffStrategy::DirtyRows,
+                cost_full: 500.0,
+                cost_dirty: 150.0,
+                cost_redraw: 800.0,
+                posterior_mean: 0.15,
+                posterior_variance: 0.01,
+                alpha: 3.0,
+                beta: 17.0,
+                dirty_rows: 6,
+                total_rows: 24,
+                total_cells: 1920,
+                guard_reason: "",
+                hysteresis_applied: false,
+                hysteresis_ratio: 0.0,
+            },
+            span_count: 2,
+            span_coverage_pct: 0.5,
+            max_span_len: 30,
+            scan_cost_estimate: 100,
+            fallback_reason: String::new(),
+            tile_used: false,
+            tile_fallback: String::new(),
+            strategy_used: ftui::render::diff_strategy::DiffStrategy::DirtyRows,
+        });
+        // No budget or resize evidence — only diff
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = ftui::Frame::new(120, 40, &mut pool);
+        let area = Rect::new(0, 0, 120, 40);
+        app.render_inspector_overlay(&mut frame, area, &styles);
+        // Switch to Budget tab (no evidence) — should still render gracefully
+        app.inspector_tab = InspectorTab::Budget;
+        let mut pool2 = ftui::GraphemePool::new();
+        let mut frame2 = ftui::Frame::new(120, 40, &mut pool2);
+        app.render_inspector_overlay(&mut frame2, area, &styles);
+    }
+
+    #[test]
+    fn cockpit_partial_evidence_budget_only() {
+        use crate::ui::style_system::StyleOptions;
+        use ftui::render::budget::{BudgetDecision, DegradationLevel};
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        app.inspector_tab = InspectorTab::Budget;
+        app.evidence.budget = Some(ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
+            frame_idx: 10,
+            decision: BudgetDecision::Hold,
+            controller_decision: BudgetDecision::Hold,
+            degradation_before: DegradationLevel::Full,
+            degradation_after: DegradationLevel::Full,
+            frame_time_us: 10000.0,
+            budget_us: 16000.0,
+            pid_output: 0.0,
+            e_value: 0.5,
+            frames_observed: 10,
+            frames_since_change: 5,
+            in_warmup: true,
+            conformal: None,
+        });
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = ftui::Frame::new(120, 40, &mut pool);
+        let area = Rect::new(0, 0, 120, 40);
+        app.render_inspector_overlay(&mut frame, area, &styles);
+        // Switch to Diff tab (no evidence)
+        app.inspector_tab = InspectorTab::Diff;
+        let mut pool2 = ftui::GraphemePool::new();
+        let mut frame2 = ftui::Frame::new(120, 40, &mut pool2);
+        app.render_inspector_overlay(&mut frame2, area, &styles);
+    }
+
+    #[test]
+    fn cockpit_tab_cycling_preserves_render() {
+        use crate::ui::style_system::StyleOptions;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let mut app = app_with_full_evidence();
+        // Cycle through all 7 tabs and render at each step
+        for _ in 0..7 {
+            let mut pool = ftui::GraphemePool::new();
+            let mut frame = ftui::Frame::new(120, 40, &mut pool);
+            let area = Rect::new(0, 0, 120, 40);
+            app.render_inspector_overlay(&mut frame, area, &styles);
+            let _ = app.update(CassMsg::InspectorTabCycled);
+        }
+        // Should be back to Timing
+        assert_eq!(app.inspector_tab, InspectorTab::Timing);
+    }
+
+    #[test]
+    fn cockpit_conformal_edge_cases() {
+        use crate::ui::style_system::StyleOptions;
+        use ftui::render::budget::{BudgetDecision, DegradationLevel};
+        let styles = StyleContext::from_options(StyleOptions::default());
+        // Test with conformal prediction data
+        let mut app = app_with_full_evidence();
+        app.inspector_tab = InspectorTab::Budget;
+        let b = app.evidence.budget.as_mut().unwrap();
+        b.conformal = Some(ftui::runtime::evidence_telemetry::ConformalSnapshot {
+            bucket_key: "alt:Full:medium".to_string(),
+            sample_count: 50,
+            upper_us: 25000.0,
+            risk: true,
+        });
+        b.e_value = 25.0;
+        b.decision = BudgetDecision::Degrade;
+        b.degradation_before = DegradationLevel::Full;
+        b.degradation_after = DegradationLevel::SimpleBorders;
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = ftui::Frame::new(120, 40, &mut pool);
+        let area = Rect::new(0, 0, 120, 40);
+        app.render_inspector_overlay(&mut frame, area, &styles);
+    }
+
+    #[test]
+    fn cockpit_extreme_values_no_panic() {
+        use crate::ui::style_system::StyleOptions;
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let mut app = app_with_full_evidence();
+        app.inspector_tab = InspectorTab::Budget;
+        let b = app.evidence.budget.as_mut().unwrap();
+        b.frame_time_us = f64::MAX;
+        b.budget_us = f64::MIN_POSITIVE;
+        b.pid_output = -999.0;
+        b.e_value = f64::INFINITY;
+        b.frames_observed = u32::MAX;
+        b.frames_since_change = u32::MAX;
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = ftui::Frame::new(120, 40, &mut pool);
+        let area = Rect::new(0, 0, 120, 40);
+        app.render_inspector_overlay(&mut frame, area, &styles);
+    }
+
+    // -----------------------------------------------------------------------
     // Cockpit mode tests (1mfw3.3.2)
     // -----------------------------------------------------------------------
 
@@ -21030,6 +21734,90 @@ mod tests {
         assert!(!app.cockpit.resize.has_data());
         // No frames observed → budget has no data
         assert!(!app.cockpit.budget.has_data());
+    }
+
+    // -----------------------------------------------------------------------
+    // Deterministic resize storm tests (1mfw3.2.6)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cockpit_topology_narrow_overlay_compact() {
+        use crate::ui::data::CockpitMode;
+        let t = LayoutBreakpoint::Narrow.cockpit_topology(CockpitMode::Overlay);
+        assert!(t.use_short_labels);
+        assert!(!t.show_mode_indicator);
+        assert!(!t.show_footer_hint);
+        assert_eq!(t.overlay_max_w, 42);
+        assert_eq!(t.overlay_max_h, 10);
+        assert_eq!(t.max_timeline_events, 3);
+    }
+
+    #[test]
+    fn cockpit_topology_expanded_grows() {
+        use crate::ui::data::CockpitMode;
+        let ov = LayoutBreakpoint::Narrow.cockpit_topology(CockpitMode::Overlay);
+        let ex = LayoutBreakpoint::Narrow.cockpit_topology(CockpitMode::Expanded);
+        assert!(ex.overlay_max_h > ov.overlay_max_h);
+        assert!(ex.max_timeline_events > ov.max_timeline_events);
+    }
+
+    #[test]
+    fn cockpit_topology_wide_expanded_largest() {
+        use crate::ui::data::CockpitMode;
+        let t = LayoutBreakpoint::Wide.cockpit_topology(CockpitMode::Expanded);
+        assert_eq!(t.overlay_max_w, 72);
+        assert_eq!(t.overlay_max_h, 30);
+        assert_eq!(t.max_timeline_events, 18);
+    }
+
+    #[test]
+    fn cockpit_topology_minimums_consistent() {
+        use crate::ui::data::CockpitMode;
+        for bp in [LayoutBreakpoint::Narrow, LayoutBreakpoint::MediumNarrow,
+                    LayoutBreakpoint::Medium, LayoutBreakpoint::Wide] {
+            for mode in [CockpitMode::Overlay, CockpitMode::Expanded] {
+                let t = bp.cockpit_topology(mode);
+                assert_eq!(t.overlay_min_w, 20);
+                assert_eq!(t.overlay_min_h, 6);
+                assert!(t.overlay_max_w >= t.overlay_min_w);
+                assert!(t.overlay_max_h >= t.overlay_min_h);
+            }
+        }
+    }
+
+    #[test]
+    fn cockpit_expand_toggle_msg() {
+        use crate::ui::data::CockpitMode;
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        app.cockpit.enabled = true;
+        assert_eq!(app.cockpit.mode, CockpitMode::Overlay);
+        let _ = app.update(CassMsg::CockpitExpandToggled);
+        assert_eq!(app.cockpit.mode, CockpitMode::Expanded);
+        let _ = app.update(CassMsg::CockpitExpandToggled);
+        assert_eq!(app.cockpit.mode, CockpitMode::Overlay);
+    }
+
+    #[test]
+    fn cockpit_e_key_expands() {
+        use crate::ui::data::CockpitMode;
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        app.cockpit.enabled = true;
+        let _ = app.update(CassMsg::QueryChanged("e".to_string()));
+        assert_eq!(app.cockpit.mode, CockpitMode::Expanded);
+    }
+
+    #[test]
+    fn cockpit_expand_preserves_tab() {
+        use crate::ui::data::CockpitMode;
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        app.cockpit.enabled = true;
+        app.inspector_tab = InspectorTab::Budget;
+        let _ = app.update(CassMsg::CockpitExpandToggled);
+        assert_eq!(app.cockpit.mode, CockpitMode::Expanded);
+        assert_eq!(app.inspector_tab, InspectorTab::Budget);
     }
 
     // -----------------------------------------------------------------------
