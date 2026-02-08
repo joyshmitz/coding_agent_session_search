@@ -58,6 +58,9 @@ pub const STYLE_LOCATION: &str = "location";
 pub const STYLE_PILL_ACTIVE: &str = "pill.active";
 pub const STYLE_PILL_INACTIVE: &str = "pill.inactive";
 pub const STYLE_PILL_LABEL: &str = "pill.label";
+pub const STYLE_CRUMB_ACTIVE: &str = "crumb.active";
+pub const STYLE_CRUMB_INACTIVE: &str = "crumb.inactive";
+pub const STYLE_CRUMB_SEPARATOR: &str = "crumb.separator";
 pub const STYLE_TAB_ACTIVE: &str = "tab.active";
 pub const STYLE_TAB_INACTIVE: &str = "tab.inactive";
 pub const STYLE_DETAIL_FIND_CONTAINER: &str = "detail.find.container";
@@ -1525,6 +1528,19 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
     );
 
     sheet.define(
+        STYLE_CRUMB_ACTIVE,
+        Style::new().fg(to_packed(resolved.accent)).bold(),
+    );
+    sheet.define(
+        STYLE_CRUMB_INACTIVE,
+        Style::new().fg(to_packed(resolved.text_subtle)),
+    );
+    sheet.define(
+        STYLE_CRUMB_SEPARATOR,
+        Style::new().fg(to_packed(resolved.border)),
+    );
+
+    sheet.define(
         STYLE_TAB_ACTIVE,
         Style::new()
             .fg(to_packed(resolved.accent))
@@ -2080,6 +2096,9 @@ mod tests {
             STYLE_PILL_ACTIVE,
             STYLE_PILL_INACTIVE,
             STYLE_PILL_LABEL,
+            STYLE_CRUMB_ACTIVE,
+            STYLE_CRUMB_INACTIVE,
+            STYLE_CRUMB_SEPARATOR,
             STYLE_TAB_ACTIVE,
             STYLE_TAB_INACTIVE,
             STYLE_DETAIL_FIND_CONTAINER,
@@ -3659,6 +3678,64 @@ mod tests {
         }
     }
 
+    // -- Breadcrumb hierarchy tests (2dccg.8.2) ---------------------------------
+
+    #[test]
+    fn crumb_active_differs_from_inactive() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let active = ctx.style(STYLE_CRUMB_ACTIVE);
+            let inactive = ctx.style(STYLE_CRUMB_INACTIVE);
+            assert_ne!(
+                active,
+                inactive,
+                "CRUMB_ACTIVE must differ from CRUMB_INACTIVE for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn crumb_active_is_bold() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let active = ctx.style(STYLE_CRUMB_ACTIVE);
+            assert!(
+                active.has_attr(ftui::StyleFlags::BOLD),
+                "CRUMB_ACTIVE should be bold for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn crumb_separator_has_fg() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let sep = ctx.style(STYLE_CRUMB_SEPARATOR);
+            assert!(
+                sep.fg.is_some(),
+                "CRUMB_SEPARATOR must have fg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn crumb_separator_differs_from_active() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let active = ctx.style(STYLE_CRUMB_ACTIVE);
+            let sep = ctx.style(STYLE_CRUMB_SEPARATOR);
+            assert_ne!(
+                active.fg,
+                sep.fg,
+                "CRUMB_SEPARATOR fg must differ from CRUMB_ACTIVE fg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
     // -- MarkdownTheme integration tests (kr88h) --------------------------------
 
     #[test]
@@ -3777,6 +3854,9 @@ mod tests {
         ("STYLE_PILL_ACTIVE", STYLE_PILL_ACTIVE),
         ("STYLE_PILL_INACTIVE", STYLE_PILL_INACTIVE),
         ("STYLE_PILL_LABEL", STYLE_PILL_LABEL),
+        ("STYLE_CRUMB_ACTIVE", STYLE_CRUMB_ACTIVE),
+        ("STYLE_CRUMB_INACTIVE", STYLE_CRUMB_INACTIVE),
+        ("STYLE_CRUMB_SEPARATOR", STYLE_CRUMB_SEPARATOR),
         ("STYLE_TAB_ACTIVE", STYLE_TAB_ACTIVE),
         ("STYLE_TAB_INACTIVE", STYLE_TAB_INACTIVE),
         ("STYLE_DETAIL_FIND_CONTAINER", STYLE_DETAIL_FIND_CONTAINER),

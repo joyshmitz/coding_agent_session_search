@@ -4445,25 +4445,90 @@ impl CassApp {
         (ftui::text::Line::from_spans(spans), rects)
     }
 
-    fn breadcrumb_line(&self, width: u16) -> String {
-        let agent = summarize_filter_values(&self.filters.agents, "All agents");
-        let workspace = summarize_filter_values(&self.filters.workspaces, "All workspaces");
-        let time = format_time_chip(self.filters.created_from, self.filters.created_to)
+    fn breadcrumb_line(
+        &self,
+        width: u16,
+        active_style: ftui::Style,
+        inactive_style: ftui::Style,
+        separator_style: ftui::Style,
+    ) -> ftui::text::Line {
+        let agent_text = summarize_filter_values(&self.filters.agents, "All agents");
+        let agent_active = !self.filters.agents.is_empty();
+
+        let ws_text = summarize_filter_values(&self.filters.workspaces, "All workspaces");
+        let ws_active = !self.filters.workspaces.is_empty();
+
+        let time_text = format_time_chip(self.filters.created_from, self.filters.created_to)
             .unwrap_or_else(|| "Any time".to_string());
-        let source = if self.filters.source_filter.is_all() {
+        let time_active = self.filters.created_from.is_some() || self.filters.created_to.is_some();
+
+        let ranking_text = ranking_mode_label(self.ranking_mode).to_string();
+
+        let source_text = if self.filters.source_filter.is_all() {
             "all sources".to_string()
         } else {
             format!("source {}", self.filters.source_filter)
         };
-        let crumb = format!(
-            "{} > {} > {} > {} > {}",
-            agent,
-            workspace,
-            time,
-            ranking_mode_label(self.ranking_mode),
-            source
-        );
-        elide_text(&crumb, width as usize)
+        let source_active = !self.filters.source_filter.is_all();
+
+        let sep = " \u{203a} "; // ›
+
+        // Build segments: (text, is_active)
+        let segments = [
+            (agent_text, agent_active),
+            (ws_text, ws_active),
+            (time_text, time_active),
+            (ranking_text, true), // ranking mode is always "active" context
+            (source_text, source_active),
+        ];
+
+        // Check total width — if it fits, render with spans; if not, elide
+        let total_len: usize =
+            segments.iter().map(|(t, _)| t.len()).sum::<usize>() + sep.len() * (segments.len() - 1);
+
+        if total_len > width as usize {
+            // Fall back to elided flat text with per-crumb styling
+            let mut spans = Vec::new();
+            let mut used = 0usize;
+            let budget = width as usize;
+
+            for (i, (text, is_active)) in segments.iter().enumerate() {
+                if i > 0 {
+                    if used + sep.len() > budget {
+                        break;
+                    }
+                    spans.push(ftui::text::Span::styled(sep, separator_style));
+                    used += sep.len();
+                }
+                let remaining = budget.saturating_sub(used);
+                let elided = elide_text(text, remaining);
+                if elided.is_empty() {
+                    break;
+                }
+                used += elided.chars().count();
+                let style = if *is_active {
+                    active_style
+                } else {
+                    inactive_style
+                };
+                spans.push(ftui::text::Span::styled(elided, style));
+            }
+            ftui::text::Line::from_spans(spans)
+        } else {
+            let mut spans = Vec::new();
+            for (i, (text, is_active)) in segments.iter().enumerate() {
+                if i > 0 {
+                    spans.push(ftui::text::Span::styled(sep, separator_style));
+                }
+                let style = if *is_active {
+                    active_style
+                } else {
+                    inactive_style
+                };
+                spans.push(ftui::text::Span::styled(text.clone(), style));
+            }
+            ftui::text::Line::from_spans(spans)
+        }
     }
 
     /// Render the results list pane using VirtualizedList for O(visible) rendering.
@@ -12281,10 +12346,16 @@ impl super::ftui_adapter::Model for CassApp {
                     }
 
                     if rows.len() > 2 {
-                        let crumb = self.breadcrumb_line(rows[2].width);
-                        Paragraph::new(crumb)
-                            .style(text_muted_style)
-                            .render(rows[2], frame);
+                        let crumb_active_style = styles.style(style_system::STYLE_CRUMB_ACTIVE);
+                        let crumb_inactive_style = styles.style(style_system::STYLE_CRUMB_INACTIVE);
+                        let crumb_sep_style = styles.style(style_system::STYLE_CRUMB_SEPARATOR);
+                        let crumb_line = self.breadcrumb_line(
+                            rows[2].width,
+                            crumb_active_style,
+                            crumb_inactive_style,
+                            crumb_sep_style,
+                        );
+                        Paragraph::new(crumb_line).render(rows[2], frame);
                     }
                 }
 
@@ -24439,5 +24510,108 @@ mod tests {
         assert!(text.contains("needle"));
         assert!(text.contains("(2/3)"));
         assert_affordance_snapshot("cassapp_baseline_detail_find_current_match", &buf);
+    }
+
+    // ── Breadcrumb rendering tests (2dccg.8.2) ────────────────────────
+
+    /// Breadcrumb line contains all expected segments.
+    #[test]
+    fn breadcrumb_contains_all_segments() {
+        let app = app_with_hits(5);
+        let s = ftui::Style::default();
+        let line = app.breadcrumb_line(200, s, s, s);
+        let plain: String = line.spans().iter().map(|sp| sp.content.as_ref()).collect();
+        assert!(plain.contains("All agents"), "should show agent segment");
+        assert!(
+            plain.contains("All workspaces"),
+            "should show workspace segment"
+        );
+        assert!(plain.contains("Any time"), "should show time segment");
+        assert!(plain.contains("all sources"), "should show source segment");
+    }
+
+    /// Active filter crumbs get a different style from inactive ones.
+    #[test]
+    fn breadcrumb_active_filter_gets_active_style() {
+        let mut app = app_with_hits(5);
+        app.filters.agents.insert("codex".to_string());
+        let ctx = StyleContext::from_options(crate::ui::style_system::StyleOptions::default());
+        let active = ctx.style(style_system::STYLE_CRUMB_ACTIVE);
+        let inactive = ctx.style(style_system::STYLE_CRUMB_INACTIVE);
+        let sep = ctx.style(style_system::STYLE_CRUMB_SEPARATOR);
+        let line = app.breadcrumb_line(200, active, inactive, sep);
+        // First span should be agent "codex" with active style
+        let agent_span = &line.spans()[0];
+        assert!(
+            agent_span.content.contains("codex"),
+            "first crumb should be agent"
+        );
+        assert_eq!(
+            agent_span.style.as_ref().and_then(|s| s.fg),
+            active.fg,
+            "active agent crumb should use active style"
+        );
+        // Workspace should be inactive
+        let ws_span = line
+            .spans()
+            .iter()
+            .find(|sp| sp.content.contains("All workspaces"));
+        assert!(ws_span.is_some(), "workspace crumb should be present");
+        if let Some(ws) = ws_span {
+            assert_eq!(
+                ws.style.as_ref().and_then(|s| s.fg),
+                inactive.fg,
+                "inactive workspace crumb should use inactive style"
+            );
+        }
+    }
+
+    /// Breadcrumb uses › separator between segments.
+    #[test]
+    fn breadcrumb_uses_separator_glyph() {
+        let app = app_with_hits(5);
+        let s = ftui::Style::default();
+        let line = app.breadcrumb_line(200, s, s, s);
+        let has_sep = line
+            .spans()
+            .iter()
+            .any(|sp| sp.content.contains('\u{203a}'));
+        assert!(has_sep, "breadcrumb should use › separator");
+    }
+
+    /// Breadcrumb renders in output buffer.
+    #[test]
+    fn breadcrumb_renders_in_output() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let app = app_with_hits(5);
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            text.contains("\u{203a}") || text.contains(">"),
+            "breadcrumb separator should appear in rendered output"
+        );
+    }
+
+    /// Breadcrumb elides gracefully at narrow widths.
+    #[test]
+    fn breadcrumb_elides_at_narrow_width() {
+        let app = app_with_hits(5);
+        let s = ftui::Style::default();
+        let line = app.breadcrumb_line(20, s, s, s);
+        let total: usize = line
+            .spans()
+            .iter()
+            .map(|sp| sp.content.chars().count())
+            .sum();
+        assert!(
+            total <= 20,
+            "breadcrumb at width=20 should fit budget, got {total}"
+        );
     }
 }
