@@ -2852,6 +2852,8 @@ pub struct CassApp {
     pub theme_preset: UiThemePreset,
     /// Runtime style options derived from environment + user toggles.
     pub style_options: StyleOptions,
+    /// Persisted theme config loaded from `data_dir/theme.json` (if present).
+    pub theme_config: Option<style_system::ThemeConfig>,
     /// Whether fancy (rounded) borders are enabled.
     pub fancy_borders: bool,
     /// Visual density mode.
@@ -3083,6 +3085,7 @@ impl Default for CassApp {
             theme_dark: true,
             theme_preset: UiThemePreset::Dark,
             style_options: StyleOptions::from_env(),
+            theme_config: None,
             fancy_borders: true,
             density_mode: DensityMode::default(),
             peek_window_saved: None,
@@ -3176,6 +3179,27 @@ impl Default for CassApp {
             status: String::new(),
             index_refresh_in_flight: false,
         };
+        // Load persisted theme config (if any) and apply overrides to initial options.
+        #[cfg(not(test))]
+        {
+            let theme_path = app.data_dir.join("theme.json");
+            if theme_path.exists() {
+                match style_system::ThemeConfig::load_from_path(&theme_path) {
+                    Ok(config) => {
+                        if let Some(preset) = config.base_preset {
+                            app.theme_preset = preset;
+                            app.style_options.preset = preset;
+                            app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                            app.style_options.dark_mode = app.theme_dark;
+                        }
+                        app.theme_config = Some(config);
+                    }
+                    Err(_) => {
+                        // Invalid or corrupt theme.json — silently ignore at startup.
+                    }
+                }
+            }
+        }
         app.init_focus_graph();
         app
     }
@@ -3312,7 +3336,12 @@ impl CassApp {
         let mut options = self.style_options;
         options.preset = self.theme_preset;
         options.dark_mode = self.theme_dark;
-        StyleContext::from_options(options)
+        if let Some(config) = &self.theme_config {
+            StyleContext::from_options_with_theme_config(options, config)
+                .unwrap_or_else(|_| StyleContext::from_options(options))
+        } else {
+            StyleContext::from_options(options)
+        }
     }
 
     fn selected_hit(&self) -> Option<&SearchHit> {
@@ -9861,6 +9890,9 @@ impl super::ftui_adapter::Model for CassApp {
                             // Apply saved theme to the live UI.
                             self.theme_preset = editor.base_preset;
                             self.style_options.preset = editor.base_preset;
+                            self.theme_dark = !matches!(editor.base_preset, UiThemePreset::Light);
+                            self.style_options.dark_mode = self.theme_dark;
+                            self.theme_config = Some(config);
                             self.status = format!("Theme saved to {}", path.display());
                         }
                         Err(e) => {
@@ -11716,7 +11748,12 @@ impl super::ftui_adapter::Model for CassApp {
                         self.theme_preset.name()
                     )
                 } else {
-                    format!("cass | {mode_label}/{match_label}")
+                    // Narrow layouts prioritize explicit mode tags over theme text.
+                    format!(
+                        "cass | mode:{} | match:{}",
+                        search_mode_str(self.search_mode),
+                        match_mode_str(self.match_mode)
+                    )
                 };
                 let query_block = Block::new()
                     .borders(adaptive_borders)
@@ -11748,36 +11785,106 @@ impl super::ftui_adapter::Model for CassApp {
                         vec![query_inner]
                     };
 
-                    let query_text = match self.input_mode {
+                    let query_row = rows[0];
+                    let query_is_active = self.input_mode == InputMode::Query;
+                    let query_primary_style = if apply_style {
+                        styles.style(style_system::STYLE_TEXT_PRIMARY)
+                    } else {
+                        plain
+                    };
+                    let caret_style = if apply_style {
+                        if query_is_active {
+                            styles.style(style_system::STYLE_KBD_KEY)
+                        } else {
+                            text_muted_style
+                        }
+                    } else {
+                        plain
+                    };
+                    let query_inset_style = if apply_style && degradation.render_decorative() {
+                        if query_is_active {
+                            styles.style(style_system::STYLE_TAB_ACTIVE)
+                        } else {
+                            styles.style(style_system::STYLE_TAB_INACTIVE)
+                        }
+                    } else {
+                        plain
+                    };
+                    Block::new()
+                        .style(query_inset_style)
+                        .render(query_row, frame);
+                    let query_line = match self.input_mode {
                         InputMode::Query => {
                             if self.query.is_empty() {
-                                "\u{2502}<type to search>".to_string()
+                                ftui::text::Line::from_spans(vec![
+                                    ftui::text::Span::styled("\u{2502}", caret_style),
+                                    ftui::text::Span::styled("<type to search>", text_muted_style),
+                                ])
                             } else {
                                 let cpos = self.cursor_pos.min(self.query.len());
-                                format!("{}\u{2502}{}", &self.query[..cpos], &self.query[cpos..])
+                                ftui::text::Line::from_spans(vec![
+                                    ftui::text::Span::styled(
+                                        self.query[..cpos].to_string(),
+                                        query_primary_style,
+                                    ),
+                                    ftui::text::Span::styled("\u{2502}", caret_style),
+                                    ftui::text::Span::styled(
+                                        self.query[cpos..].to_string(),
+                                        query_primary_style,
+                                    ),
+                                ])
                             }
                         }
-                        InputMode::Agent => format!("[agent] {}\u{2502}", self.input_buffer),
-                        InputMode::Workspace => {
-                            format!("[workspace] {}\u{2502}", self.input_buffer)
-                        }
-                        InputMode::CreatedFrom => format!("[from] {}\u{2502}", self.input_buffer),
-                        InputMode::CreatedTo => format!("[to] {}\u{2502}", self.input_buffer),
-                        InputMode::PaneFilter => format!("[pane] {}\u{2502}", self.input_buffer),
-                        InputMode::DetailFind => {
-                            format!("[detail-find] {}\u{2502}", self.input_buffer)
-                        }
+                        InputMode::Agent => ftui::text::Line::from_spans(vec![
+                            ftui::text::Span::styled("[agent] ", text_muted_style),
+                            ftui::text::Span::styled(
+                                self.input_buffer.clone(),
+                                query_primary_style,
+                            ),
+                            ftui::text::Span::styled("\u{2502}", caret_style),
+                        ]),
+                        InputMode::Workspace => ftui::text::Line::from_spans(vec![
+                            ftui::text::Span::styled("[workspace] ", text_muted_style),
+                            ftui::text::Span::styled(
+                                self.input_buffer.clone(),
+                                query_primary_style,
+                            ),
+                            ftui::text::Span::styled("\u{2502}", caret_style),
+                        ]),
+                        InputMode::CreatedFrom => ftui::text::Line::from_spans(vec![
+                            ftui::text::Span::styled("[from] ", text_muted_style),
+                            ftui::text::Span::styled(
+                                self.input_buffer.clone(),
+                                query_primary_style,
+                            ),
+                            ftui::text::Span::styled("\u{2502}", caret_style),
+                        ]),
+                        InputMode::CreatedTo => ftui::text::Line::from_spans(vec![
+                            ftui::text::Span::styled("[to] ", text_muted_style),
+                            ftui::text::Span::styled(
+                                self.input_buffer.clone(),
+                                query_primary_style,
+                            ),
+                            ftui::text::Span::styled("\u{2502}", caret_style),
+                        ]),
+                        InputMode::PaneFilter => ftui::text::Line::from_spans(vec![
+                            ftui::text::Span::styled("[pane] ", text_muted_style),
+                            ftui::text::Span::styled(
+                                self.input_buffer.clone(),
+                                query_primary_style,
+                            ),
+                            ftui::text::Span::styled("\u{2502}", caret_style),
+                        ]),
+                        InputMode::DetailFind => ftui::text::Line::from_spans(vec![
+                            ftui::text::Span::styled("[detail-find] ", text_muted_style),
+                            ftui::text::Span::styled(
+                                self.input_buffer.clone(),
+                                query_primary_style,
+                            ),
+                            ftui::text::Span::styled("\u{2502}", caret_style),
+                        ]),
                     };
-                    let query_row = rows[0];
-                    let query_style =
-                        if self.input_mode == InputMode::Query && self.query.is_empty() {
-                            text_muted_style
-                        } else {
-                            styles.style(style_system::STYLE_TEXT_PRIMARY)
-                        };
-                    Paragraph::new(elide_text(&query_text, query_row.width as usize))
-                        .style(query_style)
-                        .render(query_row, frame);
+                    Paragraph::new(query_line).render(query_row, frame);
 
                     if rows.len() > 1 {
                         let pills = self.active_filter_pills();
@@ -16425,6 +16532,148 @@ mod tests {
         }
     }
 
+    /// Deterministic high-fidelity fixture set for TUI visual rendering tests.
+    fn rich_visual_fixture_hits() -> Vec<SearchHit> {
+        vec![
+            SearchHit {
+                title: "Auth regression triage summary".into(),
+                snippet: "## Incident summary\n- symptom: OAuth callback loop\n- blast radius: desktop + remote users\n- status: mitigated".into(),
+                content: "## Timeline\n1. 09:12 deploy\n2. 09:17 alert\n3. 09:32 rollback\n\n```rust\nif token.is_expired() { refresh()?; }\n```\n\n[runbook](https://internal.example/auth)".into(),
+                content_hash: 9001,
+                score: 0.98,
+                agent: "claude_code".into(),
+                source_path: "/workspace/cass/src/auth/session.rs".into(),
+                workspace: "/workspace/cass".into(),
+                workspace_original: Some("/Users/dev/cass".into()),
+                created_at: None,
+                line_number: Some(142),
+                match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+            },
+            SearchHit {
+                title: "Search ranking tuning notes".into(),
+                snippet: "### Candidate signals\n- lexical boost\n- semantic recall\n- recency decay window=30d\n- quality rerank with guardrails".into(),
+                content: "### Experiment matrix\n| mode | ndcg@10 |\n| --- | --- |\n| lexical | 0.61 |\n| hybrid | 0.74 |\n\n```sql\nSELECT source_id, avg(score) FROM hits GROUP BY 1;\n```".into(),
+                content_hash: 9002,
+                score: 0.91,
+                agent: "codex".into(),
+                source_path: "/workspace/cass/src/search/ranking.rs".into(),
+                workspace: "/workspace/cass".into(),
+                workspace_original: Some("/srv/repos/cass".into()),
+                created_at: None,
+                line_number: Some(287),
+                match_type: MatchType::Prefix,
+                source_id: "workstation-west".into(),
+                origin_kind: "ssh".into(),
+                origin_host: Some("workstation-west".into()),
+            },
+            SearchHit {
+                title: "Theme audit and contrast findings".into(),
+                snippet: "High-contrast preset retains hierarchy; Nord needed low-score tint adjustment to prevent SCORE_MID collision.".into(),
+                content: "## Contrast report\n- pass: text.primary on pane.base\n- pass: pill.active fg/bg\n- follow-up: find-bar border token\n\n```json\n{\"preset\":\"nord\",\"issue\":\"score_low_collision\"}\n```".into(),
+                content_hash: 9003,
+                score: 0.88,
+                agent: "cursor".into(),
+                source_path: "/workspace/cass/src/ui/style_system.rs".into(),
+                workspace: "/workspace/cass".into(),
+                workspace_original: Some("/home/ops/cass".into()),
+                created_at: None,
+                line_number: Some(1166),
+                match_type: MatchType::Substring,
+                source_id: "remote-ci".into(),
+                origin_kind: "remote".into(),
+                origin_host: Some("runner-17".into()),
+            },
+            SearchHit {
+                title: "Multi-agent coordination transcript".into(),
+                snippet: "Participants: user, assistant, tool, system, reviewer. Includes dependency routing and escalation policy.".into(),
+                content: "## Roles\n- user: requested visual parity\n- assistant: implemented search-bar affordance\n- tool: generated PTY captures\n- system: enforced quality gates\n\n> Coordination stayed in thread `coding_agent_session_search-2dccg`.".into(),
+                content_hash: 9004,
+                score: 0.77,
+                agent: "gemini".into(),
+                source_path: "/workspace/cass/docs/coordination/2dccg.md".into(),
+                workspace: "/workspace/cass".into(),
+                workspace_original: Some("/Users/research/cass".into()),
+                created_at: None,
+                line_number: Some(63),
+                match_type: MatchType::Wildcard,
+                source_id: "laptop-east".into(),
+                origin_kind: "ssh".into(),
+                origin_host: Some("laptop-east".into()),
+            },
+            SearchHit {
+                title: "Large-snippet rendering edge case".into(),
+                snippet: "The following snippet intentionally exceeds normal row budgets to exercise truncation, striping, selection, and horizontal clipping behavior under compact and spacious densities.".into(),
+                content: "```text\nThis is a deliberately long snippet line that includes repeated context windows, remote provenance markers, and unicode glyphs → λ Δ ✓ to stress wrapping behavior.\n```".into(),
+                content_hash: 9005,
+                score: 0.64,
+                agent: "aider".into(),
+                source_path: "/workspace/cass/tests/regression/long_snippet.md".into(),
+                workspace: "/workspace/cass".into(),
+                workspace_original: Some("/mnt/build/cass".into()),
+                created_at: None,
+                line_number: Some(9),
+                match_type: MatchType::Suffix,
+                source_id: "ci-linux".into(),
+                origin_kind: "remote".into(),
+                origin_host: Some("ci-linux".into()),
+            },
+            SearchHit {
+                title: "JSON payload decode failure".into(),
+                snippet: "{\"error\":\"invalid_schema\",\"path\":\"payload.message.parts[2]\",\"hint\":\"expected string\"}".into(),
+                content: "{\n  \"event\": \"decode_failure\",\n  \"severity\": \"warning\",\n  \"retries\": 3,\n  \"module\": \"html_export\"\n}".into(),
+                content_hash: 9006,
+                score: 0.53,
+                agent: "opencode".into(),
+                source_path: "/workspace/cass/src/export/payload.rs".into(),
+                workspace: "/workspace/cass".into(),
+                workspace_original: Some("/tmp/cass".into()),
+                created_at: None,
+                line_number: Some(411),
+                match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+            },
+            SearchHit {
+                title: "Legacy migration checklist".into(),
+                snippet: "1. Replace ratatui snapshots\n2. Align markdown theme mapping\n3. Verify breadcrumbs + pills + footer lanes".into(),
+                content: "## Checklist\n- [x] mode-aware title\n- [x] query caret emphasis\n- [ ] full visual matrix in 8.6\n\nSee also: `docs/ftui_visual_parity_rubric.md`.".into(),
+                content_hash: 9007,
+                score: 0.41,
+                agent: "pi-agent".into(),
+                source_path: "/workspace/cass/docs/migrations/ftui.md".into(),
+                workspace: "/workspace/cass".into(),
+                workspace_original: Some("/home/docs/cass".into()),
+                created_at: None,
+                line_number: Some(101),
+                match_type: MatchType::Substring,
+                source_id: "docs-host".into(),
+                origin_kind: "remote".into(),
+                origin_host: Some("docs-host".into()),
+            },
+            SearchHit {
+                title: "Background telemetry heartbeat".into(),
+                snippet: "system event: runtime evidence snapshot refreshed; no user-visible errors".into(),
+                content: "heartbeat ok\nresize regime: stable\nbudget level: full\ndiff mode: unicode".into(),
+                content_hash: 9008,
+                score: 0.22,
+                agent: "system".into(),
+                source_path: "/workspace/cass/runtime/evidence.log".into(),
+                workspace: "/workspace/cass".into(),
+                workspace_original: Some("/var/lib/cass".into()),
+                created_at: None,
+                line_number: Some(7),
+                match_type: MatchType::ImplicitWildcard,
+                source_id: "daemon".into(),
+                origin_kind: "service".into(),
+                origin_host: Some("daemon-1".into()),
+            },
+        ]
+    }
+
     /// Helper: create a CassApp with one pane of N hits.
     fn app_with_hits(n: usize) -> CassApp {
         let mut app = CassApp::default();
@@ -16439,6 +16688,101 @@ mod tests {
         });
         app.active_pane = 0;
         app
+    }
+
+    /// Helper: create a CassApp with a richer, deterministic result corpus.
+    fn app_with_rich_visual_fixture() -> CassApp {
+        let mut app = CassApp::default();
+        let hits = rich_visual_fixture_hits();
+        let mut pane_map: std::collections::BTreeMap<String, Vec<SearchHit>> =
+            std::collections::BTreeMap::new();
+        for hit in &hits {
+            pane_map
+                .entry(hit.agent.clone())
+                .or_default()
+                .push(hit.clone());
+        }
+        app.results = hits;
+        app.panes = pane_map
+            .into_iter()
+            .map(|(agent, hits)| AgentPane {
+                agent,
+                total_count: hits.len(),
+                hits,
+                selected: 0,
+            })
+            .collect();
+        app.active_pane = 0;
+        app
+    }
+
+    #[test]
+    fn rich_visual_fixture_dataset_is_deterministic_and_diverse() {
+        let first = rich_visual_fixture_hits();
+        let second = rich_visual_fixture_hits();
+        assert_eq!(first.len(), second.len(), "fixture size must be stable");
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.title, b.title, "fixture ordering/content must be stable");
+            assert_eq!(a.content_hash, b.content_hash);
+            assert_eq!(a.score, b.score);
+        }
+
+        assert!(
+            first.len() >= 8,
+            "fixture should include enough rows for striping/scroll tests"
+        );
+
+        let agents: std::collections::BTreeSet<_> =
+            first.iter().map(|hit| hit.agent.as_str()).collect();
+        assert!(
+            agents.len() >= 6,
+            "fixture should span many agents, got {}",
+            agents.len()
+        );
+
+        let max_score = first.iter().map(|hit| hit.score).fold(f32::MIN, f32::max);
+        let min_score = first.iter().map(|hit| hit.score).fold(f32::MAX, f32::min);
+        assert!(
+            max_score - min_score > 0.6,
+            "fixture should cover a wide score range"
+        );
+
+        assert!(
+            first
+                .iter()
+                .any(|hit| hit.content.contains("```") && hit.content.contains("##")),
+            "fixture should include markdown-heavy messages with code blocks/headings"
+        );
+        assert!(
+            first.iter().any(|hit| hit.origin_host.is_some()),
+            "fixture should include remote source metadata"
+        );
+        assert!(
+            first.iter().any(|hit| hit.snippet.len() > 140),
+            "fixture should include long snippets to stress truncation/wrapping"
+        );
+    }
+
+    #[test]
+    fn rich_visual_fixture_renders_across_layouts_without_panic() {
+        let app = app_with_rich_visual_fixture();
+        for (width, height) in [(60, 24), (100, 24), (140, 36)] {
+            let buf = render_at_degradation(
+                &app,
+                width,
+                height,
+                ftui::render::budget::DegradationLevel::Full,
+            );
+            let text = ftui_harness::buffer_to_text(&buf);
+            assert!(
+                !text.trim().is_empty(),
+                "render output should be non-empty at {width}x{height}"
+            );
+            assert!(
+                text.contains("Auth regression triage summary"),
+                "fixture title should render at {width}x{height}"
+            );
+        }
     }
 
     #[test]
@@ -16918,6 +17262,58 @@ mod tests {
             narrow_text.contains("lexical"),
             "narrow search title should show mode"
         );
+    }
+
+    #[test]
+    fn search_title_and_caret_render_across_core_presets() {
+        use ftui_harness::buffer_to_text;
+        let presets = [
+            UiThemePreset::Dark,
+            UiThemePreset::Light,
+            UiThemePreset::HighContrast,
+        ];
+
+        for preset in presets {
+            let mut app = CassApp::default();
+            app.theme_preset = preset;
+            app.style_options.preset = preset;
+            app.theme_dark = !matches!(preset, UiThemePreset::Light);
+            app.style_options.dark_mode = app.theme_dark;
+
+            let medium_text = buffer_to_text(&render_at_degradation(
+                &app,
+                100,
+                24,
+                ftui::render::budget::DegradationLevel::Full,
+            ));
+            assert!(
+                medium_text.contains(preset.name()),
+                "medium title should include preset name for {:?}",
+                preset
+            );
+            assert!(
+                medium_text.contains("<type to search>") && medium_text.contains("│"),
+                "query row should include placeholder and caret for {:?}",
+                preset
+            );
+
+            let narrow_text = buffer_to_text(&render_at_degradation(
+                &app,
+                60,
+                24,
+                ftui::render::budget::DegradationLevel::Full,
+            ));
+            assert!(
+                narrow_text.contains("mode:lexical"),
+                "narrow title should include explicit mode token for {:?}",
+                preset
+            );
+            assert!(
+                narrow_text.contains("match:standard"),
+                "narrow title should include explicit match token for {:?}",
+                preset
+            );
+        }
     }
 
     #[test]

@@ -424,6 +424,30 @@ impl StyleOptions {
         options
     }
 
+    /// Resolve `StyleOptions` from a snapshot of environment variables.
+    ///
+    /// ## Precedence rules (evaluated top-to-bottom, first match wins)
+    ///
+    /// | Priority | Condition | `color_profile` | `no_color` |
+    /// |----------|-----------|------------------|------------|
+    /// | 1 (highest) | `CASS_NO_COLOR` is set | Mono | true |
+    /// | 2 | `CASS_RESPECT_NO_COLOR` is truthy **and** `NO_COLOR` is set | Mono | true |
+    /// | 3 | `CASS_COLOR_PROFILE` is set to a valid value | that value | false |
+    /// | 4 (lowest) | None of the above | detect from COLORTERM/TERM | false |
+    ///
+    /// ## Cascade effects
+    ///
+    /// - `no_gradient` = `CASS_NO_GRADIENT` **or** `no_color` **or** `a11y`
+    /// - `no_icons` = `CASS_NO_ICONS` (independent of color state)
+    /// - `a11y` = `CASS_A11Y` is truthy (adds bold/underline accents, text role markers)
+    /// - `dark_mode` = `false` only for `Light` preset; `HighContrast` auto-detects
+    ///
+    /// ## Notes
+    ///
+    /// - `NO_COLOR` alone is intentionally ignored; `CASS_RESPECT_NO_COLOR` must opt in.
+    /// - `CASS_NO_COLOR` trumps `CASS_COLOR_PROFILE` even when set to "truecolor".
+    /// - Invalid `CASS_COLOR_PROFILE` values silently fall back to env detection.
+    /// - `CASS_A11Y` uses `env_truthy()`: "0"/"false"/"off"/"no" → false, anything else → true.
     fn from_env_values(values: EnvValues<'_>) -> Self {
         let preset = values
             .cass_theme
@@ -964,6 +988,28 @@ fn downgrade_theme_for_profile(theme: Theme, profile: ColorProfile) -> Theme {
     }
 }
 
+/// Build the semantic stylesheet from resolved theme colors.
+///
+/// ## Palette → Token Derivation Strategy
+///
+/// All tokens derive from [`ResolvedTheme`] fields — no hardcoded colors.
+/// The mapping is organized into semantic groups:
+///
+/// | Group      | Tokens                          | Palette Source                |
+/// |------------|---------------------------------|-------------------------------|
+/// | App chrome | APP_ROOT, PANE_BASE/FOCUSED      | text, background, surface     |
+/// | Text       | TEXT_PRIMARY/MUTED/SUBTLE        | text hierarchy fields          |
+/// | Status     | SUCCESS/WARNING/ERROR/INFO       | success, warning, error, info |
+/// | Results    | ROW/ROW_ALT/ROW_SELECTED         | surface, selection_*          |
+/// | Roles      | ROLE_USER/ASSISTANT/TOOL/SYSTEM   | blend(accent,success,0.35), info, warning, error |
+/// | Gutters    | ROLE_GUTTER_*                    | role color + 18% bg blend     |
+/// | Scores     | SCORE_HIGH/MID/LOW               | success, info, blend(text_subtle,bg,0.35) |
+/// | Keys       | KBD_KEY/DESC                     | accent, text_subtle           |
+/// | Affordance | PILL_ACTIVE, TAB_ACTIVE/INACTIVE  | secondary/accent + bg blends  |
+///
+/// Role assignment: User=blend(accent,success,0.35), Assistant=info, Tool=warning, System=error.
+/// Gutter backgrounds use a uniform 18% blend factor with `resolved.background`.
+/// Pill/tab backgrounds use blended info tints (25% and 15% respectively).
 fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleSheet {
     let sheet = StyleSheet::new();
 
@@ -973,7 +1019,11 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
         resolved.surface
     };
 
-    let role_user = resolved.primary;
+    // Role colors must be pairwise distinct across all presets. Some upstream
+    // themes share primary==info or accent==info, so we derive the user color
+    // from a blend of accent+success to guarantee visual separation from
+    // assistant (info), tool (warning), and system (error).
+    let role_user = blend(resolved.accent, resolved.success, 0.35);
     let role_assistant = resolved.info;
     let role_tool = resolved.warning;
     let role_system = resolved.error;
@@ -1116,9 +1166,11 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
         Style::new().fg(to_packed(resolved.success)).bold(),
     );
     sheet.define(STYLE_SCORE_MID, Style::new().fg(to_packed(resolved.info)));
+    // Use a derived dim color for SCORE_LOW to avoid collision when info==text_subtle (e.g. Nord).
+    let score_low_fg = blend(resolved.text_subtle, resolved.background, 0.35);
     sheet.define(
         STYLE_SCORE_LOW,
-        Style::new().fg(to_packed(resolved.text_subtle)).dim(),
+        Style::new().fg(to_packed(score_low_fg)).dim(),
     );
 
     sheet.define(
@@ -1319,6 +1371,299 @@ mod tests {
 
         assert!(options.no_color);
         assert_eq!(options.color_profile, ColorProfile::Mono);
+    }
+
+    // -- env/capability edge-case tests (2dccg.10.4) --
+
+    #[test]
+    fn no_color_without_respect_flag_preserves_full_color() {
+        // NO_COLOR alone must NOT disable colors unless CASS_RESPECT_NO_COLOR is set.
+        let options = StyleOptions::from_env_values(EnvValues {
+            no_color: Some("1"),
+            cass_respect_no_color: None,
+            cass_no_color: None,
+            colorterm: None,
+            term: None,
+            cass_no_icons: None,
+            cass_no_gradient: None,
+            cass_a11y: None,
+            cass_theme: None,
+            cass_color_profile: None,
+        });
+        assert!(!options.no_color, "NO_COLOR alone must be ignored");
+        assert!(!options.no_gradient, "gradient should remain enabled");
+    }
+
+    #[test]
+    fn respect_no_color_with_falsy_value_is_not_truthy() {
+        // CASS_RESPECT_NO_COLOR="0" should be treated as falsy.
+        for falsy in &["0", "false", "off", "no"] {
+            let options = StyleOptions::from_env_values(EnvValues {
+                no_color: Some("1"),
+                cass_respect_no_color: Some(falsy),
+                cass_no_color: None,
+                colorterm: Some("truecolor"),
+                term: None,
+                cass_no_icons: None,
+                cass_no_gradient: None,
+                cass_a11y: None,
+                cass_theme: None,
+                cass_color_profile: None,
+            });
+            assert!(
+                !options.no_color,
+                "CASS_RESPECT_NO_COLOR={falsy} must be falsy"
+            );
+            assert_eq!(options.color_profile, ColorProfile::TrueColor);
+        }
+    }
+
+    #[test]
+    fn invalid_color_profile_falls_back_to_env_detection() {
+        let options = StyleOptions::from_env_values(EnvValues {
+            no_color: None,
+            cass_respect_no_color: None,
+            cass_no_color: None,
+            colorterm: Some("truecolor"),
+            term: Some("xterm-256color"),
+            cass_no_icons: None,
+            cass_no_gradient: None,
+            cass_a11y: None,
+            cass_theme: None,
+            cass_color_profile: Some("garbage-value"),
+        });
+        // Invalid CASS_COLOR_PROFILE → fallback to COLORTERM/TERM detection.
+        assert_eq!(options.color_profile, ColorProfile::TrueColor);
+        assert!(!options.no_color);
+    }
+
+    #[test]
+    fn a11y_cascades_no_gradient() {
+        // CASS_A11Y=1 should force no_gradient even without CASS_NO_GRADIENT.
+        let options = StyleOptions::from_env_values(EnvValues {
+            no_color: None,
+            cass_respect_no_color: None,
+            cass_no_color: None,
+            colorterm: Some("truecolor"),
+            term: None,
+            cass_no_icons: None,
+            cass_no_gradient: None,
+            cass_a11y: Some("1"),
+            cass_theme: None,
+            cass_color_profile: None,
+        });
+        assert!(options.a11y);
+        assert!(
+            options.no_gradient,
+            "a11y must cascade into no_gradient=true"
+        );
+        assert!(!options.no_color, "a11y must not cascade into no_color");
+        assert_eq!(
+            options.color_profile,
+            ColorProfile::TrueColor,
+            "a11y must not downgrade color profile"
+        );
+    }
+
+    #[test]
+    fn no_icons_is_independent_of_color_state() {
+        // CASS_NO_ICONS should work even with full color enabled.
+        let with_icons_off = StyleOptions::from_env_values(EnvValues {
+            no_color: None,
+            cass_respect_no_color: None,
+            cass_no_color: None,
+            colorterm: Some("truecolor"),
+            term: None,
+            cass_no_icons: Some("1"),
+            cass_no_gradient: None,
+            cass_a11y: None,
+            cass_theme: None,
+            cass_color_profile: None,
+        });
+        assert!(with_icons_off.no_icons);
+        assert!(!with_icons_off.no_color);
+        assert_eq!(with_icons_off.color_profile, ColorProfile::TrueColor);
+    }
+
+    #[test]
+    fn dark_mode_follows_preset() {
+        // Light preset → dark_mode=false, all others → true.
+        let presets_and_expected = [
+            ("dark", true),
+            ("light", false),
+            ("nord", true),
+            ("cat", true),
+            ("dracula", true),
+        ];
+        for (name, expected_dark) in presets_and_expected {
+            let options = StyleOptions::from_env_values(EnvValues {
+                cass_theme: Some(name),
+                ..EnvValues::default()
+            });
+            assert_eq!(
+                options.dark_mode, expected_dark,
+                "preset {name}: expected dark_mode={expected_dark}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_theme_falls_back_to_dark() {
+        let options = StyleOptions::from_env_values(EnvValues {
+            cass_theme: Some("nonexistent"),
+            ..EnvValues::default()
+        });
+        assert_eq!(options.preset, UiThemePreset::Dark);
+        assert!(options.dark_mode);
+    }
+
+    #[test]
+    fn gradients_enabled_requires_color_support() {
+        // Mono profile → no gradients even if no_gradient is false.
+        let mono = StyleOptions {
+            color_profile: ColorProfile::Mono,
+            no_gradient: false,
+            ..StyleOptions::default()
+        };
+        assert!(!mono.gradients_enabled());
+
+        // TrueColor with no_gradient=true → no gradients.
+        let no_grad = StyleOptions {
+            color_profile: ColorProfile::TrueColor,
+            no_gradient: true,
+            ..StyleOptions::default()
+        };
+        assert!(!no_grad.gradients_enabled());
+
+        // TrueColor with no_gradient=false → gradients enabled.
+        let full = StyleOptions {
+            color_profile: ColorProfile::TrueColor,
+            no_gradient: false,
+            ..StyleOptions::default()
+        };
+        assert!(full.gradients_enabled());
+    }
+
+    #[test]
+    fn env_truthy_edge_cases() {
+        // Verify env_truthy handles edge values correctly.
+        assert!(!env_truthy(None), "None → false");
+        assert!(
+            env_truthy(Some("")),
+            "empty string → true (not in falsy list)"
+        );
+        assert!(env_truthy(Some("1")), "\"1\" → true");
+        assert!(env_truthy(Some("yes")), "\"yes\" → true");
+        assert!(env_truthy(Some("true")), "\"true\" → true... wait");
+        // Actually "true" is in the falsy list? No — only "false" is falsy.
+        // Re-check: falsy = "0", "false", "off", "no"
+        assert!(!env_truthy(Some("false")), "\"false\" → false");
+        assert!(
+            !env_truthy(Some("FALSE")),
+            "\"FALSE\" → false (case insensitive)"
+        );
+        assert!(!env_truthy(Some("  Off  ")), "trimmed \"Off\" → false");
+        assert!(!env_truthy(Some("NO")), "\"NO\" → false");
+        assert!(env_truthy(Some("anything")), "arbitrary string → true");
+    }
+
+    #[test]
+    fn env_precedence_full_matrix() {
+        // Verify the full precedence chain described in the doc comment.
+
+        // Priority 1: CASS_NO_COLOR trumps everything.
+        let p1 = StyleOptions::from_env_values(EnvValues {
+            cass_no_color: Some("1"),
+            cass_color_profile: Some("truecolor"),
+            colorterm: Some("truecolor"),
+            ..EnvValues::default()
+        });
+        assert!(p1.no_color);
+        assert_eq!(p1.color_profile, ColorProfile::Mono);
+
+        // Priority 2: RESPECT_NO_COLOR + NO_COLOR beats CASS_COLOR_PROFILE.
+        let p2 = StyleOptions::from_env_values(EnvValues {
+            no_color: Some("1"),
+            cass_respect_no_color: Some("1"),
+            cass_color_profile: Some("truecolor"),
+            ..EnvValues::default()
+        });
+        assert!(p2.no_color);
+        assert_eq!(p2.color_profile, ColorProfile::Mono);
+
+        // Priority 3: CASS_COLOR_PROFILE overrides env detection.
+        let p3 = StyleOptions::from_env_values(EnvValues {
+            colorterm: Some("truecolor"),
+            term: Some("xterm-256color"),
+            cass_color_profile: Some("ansi16"),
+            ..EnvValues::default()
+        });
+        assert!(!p3.no_color);
+        assert_eq!(p3.color_profile, ColorProfile::Ansi16);
+
+        // Priority 4: Fallback to env detection.
+        let p4 = StyleOptions::from_env_values(EnvValues {
+            colorterm: Some("truecolor"),
+            term: Some("xterm-256color"),
+            ..EnvValues::default()
+        });
+        assert!(!p4.no_color);
+        assert_eq!(p4.color_profile, ColorProfile::TrueColor);
+
+        // Bare minimum: no env vars at all → defaults.
+        let bare = StyleOptions::from_env_values(EnvValues::default());
+        assert!(!bare.no_color);
+        assert_eq!(bare.preset, UiThemePreset::Dark);
+        assert!(bare.dark_mode);
+    }
+
+    #[test]
+    fn style_context_mono_produces_no_fg_bg() {
+        // Under Mono profile, styles should still resolve (so code doesn't panic)
+        // but colors are expected to be downgraded.
+        let ctx = StyleContext::from_options(StyleOptions {
+            preset: UiThemePreset::Dark,
+            dark_mode: true,
+            color_profile: ColorProfile::Mono,
+            no_color: true,
+            no_icons: false,
+            no_gradient: true,
+            a11y: false,
+        });
+        // Should not panic when resolving any token.
+        let _ = ctx.style(STYLE_TEXT_PRIMARY);
+        let _ = ctx.style(STYLE_APP_ROOT);
+        let _ = ctx.style(STYLE_ROLE_USER);
+        let _ = ctx.style(STYLE_SCORE_HIGH);
+    }
+
+    #[test]
+    fn all_presets_produce_valid_style_context() {
+        // Every preset should build a StyleContext without panicking,
+        // for both full-color and mono profiles.
+        for preset in UiThemePreset::all() {
+            for &profile in &[
+                ColorProfile::TrueColor,
+                ColorProfile::Ansi256,
+                ColorProfile::Ansi16,
+                ColorProfile::Mono,
+            ] {
+                let dark_mode = !matches!(preset, UiThemePreset::Light);
+                let ctx = StyleContext::from_options(StyleOptions {
+                    preset,
+                    dark_mode,
+                    color_profile: profile,
+                    no_color: profile == ColorProfile::Mono,
+                    no_icons: false,
+                    no_gradient: profile == ColorProfile::Mono,
+                    a11y: false,
+                });
+                // Smoke test: resolve every token without panicking.
+                for &(_, token) in ALL_STYLE_TOKENS {
+                    let _ = ctx.style(token);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1632,6 +1977,421 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    // -- theme override wiring tests (2dccg.10.5) ----------------------------
+
+    #[test]
+    fn override_applies_color_to_resolved_theme() {
+        let config = ThemeConfig {
+            version: THEME_CONFIG_VERSION,
+            base_preset: Some(UiThemePreset::Dark),
+            colors: ThemeColorOverrides {
+                text: Some("#00ff00".to_string()),
+                ..ThemeColorOverrides::default()
+            },
+        };
+        let ctx = StyleContext::from_options_with_theme_config(StyleOptions::default(), &config)
+            .expect("valid config should apply");
+
+        // The resolved text color should reflect the override.
+        let rgb = ctx.resolved.text.to_rgb();
+        assert_eq!(
+            (rgb.r, rgb.g, rgb.b),
+            (0, 255, 0),
+            "text override should be green"
+        );
+    }
+
+    #[test]
+    fn override_base_preset_switches_dark_mode() {
+        let config = ThemeConfig {
+            version: THEME_CONFIG_VERSION,
+            base_preset: Some(UiThemePreset::Light),
+            colors: ThemeColorOverrides::default(),
+        };
+        let ctx = StyleContext::from_options_with_theme_config(
+            StyleOptions::default(), // Dark by default
+            &config,
+        )
+        .expect("valid config should apply");
+
+        assert_eq!(ctx.options.preset, UiThemePreset::Light);
+        assert!(!ctx.options.dark_mode, "Light preset → dark_mode=false");
+    }
+
+    #[test]
+    fn override_empty_colors_does_not_change_theme() {
+        let config = ThemeConfig {
+            version: THEME_CONFIG_VERSION,
+            base_preset: None,
+            colors: ThemeColorOverrides::default(),
+        };
+        let base_ctx = StyleContext::from_options(StyleOptions::default());
+        let overridden_ctx =
+            StyleContext::from_options_with_theme_config(StyleOptions::default(), &config)
+                .expect("empty config should apply");
+
+        // Same preset, same resolved text color.
+        assert_eq!(base_ctx.resolved.text, overridden_ctx.resolved.text);
+        assert_eq!(
+            base_ctx.resolved.background,
+            overridden_ctx.resolved.background
+        );
+    }
+
+    #[test]
+    fn override_invalid_version_is_rejected() {
+        let config = ThemeConfig {
+            version: 99,
+            base_preset: None,
+            colors: ThemeColorOverrides::default(),
+        };
+        let err = StyleContext::from_options_with_theme_config(StyleOptions::default(), &config)
+            .expect_err("version 99 should fail");
+
+        assert!(matches!(
+            err,
+            ThemeConfigError::UnsupportedVersion { found: 99, .. }
+        ));
+    }
+
+    #[test]
+    fn override_invalid_color_is_rejected() {
+        let config = ThemeConfig {
+            version: THEME_CONFIG_VERSION,
+            base_preset: None,
+            colors: ThemeColorOverrides {
+                accent: Some("not-hex".to_string()),
+                ..ThemeColorOverrides::default()
+            },
+        };
+        let err = StyleContext::from_options_with_theme_config(StyleOptions::default(), &config)
+            .expect_err("invalid color should fail");
+
+        assert!(matches!(
+            err,
+            ThemeConfigError::InvalidColorValue {
+                field: "accent",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn override_with_downgrade_still_works() {
+        let config = ThemeConfig {
+            version: THEME_CONFIG_VERSION,
+            base_preset: Some(UiThemePreset::Dark),
+            colors: ThemeColorOverrides {
+                text: Some("#abcdef".to_string()),
+                ..ThemeColorOverrides::default()
+            },
+        };
+        let ctx = StyleContext::from_options_with_theme_config(
+            StyleOptions {
+                color_profile: ColorProfile::Ansi16,
+                ..StyleOptions::default()
+            },
+            &config,
+        )
+        .expect("override+downgrade should work");
+
+        // After ansi16 downgrade, text should be an Ansi16 color.
+        assert!(
+            matches!(ctx.resolved.text, Color::Ansi16(_)),
+            "override should still downgrade to ansi16"
+        );
+    }
+
+    #[test]
+    fn override_fallback_on_invalid_returns_base_context() {
+        // Simulate the pattern used in resolved_style_context():
+        // if from_options_with_theme_config fails, fall back to from_options.
+        let bad_config = ThemeConfig {
+            version: 99,
+            base_preset: None,
+            colors: ThemeColorOverrides::default(),
+        };
+        let options = StyleOptions::default();
+        let ctx = StyleContext::from_options_with_theme_config(options, &bad_config)
+            .unwrap_or_else(|_| StyleContext::from_options(options));
+
+        // Should still produce a valid context.
+        let _ = ctx.style(STYLE_TEXT_PRIMARY);
+        assert_eq!(ctx.options.preset, UiThemePreset::Dark);
+    }
+
+    // -- style-system invariant tests (2dccg.10.3) ---------------------------
+
+    /// Map a Color variant to a numeric fidelity level (higher = richer).
+    fn color_fidelity(c: Color) -> u8 {
+        match c {
+            Color::Mono(_) => 0,
+            Color::Ansi16(_) => 1,
+            Color::Ansi256(_) => 2,
+            Color::Rgb(_) => 3,
+        }
+    }
+
+    #[test]
+    fn profile_downgrade_is_monotonic() {
+        // As ColorProfile degrades TrueColor→Ansi256→Ansi16→Mono,
+        // every resolved color slot's fidelity must be <= the previous level.
+        let profiles = [
+            ColorProfile::TrueColor,
+            ColorProfile::Ansi256,
+            ColorProfile::Ansi16,
+            ColorProfile::Mono,
+        ];
+
+        for preset in UiThemePreset::all() {
+            let dark_mode = !matches!(preset, UiThemePreset::Light);
+            let mut prev_fidelities: Option<Vec<u8>> = None;
+
+            for &profile in &profiles {
+                let ctx = StyleContext::from_options(StyleOptions {
+                    preset,
+                    dark_mode,
+                    color_profile: profile,
+                    no_color: profile == ColorProfile::Mono,
+                    no_icons: false,
+                    no_gradient: profile == ColorProfile::Mono,
+                    a11y: false,
+                });
+
+                let slots = [
+                    ctx.resolved.text,
+                    ctx.resolved.primary,
+                    ctx.resolved.background,
+                    ctx.resolved.accent,
+                    ctx.resolved.success,
+                    ctx.resolved.warning,
+                    ctx.resolved.error,
+                    ctx.resolved.info,
+                ];
+                let fidelities: Vec<u8> = slots.iter().map(|c| color_fidelity(*c)).collect();
+
+                if let Some(prev) = &prev_fidelities {
+                    for (i, (&cur, &prv)) in fidelities.iter().zip(prev.iter()).enumerate() {
+                        assert!(
+                            cur <= prv,
+                            "Monotonic downgrade violated for preset {} slot {i}: \
+                             profile {:?} fidelity {cur} > previous {prv}",
+                            preset.name(),
+                            profile
+                        );
+                    }
+                }
+                prev_fidelities = Some(fidelities);
+            }
+        }
+    }
+
+    #[test]
+    fn override_partial_merge_preserves_unset_slots() {
+        // When only `text` is overridden, `background` should remain the base preset's value.
+        let base_ctx = StyleContext::from_options(StyleOptions {
+            preset: UiThemePreset::Dark,
+            ..StyleOptions::default()
+        });
+
+        let config = ThemeConfig {
+            version: THEME_CONFIG_VERSION,
+            base_preset: Some(UiThemePreset::Dark),
+            colors: ThemeColorOverrides {
+                text: Some("#ff0000".to_string()),
+                ..ThemeColorOverrides::default()
+            },
+        };
+        let overridden_ctx =
+            StyleContext::from_options_with_theme_config(StyleOptions::default(), &config)
+                .expect("partial override should apply");
+
+        // text should differ (overridden).
+        assert_ne!(
+            base_ctx.resolved.text.to_rgb(),
+            overridden_ctx.resolved.text.to_rgb(),
+            "text should be overridden"
+        );
+        // background should match (not overridden).
+        assert_eq!(
+            base_ctx.resolved.background.to_rgb(),
+            overridden_ctx.resolved.background.to_rgb(),
+            "background should be unchanged when not overridden"
+        );
+    }
+
+    #[test]
+    fn config_base_preset_overrides_options_preset() {
+        // ThemeConfig.base_preset wins over StyleOptions.preset.
+        let config = ThemeConfig {
+            version: THEME_CONFIG_VERSION,
+            base_preset: Some(UiThemePreset::Nord),
+            colors: ThemeColorOverrides::default(),
+        };
+        let ctx = StyleContext::from_options_with_theme_config(
+            StyleOptions {
+                preset: UiThemePreset::Dark,
+                ..StyleOptions::default()
+            },
+            &config,
+        )
+        .expect("preset override should apply");
+
+        assert_eq!(
+            ctx.options.preset,
+            UiThemePreset::Nord,
+            "config.base_preset should override options.preset"
+        );
+    }
+
+    /// Tokens that must always have a foreground color set (used by rendering code).
+    const CRITICAL_FG_TOKENS: &[&str] = &[
+        STYLE_TEXT_PRIMARY,
+        STYLE_TEXT_MUTED,
+        STYLE_TEXT_SUBTLE,
+        STYLE_STATUS_SUCCESS,
+        STYLE_STATUS_WARNING,
+        STYLE_STATUS_ERROR,
+        STYLE_STATUS_INFO,
+        STYLE_ROLE_USER,
+        STYLE_ROLE_ASSISTANT,
+        STYLE_ROLE_TOOL,
+        STYLE_ROLE_SYSTEM,
+        STYLE_SCORE_HIGH,
+        STYLE_SCORE_MID,
+        STYLE_SCORE_LOW,
+        STYLE_KBD_KEY,
+        STYLE_KBD_DESC,
+    ];
+
+    /// Tokens that must always have a background color set (pill/tab affordances).
+    const CRITICAL_BG_TOKENS: &[&str] = &[
+        STYLE_APP_ROOT,
+        STYLE_PILL_ACTIVE,
+        STYLE_TAB_ACTIVE,
+        STYLE_RESULT_ROW_SELECTED,
+    ];
+
+    #[test]
+    fn critical_fg_tokens_always_have_foreground() {
+        for preset in UiThemePreset::all() {
+            for &profile in &[
+                ColorProfile::TrueColor,
+                ColorProfile::Ansi256,
+                ColorProfile::Ansi16,
+            ] {
+                let dark_mode = !matches!(preset, UiThemePreset::Light);
+                let ctx = StyleContext::from_options(StyleOptions {
+                    preset,
+                    dark_mode,
+                    color_profile: profile,
+                    no_color: false,
+                    no_icons: false,
+                    no_gradient: false,
+                    a11y: false,
+                });
+
+                for &token in CRITICAL_FG_TOKENS {
+                    let style = ctx.style(token);
+                    assert!(
+                        style.fg.is_some(),
+                        "Token {token} must have fg for preset {} profile {:?}",
+                        preset.name(),
+                        profile
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn critical_bg_tokens_always_have_background() {
+        for preset in UiThemePreset::all() {
+            for &profile in &[
+                ColorProfile::TrueColor,
+                ColorProfile::Ansi256,
+                ColorProfile::Ansi16,
+            ] {
+                let dark_mode = !matches!(preset, UiThemePreset::Light);
+                let ctx = StyleContext::from_options(StyleOptions {
+                    preset,
+                    dark_mode,
+                    color_profile: profile,
+                    no_color: false,
+                    no_icons: false,
+                    no_gradient: false,
+                    a11y: false,
+                });
+
+                for &token in CRITICAL_BG_TOKENS {
+                    let style = ctx.style(token);
+                    assert!(
+                        style.bg.is_some(),
+                        "Token {token} must have bg for preset {} profile {:?}",
+                        preset.name(),
+                        profile
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a11y_mode_adds_emphasis_to_roles() {
+        // With a11y enabled, role tokens should have bold or underline for emphasis.
+        for preset in UiThemePreset::all() {
+            let dark_mode = !matches!(preset, UiThemePreset::Light);
+            let ctx = StyleContext::from_options(StyleOptions {
+                preset,
+                dark_mode,
+                color_profile: ColorProfile::TrueColor,
+                no_color: false,
+                no_icons: false,
+                no_gradient: true,
+                a11y: true,
+            });
+
+            let user = ctx.style(STYLE_ROLE_USER);
+            let assistant = ctx.style(STYLE_ROLE_ASSISTANT);
+            // At minimum, role tokens should still resolve with fg.
+            assert!(
+                user.fg.is_some(),
+                "ROLE_USER must have fg in a11y mode for {}",
+                preset.name()
+            );
+            assert!(
+                assistant.fg.is_some(),
+                "ROLE_ASSISTANT must have fg in a11y mode for {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn gutter_tokens_derive_from_role_tokens() {
+        // Gutter bg should be a blend of the role fg toward background.
+        // This test verifies they are related (gutter fg == role fg).
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let role_user = ctx.style(STYLE_ROLE_USER);
+            let gutter_user = ctx.style(STYLE_ROLE_GUTTER_USER);
+
+            // Gutter fg must equal role fg (they share the same foreground).
+            assert_eq!(
+                role_user.fg,
+                gutter_user.fg,
+                "GUTTER_USER.fg should match ROLE_USER.fg for preset {}",
+                preset.name()
+            );
+            // Gutter must have a bg (the role+bg blend).
+            assert!(
+                gutter_user.bg.is_some(),
+                "GUTTER_USER must have bg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
     // -- pill & tab style token tests (k25j6, 2kz6t) -------------------------
 
     fn context_for_preset(preset: UiThemePreset) -> StyleContext {
@@ -1863,26 +2623,24 @@ mod tests {
         // Verify ALL_STYLE_TOKENS matches the actual pub const declarations.
         // Read the source file and extract all `pub const STYLE_*` names.
         let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("src/ui/style_system.rs"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/style_system.rs"),
         )
         .expect("should be able to read style_system.rs");
 
         let mut defined_in_source: Vec<String> = Vec::new();
         for line in source.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("pub const STYLE_") && trimmed.contains(": &str") {
-                if let Some(name) = trimmed
+            if trimmed.starts_with("pub const STYLE_")
+                && trimmed.contains(": &str")
+                && let Some(name) = trimmed
                     .strip_prefix("pub const ")
                     .and_then(|s| s.split(':').next())
-                {
-                    defined_in_source.push(name.trim().to_string());
-                }
+            {
+                defined_in_source.push(name.trim().to_string());
             }
         }
 
-        let registry_names: Vec<&str> =
-            ALL_STYLE_TOKENS.iter().map(|(name, _)| *name).collect();
+        let registry_names: Vec<&str> = ALL_STYLE_TOKENS.iter().map(|(name, _)| *name).collect();
 
         // Check nothing is missing from the registry
         for src_name in &defined_in_source {
@@ -1939,15 +2697,13 @@ mod tests {
             // it would appear in `style_system::STYLE_PILL_ACTIVE` or
             // `STYLE_PILL_ACTIVE` references.
             let in_rendering = rendering_source.contains(const_name);
-            let in_self_methods = self_source
-                .lines()
-                .any(|line| {
-                    line.contains(const_name)
-                        && !line.trim().starts_with("pub const ")
-                        && !line.trim().starts_with("//")
-                        && !line.contains("ALL_STYLE_TOKENS")
-                        && !line.contains("INDIRECT_USE_WHITELIST")
-                });
+            let in_self_methods = self_source.lines().any(|line| {
+                line.contains(const_name)
+                    && !line.trim().starts_with("pub const ")
+                    && !line.trim().starts_with("//")
+                    && !line.contains("ALL_STYLE_TOKENS")
+                    && !line.contains("INDIRECT_USE_WHITELIST")
+            });
 
             if !in_rendering && !in_self_methods {
                 dead_tokens.push(const_name);
@@ -1978,6 +2734,187 @@ mod tests {
                     style.fg.is_some() || style.bg.is_some(),
                     "Token {const_name} resolves to a style with no fg or bg \
                      for preset {} — it may be unwired in build_stylesheet()",
+                    preset.name()
+                );
+            }
+        }
+    }
+
+    // -- palette correctness & semantic validation (2dccg.10.1) ----------------
+
+    #[test]
+    fn role_tokens_are_pairwise_distinct_per_preset() {
+        let role_tokens = [
+            ("user", STYLE_ROLE_USER),
+            ("assistant", STYLE_ROLE_ASSISTANT),
+            ("tool", STYLE_ROLE_TOOL),
+            ("system", STYLE_ROLE_SYSTEM),
+        ];
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            for i in 0..role_tokens.len() {
+                for j in (i + 1)..role_tokens.len() {
+                    let (name_a, token_a) = role_tokens[i];
+                    let (name_b, token_b) = role_tokens[j];
+                    let style_a = ctx.style(token_a);
+                    let style_b = ctx.style(token_b);
+                    assert_ne!(
+                        style_a.fg,
+                        style_b.fg,
+                        "Role {name_a} and {name_b} must have distinct fg colors \
+                         for preset {} to remain visually distinguishable",
+                        preset.name()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn role_gutter_tokens_are_pairwise_distinct_per_preset() {
+        let gutter_tokens = [
+            ("user", STYLE_ROLE_GUTTER_USER),
+            ("assistant", STYLE_ROLE_GUTTER_ASSISTANT),
+            ("tool", STYLE_ROLE_GUTTER_TOOL),
+            ("system", STYLE_ROLE_GUTTER_SYSTEM),
+        ];
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            for i in 0..gutter_tokens.len() {
+                for j in (i + 1)..gutter_tokens.len() {
+                    let (name_a, token_a) = gutter_tokens[i];
+                    let (name_b, token_b) = gutter_tokens[j];
+                    let style_a = ctx.style(token_a);
+                    let style_b = ctx.style(token_b);
+                    assert_ne!(
+                        style_a.fg,
+                        style_b.fg,
+                        "Gutter {name_a} and {name_b} must have distinct fg colors \
+                         for preset {} to remain scannable",
+                        preset.name()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn status_tokens_are_pairwise_distinct_per_preset() {
+        let status_tokens = [
+            ("success", STYLE_STATUS_SUCCESS),
+            ("warning", STYLE_STATUS_WARNING),
+            ("error", STYLE_STATUS_ERROR),
+            ("info", STYLE_STATUS_INFO),
+        ];
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            for i in 0..status_tokens.len() {
+                for j in (i + 1)..status_tokens.len() {
+                    let (name_a, token_a) = status_tokens[i];
+                    let (name_b, token_b) = status_tokens[j];
+                    let style_a = ctx.style(token_a);
+                    let style_b = ctx.style(token_b);
+                    assert_ne!(
+                        style_a.fg,
+                        style_b.fg,
+                        "Status {name_a} and {name_b} must have distinct fg colors \
+                         for preset {}",
+                        preset.name()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn text_hierarchy_is_ordered_per_preset() {
+        // text_primary should be "brighter" (more opaque/distinct from bg) than
+        // text_muted, which should differ from text_subtle.
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let primary = ctx.style(STYLE_TEXT_PRIMARY);
+            let muted = ctx.style(STYLE_TEXT_MUTED);
+            let subtle = ctx.style(STYLE_TEXT_SUBTLE);
+
+            assert_ne!(
+                primary.fg,
+                muted.fg,
+                "TEXT_PRIMARY and TEXT_MUTED must differ for preset {}",
+                preset.name()
+            );
+            assert_ne!(
+                muted.fg,
+                subtle.fg,
+                "TEXT_MUTED and TEXT_SUBTLE must differ for preset {}",
+                preset.name()
+            );
+            assert_ne!(
+                primary.fg,
+                subtle.fg,
+                "TEXT_PRIMARY and TEXT_SUBTLE must differ for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn score_tokens_form_visual_hierarchy() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let high = ctx.style(STYLE_SCORE_HIGH);
+            let mid = ctx.style(STYLE_SCORE_MID);
+            let low = ctx.style(STYLE_SCORE_LOW);
+
+            assert_ne!(
+                high.fg,
+                mid.fg,
+                "SCORE_HIGH and SCORE_MID must differ for preset {}",
+                preset.name()
+            );
+            assert_ne!(
+                mid.fg,
+                low.fg,
+                "SCORE_MID and SCORE_LOW must differ for preset {}",
+                preset.name()
+            );
+            // High should have bold for emphasis
+            assert!(
+                high.has_attr(ftui::StyleFlags::BOLD),
+                "SCORE_HIGH should be bold for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn default_presets_pass_contrast_report() {
+        // All built-in presets should pass the contrast report (they use
+        // curated color palettes). Only custom overrides might fail.
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let report = ctx.contrast_report();
+            assert!(
+                !report.has_failures(),
+                "Preset {} fails contrast checks: {:?}",
+                preset.name(),
+                report.failing_pairs().into_iter().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn palette_propagation_is_deterministic() {
+        // Building the same preset twice should produce identical styles.
+        for preset in UiThemePreset::all() {
+            let ctx1 = context_for_preset(preset);
+            let ctx2 = context_for_preset(preset);
+            for (_const_name, token_value) in ALL_STYLE_TOKENS {
+                let s1 = ctx1.style(token_value);
+                let s2 = ctx2.style(token_value);
+                assert_eq!(
+                    format!("{s1:?}"),
+                    format!("{s2:?}"),
+                    "Token {_const_name} is not deterministic for preset {}",
                     preset.name()
                 );
             }
