@@ -1244,7 +1244,7 @@ fn inspector_at_all_breakpoints() {
         let tab2 = tab.next();
         assert_eq!(tab2.label(), "Layout");
         let tab3 = tab2.next();
-        assert_eq!(tab3.label(), "Hit Regions");
+        assert_eq!(tab3.label(), "Hits");
 
         log.assert_ok(
             &format!("inspector_tabs_{label}"),
