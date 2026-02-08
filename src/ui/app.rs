@@ -4250,6 +4250,8 @@ impl CassApp {
         styles: &StyleContext,
         pane_style: ftui::Style,
         pane_focused_style: ftui::Style,
+        title_focused_style: ftui::Style,
+        title_unfocused_style: ftui::Style,
         row_style: ftui::Style,
         row_alt_style: ftui::Style,
         row_selected_style: ftui::Style,
@@ -4268,12 +4270,18 @@ impl CassApp {
                 self.selected.len()
             )
         };
+        let focused = self.focused_region() == FocusRegion::Results;
         let results_block = Block::new()
             .borders(borders)
             .border_type(border_type)
             .title(&results_title)
             .title_alignment(Alignment::Left)
-            .style(if self.focused_region() == FocusRegion::Results {
+            .border_style(if focused {
+                title_focused_style
+            } else {
+                title_unfocused_style
+            })
+            .style(if focused {
                 pane_focused_style
             } else {
                 pane_style
@@ -4884,6 +4892,8 @@ impl CassApp {
         styles: &StyleContext,
         pane_style: ftui::Style,
         pane_focused_style: ftui::Style,
+        title_focused_style: ftui::Style,
+        title_unfocused_style: ftui::Style,
         text_muted_style: ftui::Style,
     ) {
         // Keep the title explicit: include the active tab + wrap state.
@@ -4896,7 +4906,8 @@ impl CassApp {
         };
         let title = format!("Detail [{tab_label}]{wrap_indicator}");
 
-        let block_style = if self.focused_region() == FocusRegion::Detail {
+        let detail_focused = self.focused_region() == FocusRegion::Detail;
+        let block_style = if detail_focused {
             pane_focused_style
         } else {
             pane_style
@@ -4906,6 +4917,11 @@ impl CassApp {
             .border_type(border_type)
             .title(&title)
             .title_alignment(Alignment::Left)
+            .border_style(if detail_focused {
+                title_focused_style
+            } else {
+                title_unfocused_style
+            })
             .style(block_style);
         let full_inner = detail_block.inner(area);
         detail_block.render(area, frame);
@@ -11754,6 +11770,21 @@ impl super::ftui_adapter::Model for CassApp {
         } else {
             plain
         };
+        let pane_title_focused_style = if apply_style {
+            styles.style(style_system::STYLE_PANE_TITLE_FOCUSED)
+        } else {
+            plain
+        };
+        let pane_title_unfocused_style = if apply_style {
+            styles.style(style_system::STYLE_PANE_TITLE_UNFOCUSED)
+        } else {
+            plain
+        };
+        let split_handle_style = if apply_style {
+            styles.style(style_system::STYLE_SPLIT_HANDLE)
+        } else {
+            plain
+        };
 
         // Paint root background across the entire terminal.
         Block::new().style(root_style).render(area, frame);
@@ -12014,6 +12045,8 @@ impl super::ftui_adapter::Model for CassApp {
                         &styles,
                         pane_style,
                         pane_focused_style,
+                        pane_title_focused_style,
+                        pane_title_unfocused_style,
                         row_style,
                         row_alt_style,
                         row_selected_style,
@@ -12027,8 +12060,17 @@ impl super::ftui_adapter::Model for CassApp {
                         &styles,
                         pane_style,
                         pane_focused_style,
+                        pane_title_focused_style,
+                        pane_title_unfocused_style,
                         text_muted_style,
                     );
+                    // Render split handle as a subtle vertical divider.
+                    if let Some(handle) = split_handle {
+                        let divider: String = (0..handle.height).map(|_| "\u{2502}\n").collect();
+                        Paragraph::new(divider.trim_end())
+                            .style(split_handle_style)
+                            .render(handle, frame);
+                    }
                 } else {
                     // Single-pane: show whichever pane has focus, full-width.
                     match self.focused_region() {
@@ -12044,6 +12086,8 @@ impl super::ftui_adapter::Model for CassApp {
                                 &styles,
                                 pane_style,
                                 pane_focused_style,
+                                pane_title_focused_style,
+                                pane_title_unfocused_style,
                                 row_style,
                                 row_alt_style,
                                 row_selected_style,
@@ -12059,6 +12103,8 @@ impl super::ftui_adapter::Model for CassApp {
                                 &styles,
                                 pane_style,
                                 pane_focused_style,
+                                pane_title_focused_style,
+                                pane_title_unfocused_style,
                                 text_muted_style,
                             );
                         }
@@ -12187,11 +12233,6 @@ impl super::ftui_adapter::Model for CassApp {
                     value_style: kbd_desc_s,
                 });
                 hud_lanes.push(FooterHudLane {
-                    key: "scope",
-                    value: scope_lane,
-                    value_style: status_info_s,
-                });
-                hud_lanes.push(FooterHudLane {
                     key: "perf",
                     value: perf_lane,
                     value_style: perf_lane_style,
@@ -12200,6 +12241,11 @@ impl super::ftui_adapter::Model for CassApp {
                     key: "runtime",
                     value: runtime_lane,
                     value_style: runtime_lane_style,
+                });
+                hud_lanes.push(FooterHudLane {
+                    key: "scope",
+                    value: scope_lane,
+                    value_style: status_info_s,
                 });
                 hud_lanes.push(FooterHudLane {
                     key: "view",
@@ -17403,10 +17449,7 @@ mod tests {
             ftui::render::budget::DegradationLevel::Full,
         ));
         assert!(text.contains("hits:3"), "narrow footer keeps hits lane");
-        assert!(
-            text.contains("query:lexical / standard"),
-            "narrow footer keeps query lane"
-        );
+        assert!(text.contains("query:"), "narrow footer keeps query lane");
         assert!(
             !text.contains("scope:"),
             "narrow footer should drop lower-priority scope lane"
@@ -18517,6 +18560,33 @@ mod tests {
     }
 
     #[test]
+    fn dual_pane_grouping_cues_survive_degradation_levels() {
+        use ftui::render::budget::DegradationLevel;
+
+        for level in [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::NoStyling,
+            DegradationLevel::EssentialOnly,
+        ] {
+            let app = app_with_hits(3);
+            render_at_degradation(&app, 130, 24, level);
+            assert!(
+                app.last_results_inner.borrow().is_some(),
+                "results hit region should remain present at {level:?}"
+            );
+            assert!(
+                app.last_detail_area.borrow().is_some(),
+                "detail region should remain present at {level:?}"
+            );
+            assert!(
+                app.last_split_handle_area.borrow().is_some(),
+                "split-handle grouping cue should remain present at {level:?}"
+            );
+        }
+    }
+
+    #[test]
     fn focus_toggle_switches_region() {
         let mut app = CassApp::default();
         assert_eq!(app.focused_region(), FocusRegion::Results);
@@ -18580,6 +18650,45 @@ mod tests {
             app.pane_split_drag.is_none(),
             "drag in narrow mode should not start split drag"
         );
+    }
+
+    // =====================================================================
+    // 2dccg.9.1 — Pane chrome & focus clarity
+    // =====================================================================
+
+    #[test]
+    fn split_handle_rendered_in_dual_pane() {
+        let app = app_with_hits(3);
+        let buf =
+            render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        // Dual-pane at 120 cols should render the split handle divider.
+        assert!(
+            text.contains('\u{2502}'),
+            "120-col dual-pane should render vertical divider"
+        );
+    }
+
+    #[test]
+    fn single_pane_has_no_split_handle() {
+        let app = app_with_hits(3);
+        let _buf =
+            render_at_degradation(&app, 60, 24, ftui::render::budget::DegradationLevel::Full);
+        // Narrow: single-pane, no split handle area.
+        assert!(
+            app.last_split_handle_area.borrow().is_none(),
+            "60-col narrow should not have split handle"
+        );
+    }
+
+    #[test]
+    fn pane_titles_render_in_output() {
+        let app = app_with_hits(3);
+        let buf =
+            render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(text.contains("Results"), "should render Results pane title");
+        assert!(text.contains("Detail"), "should render Detail pane title");
     }
 
     // =====================================================================

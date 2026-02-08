@@ -28,6 +28,9 @@ use serde::{Deserialize, Serialize};
 pub const STYLE_APP_ROOT: &str = "app.root";
 pub const STYLE_PANE_BASE: &str = "pane.base";
 pub const STYLE_PANE_FOCUSED: &str = "pane.focused";
+pub const STYLE_PANE_TITLE_FOCUSED: &str = "pane.title.focused";
+pub const STYLE_PANE_TITLE_UNFOCUSED: &str = "pane.title.unfocused";
+pub const STYLE_SPLIT_HANDLE: &str = "split.handle";
 pub const STYLE_TEXT_PRIMARY: &str = "text.primary";
 pub const STYLE_TEXT_MUTED: &str = "text.muted";
 pub const STYLE_TEXT_SUBTLE: &str = "text.subtle";
@@ -52,6 +55,10 @@ pub const STYLE_SCORE_LOW: &str = "score.low";
 pub const STYLE_PILL_ACTIVE: &str = "pill.active";
 pub const STYLE_TAB_ACTIVE: &str = "tab.active";
 pub const STYLE_TAB_INACTIVE: &str = "tab.inactive";
+pub const STYLE_DETAIL_FIND_CONTAINER: &str = "detail.find.container";
+pub const STYLE_DETAIL_FIND_QUERY: &str = "detail.find.query";
+pub const STYLE_DETAIL_FIND_MATCH_ACTIVE: &str = "detail.find.match.active";
+pub const STYLE_DETAIL_FIND_MATCH_INACTIVE: &str = "detail.find.match.inactive";
 pub const STYLE_KBD_KEY: &str = "kbd.key";
 pub const STYLE_KBD_DESC: &str = "kbd.desc";
 pub const THEME_CONFIG_VERSION: u32 = 1;
@@ -579,6 +586,191 @@ impl DecorativePolicy {
     }
 }
 
+/// Input axes for capability-matrix diagnostics.
+///
+/// This mirrors the environment-driven style inputs that affect policy
+/// resolution and can be used in deterministic tests for representative
+/// terminal profiles.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CapabilityMatrixInputs<'a> {
+    /// TERM value used for profile detection.
+    pub term: Option<&'a str>,
+    /// COLORTERM value used for profile detection.
+    pub colorterm: Option<&'a str>,
+    /// Whether `NO_COLOR` is set.
+    pub no_color: bool,
+    /// Whether `CASS_RESPECT_NO_COLOR` is set/truthy.
+    pub cass_respect_no_color: bool,
+    /// Whether `CASS_NO_COLOR` is set.
+    pub cass_no_color: bool,
+    /// Whether `CASS_NO_ICONS` is set.
+    pub cass_no_icons: bool,
+    /// Whether `CASS_NO_GRADIENT` is set.
+    pub cass_no_gradient: bool,
+    /// Whether `CASS_A11Y` is set/truthy.
+    pub cass_a11y: bool,
+    /// Optional explicit theme preset override.
+    pub cass_theme: Option<&'a str>,
+    /// Optional explicit color profile override.
+    pub cass_color_profile: Option<&'a str>,
+}
+
+/// Machine-readable diagnostic summary for a resolved style policy decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StylePolicyDiagnostic {
+    /// Terminal capability profile id (`xterm-256color`, `dumb`, `kitty`, ...).
+    pub terminal_profile: String,
+    /// TERM from diagnostic input.
+    pub term: Option<String>,
+    /// COLORTERM from diagnostic input.
+    pub colorterm: Option<String>,
+    /// Current degradation level label.
+    pub degradation: &'static str,
+    /// Current responsive breakpoint label.
+    pub breakpoint: &'static str,
+    /// Whether rounded borders are user-enabled.
+    pub fancy_borders: bool,
+    /// Capability flag: supports truecolor.
+    pub capability_true_color: bool,
+    /// Capability flag: supports 256-color palette.
+    pub capability_colors_256: bool,
+    /// Capability flag: supports Unicode box drawing.
+    pub capability_unicode_box_drawing: bool,
+    /// Input env axis: `NO_COLOR`.
+    pub env_no_color: bool,
+    /// Input env axis: `CASS_RESPECT_NO_COLOR`.
+    pub env_cass_respect_no_color: bool,
+    /// Input env axis: `CASS_NO_COLOR`.
+    pub env_cass_no_color: bool,
+    /// Resolved color profile after precedence rules.
+    pub resolved_color_profile: &'static str,
+    /// Resolved style options: no_color.
+    pub resolved_no_color: bool,
+    /// Resolved style options: no_icons.
+    pub resolved_no_icons: bool,
+    /// Resolved style options: no_gradient.
+    pub resolved_no_gradient: bool,
+    /// Resolved policy: border tier.
+    pub policy_border_tier: &'static str,
+    /// Resolved policy: icon rendering.
+    pub policy_show_icons: bool,
+    /// Resolved policy: fg/bg styling.
+    pub policy_use_styling: bool,
+    /// Resolved policy: gradients.
+    pub policy_use_gradients: bool,
+    /// Resolved policy: content rendering.
+    pub policy_render_content: bool,
+}
+
+fn env_flag(value: bool) -> Option<&'static str> {
+    if value { Some("1") } else { None }
+}
+
+fn color_profile_name(profile: ColorProfile) -> &'static str {
+    match profile {
+        ColorProfile::Mono => "mono",
+        ColorProfile::Ansi16 => "ansi16",
+        ColorProfile::Ansi256 => "ansi256",
+        ColorProfile::TrueColor => "truecolor",
+    }
+}
+
+fn border_tier_name(tier: BorderTier) -> &'static str {
+    match tier {
+        BorderTier::Rounded => "rounded",
+        BorderTier::Square => "square",
+        BorderTier::None => "none",
+    }
+}
+
+fn breakpoint_name(breakpoint: super::app::LayoutBreakpoint) -> &'static str {
+    use crate::ui::app::LayoutBreakpoint as LB;
+    match breakpoint {
+        LB::Narrow => "narrow",
+        LB::MediumNarrow => "medium-narrow",
+        LB::Medium => "medium",
+        LB::Wide => "wide",
+    }
+}
+
+fn degradation_name(level: ftui::render::budget::DegradationLevel) -> &'static str {
+    use ftui::render::budget::DegradationLevel as DL;
+    match level {
+        DL::Full => "full",
+        DL::SimpleBorders => "simple-borders",
+        DL::NoStyling => "no-styling",
+        DL::EssentialOnly => "essential-only",
+        DL::Skeleton => "skeleton",
+        DL::SkipFrame => "skip-frame",
+    }
+}
+
+/// Build a policy diagnostic payload for a specific capability/profile fixture.
+///
+/// This intentionally accepts explicit capability and env inputs so tests can
+/// validate style-policy decisions deterministically without depending on host
+/// terminal state.
+pub fn style_policy_diagnostic(
+    capabilities: TerminalCapabilities,
+    inputs: CapabilityMatrixInputs<'_>,
+    degradation: ftui::render::budget::DegradationLevel,
+    breakpoint: super::app::LayoutBreakpoint,
+    fancy_borders: bool,
+) -> StylePolicyDiagnostic {
+    let env_values = EnvValues {
+        no_color: env_flag(inputs.no_color),
+        cass_respect_no_color: env_flag(inputs.cass_respect_no_color),
+        cass_no_color: env_flag(inputs.cass_no_color),
+        colorterm: inputs.colorterm,
+        term: inputs.term,
+        cass_no_icons: env_flag(inputs.cass_no_icons),
+        cass_no_gradient: env_flag(inputs.cass_no_gradient),
+        cass_a11y: env_flag(inputs.cass_a11y),
+        cass_theme: inputs.cass_theme,
+        cass_color_profile: inputs.cass_color_profile,
+    };
+
+    let mut options = StyleOptions::from_env_values(env_values);
+
+    // In diagnostics, keep profile resolution deterministic from explicit
+    // capabilities when no direct CASS_COLOR_PROFILE override is provided.
+    if !options.no_color && inputs.cass_color_profile.is_none() {
+        options.color_profile = if capabilities.true_color {
+            ColorProfile::TrueColor
+        } else if capabilities.colors_256 {
+            ColorProfile::Ansi256
+        } else {
+            ColorProfile::Ansi16
+        };
+    }
+
+    let policy = DecorativePolicy::resolve(options, degradation, breakpoint, fancy_borders);
+
+    StylePolicyDiagnostic {
+        terminal_profile: capabilities.profile().as_str().to_string(),
+        term: inputs.term.map(ToString::to_string),
+        colorterm: inputs.colorterm.map(ToString::to_string),
+        degradation: degradation_name(degradation),
+        breakpoint: breakpoint_name(breakpoint),
+        fancy_borders,
+        capability_true_color: capabilities.true_color,
+        capability_colors_256: capabilities.colors_256,
+        capability_unicode_box_drawing: capabilities.unicode_box_drawing,
+        env_no_color: inputs.no_color,
+        env_cass_respect_no_color: inputs.cass_respect_no_color,
+        env_cass_no_color: inputs.cass_no_color,
+        resolved_color_profile: color_profile_name(options.color_profile),
+        resolved_no_color: options.no_color,
+        resolved_no_icons: options.no_icons,
+        resolved_no_gradient: options.no_gradient,
+        policy_border_tier: border_tier_name(policy.border_tier),
+        policy_show_icons: policy.show_icons,
+        policy_use_styling: policy.use_styling,
+        policy_use_gradients: policy.use_gradients,
+        policy_render_content: policy.render_content,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoleMarkers {
     pub user: &'static str,
@@ -1094,6 +1286,7 @@ fn downgrade_theme_for_profile(theme: Theme, profile: ColorProfile) -> Theme {
 /// | Scores     | SCORE_HIGH/MID/LOW               | success, info, blend(text_subtle,bg,0.35) |
 /// | Keys       | KBD_KEY/DESC                     | accent, text_subtle           |
 /// | Affordance | PILL_ACTIVE, TAB_ACTIVE/INACTIVE  | secondary/accent + bg blends  |
+/// | Detail Find| FIND_CONTAINER/QUERY/MATCH_*     | surface/overlay + accent/selection |
 ///
 /// Role assignment: User=blend(accent,success,0.35), Assistant=info, Tool=warning, System=error.
 /// Gutter backgrounds use a uniform 18% blend factor with `resolved.background`.
@@ -1133,6 +1326,28 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
         Style::new()
             .fg(to_packed(resolved.border_focused))
             .bg(to_packed(resolved.surface)),
+    );
+    // Pane title tokens: focused uses accent+bold for immediate focus clarity,
+    // unfocused uses muted text so the eye is drawn to the active pane.
+    sheet.define(
+        STYLE_PANE_TITLE_FOCUSED,
+        Style::new()
+            .fg(to_packed(resolved.accent))
+            .bg(to_packed(resolved.surface))
+            .bold(),
+    );
+    sheet.define(
+        STYLE_PANE_TITLE_UNFOCUSED,
+        Style::new()
+            .fg(to_packed(resolved.text_muted))
+            .bg(to_packed(resolved.surface)),
+    );
+    // Split handle: subtle border-colored vertical divider between panes.
+    sheet.define(
+        STYLE_SPLIT_HANDLE,
+        Style::new()
+            .fg(to_packed(resolved.border))
+            .bg(to_packed(resolved.background)),
     );
 
     sheet.define(
@@ -1288,6 +1503,27 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
     );
     sheet.define(
         STYLE_TAB_INACTIVE,
+        Style::new().fg(to_packed(resolved.text_muted)),
+    );
+    sheet.define(
+        STYLE_DETAIL_FIND_CONTAINER,
+        Style::new()
+            .fg(to_packed(resolved.text))
+            .bg(to_packed(blend(resolved.overlay, resolved.surface, 0.40))),
+    );
+    sheet.define(
+        STYLE_DETAIL_FIND_QUERY,
+        Style::new().fg(to_packed(resolved.accent)).bold(),
+    );
+    sheet.define(
+        STYLE_DETAIL_FIND_MATCH_ACTIVE,
+        Style::new()
+            .fg(to_packed(resolved.selection_fg))
+            .bg(to_packed(resolved.selection_bg))
+            .bold(),
+    );
+    sheet.define(
+        STYLE_DETAIL_FIND_MATCH_INACTIVE,
         Style::new().fg(to_packed(resolved.text_muted)),
     );
 
@@ -1788,6 +2024,9 @@ mod tests {
             STYLE_APP_ROOT,
             STYLE_PANE_BASE,
             STYLE_PANE_FOCUSED,
+            STYLE_PANE_TITLE_FOCUSED,
+            STYLE_PANE_TITLE_UNFOCUSED,
+            STYLE_SPLIT_HANDLE,
             STYLE_RESULT_ROW,
             STYLE_RESULT_ROW_ALT,
             STYLE_RESULT_ROW_SELECTED,
@@ -1807,8 +2046,76 @@ mod tests {
             STYLE_PILL_ACTIVE,
             STYLE_TAB_ACTIVE,
             STYLE_TAB_INACTIVE,
+            STYLE_DETAIL_FIND_CONTAINER,
+            STYLE_DETAIL_FIND_QUERY,
+            STYLE_DETAIL_FIND_MATCH_ACTIVE,
+            STYLE_DETAIL_FIND_MATCH_INACTIVE,
         ] {
             assert!(context.sheet.contains(key), "missing style token: {key}");
+        }
+    }
+
+    #[test]
+    fn detail_find_token_hierarchy_is_explicit_and_theme_aware() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let container = ctx.style(STYLE_DETAIL_FIND_CONTAINER);
+            let query = ctx.style(STYLE_DETAIL_FIND_QUERY);
+            let active = ctx.style(STYLE_DETAIL_FIND_MATCH_ACTIVE);
+            let inactive = ctx.style(STYLE_DETAIL_FIND_MATCH_INACTIVE);
+
+            assert!(
+                container.bg.is_some(),
+                "find container should provide a distinct background for preset {}",
+                preset.name()
+            );
+            assert!(
+                query == query.bold(),
+                "find query should be emphasized (bold) for preset {}",
+                preset.name()
+            );
+            assert!(
+                active == active.bold() && active.bg.is_some(),
+                "active match state should be high-emphasis for preset {}",
+                preset.name()
+            );
+            assert!(
+                inactive.fg.is_some(),
+                "inactive match counter should still be legible for preset {}",
+                preset.name()
+            );
+            assert_ne!(
+                format!("{:?}", active),
+                format!("{:?}", inactive),
+                "active/inactive match states must be visually distinct for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn detail_find_tokens_remain_legible_in_mono_mode() {
+        let ctx = StyleContext::from_options(StyleOptions {
+            preset: UiThemePreset::Dark,
+            dark_mode: true,
+            color_profile: ColorProfile::Mono,
+            no_color: true,
+            no_icons: false,
+            no_gradient: true,
+            a11y: false,
+        });
+
+        for (label, token) in [
+            ("container", STYLE_DETAIL_FIND_CONTAINER),
+            ("query", STYLE_DETAIL_FIND_QUERY),
+            ("match_active", STYLE_DETAIL_FIND_MATCH_ACTIVE),
+            ("match_inactive", STYLE_DETAIL_FIND_MATCH_INACTIVE),
+        ] {
+            let style = ctx.style(token);
+            assert!(
+                style.fg.is_some() || style.bg.is_some(),
+                "detail-find {label} token should remain visible in mono mode"
+            );
         }
     }
 
@@ -2652,6 +2959,325 @@ mod tests {
         }
     }
 
+    // -- pane chrome & focus tokens (2dccg.9.1) --------------------------------
+
+    #[test]
+    fn pane_title_focused_has_bold_accent() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let focused = ctx.style(STYLE_PANE_TITLE_FOCUSED);
+            assert!(
+                focused.fg.is_some(),
+                "{preset:?}: focused title should have fg"
+            );
+            assert!(
+                focused
+                    .attrs
+                    .is_some_and(|a| a.contains(ftui::StyleFlags::BOLD)),
+                "{preset:?}: focused title should be bold"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_title_unfocused_is_muted_not_bold() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let unfocused = ctx.style(STYLE_PANE_TITLE_UNFOCUSED);
+            assert!(
+                unfocused.fg.is_some(),
+                "{preset:?}: unfocused title should have fg"
+            );
+            assert!(
+                !unfocused
+                    .attrs
+                    .is_some_and(|a| a.contains(ftui::StyleFlags::BOLD)),
+                "{preset:?}: unfocused title should NOT be bold"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_title_focused_differs_from_unfocused() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let focused = ctx.style(STYLE_PANE_TITLE_FOCUSED);
+            let unfocused = ctx.style(STYLE_PANE_TITLE_UNFOCUSED);
+            assert_ne!(
+                focused.fg, unfocused.fg,
+                "{preset:?}: focused and unfocused title fg should differ"
+            );
+        }
+    }
+
+    #[test]
+    fn split_handle_has_fg_and_bg() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let handle = ctx.style(STYLE_SPLIT_HANDLE);
+            assert!(
+                handle.fg.is_some(),
+                "{preset:?}: split handle should have fg"
+            );
+            assert!(
+                handle.bg.is_some(),
+                "{preset:?}: split handle should have bg"
+            );
+        }
+    }
+
+    #[test]
+    fn split_handle_fg_differs_from_own_bg() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let handle = ctx.style(STYLE_SPLIT_HANDLE);
+            // The handle character must be visible on its own background.
+            assert_ne!(
+                handle.fg, handle.bg,
+                "{preset:?}: split handle fg should differ from its bg"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_matrix_profiles_resolve_expected_color_profiles() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::core::terminal_capabilities::TerminalProfile;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let fixtures = [
+            (TerminalProfile::Xterm256Color, "xterm-256color"),
+            (TerminalProfile::Screen, "screen"),
+            (TerminalProfile::Dumb, "dumb"),
+            (TerminalProfile::WindowsConsole, "windows-console"),
+            (TerminalProfile::Kitty, "kitty"),
+        ];
+
+        for (profile, term) in fixtures {
+            let caps = TerminalCapabilities::from_profile(profile);
+            let diag = style_policy_diagnostic(
+                caps,
+                CapabilityMatrixInputs {
+                    term: Some(term),
+                    ..CapabilityMatrixInputs::default()
+                },
+                DL::Full,
+                LB::Wide,
+                true,
+            );
+
+            let expected_profile = if caps.true_color {
+                "truecolor"
+            } else if caps.colors_256 {
+                "ansi256"
+            } else {
+                "ansi16"
+            };
+
+            assert_eq!(
+                diag.terminal_profile,
+                profile.as_str(),
+                "terminal profile id should be preserved in diagnostics"
+            );
+            assert_eq!(
+                diag.resolved_color_profile, expected_profile,
+                "profile {profile} should map to expected color profile"
+            );
+            assert_eq!(diag.term.as_deref(), Some(term));
+            assert_eq!(
+                diag.capability_unicode_box_drawing, caps.unicode_box_drawing,
+                "unicode capability should be reported verbatim for {profile}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_matrix_no_color_precedence_matches_policy_contract() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::core::terminal_capabilities::TerminalProfile;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let caps = TerminalCapabilities::from_profile(TerminalProfile::Kitty);
+
+        let no_color_only = style_policy_diagnostic(
+            caps,
+            CapabilityMatrixInputs {
+                term: Some("xterm-kitty"),
+                no_color: true,
+                cass_respect_no_color: false,
+                ..CapabilityMatrixInputs::default()
+            },
+            DL::Full,
+            LB::Wide,
+            true,
+        );
+        assert!(
+            !no_color_only.resolved_no_color,
+            "NO_COLOR alone must not force monochrome"
+        );
+        assert_ne!(
+            no_color_only.resolved_color_profile, "mono",
+            "NO_COLOR alone should keep color enabled"
+        );
+
+        let respect_no_color = style_policy_diagnostic(
+            caps,
+            CapabilityMatrixInputs {
+                term: Some("xterm-kitty"),
+                no_color: true,
+                cass_respect_no_color: true,
+                ..CapabilityMatrixInputs::default()
+            },
+            DL::Full,
+            LB::Wide,
+            true,
+        );
+        assert!(respect_no_color.resolved_no_color);
+        assert_eq!(respect_no_color.resolved_color_profile, "mono");
+        assert!(
+            !respect_no_color.policy_use_styling,
+            "monochrome mode should disable styling"
+        );
+        assert!(
+            !respect_no_color.policy_use_gradients,
+            "monochrome mode should disable gradients"
+        );
+
+        let cass_no_color = style_policy_diagnostic(
+            caps,
+            CapabilityMatrixInputs {
+                term: Some("xterm-kitty"),
+                cass_no_color: true,
+                cass_color_profile: Some("truecolor"),
+                ..CapabilityMatrixInputs::default()
+            },
+            DL::Full,
+            LB::Wide,
+            true,
+        );
+        assert!(cass_no_color.resolved_no_color);
+        assert_eq!(
+            cass_no_color.resolved_color_profile, "mono",
+            "CASS_NO_COLOR must override explicit profile requests"
+        );
+    }
+
+    #[test]
+    fn capability_matrix_diagnostic_payload_is_machine_readable_json() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::core::terminal_capabilities::TerminalProfile;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let caps = TerminalCapabilities::from_profile(TerminalProfile::Xterm256Color);
+        let diag = style_policy_diagnostic(
+            caps,
+            CapabilityMatrixInputs {
+                term: Some("xterm-256color"),
+                colorterm: Some("truecolor"),
+                ..CapabilityMatrixInputs::default()
+            },
+            DL::SimpleBorders,
+            LB::Medium,
+            true,
+        );
+
+        let json = match serde_json::to_value(&diag) {
+            Ok(value) => value,
+            Err(error) => panic!("diagnostic payload should serialize: {error}"),
+        };
+        let object = match json.as_object() {
+            Some(map) => map,
+            None => panic!("diagnostic payload must serialize to a JSON object"),
+        };
+
+        for required in [
+            "terminal_profile",
+            "degradation",
+            "breakpoint",
+            "resolved_color_profile",
+            "policy_border_tier",
+            "policy_use_styling",
+            "policy_use_gradients",
+            "policy_render_content",
+            "capability_unicode_box_drawing",
+            "env_no_color",
+            "env_cass_respect_no_color",
+            "env_cass_no_color",
+        ] {
+            assert!(
+                object.contains_key(required),
+                "diagnostic payload missing required key: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_matrix_degradation_transitions_are_monotonic() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::core::terminal_capabilities::TerminalProfile;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        fn border_rank(tier: &str) -> u8 {
+            match tier {
+                "rounded" => 0,
+                "square" => 1,
+                "none" => 2,
+                other => panic!("unexpected border tier: {other}"),
+            }
+        }
+
+        let caps = TerminalCapabilities::from_profile(TerminalProfile::Kitty);
+        let levels = [
+            DL::Full,
+            DL::SimpleBorders,
+            DL::NoStyling,
+            DL::EssentialOnly,
+        ];
+        let mut prev: Option<StylePolicyDiagnostic> = None;
+
+        for level in levels {
+            let diag = style_policy_diagnostic(
+                caps,
+                CapabilityMatrixInputs {
+                    term: Some("xterm-kitty"),
+                    ..CapabilityMatrixInputs::default()
+                },
+                level,
+                LB::Wide,
+                true,
+            );
+
+            if let Some(last) = &prev {
+                assert!(
+                    border_rank(diag.policy_border_tier) >= border_rank(last.policy_border_tier),
+                    "border tier should only weaken across degradation levels"
+                );
+                if !last.policy_show_icons {
+                    assert!(!diag.policy_show_icons, "icons must not re-enable");
+                }
+                if !last.policy_use_styling {
+                    assert!(
+                        !diag.policy_use_styling,
+                        "styling must not re-enable after being stripped"
+                    );
+                }
+                if !last.policy_use_gradients {
+                    assert!(
+                        !diag.policy_use_gradients,
+                        "gradients must not re-enable after being stripped"
+                    );
+                }
+                if !last.policy_render_content {
+                    assert!(
+                        !diag.policy_render_content,
+                        "content rendering must not re-enable after being stripped"
+                    );
+                }
+            }
+            prev = Some(diag);
+        }
+    }
+
     // -- agent/role coherence tests (2dccg.10.2) ---
 
     #[test]
@@ -2903,6 +3529,9 @@ mod tests {
         ("STYLE_APP_ROOT", STYLE_APP_ROOT),
         ("STYLE_PANE_BASE", STYLE_PANE_BASE),
         ("STYLE_PANE_FOCUSED", STYLE_PANE_FOCUSED),
+        ("STYLE_PANE_TITLE_FOCUSED", STYLE_PANE_TITLE_FOCUSED),
+        ("STYLE_PANE_TITLE_UNFOCUSED", STYLE_PANE_TITLE_UNFOCUSED),
+        ("STYLE_SPLIT_HANDLE", STYLE_SPLIT_HANDLE),
         ("STYLE_TEXT_PRIMARY", STYLE_TEXT_PRIMARY),
         ("STYLE_TEXT_MUTED", STYLE_TEXT_MUTED),
         ("STYLE_TEXT_SUBTLE", STYLE_TEXT_SUBTLE),
@@ -2927,6 +3556,16 @@ mod tests {
         ("STYLE_PILL_ACTIVE", STYLE_PILL_ACTIVE),
         ("STYLE_TAB_ACTIVE", STYLE_TAB_ACTIVE),
         ("STYLE_TAB_INACTIVE", STYLE_TAB_INACTIVE),
+        ("STYLE_DETAIL_FIND_CONTAINER", STYLE_DETAIL_FIND_CONTAINER),
+        ("STYLE_DETAIL_FIND_QUERY", STYLE_DETAIL_FIND_QUERY),
+        (
+            "STYLE_DETAIL_FIND_MATCH_ACTIVE",
+            STYLE_DETAIL_FIND_MATCH_ACTIVE,
+        ),
+        (
+            "STYLE_DETAIL_FIND_MATCH_INACTIVE",
+            STYLE_DETAIL_FIND_MATCH_INACTIVE,
+        ),
         ("STYLE_KBD_KEY", STYLE_KBD_KEY),
         ("STYLE_KBD_DESC", STYLE_KBD_DESC),
     ];
@@ -2940,6 +3579,12 @@ mod tests {
         "STYLE_SCORE_HIGH",
         "STYLE_SCORE_MID",
         "STYLE_SCORE_LOW",
+        // Planned to be wired by implementation bead 2dccg.4.2 (detail find bar
+        // rendering). This spec bead defines the semantic contract and tests.
+        "STYLE_DETAIL_FIND_CONTAINER",
+        "STYLE_DETAIL_FIND_QUERY",
+        "STYLE_DETAIL_FIND_MATCH_ACTIVE",
+        "STYLE_DETAIL_FIND_MATCH_INACTIVE",
     ];
 
     #[test]
