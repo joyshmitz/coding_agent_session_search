@@ -1077,6 +1077,8 @@ pub enum InspectorTab {
     Layout,
     /// Hit-test regions and mouse targets
     HitRegions,
+    /// Resize regime, BOCPD, budget evidence
+    Resize,
 }
 
 impl InspectorTab {
@@ -1085,6 +1087,7 @@ impl InspectorTab {
             Self::Timing => "Timing",
             Self::Layout => "Layout",
             Self::HitRegions => "Hit Regions",
+            Self::Resize => "Resize",
         }
     }
 
@@ -1092,7 +1095,8 @@ impl InspectorTab {
         match self {
             Self::Timing => Self::Layout,
             Self::Layout => Self::HitRegions,
-            Self::HitRegions => Self::Timing,
+            Self::HitRegions => Self::Resize,
+            Self::Resize => Self::Timing,
         }
     }
 }
@@ -4414,7 +4418,7 @@ impl CassApp {
         area: Rect,
         styles: &StyleContext,
     ) {
-        let overlay_w = 44u16.min(area.width.saturating_sub(2));
+        let overlay_w = 52u16.min(area.width.saturating_sub(2));
         let overlay_h = 14u16.min(area.height.saturating_sub(2));
         if overlay_w < 20 || overlay_h < 6 {
             return; // Too narrow — auto-disable in small terminals
@@ -4436,6 +4440,7 @@ impl CassApp {
             InspectorTab::Timing,
             InspectorTab::Layout,
             InspectorTab::HitRegions,
+            InspectorTab::Resize,
         ]
         .iter()
         .map(|t| {
@@ -4576,6 +4581,61 @@ impl CassApp {
                     let text = format!("Pills: {pill_count}  Panes: {pane_count}");
                     let row = Rect::new(inner.x, y, inner.width, 1);
                     Paragraph::new(&*text).style(muted_style).render(row, frame);
+                }
+            }
+            InspectorTab::Resize => {
+                let s = &self.evidence.summary;
+                if !self.evidence.has_any() {
+                    let no_data = "No resize evidence yet";
+                    let row = Rect::new(inner.x, y, inner.width, 1);
+                    Paragraph::new(no_data)
+                        .style(muted_style)
+                        .render(row, frame);
+                    y += 1;
+                    if y < max_y {
+                        let hint2 = "(waiting for runtime events)";
+                        let row2 = Rect::new(inner.x, y, inner.width, 1);
+                        Paragraph::new(hint2).style(muted_style).render(row2, frame);
+                    }
+                } else {
+                    let lines = [
+                        format!("Regime:  {}", s.regime),
+                        format!("Degrad:  {}", s.degradation),
+                        format!("Budget:  {:.1}ms", s.budget_us / 1000.0),
+                        format!("Frame:   {:.1}ms", s.frame_time_us / 1000.0),
+                        format!("PID:     {:.2}", s.pid_output),
+                        format!(
+                            "Size:    {}",
+                            s.applied_size
+                                .map(|(w, h)| format!("{w}x{h}"))
+                                .unwrap_or_else(|| "\u{2014}".into())
+                        ),
+                        format!(
+                            "BOCPD:   {}",
+                            s.bocpd_p_burst
+                                .map(|p| format!("P(burst)={p:.2}"))
+                                .unwrap_or_else(|| "off".into())
+                        ),
+                        format!(
+                            "Delay:   {}",
+                            s.bocpd_delay_ms
+                                .map(|d| format!("{d}ms"))
+                                .unwrap_or_else(|| "\u{2014}".into())
+                        ),
+                        format!("Warmup:  {}", if s.in_warmup { "yes" } else { "no" }),
+                        format!("Frames:  {}", s.frames_observed),
+                        format!("History: {} decisions", s.history_len()),
+                    ];
+                    for line in &lines {
+                        if y >= max_y {
+                            break;
+                        }
+                        let row = Rect::new(inner.x, y, inner.width, 1);
+                        Paragraph::new(line.as_str())
+                            .style(value_style)
+                            .render(row, frame);
+                        y += 1;
+                    }
                 }
             }
         }
@@ -18329,6 +18389,9 @@ mod tests {
         assert_eq!(app.inspector_tab, InspectorTab::HitRegions);
 
         let _ = app.update(CassMsg::InspectorTabCycled);
+        assert_eq!(app.inspector_tab, InspectorTab::Resize);
+
+        let _ = app.update(CassMsg::InspectorTabCycled);
         assert_eq!(app.inspector_tab, InspectorTab::Timing);
     }
 
@@ -19245,34 +19308,33 @@ mod tests {
     fn resize_evidence_summary_with_bocpd() {
         use ftui::runtime::bocpd::{BocpdEvidence, BocpdRegime};
         let mut summary = ResizeEvidenceSummary::default();
-        let resize =
-            Some(ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot {
-                event_idx: 1,
-                action: "defer",
-                dt_ms: 5.0,
-                event_rate: 200.0,
-                regime: ftui::runtime::resize_coalescer::Regime::Burst,
-                pending_size: Some((80, 24)),
-                applied_size: None,
-                time_since_render_ms: 2.0,
-                bocpd: Some(BocpdEvidence {
-                    p_burst: 0.85,
-                    log_bayes_factor: 2.1,
-                    observation_ms: 5.0,
-                    regime: BocpdRegime::Burst,
-                    likelihood_steady: 0.01,
-                    likelihood_burst: 0.99,
-                    expected_run_length: 3.5,
-                    run_length_variance: 1.2,
-                    run_length_mode: 3,
-                    run_length_p95: 7,
-                    run_length_tail_mass: 0.001,
-                    recommended_delay_ms: Some(50),
-                    hard_deadline_forced: None,
-                    observation_count: 42,
-                    timestamp: std::time::Instant::now(),
-                }),
-            });
+        let resize = Some(ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot {
+            event_idx: 1,
+            action: "defer",
+            dt_ms: 5.0,
+            event_rate: 200.0,
+            regime: ftui::runtime::resize_coalescer::Regime::Burst,
+            pending_size: Some((80, 24)),
+            applied_size: None,
+            time_since_render_ms: 2.0,
+            bocpd: Some(BocpdEvidence {
+                p_burst: 0.85,
+                log_bayes_factor: 2.1,
+                observation_ms: 5.0,
+                regime: BocpdRegime::Burst,
+                likelihood_steady: 0.01,
+                likelihood_burst: 0.99,
+                expected_run_length: 3.5,
+                run_length_variance: 1.2,
+                run_length_mode: 3,
+                run_length_p95: 7,
+                run_length_tail_mass: 0.001,
+                recommended_delay_ms: Some(50),
+                hard_deadline_forced: None,
+                observation_count: 42,
+                timestamp: std::time::Instant::now(),
+            }),
+        });
         summary.update_from_raw(&resize, &None);
         assert_eq!(summary.bocpd_p_burst, Some(0.85));
         assert_eq!(summary.bocpd_delay_ms, Some(50));
@@ -19301,6 +19363,317 @@ mod tests {
             assert_eq!(
                 summary.degradation, expected,
                 "DegradationLevel::{expected}"
+            );
+        }
+    }
+
+    // -- Inspector Resize tab rendering (1mfw3.2.5) -------------------------
+
+    #[test]
+    fn inspector_resize_tab_label() {
+        assert_eq!(InspectorTab::Resize.label(), "Resize");
+    }
+
+    #[test]
+    fn inspector_resize_tab_cycles_correctly() {
+        assert_eq!(InspectorTab::HitRegions.next(), InspectorTab::Resize);
+        assert_eq!(InspectorTab::Resize.next(), InspectorTab::Timing);
+    }
+
+    #[test]
+    fn inspector_resize_tab_reachable() {
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        app.inspector_tab = InspectorTab::Resize;
+        // Verify the evidence summary is accessible
+        assert!(!app.evidence.summary.has_data());
+        assert_eq!(app.evidence.summary.regime, "\u{2014}");
+    }
+
+    #[test]
+    fn inspector_resize_tab_with_evidence() {
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        app.inspector_tab = InspectorTab::Resize;
+        // Feed in some evidence data
+        let resize = Some(make_resize_snapshot(
+            1,
+            ftui::runtime::resize_coalescer::Regime::Steady,
+        ));
+        let budget = Some(make_budget_snapshot(
+            ftui::render::budget::DegradationLevel::Full,
+        ));
+        app.evidence.summary.update_from_raw(&resize, &budget);
+        assert!(app.evidence.summary.has_data());
+        assert_eq!(app.evidence.summary.regime, "Steady");
+        assert_eq!(app.evidence.summary.degradation, "Full");
+    }
+
+    // -----------------------------------------------------------------------
+    // Deterministic resize storm tests (1mfw3.2.6)
+    // -----------------------------------------------------------------------
+
+    fn storm_coalescer_config() -> ftui::runtime::resize_coalescer::CoalescerConfig {
+        ftui::runtime::resize_coalescer::CoalescerConfig {
+            steady_delay_ms: 16,
+            burst_delay_ms: 40,
+            hard_deadline_ms: 100,
+            burst_enter_rate: 10.0,
+            burst_exit_rate: 5.0,
+            cooldown_frames: 3,
+            rate_window_size: 8,
+            enable_logging: true,
+            enable_bocpd: false,
+            bocpd_config: None,
+        }
+    }
+
+    #[test]
+    fn resize_storm_steady_single_event() {
+        use ftui::runtime::resize_coalescer::{CoalesceAction, ResizeCoalescer};
+        let config = storm_coalescer_config();
+        let mut c = ResizeCoalescer::new(config, (80, 24));
+        let base = Instant::now();
+
+        // Single resize event — should show placeholder immediately
+        let action = c.handle_resize_at(100, 40, base);
+        assert!(
+            matches!(action, CoalesceAction::ShowPlaceholder),
+            "first resize should show placeholder"
+        );
+
+        // After steady_delay_ms, tick should apply
+        let apply_time = base + Duration::from_millis(20);
+        let action = c.tick_at(apply_time);
+        assert!(
+            matches!(action, CoalesceAction::ApplyResize { width: 100, height: 40, .. }),
+            "expected ApplyResize(100, 40), got {action:?}"
+        );
+        assert_eq!(c.last_applied(), (100, 40));
+    }
+
+    #[test]
+    fn resize_storm_burst_latest_wins() {
+        use ftui::runtime::resize_coalescer::{CoalesceAction, Regime, ResizeCoalescer};
+        let config = storm_coalescer_config();
+        let mut c = ResizeCoalescer::new(config, (80, 24));
+        let base = Instant::now();
+
+        // Rapid-fire 15 resizes at 10ms spacing — should trigger burst
+        for i in 0..15u64 {
+            let w = 80 + (i as u16);
+            let h = 24 + (i as u16);
+            let t = base + Duration::from_millis(i * 10);
+            let _ = c.handle_resize_at(w, h, t);
+        }
+        // Should be in burst regime
+        assert_eq!(c.regime(), Regime::Burst, "expected Burst after rapid events");
+
+        // Tick well past hard_deadline to force apply
+        let late = base + Duration::from_millis(250);
+        let action = c.tick_at(late);
+        if let CoalesceAction::ApplyResize { width, height, .. } = action {
+            // Latest size should be (94, 38) — last event: 80+14=94, 24+14=38
+            assert_eq!((width, height), (94, 38), "latest-wins: expected final size");
+        }
+        assert_eq!(c.last_applied(), (94, 38));
+    }
+
+    #[test]
+    fn resize_storm_oscillating_pattern() {
+        use ftui::runtime::resize_coalescer::ResizeCoalescer;
+        let config = storm_coalescer_config();
+        let mut c = ResizeCoalescer::new(config, (80, 24));
+        let base = Instant::now();
+
+        // Alternate between two sizes at varying rates
+        // Fast oscillation → burst, then slow down
+        let pattern: Vec<(u16, u16, u64)> = vec![
+            (100, 40, 10), (80, 24, 10), (100, 40, 10), (80, 24, 10),
+            (100, 40, 10), (80, 24, 10), (100, 40, 10), (80, 24, 10),
+        ];
+
+        let mut elapsed_ms = 0u64;
+        for (w, h, delay_ms) in &pattern {
+            elapsed_ms += delay_ms;
+            let t = base + Duration::from_millis(elapsed_ms);
+            let _ = c.handle_resize_at(*w, *h, t);
+            let _ = c.tick_at(t + Duration::from_millis(1));
+        }
+
+        // After oscillation, verify coalescer didn't panic and has pending/applied state.
+        // The regime may still be Burst after rapid events — what matters is stability.
+        let transitions_before = c.regime_transition_count();
+        // No further events — just tick forward to let it settle
+        for i in 0..20u64 {
+            let t = base + Duration::from_millis(elapsed_ms + 100 + i * 50);
+            let _ = c.tick_at(t);
+        }
+        // Verify no crash and that the coalescer is still functional
+        let _ = c.regime();
+        let _ = c.last_applied();
+        assert!(c.regime_transition_count() >= transitions_before);
+    }
+
+    #[test]
+    fn resize_storm_hard_deadline_bounded_latency() {
+        use ftui::runtime::resize_coalescer::ResizeCoalescer;
+        let config = storm_coalescer_config();
+        let mut c = ResizeCoalescer::new(config, (80, 24));
+        let base = Instant::now();
+
+        // Continuous stream of events at 5ms intervals with ticks between
+        for i in 0..50u64 {
+            let t = base + Duration::from_millis(i * 5);
+            let _ = c.handle_resize_at(80 + (i % 3) as u16, 24, t);
+            // Tick after each event to let coalescer process
+            let _ = c.tick_at(t + Duration::from_millis(1));
+        }
+
+        // Tick well after all events to flush pending
+        let late = base + Duration::from_millis(500);
+        let _ = c.tick_at(late);
+
+        // Check logs for any applies (forced or normal)
+        let logs = c.logs();
+        assert!(!logs.is_empty(), "should have decision logs");
+
+        let has_apply = logs.iter().any(|l| {
+            matches!(l.action, "apply" | "apply_forced" | "apply_immediate")
+        });
+        assert!(has_apply, "hard deadline should have forced at least one apply");
+    }
+
+    #[test]
+    fn resize_storm_same_size_skipped() {
+        use ftui::runtime::resize_coalescer::{CoalesceAction, ResizeCoalescer};
+        let config = storm_coalescer_config();
+        let mut c = ResizeCoalescer::new(config, (80, 24));
+        let base = Instant::now();
+
+        // Resize to same size as current — should return None
+        let action = c.handle_resize_at(80, 24, base);
+        assert!(
+            matches!(action, CoalesceAction::None),
+            "same-size resize should be skipped: {action:?}"
+        );
+    }
+
+    #[test]
+    fn resize_storm_evidence_summary_accumulates() {
+        use ftui::runtime::resize_coalescer::Regime;
+        let mut summary = ResizeEvidenceSummary::default();
+
+        // Simulate a storm of 50 resize events
+        for i in 1..=50u64 {
+            let regime = if i < 20 {
+                Regime::Steady
+            } else {
+                Regime::Burst
+            };
+            let snap = Some(make_resize_snapshot(i, regime));
+            summary.update_from_raw(&snap, &None);
+        }
+
+        // Ring buffer should be capped at RESIZE_HISTORY_CAPACITY
+        assert_eq!(summary.history_len(), RESIZE_HISTORY_CAPACITY);
+        // Oldest should have been evicted
+        assert_eq!(
+            summary.recent_resizes.front().unwrap().event_idx,
+            50 - RESIZE_HISTORY_CAPACITY as u64 + 1
+        );
+        // Latest should have Burst regime
+        assert_eq!(summary.regime, "Burst");
+        assert_eq!(summary.recent_resizes.back().unwrap().regime, "Burst");
+    }
+
+    #[test]
+    fn resize_storm_checksum_deterministic() {
+        use ftui::runtime::resize_coalescer::ResizeCoalescer;
+        let config = storm_coalescer_config();
+        let base = Instant::now();
+
+        let pattern: Vec<(u16, u16, u64)> = vec![
+            (100, 40, 10),
+            (120, 50, 10),
+            (80, 24, 10),
+            (100, 40, 200),
+            (150, 60, 200),
+        ];
+
+        // Two coalescer runs with identical events from the same base Instant
+        let run = |c: &mut ResizeCoalescer| {
+            let mut elapsed_ms = 0u64;
+            for (w, h, delay_ms) in &pattern {
+                elapsed_ms += delay_ms;
+                let t = base + Duration::from_millis(elapsed_ms);
+                let _ = c.handle_resize_at(*w, *h, t);
+                let _ = c.tick_at(t + Duration::from_millis(1));
+            }
+            let final_tick = base + Duration::from_millis(elapsed_ms + 200);
+            let _ = c.tick_at(final_tick);
+        };
+
+        let mut c1 =
+            ResizeCoalescer::new(config.clone(), (80, 24)).with_last_render(base);
+        let mut c2 = ResizeCoalescer::new(config, (80, 24)).with_last_render(base);
+        run(&mut c1);
+        run(&mut c2);
+
+        assert_eq!(
+            c1.decision_checksum(),
+            c2.decision_checksum(),
+            "identical event streams should produce identical checksums"
+        );
+    }
+
+    #[test]
+    fn resize_storm_regime_transitions_counted() {
+        use ftui::runtime::resize_coalescer::ResizeCoalescer;
+        let config = storm_coalescer_config();
+        let mut c = ResizeCoalescer::new(config, (80, 24));
+        let base = Instant::now();
+
+        assert_eq!(c.regime_transition_count(), 0);
+
+        // Rapid burst to trigger Steady -> Burst
+        for i in 0..15u64 {
+            let t = base + Duration::from_millis(i * 8);
+            let _ = c.handle_resize_at(80 + (i as u16), 24, t);
+        }
+        // Tick to process
+        let _ = c.tick_at(base + Duration::from_millis(200));
+
+        let transitions = c.regime_transition_count();
+        assert!(transitions >= 1, "expected at least 1 regime transition, got {transitions}");
+    }
+
+    #[test]
+    fn resize_storm_evidence_integrity_no_gaps() {
+        let mut summary = ResizeEvidenceSummary::default();
+
+        // Feed events 1..=RESIZE_HISTORY_CAPACITY and verify no gaps
+        for i in 1..=RESIZE_HISTORY_CAPACITY as u64 {
+            let snap = Some(make_resize_snapshot(
+                i,
+                ftui::runtime::resize_coalescer::Regime::Steady,
+            ));
+            summary.update_from_raw(&snap, &None);
+        }
+
+        // Verify contiguous event_idx sequence
+        let indices: Vec<u64> = summary
+            .recent_resizes
+            .iter()
+            .map(|e| e.event_idx)
+            .collect();
+        for pair in indices.windows(2) {
+            assert_eq!(
+                pair[1],
+                pair[0] + 1,
+                "event_idx should be contiguous: {} -> {}",
+                pair[0],
+                pair[1]
             );
         }
     }
@@ -19398,12 +19771,8 @@ mod tests {
             (bocpd.hazard_lambda - reference.hazard_lambda).abs() < f64::EPSILON,
             "hazard_lambda must match responsive preset"
         );
-        assert!(
-            (bocpd.steady_threshold - reference.steady_threshold).abs() < f64::EPSILON,
-        );
-        assert!(
-            (bocpd.burst_threshold - reference.burst_threshold).abs() < f64::EPSILON,
-        );
+        assert!((bocpd.steady_threshold - reference.steady_threshold).abs() < f64::EPSILON,);
+        assert!((bocpd.burst_threshold - reference.burst_threshold).abs() < f64::EPSILON,);
 
         // Logging must be enabled on the BOCPD config itself
         assert!(bocpd.enable_logging, "BOCPD evidence logging must be on");

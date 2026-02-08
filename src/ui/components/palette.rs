@@ -342,6 +342,22 @@ pub fn execute_selected(state: &PaletteState) -> PaletteResult {
         .unwrap_or(PaletteResult::Noop)
 }
 
+/// Generate a stable string ID for a palette action.
+///
+/// Used as the `ActionItem::id` when registering actions with the ftui
+/// CommandPalette widget, and for reverse-lookup on `Execute(id)`.
+pub fn action_id(action: &PaletteAction) -> String {
+    format!("{action:?}")
+}
+
+/// Find the [`PaletteAction`] whose [`action_id`] matches `id`.
+pub fn action_by_id(items: &[PaletteItem], id: &str) -> Option<PaletteAction> {
+    items
+        .iter()
+        .find(|item| action_id(&item.action) == id)
+        .map(|item| item.action.clone())
+}
+
 /// Render-ready descriptor for an action.
 #[derive(Clone, Debug)]
 pub struct PaletteItem {
