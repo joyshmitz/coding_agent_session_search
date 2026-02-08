@@ -2225,6 +2225,12 @@ pub struct ResultItem {
     pub text_subtle_style: ftui::Style,
     /// Success style (for queue checkmark).
     pub success_style: ftui::Style,
+    /// Source badge style for local sources (muted).
+    pub source_local_style: ftui::Style,
+    /// Source badge style for remote sources (info + italic).
+    pub source_remote_style: ftui::Style,
+    /// File location path style (subtle).
+    pub location_style: ftui::Style,
 }
 
 fn source_display_label(source_id: &str, origin_host: Option<&str>) -> String {
@@ -2423,9 +2429,9 @@ impl RenderItem for ResultItem {
             ftui::text::Span::styled(
                 source_badge,
                 if source_is_remote {
-                    self.text_muted_style.italic()
+                    self.source_remote_style
                 } else {
-                    self.text_muted_style
+                    self.source_local_style
                 },
             ),
             ftui::text::Span::styled(format!(" {meta}"), self.text_muted_style),
@@ -2438,7 +2444,7 @@ impl RenderItem for ResultItem {
                 ftui::text::Span::styled("      ", bg_style),
                 ftui::text::Span::styled(
                     elide_text(&location, content_width.saturating_sub(6)),
-                    self.text_muted_style,
+                    self.location_style,
                 ),
             ]));
         }
@@ -4325,6 +4331,9 @@ impl CassApp {
                     text_muted_style: styles.style(style_system::STYLE_TEXT_MUTED),
                     text_subtle_style: styles.style(style_system::STYLE_TEXT_SUBTLE),
                     success_style: styles.style(style_system::STYLE_STATUS_SUCCESS),
+                    source_local_style: styles.style(style_system::STYLE_SOURCE_LOCAL),
+                    source_remote_style: styles.style(style_system::STYLE_SOURCE_REMOTE),
+                    location_style: styles.style(style_system::STYLE_LOCATION),
                 }
             })
             .collect();
@@ -15291,6 +15300,9 @@ mod tests {
                 text_muted_style: ftui::Style::default(),
                 text_subtle_style: ftui::Style::default(),
                 success_style: ftui::Style::default(),
+                source_local_style: ftui::Style::default(),
+                source_remote_style: ftui::Style::default(),
+                location_style: ftui::Style::default(),
             };
             assert_eq!(item.height(), density_h, "density {mode:?}");
         }
@@ -15452,6 +15464,9 @@ mod tests {
             text_muted_style: ftui::Style::default(),
             text_subtle_style: ftui::Style::default(),
             success_style: ftui::Style::default(),
+            source_local_style: ftui::Style::default(),
+            source_remote_style: ftui::Style::default(),
+            location_style: ftui::Style::default(),
         };
         let not_queued = ResultItem {
             index: 1,
@@ -15468,6 +15483,9 @@ mod tests {
             text_muted_style: ftui::Style::default(),
             text_subtle_style: ftui::Style::default(),
             success_style: ftui::Style::default(),
+            source_local_style: ftui::Style::default(),
+            source_remote_style: ftui::Style::default(),
+            location_style: ftui::Style::default(),
         };
         assert!(queued_item.queued);
         assert!(!not_queued.queued);
@@ -15494,6 +15512,9 @@ mod tests {
             text_muted_style: ftui::Style::default(),
             text_subtle_style: ftui::Style::default(),
             success_style: ftui::Style::default(),
+            source_local_style: ftui::Style::default(),
+            source_remote_style: ftui::Style::default(),
+            location_style: ftui::Style::default(),
         };
         assert_eq!(local_item.source_badge(), "[local]");
 
@@ -15516,6 +15537,9 @@ mod tests {
             text_muted_style: ftui::Style::default(),
             text_subtle_style: ftui::Style::default(),
             success_style: ftui::Style::default(),
+            source_local_style: ftui::Style::default(),
+            source_remote_style: ftui::Style::default(),
+            location_style: ftui::Style::default(),
         };
         assert_eq!(remote_item.source_badge(), "[laptop]");
     }
