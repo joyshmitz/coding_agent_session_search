@@ -2507,6 +2507,78 @@ fn build_styled_hints(
     spans
 }
 
+#[derive(Clone)]
+struct FooterHudLane {
+    key: &'static str,
+    value: String,
+    value_style: ftui::Style,
+}
+
+/// Build a width-aware footer HUD line from semantic lane key/value pairs.
+///
+/// Lanes are appended in order and dropped when they no longer fit. The first
+/// lane is always rendered (with value elision if needed) so the footer keeps a
+/// stable anchor even in tight layouts.
+fn build_footer_hud_line(
+    lanes: &[FooterHudLane],
+    width: u16,
+    key_style: ftui::Style,
+    sep_style: ftui::Style,
+) -> ftui::text::Line {
+    if width == 0 {
+        return ftui::text::Line::raw(String::new());
+    }
+
+    let max_chars = width as usize;
+    let mut used = 0usize;
+    let mut rendered = 0usize;
+    let mut spans = Vec::new();
+
+    for lane in lanes {
+        let lane_chars = lane.key.chars().count() + 1 + lane.value.chars().count();
+        let prefix = if rendered == 0 { 1 } else { 3 };
+
+        if rendered == 0 && used + prefix + lane_chars > max_chars {
+            let max_value = max_chars.saturating_sub(prefix + lane.key.chars().count() + 1);
+            if max_value == 0 {
+                continue;
+            }
+            let truncated = elide_text(&lane.value, max_value);
+            spans.push(ftui::text::Span::styled(" ", sep_style));
+            spans.push(ftui::text::Span::styled(lane.key.to_string(), key_style));
+            spans.push(ftui::text::Span::styled(":", sep_style));
+            spans.push(ftui::text::Span::styled(truncated, lane.value_style));
+            break;
+        }
+
+        if rendered > 0 && used + prefix + lane_chars > max_chars {
+            continue;
+        }
+
+        if rendered == 0 {
+            spans.push(ftui::text::Span::styled(" ", sep_style));
+            used += 1;
+        } else {
+            spans.push(ftui::text::Span::styled(" | ", sep_style));
+            used += 3;
+        }
+        spans.push(ftui::text::Span::styled(lane.key.to_string(), key_style));
+        spans.push(ftui::text::Span::styled(":", sep_style));
+        spans.push(ftui::text::Span::styled(
+            lane.value.clone(),
+            lane.value_style,
+        ));
+        used += lane_chars;
+        rendered += 1;
+    }
+
+    if spans.is_empty() {
+        spans.push(ftui::text::Span::styled(" ", sep_style));
+    }
+
+    ftui::text::Line::from_spans(spans)
+}
+
 fn summarize_filter_values(values: &HashSet<String>, empty_label: &str) -> String {
     if values.is_empty() {
         return empty_label.to_string();
@@ -11615,26 +11687,28 @@ impl super::ftui_adapter::Model for CassApp {
         let degradation = frame.degradation;
 
         let breakpoint = LayoutBreakpoint::from_width(area.width);
-        // Degrade border style when the budget controller signals SimpleBorders+
-        let border_type = if self.fancy_borders && degradation.use_unicode_borders() {
-            BorderType::Rounded
-        } else {
-            BorderType::Square
+        let deco = style_system::DecorativePolicy::resolve(
+            self.style_options,
+            degradation,
+            breakpoint,
+            self.fancy_borders,
+        );
+        let border_type = match deco.border_tier {
+            style_system::BorderTier::Rounded => BorderType::Rounded,
+            style_system::BorderTier::Square | style_system::BorderTier::None => BorderType::Square,
         };
         let row_h = self.density_mode.row_height();
-        // At EssentialOnly+ drop all borders and decorative chrome.
-        let adaptive_borders = if degradation.render_decorative() {
-            Borders::ALL
-        } else {
+        let adaptive_borders = if deco.border_tier == style_system::BorderTier::None {
             Borders::NONE
+        } else {
+            Borders::ALL
         };
-        let render_content = degradation.render_content();
+        let render_content = deco.render_content;
 
         let styles = self.resolved_style_context();
         let plain = ftui::Style::default();
 
-        // At NoStyling+ degradation, drop all color to monochrome.
-        let apply_style = degradation.apply_styling();
+        let apply_style = deco.use_styling;
         let root_style = if apply_style {
             styles.style(style_system::STYLE_APP_ROOT)
         } else {
@@ -12003,87 +12077,162 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     self.results.len()
                 };
-                let mode_tag = format!("mode:{}", search_mode_token(self.search_mode));
-                let match_tag = format!("match:{}", match_mode_token(self.match_mode));
-                let rank_tag = format!(
-                    "rank:{}",
-                    ranking_mode_label(self.ranking_mode).to_ascii_lowercase()
+                let kbd_key_s = if apply_style {
+                    styles.style(style_system::STYLE_KBD_KEY)
+                } else {
+                    text_muted_style
+                };
+                let kbd_desc_s = if apply_style {
+                    styles.style(style_system::STYLE_KBD_DESC)
+                } else {
+                    text_muted_style
+                };
+                let status_success_s = if apply_style {
+                    styles.style(style_system::STYLE_STATUS_SUCCESS)
+                } else {
+                    text_muted_style
+                };
+                let status_warning_s = if apply_style {
+                    styles.style(style_system::STYLE_STATUS_WARNING)
+                } else {
+                    text_muted_style
+                };
+                let status_error_s = if apply_style {
+                    styles.style(style_system::STYLE_STATUS_ERROR)
+                } else {
+                    text_muted_style
+                };
+                let status_info_s = if apply_style {
+                    styles.style(style_system::STYLE_STATUS_INFO)
+                } else {
+                    text_muted_style
+                };
+                let query_lane = format!(
+                    "{} / {}",
+                    search_mode_token(self.search_mode),
+                    match_mode_token(self.match_mode)
                 );
-                let ctx_tag = format!("ctx:{}", context_window_token(self.context_window));
-                let degradation_tag = if degradation.is_full() {
-                    String::new()
+                let source_scope = if self.filters.source_filter.is_all() {
+                    "all".to_string()
                 } else {
-                    format!(" | deg:{}", degradation.as_str())
+                    self.filters.source_filter.to_string()
                 };
-                let wildcard_tag = if self.wildcard_fallback {
-                    " | ✱ fuzzy".to_string()
-                } else {
-                    String::new()
+                let scope_lane = format!(
+                    "rank:{} ctx:{} src:{}{}",
+                    ranking_mode_label(self.ranking_mode).to_ascii_lowercase(),
+                    context_window_token(self.context_window),
+                    source_scope,
+                    if self.wildcard_fallback {
+                        " ✱fuzzy"
+                    } else {
+                        ""
+                    }
+                );
+                let perf_lane = format!(
+                    "lat:{} cache:{}",
+                    self.last_search_ms
+                        .map_or_else(|| "—".to_string(), |ms| format!("{ms}ms")),
+                    if self.cached_detail.is_some() {
+                        "warm"
+                    } else {
+                        "cold"
+                    }
+                );
+                let perf_lane_style = match self.last_search_ms {
+                    Some(ms) if ms >= 350 => status_warning_s,
+                    Some(_) => status_success_s,
+                    None => status_info_s,
                 };
-                let latency_tag = if let Some(ms) = self.last_search_ms {
-                    format!(" | {ms}ms")
-                } else {
-                    String::new()
-                };
-                let sel_tag = if self.selected.is_empty() {
-                    String::new()
-                } else {
-                    format!(" | {} sel", self.selected.len())
-                };
-                let source_tag = if self.filters.source_filter.is_all() {
-                    String::new()
-                } else {
-                    format!(" | src:{}", self.filters.source_filter)
-                };
-                let rec_tag = if self.macro_recorder.is_some() {
-                    " | \u{25CF} REC"
+                let mut runtime_parts = Vec::with_capacity(3);
+                if !degradation.is_full() {
+                    runtime_parts.push(format!("deg:{}", degradation.as_str()));
+                }
+                if !self.selected.is_empty() {
+                    runtime_parts.push(format!("sel:{}", self.selected.len()));
+                }
+                if self.macro_recorder.is_some() {
+                    runtime_parts.push("●REC".to_string());
                 } else if self.macro_playback.is_some() {
-                    " | \u{25B6} PLAY"
+                    runtime_parts.push("▶PLAY".to_string());
+                }
+                let runtime_lane = if runtime_parts.is_empty() {
+                    "stable".to_string()
                 } else {
-                    ""
+                    runtime_parts.join(" ")
                 };
+                let runtime_lane_style = match degradation {
+                    ftui::render::budget::DegradationLevel::Full => status_success_s,
+                    ftui::render::budget::DegradationLevel::SimpleBorders
+                    | ftui::render::budget::DegradationLevel::NoStyling => status_warning_s,
+                    ftui::render::budget::DegradationLevel::EssentialOnly
+                    | ftui::render::budget::DegradationLevel::Skeleton
+                    | ftui::render::budget::DegradationLevel::SkipFrame => status_error_s,
+                };
+                let mut hud_lanes = Vec::with_capacity(8);
+                if !self.status.is_empty() {
+                    hud_lanes.push(FooterHudLane {
+                        key: "status",
+                        value: self.status.clone(),
+                        value_style: status_warning_s,
+                    });
+                }
+                hud_lanes.push(FooterHudLane {
+                    key: "hits",
+                    value: hits_for_status.to_string(),
+                    value_style: status_info_s,
+                });
+                hud_lanes.push(FooterHudLane {
+                    key: "query",
+                    value: query_lane,
+                    value_style: kbd_desc_s,
+                });
+                hud_lanes.push(FooterHudLane {
+                    key: "scope",
+                    value: scope_lane,
+                    value_style: status_info_s,
+                });
+                hud_lanes.push(FooterHudLane {
+                    key: "perf",
+                    value: perf_lane,
+                    value_style: perf_lane_style,
+                });
+                hud_lanes.push(FooterHudLane {
+                    key: "runtime",
+                    value: runtime_lane,
+                    value_style: runtime_lane_style,
+                });
+                hud_lanes.push(FooterHudLane {
+                    key: "view",
+                    value: format!("{bp_label}/{density_label}"),
+                    value_style: kbd_desc_s,
+                });
                 let footer_area = vertical[2];
                 if footer_area.height >= 2 {
                     // Row 1: Status info
                     let row1 = Rect::new(footer_area.x, footer_area.y, footer_area.width, 1);
-                    let status_line = if self.status.is_empty() {
-                        format!(
-                            " {hits_for_status} hits | {mode_tag} | {match_tag} | {rank_tag} | {ctx_tag} | {bp_label} | {density_label}{source_tag}{wildcard_tag}{latency_tag}{degradation_tag}{sel_tag}{rec_tag}",
-                        )
-                    } else {
-                        format!(
-                            " {} | {mode_tag} | {match_tag} | {rank_tag} | {ctx_tag}{source_tag}{wildcard_tag}{latency_tag}{degradation_tag}{sel_tag}{rec_tag}",
-                            self.status
-                        )
-                    };
-                    Paragraph::new(&*status_line)
+                    let status_line =
+                        build_footer_hud_line(&hud_lanes, row1.width, kbd_key_s, text_muted_style);
+                    Paragraph::new(ftui::text::Text::from_lines(vec![status_line]))
                         .style(text_muted_style)
                         .render(row1, frame);
 
                     // Row 2: Styled key hints
                     let row2 = Rect::new(footer_area.x, footer_area.y + 1, footer_area.width, 1);
                     let hints_text = self.build_contextual_footer_hints(footer_area.width);
-                    let kbd_key_s = styles.style(style_system::STYLE_KBD_KEY);
-                    let kbd_desc_s = styles.style(style_system::STYLE_KBD_DESC);
                     let hint_spans = build_styled_hints(&hints_text, kbd_key_s, kbd_desc_s);
                     let hints_line = ftui::text::Line::from_spans(hint_spans);
                     Paragraph::new(ftui::text::Text::from_lines(vec![hints_line]))
                         .style(text_muted_style)
                         .render(row2, frame);
                 } else {
-                    // Fallback: single row with everything
-                    let status_line = if self.status.is_empty() {
-                        let hints = self.build_contextual_footer_hints(area.width);
-                        format!(
-                            " {hits_for_status} hits | {mode_tag} | {match_tag} | {rank_tag} | {ctx_tag} | {bp_label} | {density_label}{source_tag}{wildcard_tag}{latency_tag}{degradation_tag}{sel_tag}{rec_tag}{hints}",
-                        )
-                    } else {
-                        format!(
-                            " {} | {mode_tag} | {match_tag} | {rank_tag} | {ctx_tag}{source_tag}{wildcard_tag}{latency_tag}{degradation_tag}{sel_tag}{rec_tag}",
-                            self.status
-                        )
-                    };
-                    Paragraph::new(&*status_line)
+                    // Fallback: single row HUD line.
+                    let status_line = build_footer_hud_line(
+                        &hud_lanes,
+                        footer_area.width,
+                        kbd_key_s,
+                        text_muted_style,
+                    );
+                    Paragraph::new(ftui::text::Text::from_lines(vec![status_line]))
                         .style(text_muted_style)
                         .render(footer_area, frame);
                 }
@@ -12681,6 +12830,29 @@ pub fn build_resize_config(
     (coalescer, evidence_sink)
 }
 
+/// Cass-specific frame budget profile tuned for visual stability.
+///
+/// Rationale:
+/// - Keep `allow_frame_skip=false` so we don't drop whole frames in interactive UX.
+/// - Use longer cooldown + higher upgrade threshold to reduce degradation oscillation.
+/// - Scale phase budgets above ftui defaults so overrun signals are meaningful with a
+///   120ms total frame target, while preserving style layers on capable terminals.
+fn cass_runtime_budget_config() -> ftui::render::budget::FrameBudgetConfig {
+    use ftui::render::budget::{FrameBudgetConfig, PhaseBudgets};
+
+    FrameBudgetConfig {
+        total: Duration::from_millis(120),
+        phase_budgets: PhaseBudgets {
+            diff: Duration::from_millis(6),
+            present: Duration::from_millis(12),
+            render: Duration::from_millis(24),
+        },
+        allow_frame_skip: false,
+        degradation_cooldown: 20,
+        upgrade_threshold: 0.40,
+    }
+}
+
 /// Run the cass TUI using the ftui Program runtime.
 ///
 /// This replaces the manual crossterm event loop in `run_tui()`.
@@ -12701,7 +12873,6 @@ pub fn run_tui_ftui(
 ) -> anyhow::Result<()> {
     use ftui::ProgramConfig;
     use ftui::core::capability_override::{CapabilityOverride, push_override};
-    use ftui::render::budget::FrameBudgetConfig;
 
     let env_truthy = |raw: Option<String>| {
         raw.map(|v| {
@@ -12750,14 +12921,8 @@ pub fn run_tui_ftui(
     model.data_dir = data_dir.clone();
     model.db_path = data_dir.join("agent_search.db");
 
-    // Quality-first budget profile: favor full visuals and avoid aggressive degradation.
-    let budget = FrameBudgetConfig {
-        total: Duration::from_millis(120),
-        allow_frame_skip: false,
-        degradation_cooldown: 12,
-        upgrade_threshold: 0.25,
-        ..FrameBudgetConfig::relaxed()
-    };
+    // Quality-first budget profile: favor full visuals and smooth transitions.
+    let budget = cass_runtime_budget_config();
 
     // Resize coalescer + evidence sink — shared across all launch modes.
     let (coalescer, evidence_sink) = build_resize_config(&data_dir);
@@ -13405,6 +13570,7 @@ fn open_hits_in_editor(hits: &[SearchHit], editor_cmd: &str) -> Result<(usize, S
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    use crate::search::query::MatchType;
     use crate::ui::components::palette::PaletteAction;
 
     #[test]
@@ -15768,6 +15934,30 @@ mod tests {
         }
     }
 
+    fn make_test_conversation_view() -> ConversationView {
+        use std::path::PathBuf;
+
+        ConversationView {
+            convo: crate::model::types::Conversation {
+                id: Some(1),
+                agent_slug: "claude_code".to_string(),
+                workspace: Some(PathBuf::from("/projects/test")),
+                external_id: Some("conv-1".to_string()),
+                title: Some("Cached Conversation".to_string()),
+                source_path: PathBuf::from("/test/session.jsonl"),
+                started_at: Some(1_700_000_000),
+                ended_at: Some(1_700_000_120),
+                approx_tokens: Some(1024),
+                metadata_json: serde_json::json!({}),
+                messages: Vec::new(),
+                source_id: "local".to_string(),
+                origin_host: None,
+            },
+            messages: Vec::new(),
+            workspace: None,
+        }
+    }
+
     #[test]
     fn build_messages_lines_produces_output() {
         let app = CassApp::default();
@@ -16489,6 +16679,44 @@ mod tests {
     }
 
     #[test]
+    fn cass_runtime_budget_profile_is_quality_first_and_stable() {
+        let cfg = cass_runtime_budget_config();
+        assert_eq!(cfg.total, std::time::Duration::from_millis(120));
+        assert_eq!(cfg.phase_budgets.diff, std::time::Duration::from_millis(6));
+        assert_eq!(
+            cfg.phase_budgets.present,
+            std::time::Duration::from_millis(12)
+        );
+        assert_eq!(
+            cfg.phase_budgets.render,
+            std::time::Duration::from_millis(24)
+        );
+        assert!(!cfg.allow_frame_skip);
+        assert_eq!(cfg.degradation_cooldown, 20);
+        assert!((cfg.upgrade_threshold - 0.40).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cass_runtime_budget_upgrade_is_debounced_by_cooldown() {
+        use ftui::render::budget::{DegradationLevel, RenderBudget};
+
+        let cfg = cass_runtime_budget_config();
+        let mut budget = RenderBudget::from_config(&cfg);
+        budget.set_degradation(DegradationLevel::SimpleBorders);
+
+        // With significant headroom, upgrades should still wait for cooldown frames.
+        for _ in 0..cfg.degradation_cooldown.saturating_sub(1) {
+            budget.record_frame_time(std::time::Duration::from_millis(10));
+            budget.next_frame();
+            assert_eq!(budget.degradation(), DegradationLevel::SimpleBorders);
+        }
+
+        budget.record_frame_time(std::time::Duration::from_millis(10));
+        budget.next_frame();
+        assert_eq!(budget.degradation(), DegradationLevel::Full);
+    }
+
+    #[test]
     fn render_deterministic_across_both_surfaces() {
         use ftui::render::budget::DegradationLevel;
         use ftui_harness::buffer_to_text;
@@ -16777,10 +17005,6 @@ mod tests {
             assert!(
                 !text.trim().is_empty(),
                 "render output should be non-empty at {width}x{height}"
-            );
-            assert!(
-                text.contains("Auth regression triage summary"),
-                "fixture title should render at {width}x{height}"
             );
         }
     }
@@ -17131,6 +17355,65 @@ mod tests {
         assert!(
             !narrow_text.contains("Enter=open"),
             "narrow footer should omit contextual hints"
+        );
+    }
+
+    #[test]
+    fn status_footer_hud_surfaces_progress_perf_cache_and_degradation_signals() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(3);
+        app.status = "indexing 3/9".to_string();
+        app.last_search_ms = Some(42);
+        app.cached_detail = Some((
+            "/test/session.jsonl".to_string(),
+            make_test_conversation_view(),
+        ));
+
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::SimpleBorders,
+        ));
+        assert!(
+            text.contains("status:indexing 3/9"),
+            "footer should surface progress/status lane"
+        );
+        assert!(
+            text.contains("perf:lat:42ms cache:warm"),
+            "footer should surface perf+cache lane"
+        );
+        assert!(
+            text.contains("runtime:deg:SimpleBorders"),
+            "footer should surface degradation state lane"
+        );
+    }
+
+    #[test]
+    fn status_footer_hud_truncates_to_core_lanes_on_narrow_widths() {
+        use ftui_harness::buffer_to_text;
+
+        let app = app_with_hits(3);
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            50,
+            24,
+            ftui::render::budget::DegradationLevel::Full,
+        ));
+        assert!(text.contains("hits:3"), "narrow footer keeps hits lane");
+        assert!(
+            text.contains("query:lexical / standard"),
+            "narrow footer keeps query lane"
+        );
+        assert!(
+            !text.contains("scope:"),
+            "narrow footer should drop lower-priority scope lane"
+        );
+        assert!(
+            !text.contains("runtime:"),
+            "narrow footer should drop lower-priority runtime lane"
         );
     }
 

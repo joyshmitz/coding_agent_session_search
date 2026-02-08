@@ -491,6 +491,94 @@ impl StyleOptions {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Decorative policy — capability/degradation/breakpoint guardrails (2dccg.10.6)
+// ---------------------------------------------------------------------------
+
+/// Border rendering strategy, from richest to most minimal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BorderTier {
+    /// Unicode rounded corners (`╭─╮`).
+    Rounded,
+    /// Plain box-drawing (`┌─┐`).
+    Square,
+    /// No borders at all.
+    None,
+}
+
+/// Resolved decorative policy for the current frame.
+///
+/// Computed from [`StyleOptions`], the ftui `DegradationLevel`, and the
+/// [`LayoutBreakpoint`] so that rendering code never makes ad-hoc decisions
+/// about what decorative elements to show.
+///
+/// ## Policy table
+///
+/// | Degradation       | Breakpoint   | fancy_borders | `border_tier` | `show_icons` | `use_styling` |
+/// |-------------------|--------------|---------------|---------------|--------------|---------------|
+/// | Full              | any          | true          | Rounded       | true         | true          |
+/// | Full              | Narrow       | true          | Square        | true         | true          |
+/// | Full              | any          | false         | Square        | true         | true          |
+/// | SimpleBorders     | any          | _             | Square        | true         | true          |
+/// | NoStyling         | any          | _             | Square        | true         | false         |
+/// | EssentialOnly+    | any          | _             | None          | false        | false         |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecorativePolicy {
+    /// Which border rendering tier to use.
+    pub border_tier: BorderTier,
+    /// Whether to render icons and decorative Unicode glyphs.
+    pub show_icons: bool,
+    /// Whether to apply color styling (fg/bg).
+    pub use_styling: bool,
+    /// Whether gradients are allowed (requires TrueColor + not a11y + not no_gradient).
+    pub use_gradients: bool,
+    /// Whether to render content at all (false at Skeleton/SkipFrame).
+    pub render_content: bool,
+}
+
+impl DecorativePolicy {
+    /// Resolve policy from the current style options, degradation level, and breakpoint.
+    ///
+    /// Uses `fancy_borders` as the user-preference toggle (Ctrl+B in TUI).
+    pub fn resolve(
+        options: StyleOptions,
+        degradation: ftui::render::budget::DegradationLevel,
+        breakpoint: super::app::LayoutBreakpoint,
+        fancy_borders: bool,
+    ) -> Self {
+        use crate::ui::app::LayoutBreakpoint as LB;
+
+        let render_content = degradation.render_content();
+
+        // Border tier: EssentialOnly+ strips all borders.
+        let border_tier = if !degradation.render_decorative() {
+            BorderTier::None
+        } else if !degradation.use_unicode_borders() {
+            // SimpleBorders+ forces plain box-drawing.
+            BorderTier::Square
+        } else if !fancy_borders {
+            BorderTier::Square
+        } else if breakpoint == LB::Narrow {
+            // Narrow terminals: use square borders to save horizontal space.
+            BorderTier::Square
+        } else {
+            BorderTier::Rounded
+        };
+
+        let show_icons = degradation.render_decorative() && !options.no_icons;
+        let use_styling = degradation.apply_styling() && !options.no_color;
+        let use_gradients = options.gradients_enabled() && degradation.apply_styling();
+
+        Self {
+            border_tier,
+            show_icons,
+            use_styling,
+            use_gradients,
+            render_content,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoleMarkers {
     pub user: &'static str,
@@ -2389,6 +2477,178 @@ mod tests {
                 "GUTTER_USER must have bg for preset {}",
                 preset.name()
             );
+        }
+    }
+
+    // -- decorative policy tests (2dccg.10.6) ---
+
+    #[test]
+    fn deco_full_wide_fancy_uses_rounded() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let policy = DecorativePolicy::resolve(StyleOptions::default(), DL::Full, LB::Wide, true);
+        assert_eq!(policy.border_tier, BorderTier::Rounded);
+        assert!(policy.show_icons);
+        assert!(policy.use_styling);
+        assert!(policy.render_content);
+    }
+
+    #[test]
+    fn deco_full_narrow_downgrades_to_square() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let policy = DecorativePolicy::resolve(StyleOptions::default(), DL::Full, LB::Narrow, true);
+        assert_eq!(
+            policy.border_tier,
+            BorderTier::Square,
+            "Narrow breakpoint should force Square even with fancy_borders=true"
+        );
+        assert!(policy.show_icons);
+    }
+
+    #[test]
+    fn deco_fancy_off_uses_square() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let policy = DecorativePolicy::resolve(StyleOptions::default(), DL::Full, LB::Wide, false);
+        assert_eq!(policy.border_tier, BorderTier::Square);
+    }
+
+    #[test]
+    fn deco_simple_borders_forces_square() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let policy =
+            DecorativePolicy::resolve(StyleOptions::default(), DL::SimpleBorders, LB::Wide, true);
+        assert_eq!(policy.border_tier, BorderTier::Square);
+        assert!(
+            policy.use_styling,
+            "SimpleBorders should still allow styling"
+        );
+    }
+
+    #[test]
+    fn deco_no_styling_drops_color() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let policy =
+            DecorativePolicy::resolve(StyleOptions::default(), DL::NoStyling, LB::Wide, true);
+        assert_eq!(policy.border_tier, BorderTier::Square);
+        assert!(!policy.use_styling, "NoStyling should drop color");
+        assert!(policy.show_icons, "NoStyling should still show icons");
+    }
+
+    #[test]
+    fn deco_essential_only_strips_everything() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let policy =
+            DecorativePolicy::resolve(StyleOptions::default(), DL::EssentialOnly, LB::Wide, true);
+        assert_eq!(policy.border_tier, BorderTier::None);
+        assert!(!policy.show_icons);
+        assert!(!policy.use_styling);
+        assert!(
+            policy.render_content,
+            "EssentialOnly should still render content"
+        );
+    }
+
+    #[test]
+    fn deco_skeleton_drops_content() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let policy =
+            DecorativePolicy::resolve(StyleOptions::default(), DL::Skeleton, LB::Wide, true);
+        assert!(!policy.render_content, "Skeleton should not render content");
+    }
+
+    #[test]
+    fn deco_no_color_drops_styling() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let opts = StyleOptions {
+            no_color: true,
+            color_profile: ColorProfile::Mono,
+            no_gradient: true,
+            ..StyleOptions::default()
+        };
+        let policy = DecorativePolicy::resolve(opts, DL::Full, LB::Wide, true);
+        assert!(!policy.use_styling, "NO_COLOR should drop styling");
+        assert!(!policy.use_gradients, "NO_COLOR should drop gradients");
+    }
+
+    #[test]
+    fn deco_no_icons_suppresses_icons() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let opts = StyleOptions {
+            no_icons: true,
+            ..StyleOptions::default()
+        };
+        let policy = DecorativePolicy::resolve(opts, DL::Full, LB::Wide, true);
+        assert!(!policy.show_icons, "CASS_NO_ICONS should suppress icons");
+    }
+
+    #[test]
+    fn deco_monotonic_degradation() {
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel as DL;
+
+        let levels = [
+            DL::Full,
+            DL::SimpleBorders,
+            DL::NoStyling,
+            DL::EssentialOnly,
+            DL::Skeleton,
+            DL::SkipFrame,
+        ];
+        let opts = StyleOptions::default();
+        let mut prev: Option<DecorativePolicy> = None;
+
+        for &level in &levels {
+            let policy = DecorativePolicy::resolve(opts, level, LB::Wide, true);
+
+            if let Some(p) = prev {
+                // Border tier should be >= (weaker or equal).
+                assert!(
+                    policy.border_tier >= p.border_tier,
+                    "Border tier should degrade monotonically: {:?} at {:?}",
+                    policy.border_tier,
+                    level
+                );
+                // Capabilities should only decrease.
+                if !p.show_icons {
+                    assert!(
+                        !policy.show_icons,
+                        "show_icons should not re-enable at {:?}",
+                        level
+                    );
+                }
+                if !p.use_styling {
+                    assert!(
+                        !policy.use_styling,
+                        "use_styling should not re-enable at {:?}",
+                        level
+                    );
+                }
+                if !p.render_content {
+                    assert!(
+                        !policy.render_content,
+                        "render_content should not re-enable at {:?}",
+                        level
+                    );
+                }
+            }
+            prev = Some(policy);
         }
     }
 
