@@ -2774,6 +2774,8 @@ pub struct CassApp {
     pub palette_state: PaletteState,
     /// ftui CommandPalette widget (rendering, filtering, selection, scoring).
     pub command_palette: CommandPalette,
+    /// Current palette match-filter mode (All / Exact / Prefix / WordStart / Substring / Fuzzy).
+    pub palette_match_mode: PaletteMatchMode,
     /// Whether the palette evidence ledger panel is visible.
     pub show_palette_evidence: bool,
     /// Palette query latency instrumentation.
@@ -2989,6 +2991,7 @@ impl Default for CassApp {
                 }
                 cp
             },
+            palette_match_mode: PaletteMatchMode::default(),
             show_palette_evidence: false,
             palette_latency: PaletteLatencyStats::default(),
             update_info: None,
@@ -4661,8 +4664,8 @@ impl CassApp {
 
         // Render styled tab bar inside the pane (first row).
         let inner = if full_inner.height >= 3 {
-            let tab_active_s = styles.style(style_system::STYLE_TAB_ACTIVE);
-            let tab_inactive_s = styles.style(style_system::STYLE_TAB_INACTIVE);
+            let tab_active_s = styles.style(style_system::STYLE_STATUS_INFO);
+            let tab_inactive_s = styles.style(style_system::STYLE_TEXT_MUTED);
             let tab_items = [
                 ("Messages", DetailTab::Messages),
                 ("Snippets", DetailTab::Snippets),
@@ -8403,8 +8406,8 @@ impl super::ftui_adapter::Model for CassApp {
                         }
                         // F9 cycles the match-type filter.
                         if ke.code == super::ftui_adapter::KeyCode::F(9) {
-                            self.palette_state.match_mode = self.palette_state.match_mode.cycle();
-                            let filter = match self.palette_state.match_mode {
+                            self.palette_match_mode = self.palette_match_mode.cycle();
+                            let filter = match self.palette_match_mode {
                                 PaletteMatchMode::All => MatchFilter::All,
                                 PaletteMatchMode::Exact => MatchFilter::Exact,
                                 PaletteMatchMode::Prefix => MatchFilter::Prefix,
@@ -8413,10 +8416,8 @@ impl super::ftui_adapter::Model for CassApp {
                                 PaletteMatchMode::Fuzzy => MatchFilter::Fuzzy,
                             };
                             self.command_palette.set_match_filter(filter);
-                            self.status = format!(
-                                "Palette filter: {}",
-                                self.palette_state.match_mode.label()
-                            );
+                            self.status =
+                                format!("Palette filter: {}", self.palette_match_mode.label());
                             return ftui::Cmd::none();
                         }
                         let _t0 = std::time::Instant::now();
@@ -9533,7 +9534,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::PaletteOpened => {
                 self.palette_state.query.clear();
                 self.palette_state.selected = 0;
-                self.palette_state.match_mode = PaletteMatchMode::default();
+                self.palette_match_mode = PaletteMatchMode::default();
                 self.palette_state.refilter();
                 self.command_palette.set_match_filter(MatchFilter::All);
                 self.command_palette.open();
@@ -9564,8 +9565,8 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::PaletteMatchModeCycled => {
-                self.palette_state.match_mode = self.palette_state.match_mode.cycle();
-                let filter = match self.palette_state.match_mode {
+                self.palette_match_mode = self.palette_match_mode.cycle();
+                let filter = match self.palette_match_mode {
                     PaletteMatchMode::All => MatchFilter::All,
                     PaletteMatchMode::Exact => MatchFilter::Exact,
                     PaletteMatchMode::Prefix => MatchFilter::Prefix,
@@ -9574,7 +9575,7 @@ impl super::ftui_adapter::Model for CassApp {
                     PaletteMatchMode::Fuzzy => MatchFilter::Fuzzy,
                 };
                 self.command_palette.set_match_filter(filter);
-                self.status = format!("Palette filter: {}", self.palette_state.match_mode.label());
+                self.status = format!("Palette filter: {}", self.palette_match_mode.label());
                 ftui::Cmd::none()
             }
             CassMsg::PaletteQueryChanged(q) => {
@@ -11767,8 +11768,8 @@ impl super::ftui_adapter::Model for CassApp {
                     // Row 2: Styled key hints
                     let row2 = Rect::new(footer_area.x, footer_area.y + 1, footer_area.width, 1);
                     let hints_text = self.build_contextual_footer_hints(footer_area.width);
-                    let kbd_key_s = styles.style(style_system::STYLE_KBD_KEY);
-                    let kbd_desc_s = styles.style(style_system::STYLE_KBD_DESC);
+                    let kbd_key_s = styles.style(style_system::STYLE_STATUS_INFO);
+                    let kbd_desc_s = styles.style(style_system::STYLE_TEXT_MUTED);
                     let hint_spans = build_styled_hints(&hints_text, kbd_key_s, kbd_desc_s);
                     let hints_line = ftui::text::Line::from_spans(hint_spans);
                     Paragraph::new(ftui::text::Text::from_lines(vec![hints_line]))
@@ -13843,10 +13844,10 @@ mod tests {
         // Open palette, cycle match mode, close, reopen — should reset.
         let _ = app.update(CassMsg::PaletteOpened);
         let _ = app.update(CassMsg::PaletteMatchModeCycled);
-        assert_ne!(app.palette_state.match_mode, PaletteMatchMode::All);
+        assert_ne!(app.palette_match_mode, PaletteMatchMode::All);
         let _ = app.update(CassMsg::PaletteClosed);
         let _ = app.update(CassMsg::PaletteOpened);
-        assert_eq!(app.palette_state.match_mode, PaletteMatchMode::All);
+        assert_eq!(app.palette_match_mode, PaletteMatchMode::All);
     }
 
     #[test]
@@ -13854,10 +13855,10 @@ mod tests {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::PaletteOpened);
         let _ = app.update(CassMsg::PaletteMatchModeCycled);
-        assert_eq!(app.palette_state.match_mode, PaletteMatchMode::Exact);
+        assert_eq!(app.palette_match_mode, PaletteMatchMode::Exact);
         assert!(app.status.contains("Exact"));
         let _ = app.update(CassMsg::PaletteMatchModeCycled);
-        assert_eq!(app.palette_state.match_mode, PaletteMatchMode::Prefix);
+        assert_eq!(app.palette_match_mode, PaletteMatchMode::Prefix);
         assert!(app.status.contains("Prefix"));
     }
 
@@ -13903,7 +13904,7 @@ mod tests {
         for _ in 0..6 {
             let _ = app.update(CassMsg::PaletteMatchModeCycled);
         }
-        assert_eq!(app.palette_state.match_mode, PaletteMatchMode::All);
+        assert_eq!(app.palette_match_mode, PaletteMatchMode::All);
         let _ = app.update(CassMsg::PaletteSelectionMoved { delta: 2 });
         let _ = app.update(CassMsg::PaletteClosed);
         assert!(!app.command_palette.is_visible());
@@ -13920,7 +13921,7 @@ mod tests {
         let _ = app.update(CassMsg::PaletteOpened);
         assert_eq!(app.palette_state.query, "");
         assert_eq!(app.palette_state.selected, 0);
-        assert_eq!(app.palette_state.match_mode, PaletteMatchMode::All);
+        assert_eq!(app.palette_match_mode, PaletteMatchMode::All);
         assert!(!app.show_palette_evidence);
         assert!(!app.palette_latency.bench_mode);
     }
@@ -13979,7 +13980,7 @@ mod tests {
     fn palette_filter_mode_round_trip() {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::PaletteOpened);
-        let init = app.palette_state.match_mode;
+        let init = app.palette_match_mode;
         for exp in [
             PaletteMatchMode::Exact,
             PaletteMatchMode::Prefix,
@@ -13989,9 +13990,9 @@ mod tests {
             PaletteMatchMode::All,
         ] {
             let _ = app.update(CassMsg::PaletteMatchModeCycled);
-            assert_eq!(app.palette_state.match_mode, exp);
+            assert_eq!(app.palette_match_mode, exp);
         }
-        assert_eq!(app.palette_state.match_mode, init);
+        assert_eq!(app.palette_match_mode, init);
     }
     #[test]
     fn palette_zero_results_safe() {

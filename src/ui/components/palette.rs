@@ -37,6 +37,44 @@
 
 use crate::ui::shortcuts;
 
+/// Match-type filter mode for the command palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PaletteMatchMode {
+    #[default]
+    All,
+    Exact,
+    Prefix,
+    WordStart,
+    Substring,
+    Fuzzy,
+}
+
+impl PaletteMatchMode {
+    /// Advance to the next mode, wrapping around.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::All => Self::Exact,
+            Self::Exact => Self::Prefix,
+            Self::Prefix => Self::WordStart,
+            Self::WordStart => Self::Substring,
+            Self::Substring => Self::Fuzzy,
+            Self::Fuzzy => Self::All,
+        }
+    }
+
+    /// Short human-readable label for status display.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Exact => "Exact",
+            Self::Prefix => "Prefix",
+            Self::WordStart => "WordStart",
+            Self::Substring => "Substr",
+            Self::Fuzzy => "Fuzzy",
+        }
+    }
+}
+
 /// Categorical grouping for palette actions. Used for section headers,
 /// icons, and migration validation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -373,6 +411,7 @@ pub struct PaletteState {
     pub filtered: Vec<PaletteItem>,
     pub all_actions: Vec<PaletteItem>,
     pub selected: usize,
+    pub match_mode: PaletteMatchMode,
 }
 
 impl PaletteState {
@@ -384,6 +423,7 @@ impl PaletteState {
             filtered,
             all_actions: actions,
             selected: 0,
+            match_mode: PaletteMatchMode::default(),
         }
     }
 
