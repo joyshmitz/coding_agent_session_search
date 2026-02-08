@@ -13891,6 +13891,7 @@ fn open_hits_in_editor(hits: &[SearchHit], editor_cmd: &str) -> Result<(usize, S
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    use crate::model::types::Message;
     use crate::search::query::MatchType;
     use crate::ui::components::palette::PaletteAction;
 
@@ -16468,6 +16469,182 @@ mod tests {
         let mut lines = vec![ftui::text::Line::raw("Hello".to_string())];
         let matches = CassApp::apply_find_highlight(&mut lines, "", 0, &styles);
         assert!(matches.is_empty());
+    }
+
+    // ── Detail find bar render/interaction tests (2dccg.4.3) ──────────
+
+    /// Match-counter line structure is identical across all theme presets.
+    #[test]
+    fn detail_find_bar_match_counter_consistent_across_presets() {
+        use crate::ui::style_system::UiThemePreset;
+
+        let find = DetailFindState {
+            query: "needle".to_string(),
+            matches: vec![2, 4, 7],
+            current: 1,
+        };
+        let mut structures = Vec::new();
+        for preset in UiThemePreset::all() {
+            let ctx = StyleContext::from_options(crate::ui::style_system::StyleOptions {
+                preset,
+                ..Default::default()
+            });
+            let line = build_detail_find_bar_line(
+                &find,
+                80,
+                ctx.style(style_system::STYLE_DETAIL_FIND_QUERY),
+                ctx.style(style_system::STYLE_DETAIL_FIND_MATCH_ACTIVE),
+                ctx.style(style_system::STYLE_DETAIL_FIND_MATCH_INACTIVE),
+            );
+            let plain: String = line.spans().iter().map(|s| s.content.as_ref()).collect();
+            structures.push((preset.name(), plain));
+        }
+        // All presets produce the same text structure
+        let reference = &structures[0].1;
+        for (name, text) in &structures[1..] {
+            assert_eq!(
+                text, reference,
+                "match counter text should be identical between {} and {}",
+                name, structures[0].0
+            );
+        }
+    }
+
+    /// Find bar line produces correct span count for different states.
+    #[test]
+    fn detail_find_bar_span_structure() {
+        // With query and matches: expect "/" + query + " (" + current + "/" + total + ")"
+        let find = DetailFindState {
+            query: "test".to_string(),
+            matches: vec![1, 3],
+            current: 0,
+        };
+        let line = build_detail_find_bar_line(
+            &find,
+            80,
+            ftui::Style::default(),
+            ftui::Style::default(),
+            ftui::Style::default(),
+        );
+        let span_count = line.spans().len();
+        assert!(
+            span_count >= 3,
+            "find bar with matches should have at least 3 spans (/, query, match), got {span_count}"
+        );
+
+        // No matches: expect "/" + query + " (0/0 no matches)"
+        let find_empty = DetailFindState {
+            query: "test".to_string(),
+            matches: vec![],
+            current: 0,
+        };
+        let line_empty = build_detail_find_bar_line(
+            &find_empty,
+            80,
+            ftui::Style::default(),
+            ftui::Style::default(),
+            ftui::Style::default(),
+        );
+        let plain: String = line_empty
+            .spans()
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(plain.contains("0/0"), "no-match state should show 0/0");
+    }
+
+    /// Current match index updates correctly in the find bar line.
+    #[test]
+    fn detail_find_bar_current_match_index_updates() {
+        for current in 0..3 {
+            let find = DetailFindState {
+                query: "q".to_string(),
+                matches: vec![10, 20, 30],
+                current,
+            };
+            let line = build_detail_find_bar_line(
+                &find,
+                80,
+                ftui::Style::default(),
+                ftui::Style::default(),
+                ftui::Style::default(),
+            );
+            let plain: String = line.spans().iter().map(|s| s.content.as_ref()).collect();
+            let expected = format!("({}/3)", current + 1);
+            assert!(
+                plain.contains(&expected),
+                "current={current}: expected '{expected}' in '{plain}'"
+            );
+        }
+    }
+
+    /// Find bar at minimum width still produces output without panic.
+    #[test]
+    fn detail_find_bar_at_minimum_width() {
+        let find = DetailFindState {
+            query: "test".to_string(),
+            matches: vec![1],
+            current: 0,
+        };
+        for width in [1, 2, 3, 5, 10] {
+            let line = build_detail_find_bar_line(
+                &find,
+                width,
+                ftui::Style::default(),
+                ftui::Style::default(),
+                ftui::Style::default(),
+            );
+            let len: usize = line.spans().iter().map(|s| s.content.chars().count()).sum();
+            assert!(
+                len <= width as usize,
+                "find bar at width={width} produced {len} chars, exceeds budget"
+            );
+        }
+    }
+
+    /// Find bar rendering in detail pane produces per-span styled output across presets.
+    #[test]
+    fn detail_find_bar_render_uses_styled_spans_across_presets() {
+        use crate::ui::style_system::UiThemePreset;
+
+        let find = DetailFindState {
+            query: "needle".to_string(),
+            matches: vec![2, 4, 7],
+            current: 1,
+        };
+
+        for preset in UiThemePreset::all() {
+            let ctx = StyleContext::from_options(crate::ui::style_system::StyleOptions {
+                preset,
+                ..Default::default()
+            });
+            let query_style = ctx.style(style_system::STYLE_DETAIL_FIND_QUERY);
+            let match_active_style = ctx.style(style_system::STYLE_DETAIL_FIND_MATCH_ACTIVE);
+            let line = build_detail_find_bar_line(
+                &find,
+                80,
+                query_style,
+                match_active_style,
+                ctx.style(style_system::STYLE_DETAIL_FIND_MATCH_INACTIVE),
+            );
+
+            // Find the span containing the query text
+            let query_span = line.spans().iter().find(|s| s.content.contains("needle"));
+            assert!(
+                query_span.is_some(),
+                "preset {}: should have a span containing 'needle'",
+                preset.name()
+            );
+            // Verify it has the query style (fg should match)
+            if let Some(span) = query_span {
+                assert_eq!(
+                    span.style.as_ref().map(|style| style.fg),
+                    Some(query_style.fg),
+                    "preset {}: query span fg should use STYLE_DETAIL_FIND_QUERY",
+                    preset.name()
+                );
+            }
+        }
     }
 
     #[test]
@@ -24013,123 +24190,40 @@ mod tests {
 
     // ── Baseline snapshot tests (2dccg.6.2) ─────────────────────────────
 
-    /// Snapshot: active vs inactive pill visual distinction in rendered output.
-    #[test]
-    fn snapshot_pills_active_vs_inactive() {
-        use ftui::render::budget::DegradationLevel;
-        use ftui_harness::buffer_to_text;
-
-        let mut app = app_with_hits(5);
-        // No filters → all pills inactive
-        let text_no_filters = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        // Pills should still appear with placeholder values
-        assert!(
-            text_no_filters.contains("agent:") || text_no_filters.contains("agent"),
-            "inactive agent pill slot should be visible"
-        );
-
-        // Set agent filter → agent pill becomes active
-        app.filters.agents.insert("codex".to_string());
-        let text_with_agent = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        assert!(
-            text_with_agent.contains("codex"),
-            "active agent pill should show filter value"
+    fn assert_affordance_snapshot(name: &str, buf: &ftui::Buffer) {
+        ftui_harness::assert_buffer_snapshot(
+            name,
+            buf,
+            env!("CARGO_MANIFEST_DIR"),
+            ftui_harness::MatchMode::TrimTrailing,
         );
     }
 
-    /// Snapshot: pill rendering is deterministic across repeated renders.
-    #[test]
-    fn snapshot_pills_deterministic() {
-        use ftui::render::budget::DegradationLevel;
-        use ftui_harness::buffer_to_text;
-
-        let mut app = app_with_hits(5);
-        app.filters.agents.insert("claude_code".to_string());
-        let t1 = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        let t2 = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        assert_eq!(t1, t2, "pill rendering must be deterministic");
-    }
-
-    /// Snapshot: detail tab bar shows active and inactive tabs.
-    #[test]
-    fn snapshot_tab_bar_active_inactive() {
-        use ftui::render::budget::DegradationLevel;
-        use ftui_harness::buffer_to_text;
-
-        // Select a result so detail pane renders with tabs
-        let mut app = app_with_hits(5);
+    /// Shared fixture for detail-pane snapshot baselines.
+    fn app_with_detail_snapshot_fixture() -> CassApp {
+        let mut app = app_with_rich_visual_fixture();
         app.active_pane = 0;
-        if !app.panes.is_empty() {
-            app.panes[0].selected = 0;
+        if let Some(first_pane) = app.panes.first_mut() {
+            first_pane.selected = 0;
         }
+        app.focus_manager.focus(focus_ids::DETAIL_PANE);
         app.cached_detail = Some((
             "/test/session.jsonl".to_string(),
             make_test_conversation_view(),
         ));
-
-        // Messages tab is default active
-        app.detail_tab = DetailTab::Messages;
-        let text = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        assert!(
-            text.contains("Messages") || text.contains("Msgs"),
-            "tab bar should show Messages tab label"
-        );
-
-        // Switch to Raw tab
-        app.detail_tab = DetailTab::Raw;
-        let text_raw = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        assert!(
-            text_raw.contains("Raw"),
-            "tab bar should show Raw tab label"
-        );
+        app
     }
 
-    /// Snapshot: role gutters render different symbols for each role.
-    #[test]
-    fn snapshot_role_gutters_vary_across_roles() {
-        use crate::model::types::{Message, MessageRole};
-        use ftui::render::budget::DegradationLevel;
-        use ftui_harness::buffer_to_text;
-
-        let mut cv = make_test_conversation_view();
-        cv.messages = vec![
+    /// Shared role-message fixture for snapshot lanes that validate gutter styles.
+    fn role_gutter_snapshot_messages() -> Vec<Message> {
+        vec![
             Message {
                 id: Some(1),
                 idx: 0,
                 role: MessageRole::User,
-                author: None,
-                created_at: None,
-                content: "Hello from user".to_string(),
+                author: Some("operator".to_string()),
+                created_at: Some(1_700_000_000),
+                content: "User intent: improve visual hierarchy and readability.".to_string(),
                 extra_json: serde_json::json!({}),
                 snippets: vec![],
             },
@@ -24137,9 +24231,10 @@ mod tests {
                 id: Some(2),
                 idx: 1,
                 role: MessageRole::Agent,
-                author: None,
-                created_at: None,
-                content: "Hello from assistant".to_string(),
+                author: Some("cass".to_string()),
+                created_at: Some(1_700_000_010),
+                content: "Assistant response: proposing tab, find-bar, and pill refinements."
+                    .to_string(),
                 extra_json: serde_json::json!({}),
                 snippets: vec![],
             },
@@ -24147,225 +24242,202 @@ mod tests {
                 id: Some(3),
                 idx: 2,
                 role: MessageRole::Tool,
-                author: None,
-                created_at: None,
-                content: "Tool output".to_string(),
+                author: Some("ubs".to_string()),
+                created_at: Some(1_700_000_020),
+                content: "Tool output: scan completed with deterministic fixture checks."
+                    .to_string(),
                 extra_json: serde_json::json!({}),
                 snippets: vec![],
             },
-        ];
+            Message {
+                id: Some(4),
+                idx: 3,
+                role: MessageRole::System,
+                author: Some("runtime".to_string()),
+                created_at: Some(1_700_000_030),
+                content: "System event: render budget remains stable at full quality.".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: vec![],
+            },
+        ]
+    }
 
-        let mut app = app_with_hits(5);
-        app.active_pane = 0;
-        if !app.panes.is_empty() {
-            app.panes[0].selected = 0;
-        }
+    /// Render detail pane in isolation so snapshots stay focused and diff-friendly.
+    fn render_detail_snapshot_buffer(app: &CassApp, width: u16, height: u16) -> ftui::Buffer {
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = ftui::Frame::new(width, height, &mut pool);
+        frame.set_degradation(ftui::render::budget::DegradationLevel::Full);
+
+        let styles = app.resolved_style_context();
+        app.render_detail_pane(
+            &mut frame,
+            Rect::new(0, 0, width, height),
+            BorderType::Rounded,
+            Borders::ALL,
+            &styles,
+            styles.style(style_system::STYLE_PANE_BASE),
+            styles.style(style_system::STYLE_PANE_FOCUSED),
+            styles.style(style_system::STYLE_PANE_TITLE_FOCUSED),
+            styles.style(style_system::STYLE_PANE_TITLE_UNFOCUSED),
+            styles.style(style_system::STYLE_TEXT_MUTED),
+        );
+        frame.buffer
+    }
+
+    /// Render only the pills rows (inactive + active) for minimal snapshot diffs.
+    fn render_pill_matrix_snapshot_buffer(width: u16) -> ftui::Buffer {
+        let inactive_app = app_with_rich_visual_fixture();
+        let mut active_app = app_with_rich_visual_fixture();
+        active_app.filters.agents.insert("codex".to_string());
+        active_app
+            .filters
+            .workspaces
+            .insert("/workspace/cass".to_string());
+        active_app.filters.created_from = Some(1_700_000_000);
+        active_app.filters.source_filter = SourceFilter::SourceId("remote-ci".to_string());
+        active_app.pane_filter = Some("triage".to_string());
+
+        let base_style = ftui::Style::default();
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = ftui::Frame::new(width, 4, &mut pool);
+        let area = Rect::new(0, 0, width, 4);
+        let rows = Flex::vertical()
+            .constraints([
+                Constraint::Fixed(1),
+                Constraint::Fixed(1),
+                Constraint::Fixed(1),
+                Constraint::Fixed(1),
+            ])
+            .split(area);
+
+        let (inactive_line, _) = inactive_app.build_pills_row(
+            rows[1],
+            &inactive_app.filter_pills(),
+            base_style,
+            base_style,
+            base_style,
+            base_style,
+        );
+        let (active_line, _) = active_app.build_pills_row(
+            rows[3],
+            &active_app.filter_pills(),
+            base_style,
+            base_style,
+            base_style,
+            base_style,
+        );
+
+        Paragraph::new(ftui::text::Text::from_lines(vec![ftui::text::Line::from(
+            "inactive slots:",
+        )]))
+        .render(rows[0], &mut frame);
+        Paragraph::new(ftui::text::Text::from_lines(vec![inactive_line]))
+            .render(rows[1], &mut frame);
+        Paragraph::new(ftui::text::Text::from_lines(vec![ftui::text::Line::from(
+            "active filters:",
+        )]))
+        .render(rows[2], &mut frame);
+        Paragraph::new(ftui::text::Text::from_lines(vec![active_line])).render(rows[3], &mut frame);
+
+        frame.buffer
+    }
+
+    #[test]
+    fn snapshot_baseline_pills_active_inactive_matrix() {
+        let buf = render_pill_matrix_snapshot_buffer(110);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(
+            text.contains("inactive slots:"),
+            "snapshot should include inactive baseline heading"
+        );
+        assert!(
+            text.contains("active filters:"),
+            "snapshot should include active baseline heading"
+        );
+        assert_affordance_snapshot("cassapp_baseline_pills_active_inactive", &buf);
+    }
+
+    #[test]
+    fn snapshot_baseline_detail_tabs_active_inactive() {
+        let mut app = app_with_detail_snapshot_fixture();
+        app.detail_tab = DetailTab::Messages;
+        let messages_buf = render_detail_snapshot_buffer(&app, 88, 18);
+        assert_affordance_snapshot(
+            "cassapp_baseline_detail_tabs_messages_active",
+            &messages_buf,
+        );
+
+        app.detail_tab = DetailTab::Raw;
+        let raw_buf = render_detail_snapshot_buffer(&app, 88, 18);
+        assert_affordance_snapshot("cassapp_baseline_detail_tabs_raw_active", &raw_buf);
+    }
+
+    #[test]
+    fn snapshot_baseline_role_gutters_messages_all_roles() {
+        let mut app = app_with_detail_snapshot_fixture();
+        let mut cv = make_test_conversation_view();
+        cv.messages = role_gutter_snapshot_messages();
         app.cached_detail = Some(("/test/session.jsonl".to_string(), cv));
         app.detail_tab = DetailTab::Messages;
 
-        let text = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-
-        // Role prefix symbols should be present in the render
-        let has_role_symbols = text.contains('\u{f061}') // user arrow
-            || text.contains('\u{2713}') // assistant checkmark
-            || text.contains('\u{2699}') // tool gear
-            || text.contains('\u{2139}') // system info
-            || text.contains('\u{2022}'); // bullet
-        assert!(
-            has_role_symbols,
-            "detail pane Messages tab should contain role gutter symbols"
-        );
+        let buf = render_detail_snapshot_buffer(&app, 96, 20);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(text.contains("User"));
+        assert!(text.contains("Agent"));
+        assert!(text.contains("Tool"));
+        assert!(text.contains("System"));
+        assert_affordance_snapshot("cassapp_baseline_role_gutters_messages", &buf);
     }
 
-    /// Snapshot: find bar open state shows query and match count.
     #[test]
-    fn snapshot_find_bar_open_with_matches() {
-        use ftui::render::budget::DegradationLevel;
-        use ftui_harness::buffer_to_text;
-
-        let mut app = app_with_hits(3);
-        app.active_pane = 0;
-        if !app.panes.is_empty() {
-            app.panes[0].selected = 0;
-        }
-        app.cached_detail = Some((
-            "/test/session.jsonl".to_string(),
-            make_test_conversation_view(),
-        ));
-        app.detail_find = Some(DetailFindState {
-            query: "test".to_string(),
-            matches: vec![1, 3, 5],
-            current: 0,
-        });
-
-        let text = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        assert!(text.contains("test"), "find bar should show query text");
+    fn snapshot_baseline_detail_find_closed() {
+        let mut app = app_with_detail_snapshot_fixture();
+        app.detail_find = None;
+        let buf = render_detail_snapshot_buffer(&app, 96, 20);
+        let text = ftui_harness::buffer_to_text(&buf);
         assert!(
-            text.contains("1/3") || text.contains("(1/3)"),
-            "find bar should show match position"
+            !text.contains("/ type to find"),
+            "closed state should not render find-row hint"
         );
+        assert_affordance_snapshot("cassapp_baseline_detail_find_closed", &buf);
     }
 
-    /// Snapshot: find bar with no matches shows zero state.
     #[test]
-    fn snapshot_find_bar_no_matches() {
-        use ftui::render::budget::DegradationLevel;
-        use ftui_harness::buffer_to_text;
+    fn snapshot_baseline_detail_find_open_empty_query() {
+        let mut app = app_with_detail_snapshot_fixture();
+        app.detail_find = Some(DetailFindState::default());
+        let buf = render_detail_snapshot_buffer(&app, 96, 20);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(text.contains("/ type to find"));
+        assert_affordance_snapshot("cassapp_baseline_detail_find_empty_query", &buf);
+    }
 
-        let mut app = app_with_hits(3);
-        app.active_pane = 0;
-        if !app.panes.is_empty() {
-            app.panes[0].selected = 0;
-        }
-        app.cached_detail = Some((
-            "/test/session.jsonl".to_string(),
-            make_test_conversation_view(),
-        ));
+    #[test]
+    fn snapshot_baseline_detail_find_no_match_state() {
+        let mut app = app_with_detail_snapshot_fixture();
         app.detail_find = Some(DetailFindState {
-            query: "xyznonexistent".to_string(),
+            query: "definitely-no-hit".to_string(),
             matches: vec![],
             current: 0,
         });
-
-        let text = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        assert!(
-            text.contains("0/0") || text.contains("no match"),
-            "find bar with no matches should show zero state"
-        );
+        let buf = render_detail_snapshot_buffer(&app, 96, 20);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(text.contains("0/0"));
+        assert_affordance_snapshot("cassapp_baseline_detail_find_no_matches", &buf);
     }
 
-    /// Snapshot: find bar closed — no find container rendered.
     #[test]
-    fn snapshot_find_bar_closed() {
-        use ftui::render::budget::DegradationLevel;
-        use ftui_harness::buffer_to_text;
-
-        let mut app = app_with_hits(3);
-        app.active_pane = 0;
-        if !app.panes.is_empty() {
-            app.panes[0].selected = 0;
-        }
-        app.cached_detail = Some((
-            "/test/session.jsonl".to_string(),
-            make_test_conversation_view(),
-        ));
-        app.detail_find = None;
-
-        let text = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        assert!(
-            !text.contains("0/0") && !text.contains("1/3"),
-            "closed find bar should not show match counts"
-        );
-    }
-
-    /// Snapshot: pill rendering survives degradation levels.
-    #[test]
-    fn snapshot_pills_across_degradation() {
-        use ftui::render::budget::DegradationLevel;
-        use ftui_harness::buffer_to_text;
-
-        let mut app = app_with_hits(5);
-        app.filters.agents.insert("codex".to_string());
-
-        for level in [
-            DegradationLevel::Full,
-            DegradationLevel::SimpleBorders,
-            DegradationLevel::NoStyling,
-            DegradationLevel::EssentialOnly,
-        ] {
-            let text = buffer_to_text(&render_at_degradation(&app, 120, 24, level));
-            assert!(
-                text.contains("codex"),
-                "pill content must survive degradation level {:?}",
-                level
-            );
-        }
-    }
-
-    /// Snapshot: find bar survives degradation levels.
-    #[test]
-    fn snapshot_find_bar_across_degradation() {
-        use ftui::render::budget::DegradationLevel;
-        use ftui_harness::buffer_to_text;
-
-        let mut app = app_with_hits(3);
-        app.active_pane = 0;
-        if !app.panes.is_empty() {
-            app.panes[0].selected = 0;
-        }
-        app.cached_detail = Some((
-            "/test/session.jsonl".to_string(),
-            make_test_conversation_view(),
-        ));
+    fn snapshot_baseline_detail_find_current_match_state() {
+        let mut app = app_with_detail_snapshot_fixture();
         app.detail_find = Some(DetailFindState {
-            query: "search".to_string(),
-            matches: vec![2, 4],
+            query: "needle".to_string(),
+            matches: vec![2, 7, 11],
             current: 1,
         });
-
-        for level in [
-            DegradationLevel::Full,
-            DegradationLevel::SimpleBorders,
-            DegradationLevel::NoStyling,
-            DegradationLevel::EssentialOnly,
-        ] {
-            let text = buffer_to_text(&render_at_degradation(&app, 120, 24, level));
-            assert!(
-                text.contains("search"),
-                "find bar query must survive degradation level {:?}",
-                level
-            );
-        }
-    }
-
-    /// Snapshot: tab bar deterministic across renders.
-    #[test]
-    fn snapshot_tab_bar_deterministic() {
-        use ftui::render::budget::DegradationLevel;
-        use ftui_harness::buffer_to_text;
-
-        let mut app = app_with_hits(5);
-        app.active_pane = 0;
-        if !app.panes.is_empty() {
-            app.panes[0].selected = 0;
-        }
-        app.cached_detail = Some((
-            "/test/session.jsonl".to_string(),
-            make_test_conversation_view(),
-        ));
-        app.detail_tab = DetailTab::Snippets;
-        let t1 = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        let t2 = buffer_to_text(&render_at_degradation(
-            &app,
-            120,
-            24,
-            DegradationLevel::Full,
-        ));
-        assert_eq!(t1, t2, "tab bar rendering must be deterministic");
+        let buf = render_detail_snapshot_buffer(&app, 96, 20);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(text.contains("needle"));
+        assert!(text.contains("(2/3)"));
+        assert_affordance_snapshot("cassapp_baseline_detail_find_current_match", &buf);
     }
 }
