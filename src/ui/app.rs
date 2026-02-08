@@ -138,7 +138,7 @@ use ftui::widgets::hint_ranker::{HintContext, HintRanker, RankerConfig};
 use ftui::widgets::json_view::{JsonToken, JsonView};
 use ftui::widgets::paragraph::Paragraph;
 use ftui::widgets::{RenderItem, StatefulWidget, VirtualizedList, VirtualizedListState};
-use ftui_extras::markdown::{MarkdownRenderer, MarkdownTheme, is_likely_markdown};
+use ftui_extras::markdown::{MarkdownRenderer, is_likely_markdown};
 
 // ---------------------------------------------------------------------------
 // Re-export ftui primitives through the adapter
@@ -4252,6 +4252,17 @@ impl CassApp {
         }
     }
 
+    /// Gutter style for a message role — colored left-margin indicator.
+    fn role_gutter_style(role: &MessageRole, styles: &StyleContext) -> ftui::Style {
+        match role {
+            MessageRole::User => styles.style(style_system::STYLE_ROLE_GUTTER_USER),
+            MessageRole::Agent => styles.style(style_system::STYLE_ROLE_GUTTER_ASSISTANT),
+            MessageRole::Tool => styles.style(style_system::STYLE_ROLE_GUTTER_TOOL),
+            MessageRole::System => styles.style(style_system::STYLE_ROLE_GUTTER_SYSTEM),
+            MessageRole::Other(_) => styles.style(style_system::STYLE_TEXT_MUTED),
+        }
+    }
+
     /// Role prefix symbol for message rendering.
     fn role_prefix(role: &MessageRole) -> &'static str {
         match role {
@@ -4323,10 +4334,11 @@ impl CassApp {
 
         // If we have a cached conversation, render full messages
         if let Some((_, ref cv)) = self.cached_detail {
-            let md_renderer = MarkdownRenderer::new(MarkdownTheme::default());
+            let md_renderer = MarkdownRenderer::new(styles.markdown_theme());
 
             for msg in &cv.messages {
                 let role_s = Self::role_style(&msg.role, styles);
+                let gutter_s = Self::role_gutter_style(&msg.role, styles);
                 let prefix = Self::role_prefix(&msg.role);
                 let role_label = format!("{prefix}{}", msg.role);
                 let author_suffix = msg
@@ -4340,8 +4352,9 @@ impl CassApp {
                     .map(|dt| format!(" {}", dt.format("%H:%M:%S")))
                     .unwrap_or_default();
 
-                // Role header line
+                // Role header line with gutter
                 lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("\u{258c} ", gutter_s),
                     ftui::text::Span::styled(
                         format!("{role_label}{author_suffix}{ts_label}"),
                         role_s.bold(),
@@ -4354,22 +4367,30 @@ impl CassApp {
                     if is_likely_markdown(content).is_likely() {
                         let rendered = md_renderer.render(content);
                         for line in rendered.into_iter() {
-                            lines.push(line);
+                            let mut spans = vec![ftui::text::Span::styled("\u{258c} ", gutter_s)];
+                            spans.extend(line.spans().iter().cloned());
+                            lines.push(ftui::text::Line::from_spans(spans));
                         }
                     } else {
                         // Plain text — wrap if enabled
                         for text_line in content.lines() {
                             if self.detail_wrap && !text_line.is_empty() {
-                                let w = inner_width.saturating_sub(2) as usize;
+                                let w = inner_width.saturating_sub(4) as usize;
                                 for chunk in text_line
                                     .as_bytes()
                                     .chunks(w.max(20))
                                     .map(|c| std::str::from_utf8(c).unwrap_or(""))
                                 {
-                                    lines.push(ftui::text::Line::from(chunk.to_string()));
+                                    lines.push(ftui::text::Line::from_spans(vec![
+                                        ftui::text::Span::styled("\u{258c} ", gutter_s),
+                                        ftui::text::Span::raw(chunk.to_string()),
+                                    ]));
                                 }
                             } else {
-                                lines.push(ftui::text::Line::from(text_line.to_string()));
+                                lines.push(ftui::text::Line::from_spans(vec![
+                                    ftui::text::Span::styled("\u{258c} ", gutter_s),
+                                    ftui::text::Span::raw(text_line.to_string()),
+                                ]));
                             }
                         }
                     }
@@ -4386,7 +4407,7 @@ impl CassApp {
                 &hit.content
             };
             if is_likely_markdown(content).is_likely() {
-                let md_renderer = MarkdownRenderer::new(MarkdownTheme::default());
+                let md_renderer = MarkdownRenderer::new(styles.markdown_theme());
                 let rendered = md_renderer.render(content);
                 for line in rendered.into_iter() {
                     lines.push(line);
@@ -4796,8 +4817,8 @@ impl CassApp {
 
         // Render styled tab bar inside the pane (first row).
         let inner = if full_inner.height >= 3 {
-            let tab_active_s = styles.style(style_system::STYLE_STATUS_INFO);
-            let tab_inactive_s = styles.style(style_system::STYLE_TEXT_MUTED);
+            let tab_active_s = styles.style(style_system::STYLE_TAB_ACTIVE);
+            let tab_inactive_s = styles.style(style_system::STYLE_TAB_INACTIVE);
             let tab_items = [
                 ("Messages", DetailTab::Messages),
                 ("Snippets", DetailTab::Snippets),
@@ -4812,7 +4833,7 @@ impl CassApp {
                 }
                 if self.detail_tab == *variant {
                     tab_spans.push(ftui::text::Span::styled(
-                        format!("\u{25cf} {lbl}"),
+                        format!(" \u{25cf} {lbl} "),
                         tab_active_s,
                     ));
                 } else {
@@ -11765,7 +11786,7 @@ impl super::ftui_adapter::Model for CassApp {
                         let pill_style = if pills.is_empty() {
                             text_muted_style
                         } else {
-                            styles.style(style_system::STYLE_TEXT_PRIMARY)
+                            styles.style(style_system::STYLE_PILL_ACTIVE)
                         };
                         Paragraph::new(elide_text(&pill_text, rows[1].width as usize))
                             .style(pill_style)
@@ -11935,8 +11956,8 @@ impl super::ftui_adapter::Model for CassApp {
                     // Row 2: Styled key hints
                     let row2 = Rect::new(footer_area.x, footer_area.y + 1, footer_area.width, 1);
                     let hints_text = self.build_contextual_footer_hints(footer_area.width);
-                    let kbd_key_s = styles.style(style_system::STYLE_STATUS_INFO);
-                    let kbd_desc_s = styles.style(style_system::STYLE_TEXT_MUTED);
+                    let kbd_key_s = styles.style(style_system::STYLE_KBD_KEY);
+                    let kbd_desc_s = styles.style(style_system::STYLE_KBD_DESC);
                     let hint_spans = build_styled_hints(&hints_text, kbd_key_s, kbd_desc_s);
                     let hints_line = ftui::text::Line::from_spans(hint_spans);
                     Paragraph::new(ftui::text::Text::from_lines(vec![hints_line]))

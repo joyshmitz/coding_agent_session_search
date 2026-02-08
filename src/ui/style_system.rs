@@ -19,9 +19,10 @@ use std::path::{Path, PathBuf};
 use ftui::render::cell::PackedRgba;
 use ftui::style::theme::themes;
 use ftui::{
-    AdaptiveColor, Color, ColorProfile, ResolvedTheme, Style, StyleSheet, TerminalCapabilities,
-    Theme, ThemeBuilder,
+    AdaptiveColor, Color, ColorProfile, ResolvedTheme, Style, StyleSheet, TableTheme,
+    TerminalCapabilities, Theme, ThemeBuilder,
 };
+use ftui_extras::markdown::MarkdownTheme;
 use serde::{Deserialize, Serialize};
 
 pub const STYLE_APP_ROOT: &str = "app.root";
@@ -597,6 +598,47 @@ impl StyleContext {
     pub fn contrast_report(&self) -> ThemeContrastReport {
         build_contrast_report(self.resolved)
     }
+
+    /// Build a [`MarkdownTheme`] derived from the active resolved theme so
+    /// markdown content renders in theme-coherent colors.
+    pub fn markdown_theme(&self) -> MarkdownTheme {
+        let r = &self.resolved;
+        MarkdownTheme {
+            h1: Style::new().fg(to_packed(r.primary)).bold(),
+            h2: Style::new().fg(to_packed(r.info)).bold(),
+            h3: Style::new().fg(to_packed(r.success)).bold(),
+            h4: Style::new().fg(to_packed(r.warning)).bold(),
+            h5: Style::new().fg(to_packed(r.text)).bold(),
+            h6: Style::new().fg(to_packed(r.text_muted)).bold(),
+            code_inline: Style::new()
+                .fg(to_packed(r.text))
+                .bg(to_packed(blend(r.surface, r.text, 0.08))),
+            code_block: Style::new().fg(to_packed(r.text)).bg(to_packed(blend(
+                r.background,
+                r.surface,
+                0.5,
+            ))),
+            blockquote: Style::new().fg(to_packed(r.text_muted)).italic(),
+            link: Style::new().fg(to_packed(r.info)).underline(),
+            emphasis: Style::new().fg(to_packed(r.text)).italic(),
+            strong: Style::new().fg(to_packed(r.text)).bold(),
+            strikethrough: Style::new().fg(to_packed(r.text_muted)).strikethrough(),
+            list_bullet: Style::new().fg(to_packed(r.info)),
+            horizontal_rule: Style::new().fg(to_packed(r.border)).dim(),
+            table_theme: TableTheme::default(),
+            task_done: Style::new().fg(to_packed(r.success)),
+            task_todo: Style::new().fg(to_packed(r.text_muted)),
+            math_inline: Style::new().fg(to_packed(r.warning)).italic(),
+            math_block: Style::new().fg(to_packed(r.warning)).bold(),
+            footnote_ref: Style::new().fg(to_packed(r.info)).dim(),
+            footnote_def: Style::new().fg(to_packed(r.text_muted)),
+            admonition_note: Style::new().fg(to_packed(r.info)).bold(),
+            admonition_tip: Style::new().fg(to_packed(r.success)).bold(),
+            admonition_important: Style::new().fg(to_packed(r.primary)).bold(),
+            admonition_warning: Style::new().fg(to_packed(r.warning)).bold(),
+            admonition_caution: Style::new().fg(to_packed(r.error)).bold(),
+        }
+    }
 }
 
 fn parse_color_profile(value: &str) -> Option<ColorProfile> {
@@ -1090,13 +1132,17 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
 
     sheet.define(
         STYLE_PILL_ACTIVE,
-        Style::new().fg(to_packed(resolved.secondary)).bold(),
+        Style::new()
+            .fg(to_packed(resolved.secondary))
+            .bg(to_packed(blend(resolved.surface, resolved.info, 0.25)))
+            .bold(),
     );
 
     sheet.define(
         STYLE_TAB_ACTIVE,
         Style::new()
             .fg(to_packed(resolved.accent))
+            .bg(to_packed(blend(resolved.surface, resolved.info, 0.15)))
             .bold()
             .underline(),
     );
@@ -1584,5 +1630,181 @@ mod tests {
         assert_eq!(loaded, config);
 
         let _ = fs::remove_file(path);
+    }
+
+    // -- pill & tab style token tests (k25j6, 2kz6t) -------------------------
+
+    fn context_for_preset(preset: UiThemePreset) -> StyleContext {
+        let dark_mode = !matches!(preset, UiThemePreset::Light);
+        StyleContext::from_options(StyleOptions {
+            preset,
+            dark_mode,
+            color_profile: ColorProfile::TrueColor,
+            no_color: false,
+            no_icons: false,
+            no_gradient: false,
+            a11y: false,
+        })
+    }
+
+    #[test]
+    fn pill_active_has_background_for_all_presets() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let style = ctx.style(STYLE_PILL_ACTIVE);
+            assert!(
+                style.bg.is_some(),
+                "STYLE_PILL_ACTIVE must have bg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn tab_active_has_background_for_all_presets() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let style = ctx.style(STYLE_TAB_ACTIVE);
+            assert!(
+                style.bg.is_some(),
+                "STYLE_TAB_ACTIVE must have bg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn tab_inactive_has_no_background() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let style = ctx.style(STYLE_TAB_INACTIVE);
+            assert!(
+                style.bg.is_none(),
+                "STYLE_TAB_INACTIVE should have no bg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn tab_active_differs_from_status_info() {
+        let ctx = context_for_preset(UiThemePreset::Dark);
+        let tab = ctx.style(STYLE_TAB_ACTIVE);
+        let info = ctx.style(STYLE_STATUS_INFO);
+        assert_ne!(
+            tab, info,
+            "STYLE_TAB_ACTIVE must differ from STYLE_STATUS_INFO"
+        );
+    }
+
+    #[test]
+    fn pill_active_differs_from_text_primary() {
+        let ctx = context_for_preset(UiThemePreset::Dark);
+        let pill = ctx.style(STYLE_PILL_ACTIVE);
+        let text = ctx.style(STYLE_TEXT_PRIMARY);
+        assert_ne!(
+            pill, text,
+            "STYLE_PILL_ACTIVE must differ from STYLE_TEXT_PRIMARY"
+        );
+    }
+
+    #[test]
+    fn tab_and_pill_styles_unique_across_presets() {
+        let mut tab_styles = std::collections::HashSet::new();
+        let mut pill_styles = std::collections::HashSet::new();
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let tab = ctx.style(STYLE_TAB_ACTIVE);
+            let pill = ctx.style(STYLE_PILL_ACTIVE);
+            tab_styles.insert(format!("{:?}", tab));
+            pill_styles.insert(format!("{:?}", pill));
+        }
+        assert!(
+            tab_styles.len() >= 3,
+            "STYLE_TAB_ACTIVE should produce at least 3 distinct styles across presets, got {}",
+            tab_styles.len()
+        );
+        assert!(
+            pill_styles.len() >= 3,
+            "STYLE_PILL_ACTIVE should produce at least 3 distinct styles across presets, got {}",
+            pill_styles.len()
+        );
+    }
+
+    // -- MarkdownTheme integration tests (kr88h) --------------------------------
+
+    #[test]
+    fn markdown_theme_h1_uses_primary_color() {
+        let ctx = context_for_preset(UiThemePreset::Dark);
+        let md = ctx.markdown_theme();
+        let expected_fg = to_packed(ctx.resolved.primary);
+        assert_eq!(
+            md.h1.fg,
+            Some(expected_fg),
+            "h1 fg should match resolved.primary"
+        );
+    }
+
+    #[test]
+    fn markdown_theme_code_inline_has_background() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let md = ctx.markdown_theme();
+            assert!(
+                md.code_inline.bg.is_some(),
+                "code_inline must have bg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_theme_code_block_has_background() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let md = ctx.markdown_theme();
+            assert!(
+                md.code_block.bg.is_some(),
+                "code_block must have bg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_theme_link_is_underlined() {
+        let ctx = context_for_preset(UiThemePreset::Dark);
+        let md = ctx.markdown_theme();
+        assert!(
+            md.link.has_attr(ftui::StyleFlags::UNDERLINE),
+            "link style should include underline"
+        );
+    }
+
+    #[test]
+    fn markdown_theme_differs_across_presets() {
+        let mut themes = std::collections::HashSet::new();
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let md = ctx.markdown_theme();
+            themes.insert(format!("{:?}", md.h1.fg));
+        }
+        assert!(
+            themes.len() >= 3,
+            "markdown h1 should differ across presets, got {} distinct",
+            themes.len()
+        );
+    }
+
+    #[test]
+    fn markdown_theme_not_default() {
+        let ctx = context_for_preset(UiThemePreset::Dark);
+        let themed = ctx.markdown_theme();
+        let default = MarkdownTheme::default();
+        assert_ne!(
+            format!("{:?}", themed.h1),
+            format!("{:?}", default.h1),
+            "themed markdown h1 should differ from default"
+        );
     }
 }
