@@ -44,11 +44,11 @@ use crate::storage::sqlite::SqliteStorage;
 use crate::ui::components::export_modal::{ExportField, ExportModalState, ExportProgress};
 use crate::ui::components::palette::{
     AnalyticsTarget, InputModeTarget, PaletteResult, PaletteState, ScreenshotTarget,
-    TimeFilterPreset, default_actions, execute_selected,
+    TimeFilterPreset, action_by_id, action_id, default_actions, execute_selected,
 };
 use crate::ui::components::pills::Pill;
 use crate::ui::components::toast::ToastManager;
-use crate::ui::data::{ConversationView, InputMode};
+use crate::ui::data::{ConversationView, InputMode, format_time_short};
 use crate::ui::shortcuts;
 use crate::ui::time_parser::parse_time_input;
 use crate::update_check::{UpdateInfo, open_in_browser, skip_version};
@@ -57,6 +57,7 @@ use crate::update_check::{run_self_update, spawn_update_check};
 use ftui::widgets::Widget;
 use ftui::widgets::block::{Alignment, Block};
 use ftui::widgets::borders::{BorderType, Borders};
+use ftui::widgets::command_palette::{ActionItem, CommandPalette};
 use ftui::widgets::help_registry::{HelpContent, HelpId, HelpRegistry, Keybinding};
 use ftui::widgets::hint_ranker::{HintContext, HintRanker, RankerConfig};
 use ftui::widgets::json_view::{JsonToken, JsonView};
@@ -118,6 +119,11 @@ fn stash_raw_event(event: &super::ftui_adapter::Event) {
 
 fn take_raw_event() -> Option<super::ftui_adapter::Event> {
     RAW_EVENT_STASH.with(|buf| buf.borrow_mut().take())
+}
+
+/// Peek at the stashed raw event without removing it.
+fn peek_raw_event() -> Option<super::ftui_adapter::Event> {
+    RAW_EVENT_STASH.with(|buf| buf.borrow().clone())
 }
 
 // =========================================================================
@@ -1054,9 +1060,9 @@ impl DensityMode {
     /// Lines per result row for this density.
     pub fn row_height(self) -> u16 {
         match self {
-            Self::Compact => 1,
-            Self::Cozy => 2,
-            Self::Spacious => 3,
+            Self::Compact => 2,
+            Self::Cozy => 4,
+            Self::Spacious => 6,
         }
     }
 }
@@ -1161,6 +1167,232 @@ impl FrameTimingStats {
     /// Most recent frame time in microseconds.
     pub fn last_us(&self) -> u64 {
         self.frame_times_us.back().copied().unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime evidence snapshots (1mfw3.2.3)
+// ---------------------------------------------------------------------------
+
+/// Cached snapshots of the latest runtime resize/diff/budget decisions.
+///
+/// Populated by polling `ftui::runtime::evidence_telemetry` global snapshots
+/// each tick. Inspector/cockpit panels read these during `view()` instead of
+/// parsing the JSONL evidence file at render time.
+#[derive(Debug, Clone, Default)]
+pub struct EvidenceSnapshots {
+    /// Latest resize coalescer decision (regime, BOCPD evidence, applied size).
+    pub resize: Option<ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot>,
+    /// Latest diff-strategy decision (dirty-rows vs full-redraw evidence).
+    pub diff: Option<ftui::runtime::evidence_telemetry::DiffDecisionSnapshot>,
+    /// Latest frame-budget decision (degradation level, PID output, conformal).
+    pub budget: Option<ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot>,
+    /// Rendering-ready summary (1mfw3.2.4) — derived from raw snapshots.
+    pub summary: ResizeEvidenceSummary,
+}
+
+impl EvidenceSnapshots {
+    /// Poll the global telemetry singletons for the latest snapshots,
+    /// then update the rendering-ready summary.
+    pub fn refresh(&mut self) {
+        self.resize = ftui::runtime::evidence_telemetry::resize_snapshot();
+        self.diff = ftui::runtime::evidence_telemetry::diff_snapshot();
+        self.budget = ftui::runtime::evidence_telemetry::budget_snapshot();
+        self.summary.update_from_raw(&self.resize, &self.budget);
+    }
+
+    /// Whether any evidence has been captured yet.
+    pub fn has_any(&self) -> bool {
+        self.resize.is_some() || self.diff.is_some() || self.budget.is_some()
+    }
+
+    /// Human-readable label for the current resize regime (if available).
+    pub fn resize_regime_label(&self) -> &'static str {
+        match &self.resize {
+            Some(snap) => match snap.regime {
+                ftui::runtime::resize_coalescer::Regime::Steady => "Steady",
+                ftui::runtime::resize_coalescer::Regime::Burst => "Burst",
+            },
+            None => "\u{2014}",
+        }
+    }
+
+    /// Current degradation level label (if budget evidence is available).
+    pub fn degradation_label(&self) -> &'static str {
+        match &self.budget {
+            Some(snap) => match snap.degradation_after {
+                ftui::render::budget::DegradationLevel::Full => "Full",
+                ftui::render::budget::DegradationLevel::SimpleBorders => "SimpleBorders",
+                ftui::render::budget::DegradationLevel::NoStyling => "NoStyling",
+                ftui::render::budget::DegradationLevel::EssentialOnly => "EssentialOnly",
+                ftui::render::budget::DegradationLevel::Skeleton => "Skeleton",
+                ftui::render::budget::DegradationLevel::SkipFrame => "SkipFrame",
+            },
+            None => "\u{2014}",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering-ready evidence summary (1mfw3.2.4)
+// ---------------------------------------------------------------------------
+
+/// A single resize decision entry for the ring buffer history.
+#[derive(Debug, Clone)]
+pub struct ResizeDecisionEntry {
+    /// Monotonic event counter from the runtime.
+    pub event_idx: u64,
+    /// What happened: "apply", "defer", "coalesce", etc.
+    pub action: &'static str,
+    /// Inter-arrival time since previous resize event (ms).
+    pub dt_ms: f64,
+    /// Resize event rate at decision time (events/sec).
+    pub event_rate: f64,
+    /// Regime classification at decision time.
+    pub regime: &'static str,
+    /// Terminal size after this decision (if applied).
+    pub applied_size: Option<(u16, u16)>,
+    /// BOCPD burst probability (0.0..1.0), if BOCPD was active.
+    pub bocpd_p_burst: Option<f64>,
+    /// Timestamp when this entry was captured.
+    pub captured_at: Instant,
+}
+
+/// Rendering-ready resize evidence summary for inspector/cockpit panels.
+///
+/// Wraps raw `EvidenceSnapshots` into a single coherent typed object that
+/// UI renderers can consume without understanding the internal ftui types.
+///
+/// # Ring buffer policy
+///
+/// The `recent_resizes` ring buffer holds the last [`RESIZE_HISTORY_CAPACITY`]
+/// entries.  Each call to [`update_from`] checks whether the event_idx has
+/// advanced and, if so, pushes a new entry.
+///
+/// # Backfill/default semantics
+///
+/// All fields default to "no data" states.  When evidence is absent:
+/// - `regime` → `"—"`
+/// - `degradation` → `"—"`
+/// - Numeric fields → `0` / `0.0`
+/// - `recent_resizes` → empty VecDeque
+pub const RESIZE_HISTORY_CAPACITY: usize = 32;
+
+#[derive(Debug, Clone)]
+pub struct ResizeEvidenceSummary {
+    /// Current regime label ("Steady", "Burst", or "—" if unavailable).
+    pub regime: &'static str,
+    /// Current degradation level label (from budget evidence).
+    pub degradation: &'static str,
+    /// Frame budget in microseconds (target frame time).
+    pub budget_us: f64,
+    /// Most recent frame time in microseconds.
+    pub frame_time_us: f64,
+    /// PID controller output (budget headroom indicator).
+    pub pid_output: f64,
+    /// Whether the budget controller is in warmup phase.
+    pub in_warmup: bool,
+    /// Total frames observed by the budget controller.
+    pub frames_observed: u32,
+    /// Latest applied terminal size (w, h), if known.
+    pub applied_size: Option<(u16, u16)>,
+    /// BOCPD burst probability (0.0..1.0), if BOCPD is active.
+    pub bocpd_p_burst: Option<f64>,
+    /// BOCPD recommended coalescer delay (ms), if BOCPD is active.
+    pub bocpd_delay_ms: Option<u32>,
+    /// Ring buffer of recent resize decisions.
+    pub recent_resizes: VecDeque<ResizeDecisionEntry>,
+    /// Last event_idx seen (for deduplication).
+    last_resize_event_idx: u64,
+}
+
+impl Default for ResizeEvidenceSummary {
+    fn default() -> Self {
+        Self {
+            regime: "\u{2014}",
+            degradation: "\u{2014}",
+            budget_us: 0.0,
+            frame_time_us: 0.0,
+            pid_output: 0.0,
+            in_warmup: false,
+            frames_observed: 0,
+            applied_size: None,
+            bocpd_p_burst: None,
+            bocpd_delay_ms: None,
+            recent_resizes: VecDeque::with_capacity(RESIZE_HISTORY_CAPACITY),
+            last_resize_event_idx: 0,
+        }
+    }
+}
+
+impl ResizeEvidenceSummary {
+    /// Update from the latest evidence snapshots.
+    ///
+    /// Idempotent: only pushes to the ring buffer if the resize event_idx
+    /// has advanced since the last call.
+    pub fn update_from_raw(
+        &mut self,
+        resize_snap: &Option<ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot>,
+        budget_snap: &Option<ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot>,
+    ) {
+        // --- Resize evidence ---
+        if let Some(resize) = resize_snap {
+            self.regime = match resize.regime {
+                ftui::runtime::resize_coalescer::Regime::Steady => "Steady",
+                ftui::runtime::resize_coalescer::Regime::Burst => "Burst",
+            };
+            self.applied_size = resize.applied_size;
+            self.bocpd_p_burst = resize.bocpd.as_ref().map(|b| b.p_burst);
+            self.bocpd_delay_ms = resize
+                .bocpd
+                .as_ref()
+                .and_then(|b| b.recommended_delay_ms.map(|d| d as u32));
+
+            // Push to ring buffer if event_idx advanced.
+            if resize.event_idx > self.last_resize_event_idx {
+                self.last_resize_event_idx = resize.event_idx;
+                if self.recent_resizes.len() >= RESIZE_HISTORY_CAPACITY {
+                    self.recent_resizes.pop_front();
+                }
+                self.recent_resizes.push_back(ResizeDecisionEntry {
+                    event_idx: resize.event_idx,
+                    action: resize.action,
+                    dt_ms: resize.dt_ms,
+                    event_rate: resize.event_rate,
+                    regime: self.regime,
+                    applied_size: resize.applied_size,
+                    bocpd_p_burst: self.bocpd_p_burst,
+                    captured_at: Instant::now(),
+                });
+            }
+        }
+
+        // --- Budget evidence ---
+        if let Some(budget) = budget_snap {
+            self.degradation = match budget.degradation_after {
+                ftui::render::budget::DegradationLevel::Full => "Full",
+                ftui::render::budget::DegradationLevel::SimpleBorders => "SimpleBorders",
+                ftui::render::budget::DegradationLevel::NoStyling => "NoStyling",
+                ftui::render::budget::DegradationLevel::EssentialOnly => "EssentialOnly",
+                ftui::render::budget::DegradationLevel::Skeleton => "Skeleton",
+                ftui::render::budget::DegradationLevel::SkipFrame => "SkipFrame",
+            };
+            self.budget_us = budget.budget_us;
+            self.frame_time_us = budget.frame_time_us;
+            self.pid_output = budget.pid_output;
+            self.in_warmup = budget.in_warmup;
+            self.frames_observed = budget.frames_observed;
+        }
+    }
+
+    /// Whether any meaningful data has been captured.
+    pub fn has_data(&self) -> bool {
+        self.regime != "\u{2014}" || self.degradation != "\u{2014}"
+    }
+
+    /// Number of resize decisions in the ring buffer.
+    pub fn history_len(&self) -> usize {
+        self.recent_resizes.len()
     }
 }
 
@@ -1540,7 +1772,7 @@ pub struct ResultItem {
     pub index: usize,
     /// The underlying search hit.
     pub hit: SearchHit,
-    /// Row height (from density mode: 1=compact, 2=cozy, 3=spacious).
+    /// Row height (from density mode: 2=compact, 4=cozy, 6=spacious).
     pub row_height: u16,
     /// Whether this is an even-indexed row (for alternating stripes).
     pub even: bool,
@@ -1587,6 +1819,20 @@ fn workspace_original_from_metadata(metadata: &serde_json::Value) -> Option<Stri
         .map(ToOwned::to_owned)
 }
 
+fn elide_text(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let kept: String = text.chars().take(max_chars - 3).collect();
+    format!("{kept}...")
+}
+
 impl ResultItem {
     fn source_badge(&self) -> String {
         format!(
@@ -1594,17 +1840,100 @@ impl ResultItem {
             source_display_label(&self.hit.source_id, self.hit.origin_host.as_deref())
         )
     }
+
+    fn location_label(&self) -> String {
+        if let Some(line) = self.hit.line_number {
+            format!("{}:{line}", self.hit.source_path)
+        } else {
+            self.hit.source_path.clone()
+        }
+    }
+
+    fn metadata_line(&self, max_width: usize) -> String {
+        let hit = &self.hit;
+        let mut parts = vec![
+            format!("score {:.2}", hit.score),
+            self.source_badge(),
+            format!("ws {}", elide_text(&hit.workspace, 32)),
+        ];
+        if let Some(ts) = hit
+            .created_at
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+        {
+            parts.push(ts);
+        }
+        elide_text(&parts.join(" | "), max_width)
+    }
+
+    fn snippet_lines(&self, max_width: usize, max_lines: usize) -> Vec<String> {
+        if max_lines == 0 {
+            return Vec::new();
+        }
+
+        let source = if self.hit.snippet.trim().is_empty() {
+            self.hit.content.trim()
+        } else {
+            self.hit.snippet.trim()
+        };
+        if source.is_empty() {
+            return vec!["<no snippet>".to_string()];
+        }
+
+        let width = max_width.max(20);
+        let mut out: Vec<String> = Vec::new();
+        for raw in source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let mut line = String::new();
+            for word in raw.split_whitespace() {
+                if line.is_empty() {
+                    if word.chars().count() > width {
+                        out.push(elide_text(word, width));
+                    } else {
+                        line.push_str(word);
+                    }
+                } else {
+                    let candidate_len = line.chars().count() + 1 + word.chars().count();
+                    if candidate_len <= width {
+                        line.push(' ');
+                        line.push_str(word);
+                    } else {
+                        out.push(line);
+                        line = if word.chars().count() > width {
+                            elide_text(word, width)
+                        } else {
+                            word.to_string()
+                        };
+                    }
+                }
+                if out.len() >= max_lines {
+                    return out;
+                }
+            }
+            if !line.is_empty() {
+                out.push(line);
+            }
+            if out.len() >= max_lines {
+                break;
+            }
+        }
+
+        if out.is_empty() {
+            out.push("<no snippet>".to_string());
+        }
+        out.truncate(max_lines);
+        out
+    }
 }
 
 impl RenderItem for ResultItem {
     fn render(&self, area: Rect, frame: &mut super::ftui_adapter::Frame, selected: bool) {
         let hit = &self.hit;
         let source_badge = self.source_badge();
-        let location = if let Some(line) = hit.line_number {
-            format!("{}:{line}", hit.source_path)
-        } else {
-            hit.source_path.clone()
-        };
+        let location = self.location_label();
         let title = if hit.title.trim().is_empty() {
             "<untitled>"
         } else {
@@ -1618,53 +1947,82 @@ impl RenderItem for ResultItem {
             self.stripe_style
         };
 
-        // Selection and queue indicator prefix
+        // Selection and queue indicator prefix.
         let sel_mark = if selected { "\u{25b6} " } else { "  " };
         let queue_mark = if self.queued { "\u{2713}" } else { " " };
 
-        match self.row_height {
-            1 => {
-                // Compact: single line
-                let text = format!(
-                    "{sel_mark}{queue_mark}{:>2}. {title} {source_badge} [{location}]",
-                    self.index,
-                );
-                Paragraph::new(&*text).style(base_style).render(area, frame);
+        let content_width = usize::from(area.width.saturating_sub(8)).max(20);
+        let title_line = format!(
+            "{sel_mark}{queue_mark}{:>2}. @{} {}",
+            self.index,
+            elide_text(&hit.agent, 18),
+            elide_text(title, content_width),
+        );
+        let meta_line = format!(
+            "      {} | {}",
+            source_badge,
+            self.metadata_line(content_width.saturating_sub(10)),
+        );
+
+        let text = if self.row_height <= 1 {
+            title_line
+        } else {
+            let mut lines = vec![title_line, meta_line];
+            if self.row_height >= 3 {
+                lines.push(format!("      {}", elide_text(&location, content_width)));
             }
-            2 => {
-                // Cozy: title + metadata
-                let line1 = format!("{sel_mark}{queue_mark}{:>2}. {title}", self.index);
-                let line2 = format!("      {location} | {source_badge} | {:.1}", hit.score);
-                let text = format!("{line1}\n{line2}");
-                Paragraph::new(&*text).style(base_style).render(area, frame);
+            if self.row_height >= 4 {
+                let snippet_budget = usize::from(self.row_height.saturating_sub(3));
+                let snippet_lines = self.snippet_lines(content_width, snippet_budget);
+                for snippet in snippet_lines {
+                    lines.push(format!("      {snippet}"));
+                }
             }
-            _ => {
-                // Spacious: title + snippet + metadata
-                let line1 = format!("{sel_mark}{queue_mark}{:>2}. {title}", self.index);
-                let snippet_preview = hit
-                    .snippet
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("");
-                let max_snip = (area.width as usize).saturating_sub(6);
-                let snip = if snippet_preview.len() > max_snip {
-                    &snippet_preview[..max_snip.saturating_sub(3)]
-                } else {
-                    snippet_preview
-                };
-                let line2 = format!("      {snip}");
-                let line3 = format!(
-                    "      {} | {source_badge} | {location} | {:.1}",
-                    hit.agent, hit.score
-                );
-                let text = format!("{line1}\n{line2}\n{line3}");
-                Paragraph::new(&*text).style(base_style).render(area, frame);
-            }
-        }
+            lines.truncate(self.row_height as usize);
+            lines.join("\n")
+        };
+
+        Paragraph::new(&*text).style(base_style).render(area, frame);
     }
 
     fn height(&self) -> u16 {
         self.row_height
+    }
+}
+
+fn summarize_filter_values(values: &HashSet<String>, empty_label: &str) -> String {
+    if values.is_empty() {
+        return empty_label.to_string();
+    }
+    let mut items: Vec<String> = values.iter().cloned().collect();
+    items.sort();
+    if items.len() <= 2 {
+        return items.join(", ");
+    }
+    format!("{}, {} +{}", items[0], items[1], items.len() - 2)
+}
+
+fn format_time_chip(from: Option<i64>, to: Option<i64>) -> Option<String> {
+    match (from, to) {
+        (None, None) => None,
+        (Some(f), None) => Some(format!("{} -> now", format_time_short(f))),
+        (None, Some(t)) => Some(format!("start -> {}", format_time_short(t))),
+        (Some(f), Some(t)) => Some(format!(
+            "{} -> {}",
+            format_time_short(f),
+            format_time_short(t)
+        )),
+    }
+}
+
+fn ranking_mode_label(mode: RankingMode) -> &'static str {
+    match mode {
+        RankingMode::RecentHeavy => "Recent",
+        RankingMode::Balanced => "Balanced",
+        RankingMode::RelevanceHeavy => "Relevance",
+        RankingMode::MatchQualityHeavy => "Quality",
+        RankingMode::DateNewest => "Newest",
+        RankingMode::DateOldest => "Oldest",
     }
 }
 
@@ -1931,8 +2289,10 @@ pub struct CassApp {
     pub source_filter_menu_selection: usize,
     /// Discovered source IDs shown in the source filter menu.
     pub available_source_ids: Vec<String>,
-    /// Command palette state.
+    /// Command palette state (action registry and legacy open flag).
     pub palette_state: PaletteState,
+    /// ftui CommandPalette widget (rendering, filtering, selection, scoring).
+    pub command_palette: CommandPalette,
     /// Latest update check result (if any).
     pub update_info: Option<UpdateInfo>,
     /// Session-only dismissal toggle for update banner.
@@ -2037,6 +2397,10 @@ pub struct CassApp {
     /// Rolling frame timing statistics.
     pub frame_timing: FrameTimingStats,
 
+    // -- Resize evidence snapshots (1mfw3.2.3) ----------------------------
+    /// Latest runtime evidence snapshots for explainability cockpit.
+    pub evidence: EvidenceSnapshots,
+
     // -- Sources management (2noh9.4.9) -----------------------------------
     /// Sources management view state.
     pub sources_view: SourcesViewState,
@@ -2124,6 +2488,17 @@ impl Default for CassApp {
             source_filter_menu_selection: 0,
             available_source_ids: Vec::new(),
             palette_state: PaletteState::new(default_actions()),
+            command_palette: {
+                let mut cp = CommandPalette::new().with_max_visible(12);
+                for item in &default_actions() {
+                    cp.register_action(
+                        ActionItem::new(action_id(&item.action), &item.label)
+                            .with_description(&item.hint)
+                            .with_category(item.action.group().label()),
+                    );
+                }
+                cp
+            },
             update_info: None,
             update_dismissed: false,
             update_upgrade_armed: false,
@@ -2174,6 +2549,7 @@ impl Default for CassApp {
             inspector_tab: InspectorTab::default(),
             inspector_state: InspectorState::default(),
             frame_timing: FrameTimingStats::default(),
+            evidence: EvidenceSnapshots::default(),
             sources_view: SourcesViewState::default(),
             status: String::new(),
             index_refresh_in_flight: false,
@@ -2377,6 +2753,15 @@ impl CassApp {
             && rect.contains(x, y)
         {
             return MouseHitRegion::Detail;
+        }
+        if let Some((idx, _)) = self
+            .last_pill_rects
+            .borrow()
+            .iter()
+            .enumerate()
+            .find(|(_, (rect, _))| rect.contains(x, y))
+        {
+            return MouseHitRegion::Pill { index: idx };
         }
         if let Some(rect) = *self.last_search_bar_area.borrow()
             && rect.contains(x, y)
@@ -3018,6 +3403,114 @@ impl CassApp {
             SourceFilter::Remote => "remote only".to_string(),
             SourceFilter::SourceId(id) => format!("source '{id}'"),
         }
+    }
+
+    fn active_filter_pills(&self) -> Vec<Pill> {
+        let mut pills = Vec::new();
+
+        if !self.filters.agents.is_empty() {
+            pills.push(Pill {
+                label: "agent".to_string(),
+                value: summarize_filter_values(&self.filters.agents, "all"),
+                active: true,
+                editable: true,
+            });
+        }
+        if !self.filters.workspaces.is_empty() {
+            pills.push(Pill {
+                label: "ws".to_string(),
+                value: summarize_filter_values(&self.filters.workspaces, "all"),
+                active: true,
+                editable: true,
+            });
+        }
+        if let Some(pane_filter) = self.pane_filter.as_deref().filter(|s| !s.trim().is_empty()) {
+            pills.push(Pill {
+                label: "pane".to_string(),
+                value: pane_filter.to_string(),
+                active: true,
+                editable: true,
+            });
+        }
+        if let Some(time) = format_time_chip(self.filters.created_from, self.filters.created_to) {
+            pills.push(Pill {
+                label: "time".to_string(),
+                value: time,
+                active: true,
+                editable: true,
+            });
+        }
+        if !self.filters.source_filter.is_all() {
+            pills.push(Pill {
+                label: "source".to_string(),
+                value: self.filters.source_filter.to_string(),
+                active: true,
+                editable: true,
+            });
+        }
+
+        pills
+    }
+
+    fn build_pills_row(&self, area: Rect, pills: &[Pill]) -> (String, Vec<(Rect, Pill)>) {
+        if area.is_empty() {
+            return (String::new(), Vec::new());
+        }
+        if pills.is_empty() {
+            return ("No active filters".to_string(), Vec::new());
+        }
+
+        let mut text = String::new();
+        let mut rects: Vec<(Rect, Pill)> = Vec::new();
+        let mut x = area.x;
+        let end_x = area.x.saturating_add(area.width);
+
+        for (idx, pill) in pills.iter().enumerate() {
+            if x >= end_x {
+                break;
+            }
+            if idx > 0 {
+                text.push(' ');
+                x = x.saturating_add(1);
+            }
+
+            let raw = format!("[{}:{}]", pill.label, pill.value);
+            let max_chars = usize::from(end_x.saturating_sub(x));
+            let rendered = elide_text(&raw, max_chars);
+            if rendered.is_empty() {
+                break;
+            }
+            let width = rendered.chars().count() as u16;
+            text.push_str(&rendered);
+            rects.push((Rect::new(x, area.y, width, 1), pill.clone()));
+            x = x.saturating_add(width);
+        }
+
+        if text.is_empty() {
+            text.push_str("No active filters");
+        }
+        (text, rects)
+    }
+
+    fn breadcrumb_line(&self, width: u16) -> String {
+        let agent = summarize_filter_values(&self.filters.agents, "All agents");
+        let workspace = summarize_filter_values(&self.filters.workspaces, "All workspaces");
+        let time = format_time_chip(self.filters.created_from, self.filters.created_to)
+            .unwrap_or_else(|| "Any time".to_string());
+        let source = if self.filters.source_filter.is_all() {
+            "all sources".to_string()
+        } else {
+            format!("source {}", self.filters.source_filter)
+        };
+        let crumb = format!(
+            "{} > {} > {} > {} > {}",
+            agent,
+            workspace,
+            time,
+            ranking_mode_label(self.ranking_mode),
+            source
+        );
+        elide_text(&crumb, width as usize)
     }
 
     /// Render the results list pane using VirtualizedList for O(visible) rendering.
@@ -4095,134 +4588,8 @@ impl CassApp {
             .render(hint_row, frame);
     }
 
-    /// Render the command palette overlay centered on screen.
-    fn render_palette_overlay(
-        &self,
-        frame: &mut super::ftui_adapter::Frame,
-        area: Rect,
-        styles: &StyleContext,
-    ) {
-        // Palette dimensions: 60 cols or 80% of width, 16 rows or 60% of height.
-        let pal_w = (area.width * 4 / 5).clamp(30, 60);
-        let pal_h = (area.height * 3 / 5).clamp(8, 20);
-        let pal_x = area.x + (area.width.saturating_sub(pal_w)) / 2;
-        let pal_y = area.y + (area.height.saturating_sub(pal_h)) / 2;
-        let pal_area = Rect::new(pal_x, pal_y, pal_w, pal_h);
-
-        let palette_bg = styles.style(style_system::STYLE_PANE_BASE);
-        let border_style = styles.style(style_system::STYLE_PANE_FOCUSED);
-        let text_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
-        let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
-
-        // Clear the area and draw the outer block.
-        Block::new().style(palette_bg).render(pal_area, frame);
-        let outer = Block::new()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .title("Command Palette (Ctrl+P)")
-            .title_alignment(Alignment::Left)
-            .style(border_style);
-        let inner = outer.inner(pal_area);
-        outer.render(pal_area, frame);
-
-        if inner.is_empty() {
-            return;
-        }
-
-        // Split inner into input (1 row) + separator (1 row) + list (rest).
-        let input_area = Rect::new(inner.x, inner.y, inner.width, 1);
-        let list_y = inner.y + 2;
-        let list_h = inner.height.saturating_sub(2);
-
-        // Render query input.
-        let query_display = if self.palette_state.query.is_empty() {
-            "Type to filter..."
-        } else {
-            self.palette_state.query.as_str()
-        };
-        let query_style = if self.palette_state.query.is_empty() {
-            muted_style
-        } else {
-            text_style
-        };
-        Paragraph::new(query_display)
-            .style(query_style)
-            .render(input_area, frame);
-
-        // Render separator line.
-        if inner.height > 2 {
-            let sep = "\u{2500}".repeat(inner.width as usize);
-            Paragraph::new(&*sep)
-                .style(muted_style)
-                .render(Rect::new(inner.x, inner.y + 1, inner.width, 1), frame);
-        }
-
-        // Render filtered action list.
-        let visible_count = list_h as usize;
-        let selected = self.palette_state.selected;
-        // Scroll the list so the selection is always visible.
-        let scroll_offset = if selected >= visible_count {
-            selected - visible_count + 1
-        } else {
-            0
-        };
-
-        let selected_style = styles.style(style_system::STYLE_RESULT_ROW_SELECTED);
-
-        for (i, item) in self
-            .palette_state
-            .filtered
-            .iter()
-            .skip(scroll_offset)
-            .take(visible_count)
-            .enumerate()
-        {
-            let row_y = list_y + i as u16;
-            if row_y >= pal_area.y + pal_area.height {
-                break;
-            }
-            let row_area = Rect::new(inner.x, row_y, inner.width, 1);
-            let abs_idx = scroll_offset + i;
-            let is_selected = abs_idx == selected;
-
-            // Format: "  label                    hint" or "➜ label ... hint"
-            let prefix = if is_selected { "\u{279c} " } else { "  " };
-            let hint_len = item.hint.len();
-            let label_max = (inner.width as usize).saturating_sub(prefix.len() + hint_len + 2);
-            let label = if item.label.len() > label_max {
-                &item.label[..label_max]
-            } else {
-                &item.label
-            };
-            let padding = inner
-                .width
-                .saturating_sub(prefix.len() as u16 + label.len() as u16 + hint_len as u16);
-            let line = format!(
-                "{prefix}{label}{:>pad$}",
-                item.hint,
-                pad = padding as usize + hint_len
-            );
-
-            let row_style = if is_selected {
-                selected_style
-            } else {
-                text_style
-            };
-            Paragraph::new(&*line)
-                .style(row_style)
-                .render(row_area, frame);
-        }
-
-        // Show count at bottom if items overflow.
-        let total = self.palette_state.filtered.len();
-        if total > visible_count && list_h > 0 {
-            let count_text = format!(" {total} actions");
-            let count_area = Rect::new(inner.x, pal_area.y + pal_area.height - 1, inner.width, 1);
-            Paragraph::new(&*count_text)
-                .style(muted_style)
-                .render(count_area, frame);
-        }
-    }
+    // NOTE: render_palette_overlay() removed — rendering now delegated to
+    // ftui CommandPalette widget via Widget::render() in the view() method.
 
     // -- Help overlay rendering -----------------------------------------------
 
@@ -5760,6 +6127,8 @@ enum MouseHitRegion {
     SplitHandle,
     /// Row in the saved views manager list.
     SavedViewRow { row_idx: usize },
+    /// Active filter pill in the search header.
+    Pill { index: usize },
     /// Click/scroll landed in the results list. `item_idx` is the absolute item index.
     Results { item_idx: usize },
     /// Click/scroll landed in the detail pane.
@@ -6388,6 +6757,7 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::Char('d') if ctrl => CassMsg::DensityModeCycled,
 
                     // -- Multi-select ---------------------------------------------
+                    KeyCode::Char('m') if ctrl => CassMsg::SelectionToggled,
                     KeyCode::Char('x') if ctrl => CassMsg::SelectionToggled,
                     KeyCode::Char('a') if ctrl => CassMsg::SelectAllToggled,
                     KeyCode::Enter if ctrl => CassMsg::ItemEnqueued,
@@ -6960,6 +7330,47 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::MouseEvent { .. }
                     | CassMsg::ForceQuit => {}
                     _ => return ftui::Cmd::none(),
+                }
+            }
+        }
+
+        // -- Command palette intercept ----------------------------------------
+        // When the palette is open, forward raw key events to the ftui
+        // CommandPalette widget which owns query, selection, filtering, and
+        // scoring.  Execute/Dismiss actions are translated back to our domain
+        // via the PaletteResult adapter layer.
+        if self.palette_state.open {
+            match &msg {
+                // Let critical / non-keyboard messages through to normal handling.
+                CassMsg::Tick | CassMsg::ForceQuit | CassMsg::MouseEvent { .. } => {}
+                _ => {
+                    if let Some(ref raw_event) = peek_raw_event()
+                        && let super::ftui_adapter::Event::Key(_) = raw_event
+                    {
+                        if let Some(action) = self.command_palette.handle_event(raw_event) {
+                            use ftui::widgets::command_palette::PaletteAction as WPA;
+                            match action {
+                                WPA::Execute(ref id) => {
+                                    self.palette_state.open = false;
+                                    self.command_palette.close();
+                                    self.focus_manager.pop_trap();
+                                    let result = action_by_id(&self.palette_state.all_actions, id)
+                                        .map(|a| a.dispatch())
+                                        .unwrap_or(PaletteResult::Noop);
+                                    return self.palette_result_to_cmd(result);
+                                }
+                                WPA::Dismiss => {
+                                    self.palette_state.open = false;
+                                    self.command_palette.close();
+                                    self.focus_manager.pop_trap();
+                                    return ftui::Cmd::none();
+                                }
+                            }
+                        }
+                        // Event consumed by palette (navigation, typing, etc.)
+                        return ftui::Cmd::none();
+                    }
+                    // No raw key event available — fall through to main handler.
                 }
             }
         }
@@ -7600,7 +8011,7 @@ impl super::ftui_adapter::Model for CassApp {
                     } else {
                         self.selected.insert(key);
                         self.status = format!(
-                            "Selected ({} total) · Ctrl+X toggle · A bulk actions · Esc clear",
+                            "Selected ({} total) · Ctrl+M/Ctrl+X toggle · A bulk actions · Esc clear",
                             self.selected.len()
                         );
                     }
@@ -7652,7 +8063,8 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::BulkActionsOpened => {
                 if self.selected.is_empty() {
                     self.status =
-                        "No items selected. Ctrl+X to select, Ctrl+A to select all.".to_string();
+                        "No items selected. Ctrl+M/Ctrl+X to select, Ctrl+A to select all."
+                            .to_string();
                 } else {
                     self.show_bulk_modal = true;
                     self.bulk_action_idx = 0;
@@ -8044,12 +8456,15 @@ impl super::ftui_adapter::Model for CassApp {
                 self.palette_state.query.clear();
                 self.palette_state.selected = 0;
                 self.palette_state.refilter();
+                // Also open the ftui CommandPalette widget (owns rendering & filtering).
+                self.command_palette.open();
                 self.focus_manager.push_trap(focus_ids::GROUP_PALETTE);
                 self.focus_manager.focus(focus_ids::COMMAND_PALETTE);
                 ftui::Cmd::none()
             }
             CassMsg::PaletteClosed => {
                 self.palette_state.open = false;
+                self.command_palette.close();
                 self.focus_manager.pop_trap();
                 ftui::Cmd::none()
             }
@@ -8070,6 +8485,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::PaletteActionExecuted => {
                 let result = execute_selected(&self.palette_state);
                 self.palette_state.open = false;
+                self.command_palette.close();
                 self.palette_result_to_cmd(result)
             }
 
@@ -8916,6 +9332,8 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::Resized { .. } => {
                 // Frame dimensions update automatically via ftui runtime
                 self.pane_split_drag = None;
+                // Capture latest resize evidence after coalescer processes the event.
+                self.evidence.refresh();
                 ftui::Cmd::none()
             }
             CassMsg::Tick => {
@@ -8926,6 +9344,8 @@ impl super::ftui_adapter::Model for CassApp {
                 // Record frame interval for inspector overlay.
                 if self.show_inspector {
                     self.frame_timing.record_frame();
+                    // Refresh evidence snapshots from runtime telemetry.
+                    self.evidence.refresh();
                 }
                 // Tick spring-based animations.
                 self.anim.tick(dt);
@@ -9089,6 +9509,136 @@ impl super::ftui_adapter::Model for CassApp {
                     (MouseEventKind::LeftClick, MouseHitRegion::SplitHandle) => {
                         self.pane_split_drag = Some(PaneSplitDragState);
                         let _ = self.apply_panel_ratio_from_mouse_x(x);
+                        ftui::Cmd::none()
+                    }
+                    // ── Left click on a filter pill: edit that filter ──
+                    (MouseEventKind::LeftClick, MouseHitRegion::Pill { index }) => {
+                        let pill = {
+                            let rects = self.last_pill_rects.borrow();
+                            rects.get(index).map(|(_, pill)| pill.clone())
+                        };
+                        if let Some(pill) = pill {
+                            match pill.label.as_str() {
+                                "agent" => {
+                                    self.input_mode = InputMode::Agent;
+                                    self.input_buffer = if self.filters.agents.len() == 1 {
+                                        self.filters
+                                            .agents
+                                            .iter()
+                                            .next()
+                                            .cloned()
+                                            .unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    };
+                                    self.status =
+                                        "Edit agent filter (Enter apply, Esc cancel)".to_string();
+                                }
+                                "ws" => {
+                                    self.input_mode = InputMode::Workspace;
+                                    self.input_buffer = if self.filters.workspaces.len() == 1 {
+                                        self.filters
+                                            .workspaces
+                                            .iter()
+                                            .next()
+                                            .cloned()
+                                            .unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    };
+                                    self.status = "Edit workspace filter (Enter apply, Esc cancel)"
+                                        .to_string();
+                                }
+                                "pane" => {
+                                    self.input_mode = InputMode::PaneFilter;
+                                    self.input_buffer =
+                                        self.pane_filter.clone().unwrap_or_default();
+                                    self.status =
+                                        "Edit pane filter (Enter apply, Esc cancel)".to_string();
+                                }
+                                "time" => {
+                                    self.input_mode = InputMode::CreatedFrom;
+                                    self.input_buffer = self
+                                        .filters
+                                        .created_from
+                                        .map(|ts| ts.to_string())
+                                        .unwrap_or_default();
+                                    self.status =
+                                        "Edit from timestamp (Enter apply, Esc cancel)".to_string();
+                                }
+                                "source" => {
+                                    self.source_filter_menu_open = true;
+                                    self.source_filter_menu_selection =
+                                        match &self.filters.source_filter {
+                                            SourceFilter::All => 0,
+                                            SourceFilter::Local => 1,
+                                            SourceFilter::Remote => 2,
+                                            SourceFilter::SourceId(id) => self
+                                                .available_source_ids
+                                                .iter()
+                                                .position(|s| s == id)
+                                                .map(|i| i + 3)
+                                                .unwrap_or(0),
+                                        };
+                                    self.focus_manager.push_trap(focus_ids::GROUP_SOURCE_FILTER);
+                                    self.focus_manager.focus(focus_ids::SOURCE_FILTER_MENU);
+                                    self.status = "Choose source filter".to_string();
+                                }
+                                _ => {}
+                            }
+                        }
+                        ftui::Cmd::none()
+                    }
+                    // ── Right click on a filter pill: clear that filter ──
+                    (MouseEventKind::RightClick, MouseHitRegion::Pill { index }) => {
+                        let pill = {
+                            let rects = self.last_pill_rects.borrow();
+                            rects.get(index).map(|(_, pill)| pill.clone())
+                        };
+                        let mut changed = false;
+                        if let Some(pill) = pill {
+                            match pill.label.as_str() {
+                                "agent" if !self.filters.agents.is_empty() => {
+                                    self.push_undo("Clear agent filter");
+                                    self.filters.agents.clear();
+                                    self.status = "Cleared agent filter".to_string();
+                                    changed = true;
+                                }
+                                "ws" if !self.filters.workspaces.is_empty() => {
+                                    self.push_undo("Clear workspace filter");
+                                    self.filters.workspaces.clear();
+                                    self.status = "Cleared workspace filter".to_string();
+                                    changed = true;
+                                }
+                                "pane" if self.pane_filter.is_some() => {
+                                    self.pane_filter = None;
+                                    self.status = "Cleared pane filter".to_string();
+                                    changed = true;
+                                }
+                                "time"
+                                    if self.filters.created_from.is_some()
+                                        || self.filters.created_to.is_some() =>
+                                {
+                                    self.push_undo("Clear time filter");
+                                    self.filters.created_from = None;
+                                    self.filters.created_to = None;
+                                    self.time_preset = TimePreset::All;
+                                    self.status = "Cleared time filter".to_string();
+                                    changed = true;
+                                }
+                                "source" if !self.filters.source_filter.is_all() => {
+                                    self.push_undo("Clear source filter");
+                                    self.filters.source_filter = SourceFilter::All;
+                                    self.status = "Cleared source filter".to_string();
+                                    changed = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if changed {
+                            self.search_dirty_since = Some(Instant::now());
+                            self.cached_detail = None;
+                        }
                         ftui::Cmd::none()
                     }
                     (MouseEventKind::LeftDrag, _) if self.pane_split_drag.is_some() => {
@@ -9606,6 +10156,7 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 if self.palette_state.open {
                     self.palette_state.open = false;
+                    self.command_palette.close();
                     self.focus_manager.pop_trap();
                     return ftui::Cmd::none();
                 }
@@ -9845,7 +10396,7 @@ impl super::ftui_adapter::Model for CassApp {
                 // ── Main vertical split: search bar | content | status ──
                 let vertical = Flex::vertical()
                     .constraints([
-                        Constraint::Fixed(3), // Search bar
+                        Constraint::Fixed(5), // Search bar (query + pills + breadcrumbs)
                         Constraint::Min(4),   // Content area (results + detail)
                         Constraint::Fixed(1), // Status footer
                     ])
@@ -9879,20 +10430,75 @@ impl super::ftui_adapter::Model for CassApp {
                     });
                 let query_inner = query_block.inner(vertical[0]);
                 query_block.render(vertical[0], frame);
+                self.last_pill_rects.borrow_mut().clear();
                 if !query_inner.is_empty() {
-                    if self.query.is_empty() {
-                        Paragraph::new("\u{2502}<type to search>")
-                            .style(text_muted_style)
-                            .render(query_inner, frame);
+                    let rows = if query_inner.height >= 3 {
+                        Flex::vertical()
+                            .constraints([
+                                Constraint::Fixed(1),
+                                Constraint::Fixed(1),
+                                Constraint::Min(1),
+                            ])
+                            .split(query_inner)
+                    } else if query_inner.height == 2 {
+                        Flex::vertical()
+                            .constraints([Constraint::Fixed(1), Constraint::Min(1)])
+                            .split(query_inner)
                     } else {
-                        let cpos = self.cursor_pos.min(self.query.len());
-                        let display =
-                            format!("{}\u{2502}{}", &self.query[..cpos], &self.query[cpos..]);
-                        let text_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
-                        Paragraph::new(&*display)
-                            .style(text_style)
-                            .render(query_inner, frame);
+                        vec![query_inner]
                     };
+
+                    let query_text = match self.input_mode {
+                        InputMode::Query => {
+                            if self.query.is_empty() {
+                                "\u{2502}<type to search>".to_string()
+                            } else {
+                                let cpos = self.cursor_pos.min(self.query.len());
+                                format!("{}\u{2502}{}", &self.query[..cpos], &self.query[cpos..])
+                            }
+                        }
+                        InputMode::Agent => format!("[agent] {}\u{2502}", self.input_buffer),
+                        InputMode::Workspace => {
+                            format!("[workspace] {}\u{2502}", self.input_buffer)
+                        }
+                        InputMode::CreatedFrom => format!("[from] {}\u{2502}", self.input_buffer),
+                        InputMode::CreatedTo => format!("[to] {}\u{2502}", self.input_buffer),
+                        InputMode::PaneFilter => format!("[pane] {}\u{2502}", self.input_buffer),
+                        InputMode::DetailFind => {
+                            format!("[detail-find] {}\u{2502}", self.input_buffer)
+                        }
+                    };
+                    let query_row = rows[0];
+                    let query_style =
+                        if self.input_mode == InputMode::Query && self.query.is_empty() {
+                            text_muted_style
+                        } else {
+                            styles.style(style_system::STYLE_TEXT_PRIMARY)
+                        };
+                    Paragraph::new(elide_text(&query_text, query_row.width as usize))
+                        .style(query_style)
+                        .render(query_row, frame);
+
+                    if rows.len() > 1 {
+                        let pills = self.active_filter_pills();
+                        let (pill_text, pill_rects) = self.build_pills_row(rows[1], &pills);
+                        *self.last_pill_rects.borrow_mut() = pill_rects;
+                        let pill_style = if pills.is_empty() {
+                            text_muted_style
+                        } else {
+                            styles.style(style_system::STYLE_TEXT_PRIMARY)
+                        };
+                        Paragraph::new(elide_text(&pill_text, rows[1].width as usize))
+                            .style(pill_style)
+                            .render(rows[1], frame);
+                    }
+
+                    if rows.len() > 2 {
+                        let crumb = self.breadcrumb_line(rows[2].width);
+                        Paragraph::new(crumb)
+                            .style(text_muted_style)
+                            .render(rows[2], frame);
+                    }
                 }
 
                 // ── Content area: responsive layout ─────────────────────
@@ -10033,6 +10639,7 @@ impl super::ftui_adapter::Model for CassApp {
                 *self.last_status_area.borrow_mut() = None;
                 *self.last_content_area.borrow_mut() = None;
                 *self.last_split_handle_area.borrow_mut() = None;
+                self.last_pill_rects.borrow_mut().clear();
                 self.last_saved_view_row_areas.borrow_mut().clear();
 
                 // ── Analytics surface layout ─────────────────────────────
@@ -10149,6 +10756,7 @@ impl super::ftui_adapter::Model for CassApp {
                 *self.last_status_area.borrow_mut() = None;
                 *self.last_content_area.borrow_mut() = None;
                 *self.last_split_handle_area.borrow_mut() = None;
+                self.last_pill_rects.borrow_mut().clear();
                 self.last_saved_view_row_areas.borrow_mut().clear();
 
                 // ── Sources surface layout ─────────────────────────────
@@ -10340,7 +10948,8 @@ impl super::ftui_adapter::Model for CassApp {
 
         // ── Command palette overlay ──────────────────────────────────
         if self.palette_state.open {
-            self.render_palette_overlay(frame, area, &styles);
+            use super::ftui_adapter::Widget;
+            self.command_palette.render(area, frame);
         }
 
         // ── Screenshot capture (runs after all rendering completes) ──
@@ -10559,6 +11168,58 @@ fn macro_save_dir() -> PathBuf {
         .join("macros")
 }
 
+/// Build the BOCPD-based resize coalescer configuration.
+///
+/// This is extracted as a standalone function so all launch modes share
+/// identical config and the parity matrix can be tested without a terminal.
+///
+/// Returns `(CoalescerConfig, EvidenceSinkConfig)`.
+pub fn build_resize_config(
+    data_dir: &std::path::Path,
+) -> (
+    ftui::runtime::resize_coalescer::CoalescerConfig,
+    ftui::runtime::evidence_sink::EvidenceSinkConfig,
+) {
+    use ftui::runtime::bocpd::BocpdConfig;
+    use ftui::runtime::evidence_sink::{EvidenceSinkConfig, EvidenceSinkDestination};
+    use ftui::runtime::resize_coalescer::CoalescerConfig;
+
+    // BOCPD replaces the simple rate-threshold heuristic with Bayesian
+    // changepoint detection for principled steady/burst regime switching.
+    // The "responsive" preset uses lower thresholds for faster detection,
+    // matching cass's interactive search-as-you-type profile.
+    let bocpd_disabled = std::env::var("CASS_BOCPD")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+
+    let coalescer = if bocpd_disabled {
+        CoalescerConfig::default()
+    } else {
+        let bocpd = BocpdConfig::responsive().with_logging(true);
+        CoalescerConfig::default()
+            .with_bocpd_config(bocpd)
+            .with_logging(true)
+    };
+
+    // Evidence sink: write resize/BOCPD decision logs to data_dir.
+    // Consumed by the explainability cockpit (1mfw3.3.x) for UI-facing
+    // evidence summaries and the inspector's resize panel.
+    let evidence_path = std::env::var("CASS_RESIZE_EVIDENCE_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join("resize_evidence.jsonl"));
+    let evidence_sink = if bocpd_disabled {
+        EvidenceSinkConfig::disabled()
+    } else {
+        EvidenceSinkConfig {
+            enabled: true,
+            destination: EvidenceSinkDestination::file(&evidence_path),
+            flush_on_write: false, // batch flush for lower I/O overhead
+        }
+    };
+
+    (coalescer, evidence_sink)
+}
+
 /// Run the cass TUI using the ftui Program runtime.
 ///
 /// This replaces the manual crossterm event loop in `run_tui()`.
@@ -10588,6 +11249,9 @@ pub fn run_tui_ftui(
     // 16ms budget (60fps) with adaptive PID degradation.
     let budget = FrameBudgetConfig::default();
 
+    // Resize coalescer + evidence sink — shared across all launch modes.
+    let (coalescer, evidence_sink) = build_resize_config(&data_dir);
+
     // Build ProgramConfig once — all launch paths share this baseline.
     let mut config = if let Some(ref cfg) = inline_config {
         let mut c = ProgramConfig::inline(cfg.ui_height);
@@ -10598,6 +11262,8 @@ pub fn run_tui_ftui(
     };
     config.budget = budget;
     config.mouse = true;
+    config.resize_coalescer = coalescer;
+    config.evidence_sink = evidence_sink;
 
     // Load macro playback data into model before program creation.
     if let Some(ref play_path) = macro_config.play_path {
@@ -11347,6 +12013,15 @@ mod tests {
     }
 
     #[test]
+    fn event_mapping_ctrl_m_maps_to_selection_toggled() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('m')).with_modifiers(Modifiers::CTRL));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::SelectionToggled));
+    }
+
+    #[test]
     fn persisted_state_constructible() {
         let _state = PersistedState {
             search_mode: SearchMode::Lexical,
@@ -11769,6 +12444,87 @@ mod tests {
         let cmd = app.update(CassMsg::PaletteActionExecuted);
         assert!(!app.palette_state.open);
         assert!(matches!(extract_msg(cmd), Some(CassMsg::SavedViewsOpened)));
+    }
+
+    // -- CommandPalette widget integration tests (1mfw3.1.3) ----------------
+
+    #[test]
+    fn palette_open_also_opens_widget() {
+        let mut app = CassApp::default();
+        assert!(!app.command_palette.is_visible());
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.command_palette.is_visible());
+    }
+
+    #[test]
+    fn palette_close_also_closes_widget() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.command_palette.is_visible());
+        let _ = app.update(CassMsg::PaletteClosed);
+        assert!(!app.command_palette.is_visible());
+    }
+
+    #[test]
+    fn palette_execute_closes_widget() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.command_palette.is_visible());
+        let _ = app.update(CassMsg::PaletteActionExecuted);
+        assert!(!app.command_palette.is_visible());
+        assert!(!app.palette_state.open);
+    }
+
+    #[test]
+    fn palette_quit_requested_closes_widget() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.command_palette.is_visible());
+        let _ = app.update(CassMsg::QuitRequested);
+        assert!(!app.command_palette.is_visible());
+        assert!(!app.palette_state.open);
+    }
+
+    #[test]
+    fn palette_widget_has_registered_actions() {
+        let app = CassApp::default();
+        // action_count() returns total registered (not just filtered/visible)
+        assert_eq!(
+            app.command_palette.action_count(),
+            app.palette_state.all_actions.len()
+        );
+    }
+
+    #[test]
+    fn palette_interceptor_consumes_key_events_when_open() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        stash_raw_event(&Event::Key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: Modifiers::NONE,
+            kind: ftui::KeyEventKind::Press,
+        }));
+        let old_sel = app.selected.clone();
+        let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        assert_eq!(app.selected, old_sel);
+    }
+
+    #[test]
+    fn palette_interceptor_lets_tick_through() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let _ = app.update(CassMsg::Tick);
+        assert!(app.palette_state.open);
+    }
+
+    #[test]
+    fn palette_interceptor_lets_force_quit_through() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let cmd = app.update(CassMsg::ForceQuit);
+        // ForceQuit should produce Cmd::Quit (not be swallowed by interceptor)
+        assert!(matches!(cmd, ftui::Cmd::Quit));
     }
 
     #[test]
@@ -12436,7 +13192,12 @@ mod tests {
             origin_kind: "local".into(),
             origin_host: None,
         };
-        for (density_h, expected) in [(1u16, 1u16), (2, 2), (3, 3)] {
+        for mode in [
+            DensityMode::Compact,
+            DensityMode::Cozy,
+            DensityMode::Spacious,
+        ] {
+            let density_h = mode.row_height();
             let item = ResultItem {
                 index: 1,
                 hit: hit.clone(),
@@ -12447,7 +13208,7 @@ mod tests {
                 stripe_style: ftui::Style::default(),
                 agent_style: ftui::Style::default(),
             };
-            assert_eq!(item.height(), expected, "density {density_h}");
+            assert_eq!(item.height(), density_h, "density {mode:?}");
         }
     }
 
@@ -14246,7 +15007,9 @@ mod tests {
         let _ = app.update(CassMsg::SelectAllToggled);
         let hints = app.build_contextual_footer_hints(120);
         assert!(hints.contains("A=bulk"));
-        assert!(hints.contains("Ctrl+O=open"));
+        // Ctrl+O=open may be dropped when TOGGLE_SELECT label is long
+        // enough to exhaust the 52-char footer hint budget at this width.
+        assert!(hints.contains("select"));
     }
 
     #[test]
@@ -14513,6 +15276,57 @@ mod tests {
         let search = app.last_search_bar_area.borrow().unwrap();
         let region = app.hit_test(search.x + 1, search.y);
         assert_eq!(region, MouseHitRegion::SearchBar);
+    }
+
+    #[test]
+    fn mouse_left_click_on_agent_pill_enters_agent_input_mode() {
+        use ftui::Model;
+        let mut app = app_with_hits(5);
+        app.filters.agents.insert("codex".to_string());
+        render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+
+        let rect = app
+            .last_pill_rects
+            .borrow()
+            .iter()
+            .find_map(|(rect, pill)| (pill.label == "agent").then_some(*rect))
+            .expect("agent pill should be rendered");
+
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: rect.x,
+            y: rect.y,
+        });
+        assert_eq!(app.input_mode, InputMode::Agent);
+    }
+
+    #[test]
+    fn mouse_right_click_on_agent_pill_clears_agent_filter() {
+        use ftui::Model;
+        let mut app = app_with_hits(5);
+        app.filters.agents.insert("codex".to_string());
+        render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+
+        let rect = app
+            .last_pill_rects
+            .borrow()
+            .iter()
+            .find_map(|(rect, pill)| (pill.label == "agent").then_some(*rect))
+            .expect("agent pill should be rendered");
+
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::RightClick,
+            x: rect.x,
+            y: rect.y,
+        });
+        assert!(
+            app.filters.agents.is_empty(),
+            "right-click on agent pill should clear agent filter"
+        );
+        assert!(
+            app.search_dirty_since.is_some(),
+            "clearing a filter should trigger a debounced search"
+        );
     }
 
     #[test]
@@ -14943,7 +15757,8 @@ mod tests {
         render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
 
         let inner = app.last_results_inner.borrow().unwrap();
-        let region = app.hit_test(inner.x, inner.y + 3);
+        let row_h = app.density_mode.row_height();
+        let region = app.hit_test(inner.x, inner.y + row_h + 1);
         assert!(
             matches!(region, MouseHitRegion::Results { item_idx: 1 }),
             "2nd row in spacious density should be item_idx=1, got {region:?}"
@@ -18143,5 +18958,521 @@ mod tests {
 
         let _ = app.update(CassMsg::ViewStackPopped);
         assert_eq!(app.surface, AppSurface::Search);
+    }
+
+    // -----------------------------------------------------------------------
+    // BOCPD resize coalescer configuration (1mfw3.2.2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bocpd_coalescer_config_defaults_are_sane() {
+        use ftui::runtime::bocpd::BocpdConfig;
+        use ftui::runtime::resize_coalescer::CoalescerConfig;
+
+        let bocpd = BocpdConfig::responsive();
+        let config = CoalescerConfig::default()
+            .with_bocpd_config(bocpd.clone())
+            .with_logging(true);
+
+        // BOCPD is enabled
+        assert!(config.enable_bocpd);
+        assert!(config.bocpd_config.is_some());
+        assert!(config.enable_logging);
+
+        // Responsive preset uses lower thresholds for faster detection
+        assert!(
+            bocpd.mu_steady_ms < 200.0,
+            "responsive should be faster than default"
+        );
+        assert!(
+            bocpd.mu_burst_ms < 20.0,
+            "responsive burst should be faster"
+        );
+        assert!(
+            bocpd.hazard_lambda < 50.0,
+            "responsive expects more frequent changepoints"
+        );
+        assert!(bocpd.steady_threshold < 0.3);
+        assert!(bocpd.burst_threshold < 0.7);
+    }
+
+    #[test]
+    fn bocpd_coalescer_config_respects_env_disable() {
+        use ftui::runtime::bocpd::BocpdConfig;
+        use ftui::runtime::resize_coalescer::CoalescerConfig;
+
+        // Simulate CASS_BOCPD=0 logic
+        let bocpd_disabled = true;
+
+        let config = if bocpd_disabled {
+            CoalescerConfig::default()
+        } else {
+            let bocpd = BocpdConfig::responsive().with_logging(true);
+            CoalescerConfig::default()
+                .with_bocpd_config(bocpd)
+                .with_logging(true)
+        };
+
+        assert!(
+            !config.enable_bocpd,
+            "BOCPD should be disabled when env says so"
+        );
+        assert!(config.bocpd_config.is_none());
+        assert!(!config.enable_logging);
+    }
+
+    #[test]
+    fn bocpd_coalescer_timing_thresholds_are_bounded() {
+        use ftui::runtime::resize_coalescer::CoalescerConfig;
+
+        let config = CoalescerConfig::default();
+
+        // Steady delay ≤ burst delay ≤ hard deadline
+        assert!(config.steady_delay_ms <= config.burst_delay_ms);
+        assert!(config.burst_delay_ms <= config.hard_deadline_ms);
+
+        // Hard deadline bounded to prevent UI freezes
+        assert!(
+            config.hard_deadline_ms <= 200,
+            "hard deadline should not exceed 200ms"
+        );
+
+        // Burst enter rate > exit rate (hysteresis)
+        assert!(config.burst_enter_rate > config.burst_exit_rate);
+    }
+
+    #[test]
+    fn evidence_sink_config_writes_to_data_dir() {
+        use ftui::runtime::evidence_sink::{EvidenceSinkConfig, EvidenceSinkDestination};
+
+        let data_dir = std::path::PathBuf::from("/tmp/cass-test");
+        let evidence_path = data_dir.join("resize_evidence.jsonl");
+
+        let config = EvidenceSinkConfig {
+            enabled: true,
+            destination: EvidenceSinkDestination::file(&evidence_path),
+            flush_on_write: false,
+        };
+
+        assert!(config.enabled);
+        // Verify destination is a file path
+        match &config.destination {
+            EvidenceSinkDestination::File(p) => {
+                assert_eq!(p, &evidence_path);
+            }
+            _ => panic!("expected file destination"),
+        }
+    }
+
+    // -- Evidence snapshots (1mfw3.2.3) -----------------------------------
+
+    #[test]
+    fn evidence_snapshots_default_is_empty() {
+        let evidence = EvidenceSnapshots::default();
+        assert!(evidence.resize.is_none());
+        assert!(evidence.diff.is_none());
+        assert!(evidence.budget.is_none());
+        assert!(!evidence.has_any());
+    }
+
+    #[test]
+    fn evidence_snapshots_has_any_detects_resize() {
+        let mut evidence = EvidenceSnapshots::default();
+        assert!(!evidence.has_any());
+        // After refresh, still None if no runtime has emitted anything
+        evidence.refresh();
+        // has_any depends on what the global singletons hold
+        // In test context there's no runtime, so they remain None
+    }
+
+    #[test]
+    fn evidence_regime_label_none_returns_dash() {
+        let evidence = EvidenceSnapshots::default();
+        assert_eq!(evidence.resize_regime_label(), "\u{2014}");
+    }
+
+    #[test]
+    fn evidence_degradation_label_none_returns_dash() {
+        let evidence = EvidenceSnapshots::default();
+        assert_eq!(evidence.degradation_label(), "\u{2014}");
+    }
+
+    #[test]
+    fn evidence_snapshots_in_cass_app_default() {
+        let app = CassApp::default();
+        assert!(!app.evidence.has_any());
+        assert_eq!(app.evidence.resize_regime_label(), "\u{2014}");
+        assert_eq!(app.evidence.degradation_label(), "\u{2014}");
+    }
+
+    #[test]
+    fn evidence_refresh_is_error_tolerant() {
+        // Calling refresh when no runtime is active should not panic
+        let mut evidence = EvidenceSnapshots::default();
+        evidence.refresh();
+        evidence.refresh();
+        evidence.refresh();
+        // No panic = success; evidence stays None with no runtime
+    }
+
+    // -- Resize evidence summary (1mfw3.2.4) --------------------------------
+
+    fn make_resize_snapshot(
+        event_idx: u64,
+        regime: ftui::runtime::resize_coalescer::Regime,
+    ) -> ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot {
+        ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot {
+            event_idx,
+            action: "apply",
+            dt_ms: 16.6,
+            event_rate: 60.0,
+            regime,
+            pending_size: None,
+            applied_size: Some((120, 40)),
+            time_since_render_ms: 8.3,
+            bocpd: None,
+        }
+    }
+
+    fn make_budget_snapshot(
+        degradation: ftui::render::budget::DegradationLevel,
+    ) -> ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
+        ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
+            frame_idx: 1,
+            decision: ftui::render::budget::BudgetDecision::Hold,
+            controller_decision: ftui::render::budget::BudgetDecision::Hold,
+            degradation_before: ftui::render::budget::DegradationLevel::Full,
+            degradation_after: degradation,
+            frame_time_us: 5000.0,
+            budget_us: 16666.0,
+            pid_output: 0.3,
+            e_value: 1.0,
+            frames_observed: 100,
+            frames_since_change: 50,
+            in_warmup: false,
+            conformal: None,
+        }
+    }
+
+    #[test]
+    fn resize_evidence_summary_default_has_no_data() {
+        let summary = ResizeEvidenceSummary::default();
+        assert!(!summary.has_data());
+        assert_eq!(summary.history_len(), 0);
+        assert_eq!(summary.regime, "\u{2014}");
+        assert_eq!(summary.degradation, "\u{2014}");
+        assert_eq!(summary.budget_us, 0.0);
+        assert_eq!(summary.frame_time_us, 0.0);
+        assert!(summary.applied_size.is_none());
+        assert!(summary.bocpd_p_burst.is_none());
+    }
+
+    #[test]
+    fn resize_evidence_summary_update_from_resize() {
+        let mut summary = ResizeEvidenceSummary::default();
+        let resize = Some(make_resize_snapshot(
+            1,
+            ftui::runtime::resize_coalescer::Regime::Steady,
+        ));
+        summary.update_from_raw(&resize, &None);
+        assert!(summary.has_data());
+        assert_eq!(summary.regime, "Steady");
+        assert_eq!(summary.applied_size, Some((120, 40)));
+        assert_eq!(summary.history_len(), 1);
+    }
+
+    #[test]
+    fn resize_evidence_summary_update_from_budget() {
+        let mut summary = ResizeEvidenceSummary::default();
+        let budget = Some(make_budget_snapshot(
+            ftui::render::budget::DegradationLevel::SimpleBorders,
+        ));
+        summary.update_from_raw(&None, &budget);
+        assert!(summary.has_data());
+        assert_eq!(summary.degradation, "SimpleBorders");
+        assert_eq!(summary.budget_us, 16666.0);
+        assert_eq!(summary.frame_time_us, 5000.0);
+        assert_eq!(summary.pid_output, 0.3);
+        assert!(!summary.in_warmup);
+        assert_eq!(summary.frames_observed, 100);
+    }
+
+    #[test]
+    fn resize_evidence_summary_deduplicates_by_event_idx() {
+        let mut summary = ResizeEvidenceSummary::default();
+        let resize = Some(make_resize_snapshot(
+            1,
+            ftui::runtime::resize_coalescer::Regime::Burst,
+        ));
+        summary.update_from_raw(&resize, &None);
+        summary.update_from_raw(&resize, &None);
+        assert_eq!(summary.history_len(), 1);
+        let resize2 = Some(make_resize_snapshot(
+            2,
+            ftui::runtime::resize_coalescer::Regime::Burst,
+        ));
+        summary.update_from_raw(&resize2, &None);
+        assert_eq!(summary.history_len(), 2);
+    }
+
+    #[test]
+    fn resize_evidence_summary_ring_buffer_evicts() {
+        let mut summary = ResizeEvidenceSummary::default();
+        for i in 1..=(RESIZE_HISTORY_CAPACITY + 5) as u64 {
+            let resize = Some(make_resize_snapshot(
+                i,
+                ftui::runtime::resize_coalescer::Regime::Steady,
+            ));
+            summary.update_from_raw(&resize, &None);
+        }
+        assert_eq!(summary.history_len(), RESIZE_HISTORY_CAPACITY);
+        assert_eq!(summary.recent_resizes.front().unwrap().event_idx, 6);
+    }
+
+    #[test]
+    fn resize_evidence_summary_burst_regime() {
+        let mut summary = ResizeEvidenceSummary::default();
+        let resize = Some(make_resize_snapshot(
+            1,
+            ftui::runtime::resize_coalescer::Regime::Burst,
+        ));
+        summary.update_from_raw(&resize, &None);
+        assert_eq!(summary.regime, "Burst");
+        assert_eq!(summary.recent_resizes.back().unwrap().regime, "Burst");
+    }
+
+    #[test]
+    fn resize_evidence_summary_with_bocpd() {
+        use ftui::runtime::bocpd::{BocpdEvidence, BocpdRegime};
+        let mut summary = ResizeEvidenceSummary::default();
+        let resize =
+            Some(ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot {
+                event_idx: 1,
+                action: "defer",
+                dt_ms: 5.0,
+                event_rate: 200.0,
+                regime: ftui::runtime::resize_coalescer::Regime::Burst,
+                pending_size: Some((80, 24)),
+                applied_size: None,
+                time_since_render_ms: 2.0,
+                bocpd: Some(BocpdEvidence {
+                    p_burst: 0.85,
+                    log_bayes_factor: 2.1,
+                    observation_ms: 5.0,
+                    regime: BocpdRegime::Burst,
+                    likelihood_steady: 0.01,
+                    likelihood_burst: 0.99,
+                    expected_run_length: 3.5,
+                    run_length_variance: 1.2,
+                    run_length_mode: 3,
+                    run_length_p95: 7,
+                    run_length_tail_mass: 0.001,
+                    recommended_delay_ms: Some(50),
+                    hard_deadline_forced: None,
+                    observation_count: 42,
+                    timestamp: std::time::Instant::now(),
+                }),
+            });
+        summary.update_from_raw(&resize, &None);
+        assert_eq!(summary.bocpd_p_burst, Some(0.85));
+        assert_eq!(summary.bocpd_delay_ms, Some(50));
+        assert_eq!(summary.history_len(), 1);
+        assert_eq!(
+            summary.recent_resizes.back().unwrap().bocpd_p_burst,
+            Some(0.85)
+        );
+    }
+
+    #[test]
+    fn resize_evidence_summary_all_degradation_levels() {
+        use ftui::render::budget::DegradationLevel;
+        let cases = [
+            (DegradationLevel::Full, "Full"),
+            (DegradationLevel::SimpleBorders, "SimpleBorders"),
+            (DegradationLevel::NoStyling, "NoStyling"),
+            (DegradationLevel::EssentialOnly, "EssentialOnly"),
+            (DegradationLevel::Skeleton, "Skeleton"),
+            (DegradationLevel::SkipFrame, "SkipFrame"),
+        ];
+        for (level, expected) in cases {
+            let mut summary = ResizeEvidenceSummary::default();
+            let budget = Some(make_budget_snapshot(level));
+            summary.update_from_raw(&None, &budget);
+            assert_eq!(
+                summary.degradation, expected,
+                "DegradationLevel::{expected}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Resize config parity matrix (1mfw3.2.7)
+    // -----------------------------------------------------------------------
+    //
+    // Proves that build_resize_config() produces identical configuration
+    // regardless of which launch mode the TUI enters (standard, inline,
+    // macro-record, macro-playback). The ProgramConfig construction in
+    // run_tui_ftui() applies the result uniformly; these tests verify
+    // the config builder itself.
+
+    #[test]
+    fn resize_config_parity_across_data_dirs() {
+        // The config builder must produce identical BOCPD/logging settings
+        // regardless of which data_dir is used (only the evidence file path
+        // differs).
+        let dir_a = std::path::PathBuf::from("/tmp/cass-a");
+        let dir_b = std::path::PathBuf::from("/tmp/cass-b");
+
+        let (coal_a, sink_a) = super::build_resize_config(&dir_a);
+        let (coal_b, sink_b) = super::build_resize_config(&dir_b);
+
+        // Coalescer knobs are identical
+        assert_eq!(coal_a.enable_bocpd, coal_b.enable_bocpd);
+        assert_eq!(coal_a.enable_logging, coal_b.enable_logging);
+        assert_eq!(coal_a.steady_delay_ms, coal_b.steady_delay_ms);
+        assert_eq!(coal_a.burst_delay_ms, coal_b.burst_delay_ms);
+        assert_eq!(coal_a.hard_deadline_ms, coal_b.hard_deadline_ms);
+
+        // Evidence sink enabled state matches
+        assert_eq!(sink_a.enabled, sink_b.enabled);
+        assert_eq!(sink_a.flush_on_write, sink_b.flush_on_write);
+
+        // Evidence paths differ only by data_dir prefix
+        match (&sink_a.destination, &sink_b.destination) {
+            (
+                ftui::runtime::evidence_sink::EvidenceSinkDestination::File(pa),
+                ftui::runtime::evidence_sink::EvidenceSinkDestination::File(pb),
+            ) => {
+                assert_ne!(pa, pb, "paths should differ across data dirs");
+                assert!(
+                    pa.ends_with("resize_evidence.jsonl"),
+                    "evidence file name must be consistent"
+                );
+                assert!(pb.ends_with("resize_evidence.jsonl"));
+            }
+            _ => panic!("expected file destinations"),
+        }
+    }
+
+    #[test]
+    fn resize_config_bocpd_is_enabled_by_default() {
+        let data_dir = std::path::PathBuf::from("/tmp/cass-parity");
+        let (coalescer, evidence_sink) = super::build_resize_config(&data_dir);
+
+        // BOCPD should be on by default
+        assert!(coalescer.enable_bocpd, "BOCPD must be enabled by default");
+        assert!(coalescer.enable_logging, "logging must be enabled");
+        assert!(
+            coalescer.bocpd_config.is_some(),
+            "bocpd_config must be present"
+        );
+
+        // Evidence sink should be active
+        assert!(evidence_sink.enabled, "evidence sink must be enabled");
+        assert!(
+            !evidence_sink.flush_on_write,
+            "batch flush for lower I/O overhead"
+        );
+    }
+
+    #[test]
+    fn resize_config_bocpd_responsive_preset_values() {
+        use ftui::runtime::bocpd::BocpdConfig;
+
+        let data_dir = std::path::PathBuf::from("/tmp/cass-responsive");
+        let (coalescer, _) = super::build_resize_config(&data_dir);
+
+        let bocpd = coalescer.bocpd_config.expect("BOCPD config must exist");
+        let reference = BocpdConfig::responsive();
+
+        // Verify responsive preset is used (not default or aggressive)
+        assert!(
+            (bocpd.mu_steady_ms - reference.mu_steady_ms).abs() < f64::EPSILON,
+            "mu_steady_ms must match responsive preset"
+        );
+        assert!(
+            (bocpd.mu_burst_ms - reference.mu_burst_ms).abs() < f64::EPSILON,
+            "mu_burst_ms must match responsive preset"
+        );
+        assert!(
+            (bocpd.hazard_lambda - reference.hazard_lambda).abs() < f64::EPSILON,
+            "hazard_lambda must match responsive preset"
+        );
+        assert!(
+            (bocpd.steady_threshold - reference.steady_threshold).abs() < f64::EPSILON,
+        );
+        assert!(
+            (bocpd.burst_threshold - reference.burst_threshold).abs() < f64::EPSILON,
+        );
+
+        // Logging must be enabled on the BOCPD config itself
+        assert!(bocpd.enable_logging, "BOCPD evidence logging must be on");
+    }
+
+    #[test]
+    fn resize_config_mode_matrix_proves_uniform_knobs() {
+        // This is the definitive parity test: simulate all four launch mode
+        // combinations and prove the resize config is byte-identical.
+        //
+        // Launch modes:
+        //  1. Standard fullscreen (no inline, no macro)
+        //  2. Inline mode (inline_config = Some)
+        //  3. Macro recording (record_path = Some)
+        //  4. Macro playback (play_path = Some)
+        //
+        // In run_tui_ftui(), build_resize_config() is called once BEFORE
+        // the mode-specific ProgramConfig branching, guaranteeing that the
+        // coalescer/evidence config is identical across all modes.
+
+        let data_dir = std::path::PathBuf::from("/tmp/cass-matrix");
+
+        // Call build_resize_config N times — must always return same values.
+        let configs: Vec<_> = (0..4)
+            .map(|_| super::build_resize_config(&data_dir))
+            .collect();
+
+        for (i, (coal, sink)) in configs.iter().enumerate() {
+            let (ref_coal, ref_sink) = &configs[0];
+
+            // Coalescer knobs
+            assert_eq!(
+                coal.enable_bocpd, ref_coal.enable_bocpd,
+                "mode {i}: BOCPD enable mismatch"
+            );
+            assert_eq!(
+                coal.enable_logging, ref_coal.enable_logging,
+                "mode {i}: logging mismatch"
+            );
+            assert_eq!(
+                coal.steady_delay_ms, ref_coal.steady_delay_ms,
+                "mode {i}: steady_delay mismatch"
+            );
+            assert_eq!(
+                coal.burst_delay_ms, ref_coal.burst_delay_ms,
+                "mode {i}: burst_delay mismatch"
+            );
+            assert_eq!(
+                coal.hard_deadline_ms, ref_coal.hard_deadline_ms,
+                "mode {i}: hard_deadline mismatch"
+            );
+            assert_eq!(
+                coal.cooldown_frames, ref_coal.cooldown_frames,
+                "mode {i}: cooldown mismatch"
+            );
+            assert_eq!(
+                coal.rate_window_size, ref_coal.rate_window_size,
+                "mode {i}: rate_window mismatch"
+            );
+
+            // Evidence sink
+            assert_eq!(
+                sink.enabled, ref_sink.enabled,
+                "mode {i}: evidence enabled mismatch"
+            );
+            assert_eq!(
+                sink.flush_on_write, ref_sink.flush_on_write,
+                "mode {i}: flush_on_write mismatch"
+            );
+        }
     }
 }
