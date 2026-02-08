@@ -137,8 +137,6 @@ pub const OPEN_CONFIRM_THRESHOLD: usize = 12;
 const PANEL_RATIO_MIN: f64 = 0.25;
 const PANEL_RATIO_MAX: f64 = 0.75;
 const FOOTER_HINT_ROOT_ID: HelpId = HelpId(1_000_000);
-const FOOTER_HINT_WIDE_MIN_WIDTH: u16 = 100;
-const FOOTER_HINT_MEDIUM_MIN_WIDTH: u16 = 60;
 
 #[derive(Clone, Debug)]
 struct FooterHintCandidate {
@@ -881,6 +879,33 @@ pub struct AnalyticsTopology {
     pub show_footer_hints: bool,
 }
 
+/// Per-breakpoint visibility policy for optional UI elements.
+///
+/// Controls what non-essential chrome is shown at each breakpoint. When an
+/// element is hidden, its action remains accessible via keyboard shortcut
+/// or the command palette — visibility only affects the visual affordance.
+///
+/// # Visibility Matrix
+///
+/// | Element            | Narrow | MediumNarrow | Medium | Wide |
+/// |--------------------|--------|--------------|--------|------|
+/// | Theme name in bar  | No     | Yes          | Yes    | Yes  |
+/// | Footer key hints   | 0      | 2 slots      | 4 slots| 4   |
+/// | Footer hint budget | 0      | 22 chars     | 52     | 52  |
+/// | Split handle       | No     | Yes          | Yes    | Yes  |
+/// | Saved view paths   | Trunc  | Trunc        | Full   | Full |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisibilityPolicy {
+    /// Show the theme name in the search bar title.
+    pub show_theme_in_title: bool,
+    /// Number of contextual key hint slots in the status footer.
+    pub footer_hint_slots: u8,
+    /// Character budget for all footer key hints combined.
+    pub footer_hint_budget: u16,
+    /// Maximum display length for saved-view path labels (0 = hide).
+    pub saved_view_path_max: u16,
+}
+
 /// Ultra-narrow fallback policy constants.
 ///
 /// When the terminal is smaller than these minimums, we show a compact
@@ -967,6 +992,36 @@ impl LayoutBreakpoint {
                 show_filter_summary: true,
                 header_rows: 3,
                 show_footer_hints: true,
+            },
+        }
+    }
+
+    /// Return the visibility policy for optional UI elements at this breakpoint.
+    pub fn visibility_policy(self) -> VisibilityPolicy {
+        match self {
+            Self::Narrow => VisibilityPolicy {
+                show_theme_in_title: false,
+                footer_hint_slots: 0,
+                footer_hint_budget: 0,
+                saved_view_path_max: 20,
+            },
+            Self::MediumNarrow => VisibilityPolicy {
+                show_theme_in_title: true,
+                footer_hint_slots: 2,
+                footer_hint_budget: 22,
+                saved_view_path_max: 40,
+            },
+            Self::Medium => VisibilityPolicy {
+                show_theme_in_title: true,
+                footer_hint_slots: 4,
+                footer_hint_budget: 52,
+                saved_view_path_max: 60,
+            },
+            Self::Wide => VisibilityPolicy {
+                show_theme_in_title: true,
+                footer_hint_slots: 4,
+                footer_hint_budget: 52,
+                saved_view_path_max: 80,
             },
         }
     }
@@ -2395,23 +2450,15 @@ impl CassApp {
     }
 
     fn footer_hint_slots(width: u16) -> usize {
-        if width >= FOOTER_HINT_WIDE_MIN_WIDTH {
-            4
-        } else if width >= FOOTER_HINT_MEDIUM_MIN_WIDTH {
-            2
-        } else {
-            0
-        }
+        LayoutBreakpoint::from_width(width)
+            .visibility_policy()
+            .footer_hint_slots as usize
     }
 
     fn footer_hint_budget(width: u16) -> usize {
-        if width >= FOOTER_HINT_WIDE_MIN_WIDTH {
-            52
-        } else if width >= FOOTER_HINT_MEDIUM_MIN_WIDTH {
-            22
-        } else {
-            0
-        }
+        LayoutBreakpoint::from_width(width)
+            .visibility_policy()
+            .footer_hint_budget as usize
     }
 
     fn footer_hint_candidates(&self) -> Vec<FooterHintCandidate> {
@@ -9716,8 +9763,7 @@ impl super::ftui_adapter::Model for CassApp {
             if y < area.height {
                 // Paragraph handles overflow/truncation internally, so we
                 // can pass the full message and let it clip to the area.
-                Paragraph::new(msg)
-                    .render(Rect::new(area.x, area.y + y, area.width, 1), frame);
+                Paragraph::new(msg).render(Rect::new(area.x, area.y + y, area.width, 1), frame);
             }
             return;
         }
@@ -9847,7 +9893,8 @@ impl super::ftui_adapter::Model for CassApp {
                     SearchMode::Semantic => "semantic",
                     SearchMode::Hybrid => "hybrid",
                 };
-                let query_title = if area.width >= 80 {
+                let vis = breakpoint.visibility_policy();
+                let query_title = if vis.show_theme_in_title {
                     format!("cass | {} | {mode_label}", self.theme_preset.name())
                 } else {
                     format!("cass | {mode_label}")
@@ -14230,22 +14277,22 @@ mod tests {
             "wide footer should show contextual open hint"
         );
 
-        // Medium: still shows at least one contextual hint.
-        let medium_text = ftui_harness::buffer_to_text(&render_at_degradation(
+        // MediumNarrow: still shows at least one contextual hint.
+        let medium_narrow_text = ftui_harness::buffer_to_text(&render_at_degradation(
             &app,
-            70,
+            90,
             24,
             ftui::render::budget::DegradationLevel::Full,
         ));
         assert!(
-            medium_text.contains("Enter=open"),
-            "medium footer should keep essential contextual hints"
+            medium_narrow_text.contains("Enter=open"),
+            "medium-narrow footer should keep essential contextual hints"
         );
 
         // Narrow: hints collapse to keep the status compact.
         let narrow_text = ftui_harness::buffer_to_text(&render_at_degradation(
             &app,
-            50,
+            60,
             24,
             ftui::render::budget::DegradationLevel::Full,
         ));
@@ -15257,6 +15304,77 @@ mod tests {
         assert!(
             text.contains("cass"),
             "normal size should render full UI with app name"
+        );
+    }
+
+    // =====================================================================
+    // 1mfw3.4.3 — Visibility policy
+    // =====================================================================
+
+    #[test]
+    fn visibility_narrow_hides_theme_and_hints() {
+        let v = LayoutBreakpoint::Narrow.visibility_policy();
+        assert!(!v.show_theme_in_title);
+        assert_eq!(v.footer_hint_slots, 0);
+        assert_eq!(v.footer_hint_budget, 0);
+    }
+
+    #[test]
+    fn visibility_medium_narrow_shows_theme() {
+        let v = LayoutBreakpoint::MediumNarrow.visibility_policy();
+        assert!(v.show_theme_in_title);
+        assert_eq!(v.footer_hint_slots, 2);
+        assert_eq!(v.footer_hint_budget, 22);
+    }
+
+    #[test]
+    fn visibility_wide_full_hints() {
+        let v = LayoutBreakpoint::Wide.visibility_policy();
+        assert!(v.show_theme_in_title);
+        assert_eq!(v.footer_hint_slots, 4);
+        assert_eq!(v.footer_hint_budget, 52);
+    }
+
+    #[test]
+    fn visibility_hint_budget_monotonic() {
+        // Budget should increase or stay the same as breakpoint widens.
+        let breakpoints = [
+            LayoutBreakpoint::Narrow,
+            LayoutBreakpoint::MediumNarrow,
+            LayoutBreakpoint::Medium,
+            LayoutBreakpoint::Wide,
+        ];
+        let mut prev_budget = 0u16;
+        for bp in breakpoints {
+            let v = bp.visibility_policy();
+            assert!(
+                v.footer_hint_budget >= prev_budget,
+                "hint budget should be monotonically increasing"
+            );
+            prev_budget = v.footer_hint_budget;
+        }
+    }
+
+    #[test]
+    fn footer_hint_slots_uses_visibility_policy() {
+        // Verify the refactored function delegates to visibility_policy.
+        assert_eq!(CassApp::footer_hint_slots(40), 0); // Narrow
+        assert_eq!(CassApp::footer_hint_slots(100), 2); // MediumNarrow
+        assert_eq!(CassApp::footer_hint_slots(140), 4); // Medium
+        assert_eq!(CassApp::footer_hint_slots(200), 4); // Wide
+    }
+
+    #[test]
+    fn search_bar_shows_theme_at_medium_narrow() {
+        use ftui_harness::buffer_to_text;
+        let app = CassApp::default();
+        let buf =
+            render_at_degradation(&app, 100, 24, ftui::render::budget::DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+        // MediumNarrow (100 cols) should show theme name in title
+        assert!(
+            text.contains(app.theme_preset.name()),
+            "medium-narrow should show theme name in search bar"
         );
     }
 
