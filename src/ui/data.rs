@@ -686,6 +686,38 @@ impl TimelineContract {
     }
 }
 
+/// Cockpit display mode controlling overlay sizing behaviour.
+///
+/// **Overlay** is a compact bottom-right panel (default).
+/// **Expanded** is a taller panel that occupies more vertical space,
+/// allowing multi-panel stacking and more timeline events.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CockpitMode {
+    /// Compact overlay anchored to bottom-right corner.
+    #[default]
+    Overlay,
+    /// Expanded surface that takes more vertical space for deeper inspection.
+    Expanded,
+}
+
+impl CockpitMode {
+    /// Cycle to the next mode.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Overlay => Self::Expanded,
+            Self::Expanded => Self::Overlay,
+        }
+    }
+
+    /// Short label for status display.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Overlay => "overlay",
+            Self::Expanded => "expanded",
+        }
+    }
+}
+
 /// Aggregated cockpit state holding all panel contracts.
 ///
 /// This struct is the single rendering-ready data source for the
@@ -697,6 +729,8 @@ pub struct CockpitState {
     pub active_panel: CockpitPanel,
     /// Whether cockpit mode is active (vs classic inspector tabs).
     pub enabled: bool,
+    /// Display mode (overlay vs expanded).
+    pub mode: CockpitMode,
     /// Diff strategy contract.
     pub diff: DiffStrategyContract,
     /// Resize regime contract.
@@ -1136,5 +1170,31 @@ mod tests {
         assert_eq!(policy.no_data, "\u{2014}");
         assert!(policy.awaiting.contains("awaiting"));
         assert!(policy.disabled.contains("disabled"));
+    }
+
+    // -- CockpitMode tests (1mfw3.3.3) ------------------------------------
+
+    #[test]
+    fn cockpit_mode_default_is_overlay() {
+        assert_eq!(CockpitMode::default(), CockpitMode::Overlay);
+    }
+
+    #[test]
+    fn cockpit_mode_cycle() {
+        assert_eq!(CockpitMode::Overlay.cycle(), CockpitMode::Expanded);
+        assert_eq!(CockpitMode::Expanded.cycle(), CockpitMode::Overlay);
+    }
+
+    #[test]
+    fn cockpit_mode_labels() {
+        assert_eq!(CockpitMode::Overlay.label(), "overlay");
+        assert_eq!(CockpitMode::Expanded.label(), "expanded");
+    }
+
+    #[test]
+    fn cockpit_state_includes_mode() {
+        let state = CockpitState::new();
+        assert_eq!(state.mode, CockpitMode::Overlay);
+        assert!(!state.enabled);
     }
 }

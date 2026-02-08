@@ -1063,40 +1063,70 @@ impl LayoutBreakpoint {
         use crate::ui::data::CockpitMode;
         match (self, mode) {
             (Self::Narrow, CockpitMode::Overlay) => CockpitTopology {
-                overlay_max_w: 42, overlay_max_h: 10,
-                overlay_min_w: 20, overlay_min_h: 6,
-                use_short_labels: true, show_mode_indicator: false,
-                max_timeline_events: 3, label_width: 6, show_footer_hint: false,
+                overlay_max_w: 42,
+                overlay_max_h: 10,
+                overlay_min_w: 20,
+                overlay_min_h: 6,
+                use_short_labels: true,
+                show_mode_indicator: false,
+                max_timeline_events: 3,
+                label_width: 6,
+                show_footer_hint: false,
             },
             (Self::Narrow, CockpitMode::Expanded) => CockpitTopology {
-                overlay_max_w: 42, overlay_max_h: 16,
-                overlay_min_w: 20, overlay_min_h: 6,
-                use_short_labels: true, show_mode_indicator: false,
-                max_timeline_events: 6, label_width: 6, show_footer_hint: true,
+                overlay_max_w: 42,
+                overlay_max_h: 16,
+                overlay_min_w: 20,
+                overlay_min_h: 6,
+                use_short_labels: true,
+                show_mode_indicator: false,
+                max_timeline_events: 6,
+                label_width: 6,
+                show_footer_hint: true,
             },
             (Self::MediumNarrow, CockpitMode::Overlay) => CockpitTopology {
-                overlay_max_w: 56, overlay_max_h: 12,
-                overlay_min_w: 20, overlay_min_h: 6,
-                use_short_labels: false, show_mode_indicator: true,
-                max_timeline_events: 5, label_width: 8, show_footer_hint: true,
+                overlay_max_w: 56,
+                overlay_max_h: 12,
+                overlay_min_w: 20,
+                overlay_min_h: 6,
+                use_short_labels: false,
+                show_mode_indicator: true,
+                max_timeline_events: 5,
+                label_width: 8,
+                show_footer_hint: true,
             },
             (Self::MediumNarrow, CockpitMode::Expanded) => CockpitTopology {
-                overlay_max_w: 56, overlay_max_h: 22,
-                overlay_min_w: 20, overlay_min_h: 6,
-                use_short_labels: false, show_mode_indicator: true,
-                max_timeline_events: 10, label_width: 8, show_footer_hint: true,
+                overlay_max_w: 56,
+                overlay_max_h: 22,
+                overlay_min_w: 20,
+                overlay_min_h: 6,
+                use_short_labels: false,
+                show_mode_indicator: true,
+                max_timeline_events: 10,
+                label_width: 8,
+                show_footer_hint: true,
             },
             (Self::Medium | Self::Wide, CockpitMode::Overlay) => CockpitTopology {
-                overlay_max_w: 66, overlay_max_h: 16,
-                overlay_min_w: 20, overlay_min_h: 6,
-                use_short_labels: false, show_mode_indicator: true,
-                max_timeline_events: 8, label_width: 9, show_footer_hint: true,
+                overlay_max_w: 66,
+                overlay_max_h: 16,
+                overlay_min_w: 20,
+                overlay_min_h: 6,
+                use_short_labels: false,
+                show_mode_indicator: true,
+                max_timeline_events: 8,
+                label_width: 9,
+                show_footer_hint: true,
             },
             (Self::Medium | Self::Wide, CockpitMode::Expanded) => CockpitTopology {
-                overlay_max_w: 72, overlay_max_h: 30,
-                overlay_min_w: 20, overlay_min_h: 6,
-                use_short_labels: false, show_mode_indicator: true,
-                max_timeline_events: 18, label_width: 9, show_footer_hint: true,
+                overlay_max_w: 72,
+                overlay_max_h: 30,
+                overlay_min_w: 20,
+                overlay_min_h: 6,
+                use_short_labels: false,
+                show_mode_indicator: true,
+                max_timeline_events: 18,
+                label_width: 9,
+                show_footer_hint: true,
             },
         }
     }
@@ -5052,7 +5082,10 @@ impl CassApp {
         let overlay_w = topo.overlay_max_w.min(area.width.saturating_sub(2));
         // For low-height terminals, further clamp to 60% of available height
         let height_cap = (area.height as u32 * 60 / 100).max(topo.overlay_min_h as u32) as u16;
-        let overlay_h = topo.overlay_max_h.min(height_cap).min(area.height.saturating_sub(2));
+        let overlay_h = topo
+            .overlay_max_h
+            .min(height_cap)
+            .min(area.height.saturating_sub(2));
         if overlay_w < topo.overlay_min_w || overlay_h < topo.overlay_min_h {
             return; // Too small — auto-disable
         }
@@ -5540,9 +5573,7 @@ impl CassApp {
         if topo.show_footer_hint {
             let hint = if self.cockpit.enabled {
                 match self.cockpit.mode {
-                    crate::ui::data::CockpitMode::Overlay => {
-                        "^⇧I:close Tab:tab c:classic e:expand"
-                    }
+                    crate::ui::data::CockpitMode::Overlay => "^⇧I:close Tab:tab c:classic e:expand",
                     crate::ui::data::CockpitMode::Expanded => {
                         "^⇧I:close Tab:tab c:classic e:shrink"
                     }
@@ -13835,11 +13866,21 @@ mod tests {
     fn palette_action_ordering_is_deterministic() {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::PaletteOpened);
-        let a1: Vec<String> = app.palette_state.all_actions.iter().map(|a| a.label.clone()).collect();
+        let a1: Vec<String> = app
+            .palette_state
+            .all_actions
+            .iter()
+            .map(|a| a.label.clone())
+            .collect();
         assert!(!a1.is_empty());
         let _ = app.update(CassMsg::PaletteClosed);
         let _ = app.update(CassMsg::PaletteOpened);
-        let a2: Vec<String> = app.palette_state.all_actions.iter().map(|a| a.label.clone()).collect();
+        let a2: Vec<String> = app
+            .palette_state
+            .all_actions
+            .iter()
+            .map(|a| a.label.clone())
+            .collect();
         assert_eq!(a1, a2, "deterministic ordering");
     }
     #[test]
@@ -13859,7 +13900,9 @@ mod tests {
     fn palette_lifecycle_filter_navigate_close() {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::PaletteOpened);
-        for _ in 0..6 { let _ = app.update(CassMsg::PaletteMatchModeCycled); }
+        for _ in 0..6 {
+            let _ = app.update(CassMsg::PaletteMatchModeCycled);
+        }
         assert_eq!(app.palette_state.match_mode, PaletteMatchMode::All);
         let _ = app.update(CassMsg::PaletteSelectionMoved { delta: 2 });
         let _ = app.update(CassMsg::PaletteClosed);
@@ -13896,15 +13939,23 @@ mod tests {
     fn palette_result_dispatch_all_variants() {
         let mut app = CassApp::default();
         for r in [
-            PaletteResult::ToggleTheme, PaletteResult::CycleDensity,
-            PaletteResult::ToggleHelpStrip, PaletteResult::OpenUpdateBanner,
+            PaletteResult::ToggleTheme,
+            PaletteResult::CycleDensity,
+            PaletteResult::ToggleHelpStrip,
+            PaletteResult::OpenUpdateBanner,
             PaletteResult::EnterInputMode(InputModeTarget::Agent),
             PaletteResult::EnterInputMode(InputModeTarget::Workspace),
             PaletteResult::EnterInputMode(InputModeTarget::CreatedFrom),
-            PaletteResult::SetTimeFilter { from: TimeFilterPreset::Today },
-            PaletteResult::SetTimeFilter { from: TimeFilterPreset::LastWeek },
-            PaletteResult::OpenSavedViews, PaletteResult::SaveViewSlot(1),
-            PaletteResult::LoadViewSlot(1), PaletteResult::OpenBulkActions,
+            PaletteResult::SetTimeFilter {
+                from: TimeFilterPreset::Today,
+            },
+            PaletteResult::SetTimeFilter {
+                from: TimeFilterPreset::LastWeek,
+            },
+            PaletteResult::OpenSavedViews,
+            PaletteResult::SaveViewSlot(1),
+            PaletteResult::LoadViewSlot(1),
+            PaletteResult::OpenBulkActions,
             PaletteResult::ReloadIndex,
             PaletteResult::OpenAnalyticsView(AnalyticsTarget::Dashboard),
             PaletteResult::OpenAnalyticsView(AnalyticsTarget::Explorer),
@@ -13917,18 +13968,26 @@ mod tests {
             PaletteResult::Screenshot(ScreenshotTarget::Html),
             PaletteResult::Screenshot(ScreenshotTarget::Svg),
             PaletteResult::Screenshot(ScreenshotTarget::Text),
-            PaletteResult::ToggleMacroRecording, PaletteResult::OpenSources,
+            PaletteResult::ToggleMacroRecording,
+            PaletteResult::OpenSources,
             PaletteResult::Noop,
-        ] { let _ = app.palette_result_to_cmd(r); }
+        ] {
+            let _ = app.palette_result_to_cmd(r);
+        }
     }
     #[test]
     fn palette_filter_mode_round_trip() {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::PaletteOpened);
         let init = app.palette_state.match_mode;
-        for exp in [PaletteMatchMode::Exact, PaletteMatchMode::Prefix,
-            PaletteMatchMode::WordStart, PaletteMatchMode::Substring,
-            PaletteMatchMode::Fuzzy, PaletteMatchMode::All] {
+        for exp in [
+            PaletteMatchMode::Exact,
+            PaletteMatchMode::Prefix,
+            PaletteMatchMode::WordStart,
+            PaletteMatchMode::Substring,
+            PaletteMatchMode::Fuzzy,
+            PaletteMatchMode::All,
+        ] {
             let _ = app.update(CassMsg::PaletteMatchModeCycled);
             assert_eq!(app.palette_state.match_mode, exp);
         }
@@ -13949,7 +14008,9 @@ mod tests {
     fn palette_selection_clamps_on_filter() {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::PaletteOpened);
-        for _ in 0..10 { let _ = app.update(CassMsg::PaletteSelectionMoved { delta: 1 }); }
+        for _ in 0..10 {
+            let _ = app.update(CassMsg::PaletteSelectionMoved { delta: 1 });
+        }
         assert!(app.palette_state.selected > 0);
         let _ = app.update(CassMsg::PaletteQueryChanged("theme".into()));
         let n = app.palette_state.filtered.len();
@@ -21773,8 +21834,12 @@ mod tests {
     #[test]
     fn cockpit_topology_minimums_consistent() {
         use crate::ui::data::CockpitMode;
-        for bp in [LayoutBreakpoint::Narrow, LayoutBreakpoint::MediumNarrow,
-                    LayoutBreakpoint::Medium, LayoutBreakpoint::Wide] {
+        for bp in [
+            LayoutBreakpoint::Narrow,
+            LayoutBreakpoint::MediumNarrow,
+            LayoutBreakpoint::Medium,
+            LayoutBreakpoint::Wide,
+        ] {
             for mode in [CockpitMode::Overlay, CockpitMode::Expanded] {
                 let t = bp.cockpit_topology(mode);
                 assert_eq!(t.overlay_min_w, 20);
