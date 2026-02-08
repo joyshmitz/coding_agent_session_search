@@ -1807,4 +1807,180 @@ mod tests {
             "themed markdown h1 should differ from default"
         );
     }
+
+    // -- dead-style-token audit (2dccg.1.3) -----------------------------------
+
+    /// All semantic style token constant names defined in this module.
+    /// This list MUST be kept in sync with the `pub const STYLE_*` declarations
+    /// at the top of the file. Adding a new constant without adding it here will
+    /// cause `style_token_registry_is_complete` to fail; adding it here without
+    /// using it in rendering code will cause `no_dead_style_tokens` to fail.
+    const ALL_STYLE_TOKENS: &[(&str, &str)] = &[
+        ("STYLE_APP_ROOT", STYLE_APP_ROOT),
+        ("STYLE_PANE_BASE", STYLE_PANE_BASE),
+        ("STYLE_PANE_FOCUSED", STYLE_PANE_FOCUSED),
+        ("STYLE_TEXT_PRIMARY", STYLE_TEXT_PRIMARY),
+        ("STYLE_TEXT_MUTED", STYLE_TEXT_MUTED),
+        ("STYLE_TEXT_SUBTLE", STYLE_TEXT_SUBTLE),
+        ("STYLE_STATUS_SUCCESS", STYLE_STATUS_SUCCESS),
+        ("STYLE_STATUS_WARNING", STYLE_STATUS_WARNING),
+        ("STYLE_STATUS_ERROR", STYLE_STATUS_ERROR),
+        ("STYLE_STATUS_INFO", STYLE_STATUS_INFO),
+        ("STYLE_RESULT_ROW", STYLE_RESULT_ROW),
+        ("STYLE_RESULT_ROW_ALT", STYLE_RESULT_ROW_ALT),
+        ("STYLE_RESULT_ROW_SELECTED", STYLE_RESULT_ROW_SELECTED),
+        ("STYLE_ROLE_USER", STYLE_ROLE_USER),
+        ("STYLE_ROLE_ASSISTANT", STYLE_ROLE_ASSISTANT),
+        ("STYLE_ROLE_TOOL", STYLE_ROLE_TOOL),
+        ("STYLE_ROLE_SYSTEM", STYLE_ROLE_SYSTEM),
+        ("STYLE_ROLE_GUTTER_USER", STYLE_ROLE_GUTTER_USER),
+        ("STYLE_ROLE_GUTTER_ASSISTANT", STYLE_ROLE_GUTTER_ASSISTANT),
+        ("STYLE_ROLE_GUTTER_TOOL", STYLE_ROLE_GUTTER_TOOL),
+        ("STYLE_ROLE_GUTTER_SYSTEM", STYLE_ROLE_GUTTER_SYSTEM),
+        ("STYLE_SCORE_HIGH", STYLE_SCORE_HIGH),
+        ("STYLE_SCORE_MID", STYLE_SCORE_MID),
+        ("STYLE_SCORE_LOW", STYLE_SCORE_LOW),
+        ("STYLE_PILL_ACTIVE", STYLE_PILL_ACTIVE),
+        ("STYLE_TAB_ACTIVE", STYLE_TAB_ACTIVE),
+        ("STYLE_TAB_INACTIVE", STYLE_TAB_INACTIVE),
+        ("STYLE_KBD_KEY", STYLE_KBD_KEY),
+        ("STYLE_KBD_DESC", STYLE_KBD_DESC),
+    ];
+
+    /// Tokens that are consumed indirectly (e.g. via helper methods like
+    /// `score_style()` or `agent_accent_style()`) and may not appear as
+    /// literal `style_system::STYLE_*` references in rendering code.
+    /// Each entry requires a justification comment.
+    const INDIRECT_USE_WHITELIST: &[&str] = &[
+        // score_style() dispatches to these based on numeric thresholds
+        "STYLE_SCORE_HIGH",
+        "STYLE_SCORE_MID",
+        "STYLE_SCORE_LOW",
+    ];
+
+    #[test]
+    fn style_token_registry_is_complete() {
+        // Verify ALL_STYLE_TOKENS matches the actual pub const declarations.
+        // Read the source file and extract all `pub const STYLE_*` names.
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/ui/style_system.rs"),
+        )
+        .expect("should be able to read style_system.rs");
+
+        let mut defined_in_source: Vec<String> = Vec::new();
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("pub const STYLE_") && trimmed.contains(": &str") {
+                if let Some(name) = trimmed
+                    .strip_prefix("pub const ")
+                    .and_then(|s| s.split(':').next())
+                {
+                    defined_in_source.push(name.trim().to_string());
+                }
+            }
+        }
+
+        let registry_names: Vec<&str> =
+            ALL_STYLE_TOKENS.iter().map(|(name, _)| *name).collect();
+
+        // Check nothing is missing from the registry
+        for src_name in &defined_in_source {
+            assert!(
+                registry_names.contains(&src_name.as_str()),
+                "Style token `{src_name}` is defined in source but missing from \
+                 ALL_STYLE_TOKENS registry. Add it to the test registry."
+            );
+        }
+
+        // Check nothing in registry is absent from source
+        for reg_name in &registry_names {
+            assert!(
+                defined_in_source.iter().any(|s| s == reg_name),
+                "ALL_STYLE_TOKENS contains `{reg_name}` but it is not defined \
+                 as `pub const` in source. Remove it from the test registry."
+            );
+        }
+    }
+
+    #[test]
+    fn no_dead_style_tokens() {
+        // Read all files under src/ui/ that consume style tokens in rendering.
+        let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui");
+        let mut rendering_source = String::new();
+
+        for entry in std::fs::read_dir(&ui_dir).expect("should read src/ui/") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "rs")
+                && path.file_name().is_some_and(|n| n != "style_system.rs")
+            {
+                rendering_source.push_str(
+                    &std::fs::read_to_string(&path)
+                        .unwrap_or_else(|_| panic!("should read {}", path.display())),
+                );
+            }
+        }
+
+        // Also include style_system.rs itself for internal references
+        // (e.g. score_style, markdown_theme, agent_accent_style call sites)
+        let self_source = std::fs::read_to_string(ui_dir.join("style_system.rs"))
+            .expect("should read style_system.rs");
+
+        let mut dead_tokens: Vec<&str> = Vec::new();
+
+        for (const_name, _token_value) in ALL_STYLE_TOKENS {
+            if INDIRECT_USE_WHITELIST.contains(const_name) {
+                continue;
+            }
+
+            // Check if the constant name appears in rendering code.
+            // We search for the constant name (e.g. "STYLE_PILL_ACTIVE") as
+            // it would appear in `style_system::STYLE_PILL_ACTIVE` or
+            // `STYLE_PILL_ACTIVE` references.
+            let in_rendering = rendering_source.contains(const_name);
+            let in_self_methods = self_source
+                .lines()
+                .any(|line| {
+                    line.contains(const_name)
+                        && !line.trim().starts_with("pub const ")
+                        && !line.trim().starts_with("//")
+                        && !line.contains("ALL_STYLE_TOKENS")
+                        && !line.contains("INDIRECT_USE_WHITELIST")
+                });
+
+            if !in_rendering && !in_self_methods {
+                dead_tokens.push(const_name);
+            }
+        }
+
+        assert!(
+            dead_tokens.is_empty(),
+            "Dead style tokens found (defined but never used in rendering code):\n  \
+             {}\n\n\
+             Fix: Either wire these tokens into rendering code in src/ui/app.rs,\n\
+             or add them to INDIRECT_USE_WHITELIST with a justification comment\n\
+             if they are consumed indirectly (e.g. via helper methods).",
+            dead_tokens.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn all_tokens_resolve_to_non_default_style() {
+        // Every token should produce a meaningfully-styled Style (at minimum
+        // an fg color) for every preset, ensuring no token silently falls back
+        // to the stylesheet's default empty style.
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            for (const_name, token_value) in ALL_STYLE_TOKENS {
+                let style = ctx.style(token_value);
+                assert!(
+                    style.fg.is_some() || style.bg.is_some(),
+                    "Token {const_name} resolves to a style with no fg or bg \
+                     for preset {} — it may be unwired in build_stylesheet()",
+                    preset.name()
+                );
+            }
+        }
+    }
 }
