@@ -52,6 +52,9 @@ pub const STYLE_ROLE_GUTTER_SYSTEM: &str = "role.gutter.system";
 pub const STYLE_SCORE_HIGH: &str = "score.high";
 pub const STYLE_SCORE_MID: &str = "score.mid";
 pub const STYLE_SCORE_LOW: &str = "score.low";
+pub const STYLE_SOURCE_LOCAL: &str = "source.local";
+pub const STYLE_SOURCE_REMOTE: &str = "source.remote";
+pub const STYLE_LOCATION: &str = "location";
 pub const STYLE_PILL_ACTIVE: &str = "pill.active";
 pub const STYLE_TAB_ACTIVE: &str = "tab.active";
 pub const STYLE_TAB_INACTIVE: &str = "tab.inactive";
@@ -1476,6 +1479,22 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
         Style::new().fg(to_packed(score_low_fg)).dim(),
     );
 
+    // Source provenance tokens: local is muted, remote is italic+info to
+    // visually distinguish hosts at a glance.
+    sheet.define(
+        STYLE_SOURCE_LOCAL,
+        Style::new().fg(to_packed(resolved.text_muted)),
+    );
+    sheet.define(
+        STYLE_SOURCE_REMOTE,
+        Style::new().fg(to_packed(resolved.info)).italic(),
+    );
+    // File location path: uses text_subtle to recede behind scores and titles.
+    sheet.define(
+        STYLE_LOCATION,
+        Style::new().fg(to_packed(resolved.text_subtle)),
+    );
+
     sheet.define(
         STYLE_KBD_KEY,
         Style::new().fg(to_packed(resolved.accent)).bold(),
@@ -2041,6 +2060,9 @@ mod tests {
             STYLE_SCORE_HIGH,
             STYLE_SCORE_MID,
             STYLE_SCORE_LOW,
+            STYLE_SOURCE_LOCAL,
+            STYLE_SOURCE_REMOTE,
+            STYLE_LOCATION,
             STYLE_KBD_KEY,
             STYLE_KBD_DESC,
             STYLE_PILL_ACTIVE,
@@ -3039,6 +3061,80 @@ mod tests {
         }
     }
 
+    // -- score/source/location hierarchy (2dccg.9.3) ---------------------------
+
+    #[test]
+    fn source_local_differs_from_source_remote() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let local = ctx.style(STYLE_SOURCE_LOCAL);
+            let remote = ctx.style(STYLE_SOURCE_REMOTE);
+            assert_ne!(
+                local.fg, remote.fg,
+                "{preset:?}: local and remote source fg should differ"
+            );
+        }
+    }
+
+    #[test]
+    fn source_remote_is_italic() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let remote = ctx.style(STYLE_SOURCE_REMOTE);
+            assert!(
+                remote
+                    .attrs
+                    .is_some_and(|a| a.contains(ftui::StyleFlags::ITALIC)),
+                "{preset:?}: remote source should be italic"
+            );
+        }
+    }
+
+    #[test]
+    fn location_style_has_fg() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let loc = ctx.style(STYLE_LOCATION);
+            assert!(
+                loc.fg.is_some(),
+                "{preset:?}: location style should have fg"
+            );
+        }
+    }
+
+    #[test]
+    fn result_scanning_hierarchy_is_ordered() {
+        // Verify the visual hierarchy: score colors > source badge > location > snippet
+        // by checking that higher-priority tokens have bolder emphasis.
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let score_high = ctx.style(STYLE_SCORE_HIGH);
+            let source_local = ctx.style(STYLE_SOURCE_LOCAL);
+            let location = ctx.style(STYLE_LOCATION);
+
+            // Score high should be bold (strongest visual signal).
+            assert!(
+                score_high
+                    .attrs
+                    .is_some_and(|a| a.contains(ftui::StyleFlags::BOLD)),
+                "{preset:?}: score high should be bold"
+            );
+            // Source local and location should NOT be bold (they recede).
+            assert!(
+                !source_local
+                    .attrs
+                    .is_some_and(|a| a.contains(ftui::StyleFlags::BOLD)),
+                "{preset:?}: source local should not be bold"
+            );
+            assert!(
+                !location
+                    .attrs
+                    .is_some_and(|a| a.contains(ftui::StyleFlags::BOLD)),
+                "{preset:?}: location should not be bold"
+            );
+        }
+    }
+
     #[test]
     fn capability_matrix_profiles_resolve_expected_color_profiles() {
         use crate::ui::app::LayoutBreakpoint as LB;
@@ -3553,6 +3649,9 @@ mod tests {
         ("STYLE_SCORE_HIGH", STYLE_SCORE_HIGH),
         ("STYLE_SCORE_MID", STYLE_SCORE_MID),
         ("STYLE_SCORE_LOW", STYLE_SCORE_LOW),
+        ("STYLE_SOURCE_LOCAL", STYLE_SOURCE_LOCAL),
+        ("STYLE_SOURCE_REMOTE", STYLE_SOURCE_REMOTE),
+        ("STYLE_LOCATION", STYLE_LOCATION),
         ("STYLE_PILL_ACTIVE", STYLE_PILL_ACTIVE),
         ("STYLE_TAB_ACTIVE", STYLE_TAB_ACTIVE),
         ("STYLE_TAB_INACTIVE", STYLE_TAB_INACTIVE),
