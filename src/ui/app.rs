@@ -43,8 +43,8 @@ use crate::sources::provenance::SourceFilter;
 use crate::storage::sqlite::SqliteStorage;
 use crate::ui::components::export_modal::{ExportField, ExportModalState, ExportProgress};
 use crate::ui::components::palette::{
-    AnalyticsTarget, InputModeTarget, PaletteResult, PaletteState, ScreenshotTarget,
-    TimeFilterPreset, action_by_id, action_id, default_actions, execute_selected,
+    AnalyticsTarget, InputModeTarget, PaletteMatchMode, PaletteResult, PaletteState,
+    ScreenshotTarget, TimeFilterPreset, action_by_id, action_id, default_actions, execute_selected,
 };
 use crate::ui::components::pills::Pill;
 use crate::ui::components::toast::ToastManager;
@@ -60,7 +60,7 @@ use crate::update_check::{run_self_update, spawn_update_check};
 use ftui::widgets::Widget;
 use ftui::widgets::block::{Alignment, Block};
 use ftui::widgets::borders::{BorderType, Borders};
-use ftui::widgets::command_palette::{ActionItem, CommandPalette};
+use ftui::widgets::command_palette::{ActionItem, CommandPalette, MatchFilter};
 use ftui::widgets::help_registry::{HelpContent, HelpId, HelpRegistry, Keybinding};
 use ftui::widgets::hint_ranker::{HintContext, HintRanker, RankerConfig};
 use ftui::widgets::json_view::{JsonToken, JsonView};
@@ -1086,6 +1086,8 @@ pub enum InspectorTab {
     Diff,
     /// Budget controller / degradation state
     Budget,
+    /// Timeline of adaptive decisions
+    Timeline,
 }
 
 impl InspectorTab {
@@ -1097,6 +1099,7 @@ impl InspectorTab {
             Self::Resize => "Resize",
             Self::Diff => "Diff",
             Self::Budget => "Budget",
+            Self::Timeline => "Log",
         }
     }
 
@@ -1107,7 +1110,8 @@ impl InspectorTab {
             Self::HitRegions => Self::Resize,
             Self::Resize => Self::Diff,
             Self::Diff => Self::Budget,
-            Self::Budget => Self::Timing,
+            Self::Budget => Self::Timeline,
+            Self::Timeline => Self::Timing,
         }
     }
 }
@@ -1190,8 +1194,151 @@ impl FrameTimingStats {
 // ---------------------------------------------------------------------------
 
 /// Cached snapshots of the latest runtime resize/diff/budget decisions.
+/// Populated by polling `ftui::runtime::evidence_telemetry` global snapshots.
 ///
-/// Populated by polling `ftui::runtime::evidence_telemetry` global snapshots
+/// Capacity for the timeline event ring buffer.
+const TIMELINE_CAPACITY: usize = 20;
+
+/// Type of adaptive decision captured in the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineEventKind {
+    /// Diff strategy changed.
+    DiffStrategy,
+    /// Resize regime changed or resize applied.
+    Resize,
+    /// Budget degradation level changed.
+    BudgetChange,
+}
+
+impl TimelineEventKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DiffStrategy => "Diff",
+            Self::Resize => "Resize",
+            Self::BudgetChange => "Budget",
+        }
+    }
+}
+
+/// A single timeline event for the explainability cockpit.
+#[derive(Debug, Clone)]
+pub struct TimelineEvent {
+    /// Event kind for icon/color selection.
+    pub kind: TimelineEventKind,
+    /// Frame index when this event occurred.
+    pub frame_idx: u64,
+    /// Short human-readable summary of what happened.
+    pub summary: String,
+}
+
+/// Ring buffer of recent adaptive decision events.
+#[derive(Debug, Clone, Default)]
+pub struct TimelineBuffer {
+    events: VecDeque<TimelineEvent>,
+    /// Last seen frame indices to detect new events.
+    last_resize_idx: u64,
+    last_diff_idx: u64,
+    last_budget_idx: u64,
+}
+
+impl TimelineBuffer {
+    pub fn new() -> Self {
+        Self {
+            events: VecDeque::with_capacity(TIMELINE_CAPACITY),
+            last_resize_idx: 0,
+            last_diff_idx: 0,
+            last_budget_idx: 0,
+        }
+    }
+
+    /// Update the timeline from current evidence snapshots.
+    /// Only pushes new events when the frame index advances.
+    ///
+    /// Accepts individual Option refs to avoid a double-borrow conflict
+    /// when called from `EvidenceSnapshots::refresh()` (which owns timeline).
+    pub fn update_from_snapshots(
+        &mut self,
+        resize: &Option<ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot>,
+        diff: &Option<ftui::runtime::evidence_telemetry::DiffDecisionSnapshot>,
+        budget: &Option<ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot>,
+    ) {
+        // Check for new resize events
+        if let Some(resize) = resize
+            && resize.event_idx > self.last_resize_idx
+        {
+            self.last_resize_idx = resize.event_idx;
+            let summary = format!(
+                "{} {:?} {}",
+                resize.action,
+                resize.regime,
+                resize
+                    .applied_size
+                    .map(|(w, h)| format!("{w}x{h}"))
+                    .unwrap_or_default()
+            );
+            self.push(TimelineEvent {
+                kind: TimelineEventKind::Resize,
+                frame_idx: resize.event_idx,
+                summary,
+            });
+        }
+
+        // Check for new diff strategy events
+        if let Some(diff) = diff
+            && diff.event_idx > self.last_diff_idx
+        {
+            self.last_diff_idx = diff.event_idx;
+            let summary = format!(
+                "{} ({:.0}% dirty)",
+                diff.strategy_used,
+                diff.evidence.posterior_mean * 100.0
+            );
+            self.push(TimelineEvent {
+                kind: TimelineEventKind::DiffStrategy,
+                frame_idx: diff.event_idx,
+                summary,
+            });
+        }
+
+        // Check for new budget events
+        if let Some(budget) = budget
+            && budget.frame_idx > self.last_budget_idx
+        {
+            self.last_budget_idx = budget.frame_idx;
+            let summary = format!(
+                "{:?} {:?}\u{2192}{:?}",
+                budget.decision, budget.degradation_before, budget.degradation_after
+            );
+            self.push(TimelineEvent {
+                kind: TimelineEventKind::BudgetChange,
+                frame_idx: budget.frame_idx,
+                summary,
+            });
+        }
+    }
+
+    fn push(&mut self, event: TimelineEvent) {
+        if self.events.len() >= TIMELINE_CAPACITY {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+
+    /// Recent events, newest first.
+    pub fn recent(&self) -> impl Iterator<Item = &TimelineEvent> {
+        self.events.iter().rev()
+    }
+
+    /// Number of events in the buffer.
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+}
+
 /// each tick. Inspector/cockpit panels read these during `view()` instead of
 /// parsing the JSONL evidence file at render time.
 #[derive(Debug, Clone, Default)]
@@ -1204,6 +1351,8 @@ pub struct EvidenceSnapshots {
     pub budget: Option<ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot>,
     /// Rendering-ready summary (1mfw3.2.4) — derived from raw snapshots.
     pub summary: ResizeEvidenceSummary,
+    /// Timeline of recent adaptive decisions (1mfw3.3.6).
+    pub timeline: TimelineBuffer,
 }
 
 impl EvidenceSnapshots {
@@ -1214,6 +1363,8 @@ impl EvidenceSnapshots {
         self.diff = ftui::runtime::evidence_telemetry::diff_snapshot();
         self.budget = ftui::runtime::evidence_telemetry::budget_snapshot();
         self.summary.update_from_raw(&self.resize, &self.budget);
+        self.timeline
+            .update_from_snapshots(&self.resize, &self.diff, &self.budget);
     }
 
     /// Whether any evidence has been captured yet.
@@ -1858,8 +2009,20 @@ pub struct ResultItem {
     pub queued: bool,
     /// Stripe background style for this row (even/odd).
     pub stripe_style: ftui::Style,
-    /// Agent foreground+background accent style.
-    pub agent_style: ftui::Style,
+    /// Selected row highlight style (selection_fg/bg).
+    pub selected_style: ftui::Style,
+    /// Agent accent fg + bold (per-agent color from theme).
+    pub agent_accent_style: ftui::Style,
+    /// Score magnitude style (high/mid/low).
+    pub score_style: ftui::Style,
+    /// Primary text style.
+    pub text_primary_style: ftui::Style,
+    /// Muted text style (metadata, location).
+    pub text_muted_style: ftui::Style,
+    /// Subtle text style (snippets).
+    pub text_subtle_style: ftui::Style,
+    /// Success style (for queue checkmark).
+    pub success_style: ftui::Style,
 }
 
 fn source_display_label(source_id: &str, origin_host: Option<&str>) -> String {
@@ -2008,7 +2171,6 @@ impl ResultItem {
 impl RenderItem for ResultItem {
     fn render(&self, area: Rect, frame: &mut super::ftui_adapter::Frame, selected: bool) {
         let hit = &self.hit;
-        let source_badge = self.source_badge();
         let location = self.location_label();
         let title = if hit.title.trim().is_empty() {
             "<untitled>"
@@ -2016,54 +2178,131 @@ impl RenderItem for ResultItem {
             hit.title.trim()
         };
 
-        // Base style: stripe bg unless selected (highlight_style applied by VirtualizedList).
-        let base_style = if selected {
-            self.agent_style
+        let bg_style = if selected {
+            self.selected_style
         } else {
             self.stripe_style
         };
 
-        // Selection and queue indicator prefix.
+        Block::new().style(bg_style).render(area, frame);
+
+        let content_width = usize::from(area.width.saturating_sub(2)).max(20);
+
+        // Line 1: sel + queue + index + agent icon + agent name + title
         let sel_mark = if selected { "\u{25b6} " } else { "  " };
-        let queue_mark = if self.queued { "\u{2713}" } else { " " };
-
-        let content_width = usize::from(area.width.saturating_sub(8)).max(20);
-        let title_line = format!(
-            "{sel_mark}{queue_mark}{:>2}. @{} {}",
-            self.index,
-            elide_text(&hit.agent, 18),
-            elide_text(title, content_width),
-        );
-        let meta_line = format!(
-            "      {} | {}",
-            source_badge,
-            self.metadata_line(content_width.saturating_sub(10)),
-        );
-
-        let text = if self.row_height <= 1 {
-            title_line
+        let queue_span = if self.queued {
+            ftui::text::Span::styled("\u{2713}", self.success_style)
         } else {
-            let mut lines = vec![title_line, meta_line];
-            if self.row_height >= 3 {
-                lines.push(format!("      {}", elide_text(&location, content_width)));
-            }
-            if self.row_height >= 4 {
-                let snippet_budget = usize::from(self.row_height.saturating_sub(3));
-                let snippet_lines = self.snippet_lines(content_width, snippet_budget);
-                for snippet in snippet_lines {
-                    lines.push(format!("      {snippet}"));
-                }
-            }
-            lines.truncate(self.row_height as usize);
-            lines.join("\n")
+            ftui::text::Span::styled(" ", bg_style)
         };
+        let agent_icon = super::components::theme::ThemePalette::agent_icon(&hit.agent);
+        let agent_name = format!("@{}", elide_text(&hit.agent, 18));
+        let title_line = ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled(sel_mark, bg_style),
+            queue_span,
+            ftui::text::Span::styled(format!("{:>2}. ", self.index), self.text_muted_style),
+            ftui::text::Span::styled(format!("{agent_icon} "), self.agent_accent_style),
+            ftui::text::Span::styled(format!("{agent_name} "), self.agent_accent_style),
+            ftui::text::Span::styled(
+                elide_text(title, content_width.saturating_sub(agent_name.len() + 10)),
+                self.text_primary_style.bold(),
+            ),
+        ]);
 
-        Paragraph::new(&*text).style(base_style).render(area, frame);
+        // Line 2: score bar + source badge + metadata
+        let score_bar = score_bar_str(hit.score);
+        let source_badge = self.source_badge();
+        let source_is_remote = hit.source_id != "local";
+        let meta = self.metadata_line(content_width.saturating_sub(20));
+        let meta_line = ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("      ", bg_style),
+            ftui::text::Span::styled(score_bar, self.score_style),
+            ftui::text::Span::styled(" ", bg_style),
+            ftui::text::Span::styled(
+                source_badge,
+                if source_is_remote {
+                    self.text_muted_style.italic()
+                } else {
+                    self.text_muted_style
+                },
+            ),
+            ftui::text::Span::styled(format!(" {meta}"), self.text_muted_style),
+        ]);
+
+        let mut lines = vec![title_line, meta_line];
+
+        if self.row_height >= 3 {
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("      ", bg_style),
+                ftui::text::Span::styled(
+                    elide_text(&location, content_width.saturating_sub(6)),
+                    self.text_muted_style,
+                ),
+            ]));
+        }
+
+        if self.row_height >= 4 {
+            let snippet_budget = usize::from(self.row_height.saturating_sub(3));
+            let snippet_lines = self.snippet_lines(content_width.saturating_sub(6), snippet_budget);
+            for snippet in snippet_lines {
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("      ", bg_style),
+                    ftui::text::Span::styled(snippet, self.text_subtle_style),
+                ]));
+            }
+        }
+
+        lines.truncate(self.row_height as usize);
+        let text = ftui::text::Text::from_lines(lines);
+        Paragraph::new(text).style(bg_style).render(area, frame);
     }
 
     fn height(&self) -> u16 {
         self.row_height
     }
+}
+
+/// Build a Unicode score bar from a score (0.0-10.0).
+fn score_bar_str(score: f32) -> String {
+    const BLOCKS: &[char] = &[
+        ' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+        '\u{2588}',
+    ];
+    let level = ((score.clamp(0.0, 10.0) / 10.0) * 8.0).round() as usize;
+    let bar_char = BLOCKS[level.min(BLOCKS.len() - 1)];
+    let filled: String = std::iter::repeat_n(bar_char, 3).collect();
+    format!("{filled}{score:.1}")
+}
+
+/// Parse a hint string like " | key1=desc key2=desc" into styled spans.
+/// Keys get `key_style`, descriptions get `desc_style`.
+fn build_styled_hints(
+    raw: &str,
+    key_style: ftui::Style,
+    desc_style: ftui::Style,
+) -> Vec<ftui::text::Span<'static>> {
+    let mut spans = Vec::new();
+    if raw.is_empty() {
+        return spans;
+    }
+    spans.push(ftui::text::Span::styled(" ", desc_style));
+    // Hint format: " | key=desc key=desc ..."
+    // Split on spaces, then each token is "key=desc" or a separator.
+    for token in raw.split_whitespace() {
+        if token == "|" {
+            spans.push(ftui::text::Span::styled(" | ", desc_style));
+            continue;
+        }
+        if let Some(eq_pos) = token.find('=') {
+            let key = &token[..eq_pos];
+            let desc = &token[eq_pos + 1..];
+            spans.push(ftui::text::Span::styled(key.to_string(), key_style));
+            spans.push(ftui::text::Span::styled(format!("={desc} "), desc_style));
+        } else {
+            spans.push(ftui::text::Span::styled(format!("{token} "), desc_style));
+        }
+    }
+    spans
 }
 
 fn summarize_filter_values(values: &HashSet<String>, empty_label: &str) -> String {
@@ -2201,6 +2440,72 @@ pub struct SourcesViewState {
 // =========================================================================
 // CassApp — the ftui Model
 // =========================================================================
+
+/// Palette query latency instrumentation (1mfw3.1.7).
+#[derive(Debug, Clone, Default)]
+pub struct PaletteLatencyStats {
+    /// Microseconds for the most recent query update.
+    pub last_query_us: u64,
+    /// Peak query latency observed this session.
+    pub peak_us: u64,
+    /// Total queries processed (for throughput calculation).
+    pub query_count: u64,
+    /// Accumulated latency microseconds.
+    pub total_us: u64,
+    /// Whether micro-bench mode is active.
+    pub bench_mode: bool,
+    /// Timestamp when bench mode was last activated.
+    pub bench_start: Option<std::time::Instant>,
+}
+
+impl PaletteLatencyStats {
+    /// Record a query latency sample.
+    pub fn record(&mut self, us: u64) {
+        self.last_query_us = us;
+        self.peak_us = self.peak_us.max(us);
+        self.query_count += 1;
+        self.total_us += us;
+    }
+
+    /// Average latency in microseconds, or 0 if no queries.
+    pub fn avg_us(&self) -> u64 {
+        if self.query_count == 0 {
+            0
+        } else {
+            self.total_us / self.query_count
+        }
+    }
+
+    /// Queries per second throughput (only meaningful in bench mode).
+    pub fn queries_per_sec(&self) -> f64 {
+        if let Some(start) = self.bench_start {
+            let elapsed = start.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                return self.query_count as f64 / elapsed;
+            }
+        }
+        0.0
+    }
+
+    /// Budget health indicator: green (<2ms), yellow (2-8ms), red (>8ms).
+    pub fn budget_indicator(&self) -> &'static str {
+        if self.last_query_us < 2_000 {
+            "OK"
+        } else if self.last_query_us < 8_000 {
+            "WARN"
+        } else {
+            "SLOW"
+        }
+    }
+
+    /// Reset stats (called when bench mode is toggled on).
+    pub fn reset(&mut self) {
+        self.last_query_us = 0;
+        self.peak_us = 0;
+        self.query_count = 0;
+        self.total_us = 0;
+    }
+}
 
 /// Top-level application state for the cass TUI.
 ///
@@ -2371,6 +2676,8 @@ pub struct CassApp {
     pub command_palette: CommandPalette,
     /// Whether the palette evidence ledger panel is visible.
     pub show_palette_evidence: bool,
+    /// Palette query latency instrumentation.
+    pub palette_latency: PaletteLatencyStats,
     /// Latest update check result (if any).
     pub update_info: Option<UpdateInfo>,
     /// Session-only dismissal toggle for update banner.
@@ -2583,6 +2890,7 @@ impl Default for CassApp {
                 cp
             },
             show_palette_evidence: false,
+            palette_latency: PaletteLatencyStats::default(),
             update_info: None,
             update_dismissed: false,
             update_upgrade_armed: false,
@@ -3672,7 +3980,13 @@ impl CassApp {
                     max_width: inner.width,
                     queued,
                     stripe_style: if even { row_style } else { row_alt_style },
-                    agent_style: row_selected_style,
+                    selected_style: row_selected_style,
+                    agent_accent_style: styles.agent_accent_style(&hit.agent),
+                    score_style: styles.score_style(hit.score),
+                    text_primary_style: styles.style(style_system::STYLE_TEXT_PRIMARY),
+                    text_muted_style: styles.style(style_system::STYLE_TEXT_MUTED),
+                    text_subtle_style: styles.style(style_system::STYLE_TEXT_SUBTLE),
+                    success_style: styles.style(style_system::STYLE_STATUS_SUCCESS),
                 }
             })
             .collect();
@@ -4221,31 +4535,70 @@ impl CassApp {
         pane_focused_style: ftui::Style,
         text_muted_style: ftui::Style,
     ) {
-        // Tab indicator and wrap status
-        let tab_label = match self.detail_tab {
-            DetailTab::Messages => "Detail [\u{25cf}Messages] Snippets  Raw  Json",
-            DetailTab::Snippets => "Detail  Messages [\u{25cf}Snippets] Raw  Json",
-            DetailTab::Raw => "Detail  Messages  Snippets [\u{25cf}Raw] Json",
-            DetailTab::Json => "Detail  Messages  Snippets  Raw [\u{25cf}Json]",
-        };
+        // Styled tab bar is rendered inside the pane below; block title is short.
         let wrap_indicator = if self.detail_wrap { " \u{21a9}" } else { "" };
-        let title = format!("{tab_label}{wrap_indicator}");
+        let title = format!("Detail{wrap_indicator}");
 
+        let block_style = if self.focused_region() == FocusRegion::Detail {
+            pane_focused_style
+        } else {
+            pane_style
+        };
         let detail_block = Block::new()
             .borders(borders)
             .border_type(border_type)
             .title(&title)
             .title_alignment(Alignment::Left)
-            .style(if self.focused_region() == FocusRegion::Detail {
-                pane_focused_style
-            } else {
-                pane_style
-            });
-        let inner = detail_block.inner(area);
+            .style(block_style);
+        let full_inner = detail_block.inner(area);
         detail_block.render(area, frame);
 
-        // Record hit region for mouse scroll in detail.
         *self.last_detail_area.borrow_mut() = Some(area);
+
+        if full_inner.is_empty() {
+            return;
+        }
+
+        // Render styled tab bar inside the pane (first row).
+        let inner = if full_inner.height >= 3 {
+            let tab_active_s = styles.style(style_system::STYLE_TAB_ACTIVE);
+            let tab_inactive_s = styles.style(style_system::STYLE_TAB_INACTIVE);
+            let tab_items = [
+                ("Messages", DetailTab::Messages),
+                ("Snippets", DetailTab::Snippets),
+                ("Raw", DetailTab::Raw),
+                ("Json", DetailTab::Json),
+            ];
+            let mut tab_spans: Vec<ftui::text::Span> =
+                vec![ftui::text::Span::styled(" ", block_style)];
+            for (i, (lbl, variant)) in tab_items.iter().enumerate() {
+                if i > 0 {
+                    tab_spans.push(ftui::text::Span::styled(" \u{2502} ", text_muted_style));
+                }
+                if self.detail_tab == *variant {
+                    tab_spans.push(ftui::text::Span::styled(
+                        format!("\u{25cf} {lbl}"),
+                        tab_active_s,
+                    ));
+                } else {
+                    tab_spans.push(ftui::text::Span::styled(lbl.to_string(), tab_inactive_s));
+                }
+            }
+            let tab_row = Rect::new(full_inner.x, full_inner.y, full_inner.width, 1);
+            Paragraph::new(ftui::text::Text::from_lines(vec![
+                ftui::text::Line::from_spans(tab_spans),
+            ]))
+            .style(block_style)
+            .render(tab_row, frame);
+            Rect::new(
+                full_inner.x,
+                full_inner.y + 1,
+                full_inner.width,
+                full_inner.height - 1,
+            )
+        } else {
+            full_inner
+        };
 
         if inner.is_empty() {
             return;
@@ -4500,8 +4853,8 @@ impl CassApp {
         styles: &StyleContext,
     ) {
         use ftui::widgets::Widget;
-        let panel_w = 60u16.min(area.width.saturating_sub(4));
-        let panel_h = 10u16.min(area.height.saturating_sub(4));
+        let panel_w = 68u16.min(area.width.saturating_sub(4));
+        let panel_h = 12u16.min(area.height.saturating_sub(4));
         if panel_w < 30 || panel_h < 5 {
             return;
         }
@@ -4577,6 +4930,23 @@ impl CassApp {
                 dim,
             ),
         ]));
+        // Latency stats line
+        let lat = &self.palette_latency;
+        if lat.query_count > 0 || lat.bench_mode {
+            let mut parts = format!(
+                "latency: {}us last | {}us avg | {}us peak [{}]",
+                lat.last_query_us,
+                lat.avg_us(),
+                lat.peak_us,
+                lat.budget_indicator(),
+            );
+            if lat.bench_mode {
+                parts.push_str(&format!(" | bench: {:.1} q/s", lat.queries_per_sec()));
+            }
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(parts, dim),
+            ]));
+        }
         {
             let mut ly = inner.y;
             for line in &lines {
@@ -4630,6 +5000,7 @@ impl CassApp {
             InspectorTab::Resize,
             InspectorTab::Diff,
             InspectorTab::Budget,
+            InspectorTab::Timeline,
         ]
         .iter()
         .map(|t| {
@@ -4833,34 +5204,93 @@ impl CassApp {
                 }
             }
             InspectorTab::Diff => {
+                let warn_style = styles.style(style_system::STYLE_STATUS_WARNING);
                 if let Some(diff) = &self.evidence.diff {
-                    let lines = [
-                        format!("Strategy: {}", diff.strategy_used),
-                        format!("Screen:   {}x{} {}", diff.cols, diff.rows, diff.screen_mode),
+                    let ev = &diff.evidence;
+                    // Human-readable rationale
+                    let rationale = if !diff.fallback_reason.is_empty() {
+                        format!("fallback: {}", diff.fallback_reason)
+                    } else if ev.hysteresis_applied {
                         format!(
-                            "Spans:    {} ({:.0}%)",
-                            diff.span_count,
-                            diff.span_coverage_pct * 100.0
+                            "hysteresis held ({:.0}% ratio)",
+                            ev.hysteresis_ratio * 100.0
+                        )
+                    } else if !ev.guard_reason.is_empty() {
+                        format!("guard: {}", ev.guard_reason)
+                    } else {
+                        let winner =
+                            if ev.cost_dirty <= ev.cost_full && ev.cost_dirty <= ev.cost_redraw {
+                                "DirtyRows cheapest"
+                            } else if ev.cost_full <= ev.cost_redraw {
+                                "Full cheapest"
+                            } else {
+                                "FullRedraw cheapest"
+                            };
+                        winner.to_string()
+                    };
+                    let is_full_redraw = matches!(
+                        diff.strategy_used,
+                        ftui::render::diff_strategy::DiffStrategy::FullRedraw
+                    );
+                    let rows: Vec<(&str, String, bool)> = vec![
+                        (
+                            "Strategy",
+                            format!("{}", diff.strategy_used),
+                            is_full_redraw,
                         ),
-                        format!("MaxSpan:  {}", diff.max_span_len),
-                        format!("ScanCost: {}", diff.scan_cost_estimate),
-                        format!("Tile:     {}", if diff.tile_used { "yes" } else { "no" }),
-                        format!("P(chg):   {:.3}", diff.evidence.posterior_mean),
-                        format!(
-                            "Costs:    F={:.0} D={:.0} R={:.0}",
-                            diff.evidence.cost_full,
-                            diff.evidence.cost_dirty,
-                            diff.evidence.cost_redraw
+                        ("Why", rationale, false),
+                        (
+                            "Screen",
+                            format!("{}x{} {}", diff.cols, diff.rows, diff.screen_mode),
+                            false,
+                        ),
+                        (
+                            "Dirty",
+                            format!(
+                                "{}/{} ({:.0}%)",
+                                ev.dirty_rows,
+                                ev.total_rows,
+                                ev.posterior_mean * 100.0
+                            ),
+                            ev.posterior_mean > 0.5,
+                        ),
+                        (
+                            "Costs",
+                            format!(
+                                "F={:.0} D={:.0} R={:.0}",
+                                ev.cost_full, ev.cost_dirty, ev.cost_redraw
+                            ),
+                            false,
+                        ),
+                        (
+                            "Spans",
+                            format!(
+                                "{} ({:.0}% cov)",
+                                diff.span_count,
+                                diff.span_coverage_pct * 100.0
+                            ),
+                            false,
+                        ),
+                        (
+                            "Tile",
+                            if diff.tile_used {
+                                "yes".to_string()
+                            } else if diff.tile_fallback.is_empty() {
+                                "no".to_string()
+                            } else {
+                                format!("no ({})", diff.tile_fallback)
+                            },
+                            false,
                         ),
                     ];
-                    for line in &lines {
+                    for (label, value, is_warn) in &rows {
                         if y >= max_y {
                             break;
                         }
                         let row = Rect::new(inner.x, y, inner.width, 1);
-                        Paragraph::new(line.as_str())
-                            .style(value_style)
-                            .render(row, frame);
+                        let text = format!("{label:<8}  {value}");
+                        let st = if *is_warn { warn_style } else { value_style };
+                        Paragraph::new(text).style(st).render(row, frame);
                         y += 1;
                     }
                 } else {
@@ -4966,6 +5396,46 @@ impl CassApp {
                     Paragraph::new("No budget evidence yet")
                         .style(muted_style)
                         .render(row, frame);
+                }
+            }
+            InspectorTab::Timeline => {
+                if self.evidence.timeline.is_empty() {
+                    let row = Rect::new(inner.x, y, inner.width, 1);
+                    Paragraph::new("No events yet")
+                        .style(muted_style)
+                        .render(row, frame);
+                    y += 1;
+                    if y < max_y {
+                        let row2 = Rect::new(inner.x, y, inner.width, 1);
+                        Paragraph::new("(waiting for adaptive decisions)")
+                            .style(muted_style)
+                            .render(row2, frame);
+                    }
+                } else {
+                    // Header line
+                    let hdr = format!(
+                        "{} events (cap {})",
+                        self.evidence.timeline.len(),
+                        TIMELINE_CAPACITY
+                    );
+                    let row = Rect::new(inner.x, y, inner.width, 1);
+                    Paragraph::new(hdr).style(muted_style).render(row, frame);
+                    y += 1;
+                    // Recent events, newest first
+                    for event in self.evidence.timeline.recent() {
+                        if y >= max_y {
+                            break;
+                        }
+                        let row = Rect::new(inner.x, y, inner.width, 1);
+                        let text = format!(
+                            "#{:<4} {:<6} {}",
+                            event.frame_idx,
+                            event.kind.label(),
+                            event.summary
+                        );
+                        Paragraph::new(text).style(value_style).render(row, frame);
+                        y += 1;
+                    }
                 }
             }
         }
@@ -6216,6 +6686,10 @@ pub enum CassMsg {
     PaletteActionExecuted,
     /// Toggle the palette evidence ledger panel.
     PaletteEvidenceToggled,
+    /// Toggle palette micro-bench mode for latency profiling.
+    PaletteBenchToggled,
+    /// Cycle the palette match-type filter (F9 while palette is open).
+    PaletteMatchModeCycled,
 
     // -- Theme editor -----------------------------------------------------
     /// Open the interactive theme editor modal.
@@ -7769,12 +8243,46 @@ impl super::ftui_adapter::Model for CassApp {
                             self.show_palette_evidence = !self.show_palette_evidence;
                             return ftui::Cmd::none();
                         }
+                        // Alt+B toggles micro-bench mode.
+                        if ke.code == super::ftui_adapter::KeyCode::Char('b')
+                            && ke.modifiers.contains(super::ftui_adapter::Modifiers::ALT)
+                        {
+                            self.palette_latency.bench_mode = !self.palette_latency.bench_mode;
+                            if self.palette_latency.bench_mode {
+                                self.palette_latency.reset();
+                                self.palette_latency.bench_start = Some(std::time::Instant::now());
+                            } else {
+                                self.palette_latency.bench_start = None;
+                            }
+                            return ftui::Cmd::none();
+                        }
+                        // F9 cycles the match-type filter.
+                        if ke.code == super::ftui_adapter::KeyCode::F(9) {
+                            self.palette_state.match_mode = self.palette_state.match_mode.cycle();
+                            let filter = match self.palette_state.match_mode {
+                                PaletteMatchMode::All => MatchFilter::All,
+                                PaletteMatchMode::Exact => MatchFilter::Exact,
+                                PaletteMatchMode::Prefix => MatchFilter::Prefix,
+                                PaletteMatchMode::WordStart => MatchFilter::WordStart,
+                                PaletteMatchMode::Substring => MatchFilter::Substring,
+                                PaletteMatchMode::Fuzzy => MatchFilter::Fuzzy,
+                            };
+                            self.command_palette.set_match_filter(filter);
+                            self.status = format!(
+                                "Palette filter: {}",
+                                self.palette_state.match_mode.label()
+                            );
+                            return ftui::Cmd::none();
+                        }
+                        let _t0 = std::time::Instant::now();
                         if let Some(action) = self.command_palette.handle_event(raw_event) {
                             use ftui::widgets::command_palette::PaletteAction as WPA;
                             match action {
                                 WPA::Execute(ref id) => {
                                     self.command_palette.close();
                                     self.show_palette_evidence = false;
+                                    self.palette_latency.bench_mode = false;
+                                    self.palette_latency.bench_start = None;
                                     self.focus_manager.pop_trap();
                                     let result = action_by_id(&self.palette_state.all_actions, id)
                                         .map(|a| a.dispatch())
@@ -7784,12 +8292,16 @@ impl super::ftui_adapter::Model for CassApp {
                                 WPA::Dismiss => {
                                     self.command_palette.close();
                                     self.show_palette_evidence = false;
+                                    self.palette_latency.bench_mode = false;
+                                    self.palette_latency.bench_start = None;
                                     self.focus_manager.pop_trap();
                                     return ftui::Cmd::none();
                                 }
                             }
                         }
                         // Event consumed by palette (navigation, typing, etc.)
+                        self.palette_latency
+                            .record(_t0.elapsed().as_micros() as u64);
                         return ftui::Cmd::none();
                     }
                     // No raw key event available — fall through to main handler.
@@ -8876,7 +9388,9 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::PaletteOpened => {
                 self.palette_state.query.clear();
                 self.palette_state.selected = 0;
+                self.palette_state.match_mode = PaletteMatchMode::default();
                 self.palette_state.refilter();
+                self.command_palette.set_match_filter(MatchFilter::All);
                 self.command_palette.open();
                 self.focus_manager.push_trap(focus_ids::GROUP_PALETTE);
                 self.focus_manager.focus(focus_ids::COMMAND_PALETTE);
@@ -8885,11 +9399,37 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::PaletteClosed => {
                 self.command_palette.close();
                 self.show_palette_evidence = false;
+                self.palette_latency.bench_mode = false;
+                self.palette_latency.bench_start = None;
                 self.focus_manager.pop_trap();
                 ftui::Cmd::none()
             }
             CassMsg::PaletteEvidenceToggled => {
                 self.show_palette_evidence = !self.show_palette_evidence;
+                ftui::Cmd::none()
+            }
+            CassMsg::PaletteBenchToggled => {
+                self.palette_latency.bench_mode = !self.palette_latency.bench_mode;
+                if self.palette_latency.bench_mode {
+                    self.palette_latency.reset();
+                    self.palette_latency.bench_start = Some(std::time::Instant::now());
+                } else {
+                    self.palette_latency.bench_start = None;
+                }
+                ftui::Cmd::none()
+            }
+            CassMsg::PaletteMatchModeCycled => {
+                self.palette_state.match_mode = self.palette_state.match_mode.cycle();
+                let filter = match self.palette_state.match_mode {
+                    PaletteMatchMode::All => MatchFilter::All,
+                    PaletteMatchMode::Exact => MatchFilter::Exact,
+                    PaletteMatchMode::Prefix => MatchFilter::Prefix,
+                    PaletteMatchMode::WordStart => MatchFilter::WordStart,
+                    PaletteMatchMode::Substring => MatchFilter::Substring,
+                    PaletteMatchMode::Fuzzy => MatchFilter::Fuzzy,
+                };
+                self.command_palette.set_match_filter(filter);
+                self.status = format!("Palette filter: {}", self.palette_state.match_mode.label());
                 ftui::Cmd::none()
             }
             CassMsg::PaletteQueryChanged(q) => {
@@ -8910,6 +9450,8 @@ impl super::ftui_adapter::Model for CassApp {
                 let result = execute_selected(&self.palette_state);
                 self.command_palette.close();
                 self.show_palette_evidence = false;
+                self.palette_latency.bench_mode = false;
+                self.palette_latency.bench_start = None;
                 self.palette_result_to_cmd(result)
             }
 
@@ -10595,6 +11137,8 @@ impl super::ftui_adapter::Model for CassApp {
                 if self.command_palette.is_visible() {
                     self.command_palette.close();
                     self.show_palette_evidence = false;
+                    self.palette_latency.bench_mode = false;
+                    self.palette_latency.bench_start = None;
                     self.focus_manager.pop_trap();
                     return ftui::Cmd::none();
                 }
@@ -10836,7 +11380,7 @@ impl super::ftui_adapter::Model for CassApp {
                     .constraints([
                         Constraint::Fixed(5), // Search bar (query + pills + breadcrumbs)
                         Constraint::Min(4),   // Content area (results + detail)
-                        Constraint::Fixed(1), // Status footer
+                        Constraint::Fixed(2), // Status footer (status + key hints)
                     ])
                     .split(layout_area);
 
@@ -11056,17 +11600,45 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     ""
                 };
-                let status_line = if self.status.is_empty() {
-                    let hints = self.build_contextual_footer_hints(area.width);
-                    format!(
-                        " {hits_for_status} hits | {bp_label} | {density_label}{source_tag}{degradation_tag}{sel_tag}{rec_tag}{hints}",
-                    )
+                let footer_area = vertical[2];
+                if footer_area.height >= 2 {
+                    // Row 1: Status info
+                    let row1 = Rect::new(footer_area.x, footer_area.y, footer_area.width, 1);
+                    let status_line = if self.status.is_empty() {
+                        format!(
+                            " {hits_for_status} hits | {bp_label} | {density_label}{source_tag}{degradation_tag}{sel_tag}{rec_tag}",
+                        )
+                    } else {
+                        format!(" {}{}{}{}", self.status, degradation_tag, sel_tag, rec_tag)
+                    };
+                    Paragraph::new(&*status_line)
+                        .style(text_muted_style)
+                        .render(row1, frame);
+
+                    // Row 2: Styled key hints
+                    let row2 = Rect::new(footer_area.x, footer_area.y + 1, footer_area.width, 1);
+                    let hints_text = self.build_contextual_footer_hints(footer_area.width);
+                    let kbd_key_s = styles.style(style_system::STYLE_KBD_KEY);
+                    let kbd_desc_s = styles.style(style_system::STYLE_KBD_DESC);
+                    let hint_spans = build_styled_hints(&hints_text, kbd_key_s, kbd_desc_s);
+                    let hints_line = ftui::text::Line::from_spans(hint_spans);
+                    Paragraph::new(ftui::text::Text::from_lines(vec![hints_line]))
+                        .style(text_muted_style)
+                        .render(row2, frame);
                 } else {
-                    format!(" {}{}{}{}", self.status, degradation_tag, sel_tag, rec_tag)
-                };
-                Paragraph::new(&*status_line)
-                    .style(text_muted_style)
-                    .render(vertical[2], frame);
+                    // Fallback: single row with everything
+                    let status_line = if self.status.is_empty() {
+                        let hints = self.build_contextual_footer_hints(area.width);
+                        format!(
+                            " {hits_for_status} hits | {bp_label} | {density_label}{source_tag}{degradation_tag}{sel_tag}{rec_tag}{hints}",
+                        )
+                    } else {
+                        format!(" {}{}{}{}", self.status, degradation_tag, sel_tag, rec_tag)
+                    };
+                    Paragraph::new(&*status_line)
+                        .style(text_muted_style)
+                        .render(footer_area, frame);
+                }
             }
 
             AppSurface::Analytics => {
@@ -12997,6 +13569,93 @@ mod tests {
         assert!(stats.full_scans <= 1);
     }
 
+    // -- Palette latency tests ------------------------------------------------
+
+    #[test]
+    fn palette_latency_stats_record() {
+        let mut stats = PaletteLatencyStats::default();
+        assert_eq!(stats.last_query_us, 0);
+        assert_eq!(stats.query_count, 0);
+        stats.record(500);
+        assert_eq!(stats.last_query_us, 500);
+        assert_eq!(stats.peak_us, 500);
+        assert_eq!(stats.query_count, 1);
+        stats.record(1200);
+        assert_eq!(stats.last_query_us, 1200);
+        assert_eq!(stats.peak_us, 1200);
+        assert_eq!(stats.query_count, 2);
+        stats.record(300);
+        assert_eq!(stats.last_query_us, 300);
+        assert_eq!(stats.peak_us, 1200); // peak unchanged
+        assert_eq!(stats.query_count, 3);
+        assert_eq!(stats.avg_us(), (500 + 1200 + 300) / 3);
+    }
+
+    #[test]
+    fn palette_latency_budget_indicator() {
+        let mut stats = PaletteLatencyStats::default();
+        stats.record(100);
+        assert_eq!(stats.budget_indicator(), "OK");
+        stats.record(3_000);
+        assert_eq!(stats.budget_indicator(), "WARN");
+        stats.record(10_000);
+        assert_eq!(stats.budget_indicator(), "SLOW");
+    }
+
+    #[test]
+    fn palette_latency_reset() {
+        let mut stats = PaletteLatencyStats::default();
+        stats.record(500);
+        stats.record(1200);
+        stats.bench_mode = true;
+        stats.bench_start = Some(std::time::Instant::now());
+        stats.reset();
+        assert_eq!(stats.last_query_us, 0);
+        assert_eq!(stats.peak_us, 0);
+        assert_eq!(stats.query_count, 0);
+        assert_eq!(stats.total_us, 0);
+    }
+
+    #[test]
+    fn palette_bench_toggle_msg() {
+        let mut app = CassApp::default();
+        assert!(!app.palette_latency.bench_mode);
+        let _ = app.update(CassMsg::PaletteBenchToggled);
+        assert!(app.palette_latency.bench_mode);
+        assert!(app.palette_latency.bench_start.is_some());
+        let _ = app.update(CassMsg::PaletteBenchToggled);
+        assert!(!app.palette_latency.bench_mode);
+        assert!(app.palette_latency.bench_start.is_none());
+    }
+
+    #[test]
+    fn palette_bench_resets_on_close() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let _ = app.update(CassMsg::PaletteBenchToggled);
+        assert!(app.palette_latency.bench_mode);
+        let _ = app.update(CassMsg::PaletteClosed);
+        assert!(!app.palette_latency.bench_mode);
+        assert!(app.palette_latency.bench_start.is_none());
+    }
+
+    #[test]
+    fn palette_bench_resets_on_execute() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let _ = app.update(CassMsg::PaletteBenchToggled);
+        assert!(app.palette_latency.bench_mode);
+        let _ = app.update(CassMsg::PaletteActionExecuted);
+        assert!(!app.palette_latency.bench_mode);
+    }
+
+    #[test]
+    fn palette_latency_avg_zero_when_empty() {
+        let stats = PaletteLatencyStats::default();
+        assert_eq!(stats.avg_us(), 0);
+        assert_eq!(stats.queries_per_sec(), 0.0);
+    }
+
     #[test]
     fn palette_interceptor_consumes_key_events_when_open() {
         use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
@@ -13027,6 +13686,30 @@ mod tests {
         let cmd = app.update(CassMsg::ForceQuit);
         // ForceQuit should produce Cmd::Quit (not be swallowed by interceptor)
         assert!(matches!(cmd, ftui::Cmd::Quit));
+    }
+
+    #[test]
+    fn palette_open_resets_match_mode() {
+        let mut app = CassApp::default();
+        // Open palette, cycle match mode, close, reopen — should reset.
+        let _ = app.update(CassMsg::PaletteOpened);
+        let _ = app.update(CassMsg::PaletteMatchModeCycled);
+        assert_ne!(app.palette_state.match_mode, PaletteMatchMode::All);
+        let _ = app.update(CassMsg::PaletteClosed);
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert_eq!(app.palette_state.match_mode, PaletteMatchMode::All);
+    }
+
+    #[test]
+    fn palette_match_mode_cycled_updates_status() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        let _ = app.update(CassMsg::PaletteMatchModeCycled);
+        assert_eq!(app.palette_state.match_mode, PaletteMatchMode::Exact);
+        assert!(app.status.contains("Exact"));
+        let _ = app.update(CassMsg::PaletteMatchModeCycled);
+        assert_eq!(app.palette_state.match_mode, PaletteMatchMode::Prefix);
+        assert!(app.status.contains("Prefix"));
     }
 
     #[test]
@@ -13708,7 +14391,13 @@ mod tests {
                 max_width: 80,
                 queued: false,
                 stripe_style: ftui::Style::default(),
-                agent_style: ftui::Style::default(),
+                selected_style: ftui::Style::default(),
+                agent_accent_style: ftui::Style::default(),
+                score_style: ftui::Style::default(),
+                text_primary_style: ftui::Style::default(),
+                text_muted_style: ftui::Style::default(),
+                text_subtle_style: ftui::Style::default(),
+                success_style: ftui::Style::default(),
             };
             assert_eq!(item.height(), density_h, "density {mode:?}");
         }
@@ -13863,7 +14552,13 @@ mod tests {
             max_width: 80,
             queued: true,
             stripe_style: ftui::Style::default(),
-            agent_style: ftui::Style::default(),
+            selected_style: ftui::Style::default(),
+            agent_accent_style: ftui::Style::default(),
+            score_style: ftui::Style::default(),
+            text_primary_style: ftui::Style::default(),
+            text_muted_style: ftui::Style::default(),
+            text_subtle_style: ftui::Style::default(),
+            success_style: ftui::Style::default(),
         };
         let not_queued = ResultItem {
             index: 1,
@@ -13873,7 +14568,13 @@ mod tests {
             max_width: 80,
             queued: false,
             stripe_style: ftui::Style::default(),
-            agent_style: ftui::Style::default(),
+            selected_style: ftui::Style::default(),
+            agent_accent_style: ftui::Style::default(),
+            score_style: ftui::Style::default(),
+            text_primary_style: ftui::Style::default(),
+            text_muted_style: ftui::Style::default(),
+            text_subtle_style: ftui::Style::default(),
+            success_style: ftui::Style::default(),
         };
         assert!(queued_item.queued);
         assert!(!not_queued.queued);
@@ -13893,7 +14594,13 @@ mod tests {
             max_width: 80,
             queued: false,
             stripe_style: ftui::Style::default(),
-            agent_style: ftui::Style::default(),
+            selected_style: ftui::Style::default(),
+            agent_accent_style: ftui::Style::default(),
+            score_style: ftui::Style::default(),
+            text_primary_style: ftui::Style::default(),
+            text_muted_style: ftui::Style::default(),
+            text_subtle_style: ftui::Style::default(),
+            success_style: ftui::Style::default(),
         };
         assert_eq!(local_item.source_badge(), "[local]");
 
@@ -13909,7 +14616,13 @@ mod tests {
             max_width: 80,
             queued: false,
             stripe_style: ftui::Style::default(),
-            agent_style: ftui::Style::default(),
+            selected_style: ftui::Style::default(),
+            agent_accent_style: ftui::Style::default(),
+            score_style: ftui::Style::default(),
+            text_primary_style: ftui::Style::default(),
+            text_muted_style: ftui::Style::default(),
+            text_subtle_style: ftui::Style::default(),
+            success_style: ftui::Style::default(),
         };
         assert_eq!(remote_item.source_badge(), "[laptop]");
     }
@@ -18840,6 +19553,9 @@ mod tests {
         assert_eq!(app.inspector_tab, InspectorTab::Budget);
 
         let _ = app.update(CassMsg::InspectorTabCycled);
+        assert_eq!(app.inspector_tab, InspectorTab::Timeline);
+
+        let _ = app.update(CassMsg::InspectorTabCycled);
         assert_eq!(app.inspector_tab, InspectorTab::Timing);
     }
 
@@ -19827,7 +20543,8 @@ mod tests {
         assert_eq!(InspectorTab::HitRegions.next(), InspectorTab::Resize);
         assert_eq!(InspectorTab::Resize.next(), InspectorTab::Diff);
         assert_eq!(InspectorTab::Diff.next(), InspectorTab::Budget);
-        assert_eq!(InspectorTab::Budget.next(), InspectorTab::Timing);
+        assert_eq!(InspectorTab::Budget.next(), InspectorTab::Timeline);
+        assert_eq!(InspectorTab::Timeline.next(), InspectorTab::Timing);
     }
 
     #[test]
@@ -19836,23 +20553,21 @@ mod tests {
         let mut app = CassApp::default();
         app.show_inspector = true;
         app.inspector_tab = InspectorTab::Budget;
-        app.evidence.budget = Some(
-            ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
-                frame_idx: 100,
-                decision: BudgetDecision::Hold,
-                controller_decision: BudgetDecision::Hold,
-                degradation_before: DegradationLevel::Full,
-                degradation_after: DegradationLevel::Full,
-                frame_time_us: 20000.0,
-                budget_us: 16000.0,
-                pid_output: 0.4,
-                e_value: 2.0,
-                frames_observed: 50,
-                frames_since_change: 30,
-                in_warmup: false,
-                conformal: None,
-            },
-        );
+        app.evidence.budget = Some(ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
+            frame_idx: 100,
+            decision: BudgetDecision::Hold,
+            controller_decision: BudgetDecision::Hold,
+            degradation_before: DegradationLevel::Full,
+            degradation_after: DegradationLevel::Full,
+            frame_time_us: 20000.0,
+            budget_us: 16000.0,
+            pid_output: 0.4,
+            e_value: 2.0,
+            frames_observed: 50,
+            frames_since_change: 30,
+            in_warmup: false,
+            conformal: None,
+        });
         let b = app.evidence.budget.as_ref().unwrap();
         assert!(b.frame_time_us > b.budget_us, "overrun detected");
         assert!(b.pid_output > 0.1, "pressure increasing");
@@ -19864,23 +20579,21 @@ mod tests {
         let mut app = CassApp::default();
         app.show_inspector = true;
         app.inspector_tab = InspectorTab::Budget;
-        app.evidence.budget = Some(
-            ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
-                frame_idx: 200,
-                decision: BudgetDecision::Degrade,
-                controller_decision: BudgetDecision::Degrade,
-                degradation_before: DegradationLevel::Full,
-                degradation_after: DegradationLevel::SimpleBorders,
-                frame_time_us: 25000.0,
-                budget_us: 16000.0,
-                pid_output: 0.8,
-                e_value: 25.0,
-                frames_observed: 80,
-                frames_since_change: 0,
-                in_warmup: false,
-                conformal: None,
-            },
-        );
+        app.evidence.budget = Some(ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
+            frame_idx: 200,
+            decision: BudgetDecision::Degrade,
+            controller_decision: BudgetDecision::Degrade,
+            degradation_before: DegradationLevel::Full,
+            degradation_after: DegradationLevel::SimpleBorders,
+            frame_time_us: 25000.0,
+            budget_us: 16000.0,
+            pid_output: 0.8,
+            e_value: 25.0,
+            frames_observed: 80,
+            frames_since_change: 0,
+            in_warmup: false,
+            conformal: None,
+        });
         let b = app.evidence.budget.as_ref().unwrap();
         assert!(
             b.degradation_after as u8 > b.degradation_before as u8,
@@ -19893,23 +20606,21 @@ mod tests {
     fn inspector_budget_healthy_state() {
         use ftui::render::budget::{BudgetDecision, DegradationLevel};
         let mut app = CassApp::default();
-        app.evidence.budget = Some(
-            ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
-                frame_idx: 300,
-                decision: BudgetDecision::Hold,
-                controller_decision: BudgetDecision::Hold,
-                degradation_before: DegradationLevel::Full,
-                degradation_after: DegradationLevel::Full,
-                frame_time_us: 8000.0,
-                budget_us: 16000.0,
-                pid_output: -0.2,
-                e_value: 0.3,
-                frames_observed: 200,
-                frames_since_change: 150,
-                in_warmup: false,
-                conformal: None,
-            },
-        );
+        app.evidence.budget = Some(ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
+            frame_idx: 300,
+            decision: BudgetDecision::Hold,
+            controller_decision: BudgetDecision::Hold,
+            degradation_before: DegradationLevel::Full,
+            degradation_after: DegradationLevel::Full,
+            frame_time_us: 8000.0,
+            budget_us: 16000.0,
+            pid_output: -0.2,
+            e_value: 0.3,
+            frames_observed: 200,
+            frames_since_change: 150,
+            in_warmup: false,
+            conformal: None,
+        });
         let b = app.evidence.budget.as_ref().unwrap();
         assert!(b.frame_time_us < b.budget_us, "within budget");
         assert!(b.e_value < 0.5, "healthy zone");
@@ -19920,37 +20631,29 @@ mod tests {
     fn inspector_budget_conformal_risk() {
         use ftui::render::budget::{BudgetDecision, DegradationLevel};
         let mut app = CassApp::default();
-        app.evidence.budget = Some(
-            ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
-                frame_idx: 400,
-                decision: BudgetDecision::Hold,
-                controller_decision: BudgetDecision::Hold,
-                degradation_before: DegradationLevel::Full,
-                degradation_after: DegradationLevel::Full,
-                frame_time_us: 15000.0,
-                budget_us: 16000.0,
-                pid_output: 0.05,
-                e_value: 1.5,
-                frames_observed: 100,
-                frames_since_change: 50,
-                in_warmup: false,
-                conformal: Some(
-                    ftui::runtime::evidence_telemetry::ConformalSnapshot {
-                        bucket_key: "alt:Full:medium".to_string(),
-                        sample_count: 42,
-                        upper_us: 18000.0,
-                        risk: true,
-                    },
-                ),
-            },
-        );
+        app.evidence.budget = Some(ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
+            frame_idx: 400,
+            decision: BudgetDecision::Hold,
+            controller_decision: BudgetDecision::Hold,
+            degradation_before: DegradationLevel::Full,
+            degradation_after: DegradationLevel::Full,
+            frame_time_us: 15000.0,
+            budget_us: 16000.0,
+            pid_output: 0.05,
+            e_value: 1.5,
+            frames_observed: 100,
+            frames_since_change: 50,
+            in_warmup: false,
+            conformal: Some(ftui::runtime::evidence_telemetry::ConformalSnapshot {
+                bucket_key: "alt:Full:medium".to_string(),
+                sample_count: 42,
+                upper_us: 18000.0,
+                risk: true,
+            }),
+        });
         let b = app.evidence.budget.as_ref().unwrap();
-        assert!(
-            b.conformal.as_ref().unwrap().risk,
-            "conformal risk flagged"
-        );
+        assert!(b.conformal.as_ref().unwrap().risk, "conformal risk flagged");
     }
-
 
     #[test]
     fn inspector_resize_tab_reachable() {
@@ -19984,6 +20687,242 @@ mod tests {
     #[test]
     fn inspector_diff_tab_label() {
         assert_eq!(InspectorTab::Diff.label(), "Diff");
+    }
+
+    #[test]
+    fn inspector_diff_with_dirty_rows_strategy() {
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        app.inspector_tab = InspectorTab::Diff;
+        app.evidence.diff = Some(ftui::runtime::evidence_telemetry::DiffDecisionSnapshot {
+            event_idx: 1,
+            screen_mode: "Fullscreen".to_string(),
+            cols: 120,
+            rows: 40,
+            evidence: ftui::render::diff_strategy::StrategyEvidence {
+                strategy: ftui::render::diff_strategy::DiffStrategy::DirtyRows,
+                cost_full: 500.0,
+                cost_dirty: 150.0,
+                cost_redraw: 800.0,
+                posterior_mean: 0.15,
+                posterior_variance: 0.01,
+                alpha: 3.0,
+                beta: 17.0,
+                dirty_rows: 6,
+                total_rows: 40,
+                total_cells: 4800,
+                guard_reason: "",
+                hysteresis_applied: false,
+                hysteresis_ratio: 0.0,
+            },
+            span_count: 3,
+            span_coverage_pct: 0.65,
+            max_span_len: 45,
+            scan_cost_estimate: 200,
+            fallback_reason: String::new(),
+            tile_used: true,
+            tile_fallback: String::new(),
+            strategy_used: ftui::render::diff_strategy::DiffStrategy::DirtyRows,
+        });
+        let d = app.evidence.diff.as_ref().unwrap();
+        assert!(
+            d.evidence.cost_dirty < d.evidence.cost_full,
+            "DirtyRows cheapest"
+        );
+        assert!(d.evidence.posterior_mean < 0.5, "low change rate");
+    }
+
+    #[test]
+    fn inspector_diff_full_redraw_flagged() {
+        let mut app = CassApp::default();
+        app.show_inspector = true;
+        app.inspector_tab = InspectorTab::Diff;
+        app.evidence.diff = Some(ftui::runtime::evidence_telemetry::DiffDecisionSnapshot {
+            event_idx: 2,
+            screen_mode: "Fullscreen".to_string(),
+            cols: 80,
+            rows: 24,
+            evidence: ftui::render::diff_strategy::StrategyEvidence {
+                strategy: ftui::render::diff_strategy::DiffStrategy::FullRedraw,
+                cost_full: 400.0,
+                cost_dirty: 380.0,
+                cost_redraw: 300.0,
+                posterior_mean: 0.85,
+                posterior_variance: 0.02,
+                alpha: 17.0,
+                beta: 3.0,
+                dirty_rows: 20,
+                total_rows: 24,
+                total_cells: 1920,
+                guard_reason: "",
+                hysteresis_applied: false,
+                hysteresis_ratio: 0.0,
+            },
+            span_count: 1,
+            span_coverage_pct: 1.0,
+            max_span_len: 1920,
+            scan_cost_estimate: 1920,
+            fallback_reason: String::new(),
+            tile_used: false,
+            tile_fallback: "too many dirty rows".to_string(),
+            strategy_used: ftui::render::diff_strategy::DiffStrategy::FullRedraw,
+        });
+        let d = app.evidence.diff.as_ref().unwrap();
+        assert!(d.evidence.posterior_mean > 0.5, "high change rate");
+        assert!(
+            matches!(
+                d.strategy_used,
+                ftui::render::diff_strategy::DiffStrategy::FullRedraw
+            ),
+            "full redraw selected"
+        );
+    }
+
+    // -- Timeline event feed tests (1mfw3.3.6) ---------------------------
+
+    #[test]
+    fn timeline_buffer_starts_empty() {
+        let buf = TimelineBuffer::new();
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn timeline_captures_resize_event() {
+        let mut buf = TimelineBuffer::new();
+        let resize = Some(ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot {
+            event_idx: 1,
+            action: "apply",
+            dt_ms: 50.0,
+            event_rate: 2.0,
+            regime: ftui::runtime::resize_coalescer::Regime::Steady,
+            pending_size: None,
+            applied_size: Some((120, 40)),
+            bocpd: None,
+            time_since_render_ms: 0.0,
+        });
+        buf.update_from_snapshots(&resize, &None, &None);
+        assert_eq!(buf.len(), 1);
+        let event = buf.recent().next().unwrap();
+        assert_eq!(event.kind, TimelineEventKind::Resize);
+        assert!(event.summary.contains("apply"));
+    }
+
+    #[test]
+    fn timeline_deduplicates_by_frame_idx() {
+        let mut buf = TimelineBuffer::new();
+        let resize = Some(ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot {
+            event_idx: 5,
+            action: "apply",
+            dt_ms: 50.0,
+            event_rate: 2.0,
+            regime: ftui::runtime::resize_coalescer::Regime::Steady,
+            pending_size: None,
+            applied_size: Some((80, 24)),
+            bocpd: None,
+            time_since_render_ms: 0.0,
+        });
+        buf.update_from_snapshots(&resize, &None, &None);
+        buf.update_from_snapshots(&resize, &None, &None);
+        assert_eq!(buf.len(), 1, "same event_idx should not duplicate");
+    }
+
+    #[test]
+    fn timeline_ring_buffer_evicts() {
+        let mut buf = TimelineBuffer::new();
+        for i in 1..=(TIMELINE_CAPACITY + 5) {
+            let resize = Some(ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot {
+                event_idx: i as u64,
+                action: "apply",
+                dt_ms: 10.0,
+                event_rate: 1.0,
+                regime: ftui::runtime::resize_coalescer::Regime::Steady,
+                pending_size: None,
+                applied_size: Some((80, 24)),
+                bocpd: None,
+                time_since_render_ms: 0.0,
+            });
+            buf.update_from_snapshots(&resize, &None, &None);
+        }
+        assert_eq!(buf.len(), TIMELINE_CAPACITY, "should cap at capacity");
+    }
+
+    #[test]
+    fn timeline_captures_all_event_kinds() {
+        let mut buf = TimelineBuffer::new();
+        let resize = Some(ftui::runtime::evidence_telemetry::ResizeDecisionSnapshot {
+            event_idx: 1,
+            action: "apply",
+            dt_ms: 50.0,
+            event_rate: 2.0,
+            regime: ftui::runtime::resize_coalescer::Regime::Steady,
+            pending_size: None,
+            applied_size: Some((120, 40)),
+            bocpd: None,
+            time_since_render_ms: 0.0,
+        });
+        let diff = Some(ftui::runtime::evidence_telemetry::DiffDecisionSnapshot {
+            event_idx: 2,
+            screen_mode: "Fullscreen".to_string(),
+            cols: 120,
+            rows: 40,
+            evidence: ftui::render::diff_strategy::StrategyEvidence {
+                strategy: ftui::render::diff_strategy::DiffStrategy::DirtyRows,
+                cost_full: 500.0,
+                cost_dirty: 150.0,
+                cost_redraw: 800.0,
+                posterior_mean: 0.15,
+                posterior_variance: 0.01,
+                alpha: 3.0,
+                beta: 17.0,
+                dirty_rows: 6,
+                total_rows: 40,
+                total_cells: 4800,
+                guard_reason: "",
+                hysteresis_applied: false,
+                hysteresis_ratio: 0.0,
+            },
+            span_count: 3,
+            span_coverage_pct: 0.65,
+            max_span_len: 45,
+            scan_cost_estimate: 200,
+            fallback_reason: String::new(),
+            tile_used: true,
+            tile_fallback: String::new(),
+            strategy_used: ftui::render::diff_strategy::DiffStrategy::DirtyRows,
+        });
+        let budget = Some(ftui::runtime::evidence_telemetry::BudgetDecisionSnapshot {
+            frame_idx: 3,
+            decision: ftui::render::budget::BudgetDecision::Hold,
+            controller_decision: ftui::render::budget::BudgetDecision::Hold,
+            degradation_before: ftui::render::budget::DegradationLevel::Full,
+            degradation_after: ftui::render::budget::DegradationLevel::Full,
+            frame_time_us: 10000.0,
+            budget_us: 16000.0,
+            pid_output: 0.0,
+            e_value: 0.5,
+            frames_observed: 100,
+            frames_since_change: 50,
+            in_warmup: false,
+            conformal: None,
+        });
+        buf.update_from_snapshots(&resize, &diff, &budget);
+        assert_eq!(buf.len(), 3);
+        let kinds: Vec<_> = buf.recent().map(|e| e.kind).collect();
+        assert!(kinds.contains(&TimelineEventKind::Resize));
+        assert!(kinds.contains(&TimelineEventKind::DiffStrategy));
+        assert!(kinds.contains(&TimelineEventKind::BudgetChange));
+    }
+
+    #[test]
+    fn timeline_tab_label() {
+        assert_eq!(InspectorTab::Timeline.label(), "Log");
+    }
+
+    #[test]
+    fn timeline_tab_empty_evidence() {
+        let app = CassApp::default();
+        assert!(app.evidence.timeline.is_empty());
     }
 
     #[test]
