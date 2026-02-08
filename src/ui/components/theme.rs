@@ -1287,4 +1287,116 @@ mod tests {
         assert_ne!(pane.bg, PackedRgba::TRANSPARENT);
         assert_ne!(pane.accent, PackedRgba::TRANSPARENT);
     }
+
+    // -- agent/role coherence tests (2dccg.10.2) --
+
+    const KNOWN_AGENTS: &[&str] = &[
+        "claude_code",
+        "codex",
+        "cline",
+        "gemini",
+        "amp",
+        "aider",
+        "cursor",
+        "chatgpt",
+        "opencode",
+        "pi_agent",
+    ];
+
+    #[test]
+    fn agent_accent_colors_are_pairwise_distinct() {
+        let accents: Vec<(&str, PackedRgba)> = KNOWN_AGENTS
+            .iter()
+            .map(|a| (*a, ThemePalette::agent_pane(a).accent))
+            .collect();
+
+        for i in 0..accents.len() {
+            for j in (i + 1)..accents.len() {
+                let (name_a, color_a) = accents[i];
+                let (name_b, color_b) = accents[j];
+                assert_ne!(
+                    color_a, color_b,
+                    "Agents {name_a} and {name_b} have identical accent colors — \
+                     users cannot distinguish them"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_background_colors_are_pairwise_distinct() {
+        let bgs: Vec<(&str, PackedRgba)> = KNOWN_AGENTS
+            .iter()
+            .map(|a| (*a, ThemePalette::agent_pane(a).bg))
+            .collect();
+
+        for i in 0..bgs.len() {
+            for j in (i + 1)..bgs.len() {
+                let (name_a, bg_a) = bgs[i];
+                let (name_b, bg_b) = bgs[j];
+                // codex and pi_agent intentionally share AGENT_CODEX_BG
+                if (name_a == "codex" && name_b == "pi_agent")
+                    || (name_a == "pi_agent" && name_b == "codex")
+                {
+                    continue;
+                }
+                assert_ne!(
+                    bg_a, bg_b,
+                    "Agents {name_a} and {name_b} have identical background colors"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_icons_are_pairwise_distinct() {
+        let icons: Vec<(&str, &str)> = KNOWN_AGENTS
+            .iter()
+            .map(|a| (*a, ThemePalette::agent_icon(a)))
+            .collect();
+
+        for i in 0..icons.len() {
+            for j in (i + 1)..icons.len() {
+                let (name_a, icon_a) = icons[i];
+                let (name_b, icon_b) = icons[j];
+                assert_ne!(
+                    icon_a, icon_b,
+                    "Agents {name_a} and {name_b} have identical icons"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_agent_falls_back_gracefully() {
+        let pane = ThemePalette::agent_pane("nonexistent_agent");
+        // Should not panic and should produce a usable theme.
+        assert_ne!(pane.fg, PackedRgba::TRANSPARENT);
+        assert_ne!(pane.bg, PackedRgba::TRANSPARENT);
+        assert_ne!(pane.accent, PackedRgba::TRANSPARENT);
+
+        let icon = ThemePalette::agent_icon("nonexistent_agent");
+        assert!(!icon.is_empty(), "unknown agent should get a fallback icon");
+    }
+
+    #[test]
+    fn role_colors_are_pairwise_distinct_in_palette() {
+        let palette = ThemePalette::dark();
+        let roles = [
+            ("user", palette.user),
+            ("agent", palette.agent),
+            ("tool", palette.tool),
+            ("system", palette.system),
+        ];
+        for i in 0..roles.len() {
+            for j in (i + 1)..roles.len() {
+                let (name_a, color_a) = roles[i];
+                let (name_b, color_b) = roles[j];
+                assert_ne!(
+                    color_a, color_b,
+                    "ThemePalette::dark() role {name_a} and {name_b} have identical colors"
+                );
+            }
+        }
+    }
 }

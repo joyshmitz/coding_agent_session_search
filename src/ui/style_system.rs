@@ -2392,6 +2392,70 @@ mod tests {
         }
     }
 
+    // -- agent/role coherence tests (2dccg.10.2) ---
+
+    #[test]
+    fn agent_accent_style_is_bold_for_all_agents() {
+        let ctx = context_for_preset(UiThemePreset::Dark);
+        let agents = [
+            "claude_code",
+            "codex",
+            "cline",
+            "gemini",
+            "amp",
+            "aider",
+            "cursor",
+            "chatgpt",
+            "opencode",
+            "pi_agent",
+            "unknown_agent",
+        ];
+        for agent in agents {
+            let style = ctx.agent_accent_style(agent);
+            assert!(
+                style.fg.is_some(),
+                "agent_accent_style({agent}) must have fg"
+            );
+            assert!(
+                style.has_attr(ftui::StyleFlags::BOLD),
+                "agent_accent_style({agent}) must be bold"
+            );
+        }
+    }
+
+    #[test]
+    fn role_markers_provide_text_disambiguation_in_a11y() {
+        let markers = RoleMarkers::from_options(StyleOptions {
+            a11y: true,
+            ..StyleOptions::default()
+        });
+        // In a11y mode, markers provide text-based role disambiguation.
+        assert!(
+            !markers.user.is_empty(),
+            "a11y user marker must be non-empty"
+        );
+        assert!(
+            !markers.assistant.is_empty(),
+            "a11y assistant marker must be non-empty"
+        );
+        assert_ne!(markers.user, markers.assistant, "user != assistant markers");
+        assert_ne!(markers.user, markers.tool, "user != tool markers");
+        assert_ne!(markers.assistant, markers.tool, "assistant != tool markers");
+    }
+
+    #[test]
+    fn role_markers_empty_when_no_icons() {
+        let markers = RoleMarkers::from_options(StyleOptions {
+            no_icons: true,
+            a11y: false,
+            ..StyleOptions::default()
+        });
+        assert!(
+            markers.user.is_empty(),
+            "no_icons should suppress role markers"
+        );
+    }
+
     // -- pill & tab style token tests (k25j6, 2kz6t) -------------------------
 
     fn context_for_preset(preset: UiThemePreset) -> StyleContext {
