@@ -4611,7 +4611,7 @@ impl CassApp {
         hit_count: usize,
     ) -> bool {
         self.anim.enabled
-            && degradation.render_decorative()
+            && degradation.is_full()
             && (RESULTS_REVEAL_MIN_HITS..=RESULTS_REVEAL_MAX_HITS).contains(&hit_count)
     }
 
@@ -4620,7 +4620,7 @@ impl CassApp {
         degradation: ftui::render::budget::DegradationLevel,
         results_focused: bool,
     ) -> f32 {
-        if !results_focused || !self.anim.enabled || !degradation.render_decorative() {
+        if !results_focused || !self.anim.enabled || !degradation.is_full() {
             return 0.0;
         }
         (1.0 - self.anim.focus_flash_progress()).clamp(0.0, 1.0)
@@ -15764,6 +15764,8 @@ mod tests {
                 source_local_style: ftui::Style::default(),
                 source_remote_style: ftui::Style::default(),
                 location_style: ftui::Style::default(),
+                reveal_progress: 1.0,
+                focus_flash_intensity: 0.0,
             };
             assert_eq!(item.height(), density_h, "density {mode:?}");
         }
@@ -15928,6 +15930,8 @@ mod tests {
             source_local_style: ftui::Style::default(),
             source_remote_style: ftui::Style::default(),
             location_style: ftui::Style::default(),
+            reveal_progress: 1.0,
+            focus_flash_intensity: 0.0,
         };
         let not_queued = ResultItem {
             index: 1,
@@ -15947,6 +15951,8 @@ mod tests {
             source_local_style: ftui::Style::default(),
             source_remote_style: ftui::Style::default(),
             location_style: ftui::Style::default(),
+            reveal_progress: 1.0,
+            focus_flash_intensity: 0.0,
         };
         assert!(queued_item.queued);
         assert!(!not_queued.queued);
@@ -15976,6 +15982,8 @@ mod tests {
             source_local_style: ftui::Style::default(),
             source_remote_style: ftui::Style::default(),
             location_style: ftui::Style::default(),
+            reveal_progress: 1.0,
+            focus_flash_intensity: 0.0,
         };
         assert_eq!(local_item.source_badge(), "[local]");
 
@@ -16001,6 +16009,8 @@ mod tests {
             source_local_style: ftui::Style::default(),
             source_remote_style: ftui::Style::default(),
             location_style: ftui::Style::default(),
+            reveal_progress: 1.0,
+            focus_flash_intensity: 0.0,
         };
         assert_eq!(remote_item.source_badge(), "[laptop]");
     }
@@ -16212,6 +16222,172 @@ mod tests {
         assert!(
             text_narrow.contains("density-effective-test-sentinel"),
             "narrow render (effective=Compact) should still show inline snippet"
+        );
+    }
+
+    // =====================================================================
+    // 2dccg.9.5 — Results-surface regression suite
+    // =====================================================================
+
+    #[test]
+    fn results_surface_density_theme_matrix_preserves_core_cues() {
+        use crate::ui::style_system::UiThemePreset;
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        for preset in [UiThemePreset::Dark, UiThemePreset::Light] {
+            for density in [
+                DensityMode::Compact,
+                DensityMode::Cozy,
+                DensityMode::Spacious,
+            ] {
+                let mut app = app_with_hits(6);
+                app.density_mode = density;
+                app.theme_preset = preset;
+                app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                app.style_options.preset = preset;
+                app.style_options.dark_mode = app.theme_dark;
+
+                let text = buffer_to_text(&render_at_degradation(
+                    &app,
+                    140,
+                    24,
+                    DegradationLevel::Full,
+                ));
+                assert!(
+                    text.contains("Results"),
+                    "test_id=9.5.matrix.{:?}.{:?} component=results-pane expected=title actual=missing",
+                    preset,
+                    density
+                );
+                assert!(
+                    text.contains("Hit 0"),
+                    "test_id=9.5.matrix.{:?}.{:?} component=results-pane expected=first-row-title actual=missing",
+                    preset,
+                    density
+                );
+                assert!(
+                    text.contains("[local]"),
+                    "test_id=9.5.matrix.{:?}.{:?} component=source-badge expected=local-badge actual=missing",
+                    preset,
+                    density
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn density_mode_switch_preserves_selection_and_scroll_state() {
+        let mut app = app_with_hits(120);
+
+        let _ = app.update(CassMsg::SelectionMoved { delta: 28 });
+        let _ = app.update(CassMsg::PageScrolled { delta: 1 });
+
+        let before_selected = app.panes[0].selected;
+        let before_scroll = app.results_list_state.borrow().scroll_offset();
+
+        let _ = app.update(CassMsg::DensityModeCycled);
+        let _ = app.update(CassMsg::DensityModeCycled);
+        let _ = app.update(CassMsg::DensityModeCycled);
+
+        let after_selected = app.panes[0].selected;
+        let after_scroll = app.results_list_state.borrow().scroll_offset();
+
+        assert_eq!(
+            after_selected, before_selected,
+            "test_id=9.5.interaction.density_cycle component=selection expected=preserved actual_before={} actual_after={}",
+            before_selected, after_selected
+        );
+        assert_eq!(
+            after_scroll, before_scroll,
+            "test_id=9.5.interaction.density_cycle component=scroll expected=preserved actual_before={} actual_after={}",
+            before_scroll, after_scroll
+        );
+    }
+
+    #[test]
+    fn snippet_budget_exhaustion_uses_ellipsis_on_last_line() {
+        let mut hit = make_test_hit();
+        hit.snippet = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_string();
+        let item = make_result_item(hit, DensityMode::Cozy.row_height());
+        let lines = item.snippet_lines(16, 2);
+
+        assert_eq!(
+            lines.len(),
+            2,
+            "test_id=9.5.snippet.ellipsis expected=2-lines actual={}",
+            lines.len()
+        );
+        assert!(
+            lines[1].ends_with("..."),
+            "test_id=9.5.snippet.ellipsis expected=trailing-ellipsis actual='{}'",
+            lines[1]
+        );
+        assert!(
+            lines[1].chars().count() <= 16,
+            "test_id=9.5.snippet.ellipsis expected=max-width actual_len={}",
+            lines[1].chars().count()
+        );
+    }
+
+    #[test]
+    fn results_navigation_page_scroll_and_home_end_are_stable() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = app_with_hits(120);
+        // Virtualized page movement relies on a rendered viewport row count.
+        render_at_degradation(&app, 140, 24, DegradationLevel::Full);
+        assert_eq!(app.panes[0].selected, 0);
+
+        let _ = app.update(CassMsg::PageScrolled { delta: 1 });
+        let after_page_down = app.panes[0].selected;
+        assert!(
+            after_page_down > 0,
+            "test_id=9.5.interaction.page component=selection expected=advance actual={after_page_down}"
+        );
+
+        let _ = app.update(CassMsg::PageScrolled { delta: -1 });
+        let after_page_up = app.panes[0].selected;
+        assert!(
+            after_page_up <= after_page_down,
+            "test_id=9.5.interaction.page component=selection expected=non-increase actual_down={} actual_up={}",
+            after_page_down,
+            after_page_up
+        );
+
+        let _ = app.update(CassMsg::SelectionJumped { to_end: true });
+        assert_eq!(
+            app.panes[0].selected,
+            app.panes[0].hits.len().saturating_sub(1),
+            "test_id=9.5.interaction.home-end component=end-jump expected=last-row"
+        );
+
+        let _ = app.update(CassMsg::SelectionJumped { to_end: false });
+        assert_eq!(
+            app.panes[0].selected, 0,
+            "test_id=9.5.interaction.home-end component=home-jump expected=first-row"
+        );
+    }
+
+    #[test]
+    fn results_focus_persists_through_theme_and_filter_changes() {
+        let mut app = app_with_hits(10);
+        let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(
+            app.focused_region(),
+            FocusRegion::Detail,
+            "precondition: focus should be detail"
+        );
+
+        let _ = app.update(CassMsg::ThemeToggled);
+        let mut agents = std::collections::HashSet::new();
+        agents.insert("codex".to_string());
+        let _ = app.update(CassMsg::FilterAgentSet(agents));
+
+        assert_eq!(
+            app.focused_region(),
+            FocusRegion::Detail,
+            "test_id=9.5.interaction.focus component=theme+filter expected=detail-focus-preserved"
         );
     }
 
@@ -17015,6 +17191,8 @@ mod tests {
             source_local_style: ftui::Style::default(),
             source_remote_style: ftui::Style::default(),
             location_style: ftui::Style::default(),
+            reveal_progress: 1.0,
+            focus_flash_intensity: 0.0,
         }
     }
 
@@ -21974,6 +22152,274 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         let anim = AnimationState::new(false);
         assert!((anim.reveal_progress(0) - 1.0).abs() < 0.01);
         assert!((anim.reveal_progress(99) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn animation_clear_reveal_resets_state() {
+        let mut anim = AnimationState::new(true);
+        anim.start_reveal(8);
+        assert!(anim.reveal_active);
+        assert!(!anim.reveal_springs.is_empty());
+        anim.clear_reveal();
+        assert!(!anim.reveal_active);
+        assert!(anim.reveal_springs.is_empty());
+    }
+
+    #[test]
+    fn search_completed_large_result_set_starts_reveal_sequence() {
+        let mut app = CassApp::default();
+        let hits: Vec<SearchHit> = (0..RESULTS_REVEAL_MIN_HITS)
+            .map(|i| make_hit(i as u64, &format!("/reveal/{i}")))
+            .collect();
+        let _ = app.update(CassMsg::SearchCompleted {
+            hits,
+            elapsed_ms: 7,
+            suggestions: Vec::new(),
+            wildcard_fallback: false,
+        });
+        assert!(
+            app.anim.reveal_active,
+            "large result sets should trigger reveal"
+        );
+        assert_eq!(
+            app.anim.reveal_springs.len(),
+            RESULTS_REVEAL_MIN_HITS.min(anim_config::MAX_ANIMATED_ITEMS)
+        );
+        assert!(
+            app.reveal_anim_start.is_some(),
+            "reveal start timestamp should be recorded"
+        );
+    }
+
+    #[test]
+    fn search_completed_small_result_set_clears_reveal_sequence() {
+        let mut app = CassApp::default();
+        app.anim.start_reveal(10);
+        app.reveal_anim_start = Some(Instant::now());
+
+        let hits: Vec<SearchHit> = (0..RESULTS_REVEAL_MIN_HITS.saturating_sub(1))
+            .map(|i| make_hit(i as u64, &format!("/small/{i}")))
+            .collect();
+        let _ = app.update(CassMsg::SearchCompleted {
+            hits,
+            elapsed_ms: 6,
+            suggestions: Vec::new(),
+            wildcard_fallback: false,
+        });
+        assert!(
+            !app.anim.reveal_active,
+            "small result sets should not keep reveal animation active"
+        );
+        assert!(
+            app.anim.reveal_springs.is_empty(),
+            "small result sets should clear reveal springs"
+        );
+        assert!(
+            app.reveal_anim_start.is_none(),
+            "small result sets should clear reveal start timestamp"
+        );
+    }
+
+    #[test]
+    fn results_reveal_affects_full_mode_but_is_suppressed_when_degraded() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut full_app = app_with_hits(8);
+        full_app.anim.start_reveal(8);
+        let full_early = ftui_harness::buffer_to_text(&render_at_degradation(
+            &full_app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        for _ in 0..60 {
+            full_app.anim.tick(std::time::Duration::from_millis(16));
+        }
+        let full_late = ftui_harness::buffer_to_text(&render_at_degradation(
+            &full_app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert_ne!(
+            full_early, full_late,
+            "full mode should reflect reveal progress over time"
+        );
+
+        let mut degraded_app = app_with_hits(8);
+        degraded_app.anim.start_reveal(8);
+        let degraded_early = ftui_harness::buffer_to_text(&render_at_degradation(
+            &degraded_app,
+            120,
+            24,
+            DegradationLevel::SimpleBorders,
+        ));
+        for _ in 0..60 {
+            degraded_app.anim.tick(std::time::Duration::from_millis(16));
+        }
+        let degraded_late = ftui_harness::buffer_to_text(&render_at_degradation(
+            &degraded_app,
+            120,
+            24,
+            DegradationLevel::SimpleBorders,
+        ));
+        assert_eq!(
+            degraded_early, degraded_late,
+            "degraded mode should suppress reveal animation for deterministic output"
+        );
+    }
+
+    #[test]
+    fn focus_flash_glyph_only_renders_when_motion_policy_allows() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = app_with_hits(8);
+        app.anim.trigger_focus_flash();
+
+        let full = ftui_harness::buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            full.contains('\u{2726}'),
+            "full mode should render focus-flash cue in selected row"
+        );
+
+        let degraded = ftui_harness::buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::SimpleBorders,
+        ));
+        assert!(
+            !degraded.contains('\u{2726}'),
+            "degraded mode should suppress focus-flash cue"
+        );
+    }
+
+    // =========================================================================
+    // 2dccg.9.4 — Animation stress + performance guardrail tests
+    // =========================================================================
+
+    #[test]
+    fn reveal_springs_capped_at_max_animated_items() {
+        let mut anim = AnimationState::new(true);
+        anim.start_reveal(500);
+        assert_eq!(
+            anim.reveal_springs.len(),
+            anim_config::MAX_ANIMATED_ITEMS,
+            "reveal springs should be capped at MAX_ANIMATED_ITEMS={} even for 500 hits",
+            anim_config::MAX_ANIMATED_ITEMS
+        );
+    }
+
+    #[test]
+    fn reveal_not_triggered_below_min_hits() {
+        let app = app_with_hits(RESULTS_REVEAL_MIN_HITS - 1);
+        let enabled = app.results_reveal_motion_enabled(
+            ftui::render::budget::DegradationLevel::Full,
+            RESULTS_REVEAL_MIN_HITS - 1,
+        );
+        assert!(
+            !enabled,
+            "reveal should not trigger below {RESULTS_REVEAL_MIN_HITS} hits"
+        );
+    }
+
+    #[test]
+    fn reveal_not_triggered_above_max_hits() {
+        let app = app_with_hits(10);
+        let enabled = app.results_reveal_motion_enabled(
+            ftui::render::budget::DegradationLevel::Full,
+            RESULTS_REVEAL_MAX_HITS + 1,
+        );
+        assert!(
+            !enabled,
+            "reveal should not trigger above {RESULTS_REVEAL_MAX_HITS} hits"
+        );
+    }
+
+    #[test]
+    fn reveal_enabled_within_hit_range() {
+        let app = app_with_hits(10);
+        assert!(
+            app.results_reveal_motion_enabled(
+                ftui::render::budget::DegradationLevel::Full,
+                RESULTS_REVEAL_MIN_HITS,
+            ),
+            "reveal should trigger at exactly MIN_HITS"
+        );
+        assert!(
+            app.results_reveal_motion_enabled(
+                ftui::render::budget::DegradationLevel::Full,
+                RESULTS_REVEAL_MAX_HITS,
+            ),
+            "reveal should trigger at exactly MAX_HITS"
+        );
+    }
+
+    #[test]
+    fn heavy_result_render_no_panic_with_animation() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = app_with_hits(200);
+        app.anim.start_reveal(200);
+        // Render at full degradation — animation active
+        let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        // Tick forward and render again
+        app.anim.tick(std::time::Duration::from_millis(50));
+        let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        // Should not panic even with 200 hits + reveal animation
+    }
+
+    #[test]
+    fn animation_disabled_env_snaps_springs() {
+        let mut anim = AnimationState::new(false);
+        anim.start_reveal(10);
+        // Disabled animations should still allow start_reveal
+        // but tick should snap everything instantly
+        anim.tick(std::time::Duration::from_millis(16));
+        assert!(
+            !anim.reveal_active,
+            "disabled animations should snap reveal to complete"
+        );
+        // Focus flash should also snap
+        anim.trigger_focus_flash();
+        anim.tick(std::time::Duration::from_millis(16));
+        assert!(
+            (anim.focus_flash_progress() - 1.0).abs() < 0.01,
+            "disabled animations should snap focus flash to settled"
+        );
+    }
+
+    #[test]
+    fn focus_flash_disabled_returns_zero_intensity() {
+        let mut app = app_with_hits(8);
+        // Trigger flash then check intensity with disabled animation
+        app.anim.trigger_focus_flash();
+        // Even with flash triggered, disabled anim should return 0
+        app.anim.enabled = false;
+        let intensity =
+            app.results_focus_flash_intensity(ftui::render::budget::DegradationLevel::Full, true);
+        assert!(
+            intensity < 0.01,
+            "disabled animation should return zero flash intensity"
+        );
+    }
+
+    #[test]
+    fn focus_flash_zero_when_not_focused() {
+        let app = app_with_hits(8);
+        let intensity = app.results_focus_flash_intensity(
+            ftui::render::budget::DegradationLevel::Full,
+            false, // not focused
+        );
+        assert!(
+            intensity < 0.01,
+            "unfocused results should return zero flash intensity"
+        );
     }
 
     // =========================================================================
