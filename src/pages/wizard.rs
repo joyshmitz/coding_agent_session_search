@@ -93,6 +93,11 @@ pub struct WizardState {
     // Attachment support
     pub include_attachments: bool,
 
+    // Cloudflare Pages deployment
+    pub cloudflare_branch: Option<String>,
+    pub cloudflare_account_id: Option<String>,
+    pub cloudflare_api_token: Option<String>,
+
     // Final output location (set after export)
     pub final_site_dir: Option<PathBuf>,
 }
@@ -128,6 +133,9 @@ impl Default for WizardState {
             no_encryption: false,
             unencrypted_confirmed: false,
             include_attachments: false,
+            cloudflare_branch: None,
+            cloudflare_account_id: None,
+            cloudflare_api_token: None,
             final_site_dir: None,
         }
     }
@@ -161,6 +169,31 @@ impl PagesWizard {
     /// Set whether to include attachments in the export.
     pub fn set_include_attachments(&mut self, include: bool) {
         self.state.include_attachments = include;
+    }
+
+    /// Set the deployment target.
+    pub fn set_deploy_target(&mut self, target: DeployTarget) {
+        self.state.target = target;
+    }
+
+    /// Set the repository/project name for deployment.
+    pub fn set_repo_name(&mut self, name: String) {
+        self.state.repo_name = Some(name);
+    }
+
+    /// Set the Cloudflare Pages branch.
+    pub fn set_cloudflare_branch(&mut self, branch: String) {
+        self.state.cloudflare_branch = Some(branch);
+    }
+
+    /// Set the Cloudflare account ID.
+    pub fn set_cloudflare_account_id(&mut self, account_id: String) {
+        self.state.cloudflare_account_id = Some(account_id);
+    }
+
+    /// Set the Cloudflare API token.
+    pub fn set_cloudflare_api_token(&mut self, api_token: String) {
+        self.state.cloudflare_api_token = Some(api_token);
     }
 
     pub fn run(&mut self) -> Result<()> {
