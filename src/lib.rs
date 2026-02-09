@@ -1252,7 +1252,7 @@ pub enum RobotFormat {
     Compact,
     /// Session paths only: one source_path per line (for chained searches)
     Sessions,
-    /// Token-Optimized Object Notation (encodes via toon_rust crate)
+    /// Token-Optimized Object Notation (encodes via tru crate)
     Toon,
 }
 
@@ -6410,7 +6410,7 @@ fn robot_format_from_env() -> Option<RobotFormat> {
         })
 }
 
-fn toon_encode_options_from_env() -> toon_rust::EncodeOptions {
+fn toon_encode_options_from_env() -> tru::EncodeOptions {
     let indent = match dotenvy::var("TOON_INDENT") {
         Ok(v) if !v.trim().is_empty() => match v.parse::<usize>() {
             Ok(n) => Some(n),
@@ -6424,8 +6424,8 @@ fn toon_encode_options_from_env() -> toon_rust::EncodeOptions {
 
     let key_folding = match dotenvy::var("TOON_KEY_FOLDING") {
         Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "" | "off" | "0" | "false" => Some(toon_rust::options::KeyFoldingMode::Off),
-            "safe" => Some(toon_rust::options::KeyFoldingMode::Safe),
+            "" | "off" | "0" | "false" => Some(tru::options::KeyFoldingMode::Off),
+            "safe" => Some(tru::options::KeyFoldingMode::Safe),
             other => {
                 warn!("invalid TOON_KEY_FOLDING={other} (expected off|safe); ignoring");
                 None
@@ -6434,7 +6434,7 @@ fn toon_encode_options_from_env() -> toon_rust::EncodeOptions {
         Err(_) => None,
     };
 
-    toon_rust::EncodeOptions {
+    tru::EncodeOptions {
         indent,
         delimiter: None,
         key_folding,
@@ -6455,7 +6455,7 @@ fn output_structured_value(payload: serde_json::Value, format: RobotFormat) -> C
             println!("{}", serde_json::to_string(&payload).unwrap_or_default());
         }
         RobotFormat::Toon => {
-            let toon_str = toon_rust::encode(payload, Some(toon_encode_options_from_env()));
+            let toon_str = tru::encode(payload, Some(toon_encode_options_from_env()));
             print!("{toon_str}");
         }
     }
@@ -6878,7 +6878,7 @@ fn output_robot_results(
         }
         RobotFormat::Toon => {
             // TOON: Token-Optimized Object Notation
-            // Encodes via toon_rust crate for token-efficient output
+            // Encodes via tru crate for token-efficient output
             let mut payload = serde_json::json!({
                 "query": query,
                 "limit": limit,
@@ -6983,7 +6983,7 @@ fn output_robot_results(
                 retryable: false,
             })?;
 
-            let toon_str = toon_rust::encode(payload, Some(toon_encode_options_from_env()));
+            let toon_str = tru::encode(payload, Some(toon_encode_options_from_env()));
 
             // Preserve the existing "compact JSON" behavior by first ensuring the payload is
             // valid JSON (serde_json::to_string above). We don't need the string itself here.
