@@ -13495,7 +13495,7 @@ fn should_upgrade_style_profile_for_dumb_term(
         && !headless
         && !explicit_no_color
         && !explicit_color_profile
-        && style_options.color_profile == ftui::ColorProfile::Mono
+        && style_options.color_profile != ftui::ColorProfile::TrueColor
 }
 
 /// Run the cass TUI using the ftui Program runtime.
@@ -18540,6 +18540,23 @@ mod tests {
     fn dumb_term_style_profile_upgrade_triggers_for_inherited_mono() {
         let style_options = StyleOptions {
             color_profile: ftui::ColorProfile::Mono,
+            no_color: false,
+            ..StyleOptions::default()
+        };
+        assert!(should_upgrade_style_profile_for_dumb_term(
+            style_options,
+            true,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn dumb_term_style_profile_upgrade_triggers_for_inherited_ansi16() {
+        let style_options = StyleOptions {
+            color_profile: ftui::ColorProfile::Ansi16,
             no_color: false,
             ..StyleOptions::default()
         };
