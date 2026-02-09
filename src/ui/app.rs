@@ -13925,12 +13925,10 @@ mod macro_file {
             let json = serialize_event(&event);
             let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
             let restored = deserialize_event(&parsed).unwrap();
-            match restored {
-                Event::Key(k) => {
-                    assert_eq!(k.code, KeyCode::Char('a'));
-                    assert!(k.modifiers.contains(Modifiers::CTRL));
-                }
-                _ => panic!("expected Key event"),
+            assert!(matches!(&restored, Event::Key(_)), "expected Key event");
+            if let Event::Key(k) = restored {
+                assert_eq!(k.code, KeyCode::Char('a'));
+                assert!(k.modifiers.contains(Modifiers::CTRL));
             }
         }
 
@@ -13953,10 +13951,13 @@ mod macro_file {
                 let json = serialize_event(&event);
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 let restored = deserialize_event(&parsed).unwrap();
+                assert!(
+                    matches!(&restored, Event::Key(_)),
+                    "expected Key event for {:?}",
+                    code
+                );
                 if let Event::Key(k) = restored {
                     assert_eq!(k.code, code, "roundtrip failed for {:?}", code);
-                } else {
-                    panic!("expected Key event for {:?}", code);
                 }
             }
         }
@@ -14056,11 +14057,10 @@ mod macro_file {
                 bracketed: true,
             });
             let redacted = redact_event_paths(&event, &home);
+            assert!(matches!(&redacted, Event::Paste(_)), "expected Paste event");
             if let Event::Paste(p) = redacted {
                 assert_eq!(p.text, "~/projects/foo/bar.rs");
                 assert!(p.bracketed);
-            } else {
-                panic!("expected Paste event");
             }
         }
 
@@ -24384,11 +24384,12 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
 
         assert!(config.enabled);
         // Verify destination is a file path
-        match &config.destination {
-            EvidenceSinkDestination::File(p) => {
-                assert_eq!(p, &evidence_path);
-            }
-            _ => panic!("expected file destination"),
+        assert!(
+            matches!(&config.destination, EvidenceSinkDestination::File(_)),
+            "expected file destination"
+        );
+        if let EvidenceSinkDestination::File(p) = &config.destination {
+            assert_eq!(p, &evidence_path);
         }
     }
 
@@ -25977,19 +25978,27 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         assert_eq!(sink_a.flush_on_write, sink_b.flush_on_write);
 
         // Evidence paths differ only by data_dir prefix
-        match (&sink_a.destination, &sink_b.destination) {
-            (
-                ftui::runtime::evidence_sink::EvidenceSinkDestination::File(pa),
-                ftui::runtime::evidence_sink::EvidenceSinkDestination::File(pb),
-            ) => {
-                assert_ne!(pa, pb, "paths should differ across data dirs");
-                assert!(
-                    pa.ends_with("resize_evidence.jsonl"),
-                    "evidence file name must be consistent"
-                );
-                assert!(pb.ends_with("resize_evidence.jsonl"));
-            }
-            _ => panic!("expected file destinations"),
+        assert!(
+            matches!(
+                (&sink_a.destination, &sink_b.destination),
+                (
+                    ftui::runtime::evidence_sink::EvidenceSinkDestination::File(_),
+                    ftui::runtime::evidence_sink::EvidenceSinkDestination::File(_)
+                )
+            ),
+            "expected file destinations"
+        );
+        if let (
+            ftui::runtime::evidence_sink::EvidenceSinkDestination::File(pa),
+            ftui::runtime::evidence_sink::EvidenceSinkDestination::File(pb),
+        ) = (&sink_a.destination, &sink_b.destination)
+        {
+            assert_ne!(pa, pb, "paths should differ across data dirs");
+            assert!(
+                pa.ends_with("resize_evidence.jsonl"),
+                "evidence file name must be consistent"
+            );
+            assert!(pb.ends_with("resize_evidence.jsonl"));
         }
     }
 
