@@ -4786,7 +4786,10 @@ impl CassApp {
                     even,
                     max_width: inner.width,
                     queued,
-                    stripe_style: if even { row_style } else { row_alt_style },
+                    stripe_style: styles.result_row_style_for_agent(
+                        if even { row_style } else { row_alt_style },
+                        &hit.agent,
+                    ),
                     selected_style: row_selected_style,
                     agent_accent_style: styles.agent_accent_style(&hit.agent),
                     score_style: styles.score_style(normalize_score_for_visuals(hit.score)),
