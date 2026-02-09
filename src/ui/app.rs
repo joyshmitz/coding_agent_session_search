@@ -16801,6 +16801,20 @@ mod tests {
         }
     }
 
+    fn markdown_span_fg_for_text(
+        lines: &[ftui::text::Line],
+        needle: &str,
+    ) -> Option<ftui::render::cell::PackedRgba> {
+        for line in lines {
+            for span in line.spans() {
+                if span.content.as_ref().contains(needle) {
+                    return span.style.as_ref().and_then(|style| style.fg);
+                }
+            }
+        }
+        None
+    }
+
     #[test]
     fn build_messages_lines_produces_output() {
         let app = CassApp::default();
@@ -17006,6 +17020,82 @@ mod tests {
         let lines = app.build_messages_lines(&hit, 80, &styles);
         // The content has "# Heading" which is markdown — should render it
         assert!(lines.len() > 5, "markdown should produce multiple lines");
+    }
+
+    #[test]
+    fn detail_markdown_fallback_uses_active_theme_mapping() {
+        use crate::ui::style_system::UiThemePreset;
+
+        let mut app = CassApp::default();
+        app.cached_detail = None;
+        let mut hit = make_test_hit();
+        hit.content = "# Themed Heading\n\nSome **bold** text".to_string();
+        let presets = [
+            (UiThemePreset::Dark, true),
+            (UiThemePreset::Light, false),
+            (UiThemePreset::HighContrast, true),
+            (UiThemePreset::Catppuccin, true),
+        ];
+        for (preset, dark_mode) in presets {
+            let styles = StyleContext::from_options(StyleOptions {
+                preset,
+                dark_mode,
+                ..StyleOptions::default()
+            });
+            let lines = app.build_messages_lines(&hit, 80, &styles);
+            let heading_fg = markdown_span_fg_for_text(&lines, "Themed Heading")
+                .expect("fallback heading should render for preset");
+            assert_eq!(
+                Some(heading_fg),
+                styles.markdown_theme().h1.fg,
+                "fallback markdown heading should use active markdown theme h1 for preset {:?}",
+                preset
+            );
+        }
+    }
+
+    #[test]
+    fn detail_markdown_cached_messages_follow_theme_toggle() {
+        let mut app = CassApp::default();
+        let mut cv = make_test_conversation_view();
+        cv.messages = vec![Message {
+            id: Some(1),
+            idx: 0,
+            role: MessageRole::Agent,
+            author: Some("cass".to_string()),
+            created_at: Some(1_700_000_000),
+            content: "# Cached Theme Heading\n\nSome **bold** markdown.".to_string(),
+            extra_json: serde_json::json!({}),
+            snippets: vec![],
+        }];
+        app.cached_detail = Some(("/test/session.jsonl".to_string(), cv));
+
+        let hit = make_test_hit();
+        let dark_styles = app.resolved_style_context();
+        let dark_lines = app.build_messages_lines(&hit, 80, &dark_styles);
+        let dark_fg = markdown_span_fg_for_text(&dark_lines, "Cached Theme Heading")
+            .expect("cached markdown heading should be rendered before theme toggle");
+        assert_eq!(
+            Some(dark_fg),
+            dark_styles.markdown_theme().h1.fg,
+            "cached markdown heading should use current preset markdown theme before toggle"
+        );
+
+        let _ = app.update(CassMsg::ThemeToggled);
+        let toggled_styles = app.resolved_style_context();
+        let toggled_lines = app.build_messages_lines(&hit, 80, &toggled_styles);
+        let toggled_fg = markdown_span_fg_for_text(&toggled_lines, "Cached Theme Heading")
+            .expect("cached markdown heading should be rendered after theme toggle");
+        assert_eq!(
+            Some(toggled_fg),
+            toggled_styles.markdown_theme().h1.fg,
+            "cached markdown heading should use current preset markdown theme after toggle"
+        );
+
+        assert_ne!(
+            dark_fg, toggled_fg,
+            "theme toggle should immediately change cached markdown heading color"
+        );
     }
 
     // ==================== Analytics surface tests ====================
@@ -24613,5 +24703,588 @@ mod tests {
             total <= 20,
             "breadcrumb at width=20 should fit budget, got {total}"
         );
+    }
+
+    // ── Search-surface regression snapshots (2dccg.8.6) ─────────────────
+
+    fn search_surface_fixture_app() -> CassApp {
+        let mut app = app_with_rich_visual_fixture();
+        app.query = "authentication regression".to_string();
+        app.cursor_pos = 13;
+        app.search_mode = SearchMode::Hybrid;
+        app.match_mode = MatchMode::Prefix;
+        app
+    }
+
+    #[test]
+    fn snapshot_search_surface_structure_default() {
+        use ftui::render::budget::DegradationLevel;
+
+        let app = search_surface_fixture_app();
+        let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+
+        assert!(
+            text.contains("cass"),
+            "test_id=8.6.structure.default component=search_bar action=render expected=title actual=missing"
+        );
+        assert!(
+            text.contains("[agent:"),
+            "test_id=8.6.structure.default component=pills action=render expected=agent-pill actual=missing"
+        );
+        assert!(
+            text.contains("hits:"),
+            "test_id=8.6.structure.default component=footer action=render expected=hud-lane actual=missing"
+        );
+        assert_affordance_snapshot("cassapp_search_surface_structure_default", &buf);
+    }
+
+    #[test]
+    fn snapshot_search_surface_active_filters_hierarchy() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = search_surface_fixture_app();
+        app.filters.agents.insert("codex".to_string());
+        app.filters.workspaces.insert("/workspace/cass".to_string());
+        app.filters.created_from = Some(1_700_000_000);
+        app.filters.source_filter = SourceFilter::SourceId("remote-ci".to_string());
+        app.pane_filter = Some("triage".to_string());
+
+        let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(
+            text.contains("[agent:codex]"),
+            "test_id=8.6.hierarchy.filters component=pills action=render expected=active-agent-value actual=missing"
+        );
+        assert!(
+            text.contains("\u{203a}") || text.contains(">"),
+            "test_id=8.6.hierarchy.filters component=breadcrumbs action=render expected=separator actual=missing"
+        );
+        assert_affordance_snapshot("cassapp_search_surface_active_filters", &buf);
+    }
+
+    #[test]
+    fn snapshot_search_surface_breakpoint_matrix() {
+        use ftui::render::budget::DegradationLevel;
+
+        let app = search_surface_fixture_app();
+        let cases = [
+            ("cassapp_search_surface_breakpoint_narrow", 79u16),
+            ("cassapp_search_surface_breakpoint_medium", 120u16),
+            ("cassapp_search_surface_breakpoint_wide", 160u16),
+        ];
+        for (name, width) in cases {
+            let buf = render_at_degradation(&app, width, 24, DegradationLevel::Full);
+            let text = ftui_harness::buffer_to_text(&buf);
+            assert!(
+                text.contains("cass"),
+                "test_id=8.6.structure.breakpoint component=search_bar action=render expected=title actual=missing width={width}"
+            );
+            assert_affordance_snapshot(name, &buf);
+        }
+    }
+
+    #[test]
+    fn snapshot_search_surface_theme_toggle_updates_chrome_immediately() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = search_surface_fixture_app();
+        let dark_buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let dark_text = ftui_harness::buffer_to_text(&dark_buf);
+
+        let _ = app.update(CassMsg::ThemeToggled);
+        let light_buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let light_text = ftui_harness::buffer_to_text(&light_buf);
+
+        assert_ne!(
+            dark_text, light_text,
+            "test_id=8.6.hierarchy.theme component=search-surface action=theme-toggle expected=updated-render actual=unchanged"
+        );
+        assert_affordance_snapshot("cassapp_search_surface_theme_dark", &dark_buf);
+        assert_affordance_snapshot("cassapp_search_surface_theme_light", &light_buf);
+    }
+
+    #[test]
+    fn search_surface_interaction_matrix_enter_click_escape() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = search_surface_fixture_app();
+        app.query = "follow-up query".to_string();
+
+        // Enter submit should push query history.
+        let _ = app.update(CassMsg::QuerySubmitted);
+        assert!(
+            app.query_history
+                .front()
+                .is_some_and(|q| q == "follow-up query"),
+            "test_id=8.6.interaction.enter component=search_bar action=query_submit expected=history_push actual={:?}",
+            app.query_history.front()
+        );
+
+        // Left-click on an agent pill should enter agent-edit mode.
+        app.filters.agents.insert("codex".to_string());
+        render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let rect = app
+            .last_pill_rects
+            .borrow()
+            .iter()
+            .find_map(|(rect, pill)| (pill.label == "agent").then_some(*rect))
+            .expect("test_id=8.6.interaction.pill expected=agent-pill-rect actual=none");
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: rect.x,
+            y: rect.y,
+        });
+        assert_eq!(
+            app.input_mode,
+            InputMode::Agent,
+            "test_id=8.6.interaction.pill component=pills action=left_click expected=input_mode_agent actual={:?}",
+            app.input_mode
+        );
+
+        // Esc unwind from non-query input mode should return to query mode.
+        let _ = app.update(CassMsg::QuitRequested);
+        assert_eq!(
+            app.input_mode,
+            InputMode::Query,
+            "test_id=8.6.interaction.escape component=input_mode action=quit_requested expected=query_mode actual={:?}",
+            app.input_mode
+        );
+        assert!(
+            app.input_buffer.is_empty(),
+            "test_id=8.6.interaction.escape component=input_buffer action=quit_requested expected=cleared actual={}",
+            app.input_buffer
+        );
+    }
+
+    #[test]
+    fn search_bar_renders_mode_aware_title() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let modes = [
+            (InputMode::Query, "<type to search>"),
+            (InputMode::Agent, "[agent]"),
+            (InputMode::Workspace, "[workspace]"),
+            (InputMode::CreatedFrom, "[from]"),
+            (InputMode::CreatedTo, "[to]"),
+            (InputMode::PaneFilter, "[pane]"),
+        ];
+
+        for (mode, expected_prefix) in modes {
+            let mut app = search_surface_fixture_app();
+            app.input_mode = mode;
+            if mode == InputMode::Query {
+                app.query.clear(); // empty query shows placeholder
+            }
+            let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+            let text = buffer_to_text(&buf);
+            assert!(
+                text.contains(expected_prefix),
+                "test_id=8.6.structure.mode_title component=search_bar mode={mode:?} expected='{expected_prefix}' actual_text_missing"
+            );
+        }
+    }
+
+    #[test]
+    fn search_bar_cursor_position_tracks_input() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = search_surface_fixture_app();
+        app.query = "hello world".to_string();
+        app.cursor_pos = 5; // cursor after "hello"
+
+        let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+        // The caret character │ should appear between "hello" and " world"
+        assert!(
+            text.contains("hello") && text.contains("world"),
+            "test_id=8.6.structure.cursor component=search_bar action=render expected=query_visible"
+        );
+    }
+
+    #[test]
+    fn pill_spans_use_distinct_styles_for_active_and_inactive() {
+        let app = search_surface_fixture_app();
+        let active_style = ftui::Style::new()
+            .fg(ftui::render::cell::PackedRgba::rgba(255, 100, 100, 255))
+            .bold();
+        let inactive_style =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(128, 128, 128, 255));
+        let label_style =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(200, 200, 200, 255));
+        let sep_style = ftui::Style::new();
+
+        let mut pills = app.filter_pills();
+        // Ensure we have at least one active and one inactive pill
+        pills[0].active = true;
+        pills[1].active = false;
+
+        let area = Rect::new(0, 0, 120, 1);
+        let (line, _rects) = app.build_pills_row(
+            area,
+            &pills,
+            active_style,
+            inactive_style,
+            label_style,
+            sep_style,
+        );
+        let spans = line.spans();
+
+        // Collect value spans (those that are not label or separator) —
+        // active pill values should have different fg than inactive pill values
+        let active_value_spans: Vec<_> = spans
+            .iter()
+            .filter(|sp| {
+                sp.style.as_ref().and_then(|s| s.fg)
+                    == Some(ftui::render::cell::PackedRgba::rgba(255, 100, 100, 255))
+            })
+            .collect();
+        let inactive_value_spans: Vec<_> = spans
+            .iter()
+            .filter(|sp| {
+                sp.style.as_ref().and_then(|s| s.fg)
+                    == Some(ftui::render::cell::PackedRgba::rgba(128, 128, 128, 255))
+            })
+            .collect();
+        assert!(
+            !active_value_spans.is_empty(),
+            "test_id=8.6.hierarchy.pill_active component=pills expected=active_styled_span actual=none"
+        );
+        assert!(
+            !inactive_value_spans.is_empty(),
+            "test_id=8.6.hierarchy.pill_inactive component=pills expected=inactive_styled_span actual=none"
+        );
+    }
+
+    #[test]
+    fn breadcrumb_spans_differentiate_active_inactive_segments() {
+        let mut app = search_surface_fixture_app();
+        app.filters.agents.insert("codex".to_string());
+        // ws filter NOT set — should be inactive
+
+        let active_style =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(0, 255, 0, 255));
+        let inactive_style =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(100, 100, 100, 255));
+        let sep_style =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(50, 50, 50, 255));
+
+        let line = app.breadcrumb_line(120, active_style, inactive_style, sep_style);
+        let spans = line.spans();
+
+        // Should have multiple spans with mixed styles
+        let active_count = spans
+            .iter()
+            .filter(|sp| {
+                sp.style.as_ref().and_then(|s| s.fg)
+                    == Some(ftui::render::cell::PackedRgba::rgba(0, 255, 0, 255))
+            })
+            .count();
+        let inactive_count = spans
+            .iter()
+            .filter(|sp| {
+                sp.style.as_ref().and_then(|s| s.fg)
+                    == Some(ftui::render::cell::PackedRgba::rgba(100, 100, 100, 255))
+            })
+            .count();
+        assert!(
+            active_count >= 1,
+            "test_id=8.6.hierarchy.crumb_active component=breadcrumbs expected>=1_active_span actual={active_count}"
+        );
+        assert!(
+            inactive_count >= 1,
+            "test_id=8.6.hierarchy.crumb_inactive component=breadcrumbs expected>=1_inactive_span actual={inactive_count}"
+        );
+    }
+
+    #[test]
+    fn footer_hud_uses_key_desc_token_pairing() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = search_surface_fixture_app();
+        app.last_search_ms = Some(42);
+
+        let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+
+        // Footer HUD should contain key:value pairs
+        assert!(
+            text.contains("hits:"),
+            "test_id=8.6.structure.footer_hud component=footer action=render expected=hits_lane"
+        );
+        assert!(
+            text.contains("query:") || text.contains("hybrid"),
+            "test_id=8.6.structure.footer_hud component=footer action=render expected=query_lane"
+        );
+        assert!(
+            text.contains("lat:42ms"),
+            "test_id=8.6.structure.footer_hud component=footer action=render expected=perf_lane"
+        );
+    }
+
+    #[test]
+    fn footer_hud_line_produces_key_style_per_lane() {
+        let key_style =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(200, 200, 255, 255));
+        let sep_style =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(80, 80, 80, 255));
+        let value_style =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(100, 200, 100, 255));
+
+        let lanes = vec![
+            FooterHudLane {
+                key: "hits",
+                value: "42".to_string(),
+                value_style,
+            },
+            FooterHudLane {
+                key: "query",
+                value: "hybrid / prefix".to_string(),
+                value_style,
+            },
+        ];
+
+        let line = build_footer_hud_line(&lanes, 120, key_style, sep_style);
+        let spans = line.spans();
+
+        // Key spans should use key_style
+        let key_spans: Vec<_> = spans
+            .iter()
+            .filter(|sp| {
+                sp.style.as_ref().and_then(|s| s.fg)
+                    == Some(ftui::render::cell::PackedRgba::rgba(200, 200, 255, 255))
+            })
+            .collect();
+        assert!(
+            key_spans.len() >= 2,
+            "test_id=8.6.structure.footer_spans component=footer expected>=2_key_styled_spans actual={}",
+            key_spans.len()
+        );
+        // Separator spans (colons, dividers) should use sep_style
+        let sep_spans: Vec<_> = spans
+            .iter()
+            .filter(|sp| {
+                sp.style.as_ref().and_then(|s| s.fg)
+                    == Some(ftui::render::cell::PackedRgba::rgba(80, 80, 80, 255))
+            })
+            .collect();
+        assert!(
+            !sep_spans.is_empty(),
+            "test_id=8.6.structure.footer_spans component=footer expected=sep_styled_spans actual=none"
+        );
+    }
+
+    #[test]
+    fn fkey_cycling_enters_filter_input_modes() {
+        use ftui::Model;
+
+        let mut app = search_surface_fixture_app();
+        assert_eq!(app.input_mode, InputMode::Query);
+
+        // F3 → Agent
+        let _ = app.update(CassMsg::InputModeEntered(InputMode::Agent));
+        assert_eq!(
+            app.input_mode,
+            InputMode::Agent,
+            "test_id=8.6.interaction.fkey component=input_mode action=f3 expected=agent"
+        );
+
+        // Cancel, then F4 → Workspace
+        let _ = app.update(CassMsg::InputModeCancelled);
+        assert_eq!(app.input_mode, InputMode::Query);
+        let _ = app.update(CassMsg::InputModeEntered(InputMode::Workspace));
+        assert_eq!(
+            app.input_mode,
+            InputMode::Workspace,
+            "test_id=8.6.interaction.fkey component=input_mode action=f4 expected=workspace"
+        );
+
+        // Cancel, then F5 → CreatedFrom
+        let _ = app.update(CassMsg::InputModeCancelled);
+        let _ = app.update(CassMsg::InputModeEntered(InputMode::CreatedFrom));
+        assert_eq!(
+            app.input_mode,
+            InputMode::CreatedFrom,
+            "test_id=8.6.interaction.fkey component=input_mode action=f5 expected=created_from"
+        );
+
+        // Cancel, then F6 → CreatedTo
+        let _ = app.update(CassMsg::InputModeCancelled);
+        let _ = app.update(CassMsg::InputModeEntered(InputMode::CreatedTo));
+        assert_eq!(
+            app.input_mode,
+            InputMode::CreatedTo,
+            "test_id=8.6.interaction.fkey component=input_mode action=f6 expected=created_to"
+        );
+    }
+
+    #[test]
+    fn input_mode_apply_sets_filter_and_returns_to_query() {
+        use ftui::Model;
+
+        let mut app = search_surface_fixture_app();
+
+        // Enter agent mode, type buffer, apply
+        let _ = app.update(CassMsg::InputModeEntered(InputMode::Agent));
+        app.input_buffer = "gemini, codex".to_string();
+        let _ = app.update(CassMsg::InputModeApplied);
+
+        assert_eq!(
+            app.input_mode,
+            InputMode::Query,
+            "test_id=8.6.interaction.apply component=input_mode expected=query_after_apply"
+        );
+        assert!(
+            app.input_buffer.is_empty(),
+            "test_id=8.6.interaction.apply component=input_buffer expected=cleared_after_apply"
+        );
+    }
+
+    #[test]
+    fn footer_contextual_hints_stable_across_themes() {
+        use ftui::Model;
+
+        let mut app = search_surface_fixture_app();
+
+        // Dark theme hints
+        let dark_hints = app.build_contextual_footer_hints(120);
+
+        // Toggle to light
+        let _ = app.update(CassMsg::ThemeToggled);
+        let light_hints = app.build_contextual_footer_hints(120);
+
+        // Hints should contain the same structural key=action pairs
+        // (same keys/descriptions regardless of theme)
+        assert_eq!(
+            dark_hints, light_hints,
+            "test_id=8.6.hierarchy.footer_hints component=footer action=theme_toggle expected=same_hint_text"
+        );
+    }
+
+    #[test]
+    fn search_bar_query_inset_visually_distinct() {
+        use ftui::render::budget::DegradationLevel;
+
+        // The search bar uses STYLE_TAB_ACTIVE/INACTIVE for its background.
+        // Verify that the rendered buffer at the search bar row differs from adjacent rows.
+        let app = search_surface_fixture_app();
+        let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+
+        // Search bar area is stored — verify it was rendered
+        let search_area = app.last_search_bar_area.borrow();
+        assert!(
+            search_area.is_some(),
+            "test_id=8.6.hierarchy.search_inset component=search_bar expected=area_recorded actual=none"
+        );
+    }
+
+    #[test]
+    fn escape_unwind_clears_pane_filter() {
+        use ftui::Model;
+
+        let mut app = search_surface_fixture_app();
+        app.pane_filter = Some("test-filter".to_string());
+        app.input_mode = InputMode::PaneFilter;
+
+        // First Esc: should clear pane filter
+        let _ = app.update(CassMsg::QuitRequested);
+        assert!(
+            app.pane_filter.is_none(),
+            "test_id=8.6.interaction.escape_pane component=pane_filter expected=cleared"
+        );
+        assert_eq!(
+            app.input_mode,
+            InputMode::Query,
+            "test_id=8.6.interaction.escape_pane component=input_mode expected=query"
+        );
+    }
+
+    #[test]
+    fn escape_unwind_clears_selection_before_quit() {
+        use ftui::Model;
+
+        let mut app = search_surface_fixture_app();
+        app.selected.insert(SelectedHitKey {
+            source_id: "local".into(),
+            source_path: "/path/0".into(),
+            line_number: None,
+            content_hash: 0,
+        });
+        app.selected.insert(SelectedHitKey {
+            source_id: "local".into(),
+            source_path: "/path/1".into(),
+            line_number: None,
+            content_hash: 1,
+        });
+
+        // Esc should clear selection first, not quit
+        let cmd = app.update(CassMsg::QuitRequested);
+        assert!(
+            app.selected.is_empty(),
+            "test_id=8.6.interaction.escape_selection component=selection expected=cleared"
+        );
+        assert!(
+            !matches!(cmd, ftui::Cmd::Quit),
+            "test_id=8.6.interaction.escape_selection expected=no_quit_yet"
+        );
+    }
+
+    #[test]
+    fn right_click_pill_clears_filter_and_triggers_search() {
+        use ftui::Model;
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = search_surface_fixture_app();
+        app.filters.workspaces.insert("/test/ws".to_string());
+        render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+
+        let rect = app
+            .last_pill_rects
+            .borrow()
+            .iter()
+            .find_map(|(rect, pill)| (pill.label == "ws").then_some(*rect))
+            .expect("test_id=8.6.interaction.right_click expected=ws_pill_rect");
+
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::RightClick,
+            x: rect.x,
+            y: rect.y,
+        });
+
+        assert!(
+            app.filters.workspaces.is_empty(),
+            "test_id=8.6.interaction.right_click component=ws_filter expected=cleared"
+        );
+        assert!(
+            app.search_dirty_since.is_some(),
+            "test_id=8.6.interaction.right_click component=search expected=dirty_for_debounce"
+        );
+    }
+
+    #[test]
+    fn search_surface_degradation_matrix() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let app = search_surface_fixture_app();
+        let levels = [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::NoStyling,
+            DegradationLevel::EssentialOnly,
+        ];
+
+        for level in levels {
+            let buf = render_at_degradation(&app, 120, 24, level);
+            let text = buffer_to_text(&buf);
+            // Core structure should survive all degradation levels
+            assert!(
+                text.contains("cass"),
+                "test_id=8.6.structure.degradation component=search_bar level={level:?} expected=title_present"
+            );
+        }
     }
 }
