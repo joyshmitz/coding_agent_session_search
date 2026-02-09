@@ -26480,4 +26480,202 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             );
         }
     }
+
+    // =====================================================================
+    // 2dccg.6.3 — Cross-theme × cross-degradation visual regression matrix
+    // =====================================================================
+
+    #[test]
+    fn cross_theme_degradation_matrix_results_pane() {
+        use crate::ui::style_system::UiThemePreset;
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        // Compact matrix: 3 representative themes × 2 reliable degradation tiers
+        // Full + SimpleBorders: full hierarchy must be present
+        // EssentialOnly: too aggressive for content assertions — tested as no-panic only
+        let themes = [
+            UiThemePreset::Dark,
+            UiThemePreset::Light,
+            UiThemePreset::HighContrast,
+        ];
+
+        for preset in themes {
+            for level in [DegradationLevel::Full, DegradationLevel::SimpleBorders] {
+                let mut app = app_with_hits(8);
+                app.theme_preset = preset;
+                app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                app.style_options.preset = preset;
+                app.style_options.dark_mode = app.theme_dark;
+
+                let buf = render_at_degradation(&app, 120, 24, level);
+                let text = buffer_to_text(&buf);
+
+                // Core hierarchy must survive Full and SimpleBorders
+                assert!(
+                    text.contains("Results"),
+                    "test_id=6.3.matrix.{:?}.{:?} component=results-title expected=present",
+                    preset,
+                    level
+                );
+                assert!(
+                    text.contains("Hit 0"),
+                    "test_id=6.3.matrix.{:?}.{:?} component=first-result expected=present",
+                    preset,
+                    level
+                );
+                assert!(
+                    text.contains("[local]"),
+                    "test_id=6.3.matrix.{:?}.{:?} component=source-badge expected=local-present",
+                    preset,
+                    level
+                );
+            }
+            // EssentialOnly: no-panic rendering (chrome may be stripped)
+            {
+                let mut app = app_with_hits(8);
+                app.theme_preset = preset;
+                app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                app.style_options.preset = preset;
+                app.style_options.dark_mode = app.theme_dark;
+                let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::EssentialOnly);
+            }
+        }
+    }
+
+    #[test]
+    fn cross_theme_degradation_matrix_search_surface() {
+        use crate::ui::style_system::UiThemePreset;
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let themes = [
+            UiThemePreset::Dark,
+            UiThemePreset::Light,
+            UiThemePreset::HighContrast,
+        ];
+
+        for preset in themes {
+            for level in [DegradationLevel::Full, DegradationLevel::SimpleBorders] {
+                let mut app = search_surface_fixture_app();
+                app.theme_preset = preset;
+                app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                app.style_options.preset = preset;
+                app.style_options.dark_mode = app.theme_dark;
+
+                let buf = render_at_degradation(&app, 120, 24, level);
+                let text = buffer_to_text(&buf);
+
+                assert!(
+                    text.contains("cass"),
+                    "test_id=6.3.matrix.search.{:?}.{:?} component=search-bar expected=title",
+                    preset,
+                    level
+                );
+            }
+            // EssentialOnly: no-panic only
+            {
+                let mut app = search_surface_fixture_app();
+                app.theme_preset = preset;
+                app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                app.style_options.preset = preset;
+                app.style_options.dark_mode = app.theme_dark;
+                let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::EssentialOnly);
+            }
+        }
+    }
+
+    #[test]
+    fn cross_theme_degradation_matrix_full_preset_sweep() {
+        use crate::ui::style_system::UiThemePreset;
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        // Exhaustive: all 6 themes at Full degradation — ensures no theme panics
+        for preset in UiThemePreset::all() {
+            let mut app = app_with_hits(5);
+            app.theme_preset = preset;
+            app.theme_dark = !matches!(preset, UiThemePreset::Light);
+            app.style_options.preset = preset;
+            app.style_options.dark_mode = app.theme_dark;
+
+            let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+            let text = buffer_to_text(&buf);
+
+            assert!(
+                text.contains("Results"),
+                "test_id=6.3.sweep.{:?} component=results-title expected=present",
+                preset
+            );
+        }
+    }
+
+    #[test]
+    fn cross_theme_degradation_light_specific_regressions() {
+        use crate::ui::style_system::UiThemePreset;
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        // Light theme at degraded levels — historically where regressions hide
+        let mut app = app_with_hits(8);
+        app.theme_preset = UiThemePreset::Light;
+        app.theme_dark = false;
+        app.style_options.preset = UiThemePreset::Light;
+        app.style_options.dark_mode = false;
+
+        for level in [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::NoStyling,
+        ] {
+            let buf = render_at_degradation(&app, 120, 24, level);
+            let text = buffer_to_text(&buf);
+
+            // Structural content must survive Full/SimpleBorders/NoStyling
+            assert!(
+                text.contains("Results"),
+                "test_id=6.3.light.{:?} component=results-title expected=present",
+                level
+            );
+            assert!(
+                text.contains("Hit 0"),
+                "test_id=6.3.light.{:?} component=first-hit expected=present",
+                level
+            );
+        }
+        // EssentialOnly: no-panic only (too aggressive for content assertions)
+        let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::EssentialOnly);
+    }
+
+    #[test]
+    fn cross_theme_degradation_high_contrast_preserves_hierarchy() {
+        use crate::ui::style_system::UiThemePreset;
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        // HighContrast at degraded — must preserve accessibility-critical content
+        let mut app = app_with_hits(8);
+        app.theme_preset = UiThemePreset::HighContrast;
+        app.theme_dark = true;
+        app.style_options.preset = UiThemePreset::HighContrast;
+        app.style_options.dark_mode = true;
+
+        for level in [DegradationLevel::Full, DegradationLevel::SimpleBorders] {
+            let buf = render_at_degradation(&app, 120, 24, level);
+            let text = buffer_to_text(&buf);
+
+            assert!(
+                text.contains("Results"),
+                "test_id=6.3.hc.{:?} component=results-title expected=present",
+                level
+            );
+            assert!(
+                text.contains("[local]"),
+                "test_id=6.3.hc.{:?} component=source-badge expected=present",
+                level
+            );
+        }
+        // EssentialOnly: no-panic only
+        let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::EssentialOnly);
+    }
 }
