@@ -127,6 +127,18 @@ pub mod colors {
     /// `OpenCode` - neutral gray
     pub const AGENT_OPENCODE_BG: Color = Color::rgb(32, 32, 36); // #202024 - neutral
 
+    /// Factory (Droid) - warm amber tint
+    pub const AGENT_FACTORY_BG: Color = Color::rgb(36, 30, 20); // #241e14 - amber
+
+    /// Clawdbot - indigo tint
+    pub const AGENT_CLAWDBOT_BG: Color = Color::rgb(26, 24, 44); // #1a182c - indigo
+
+    /// Vibe (Mistral) - rose tint
+    pub const AGENT_VIBE_BG: Color = Color::rgb(36, 22, 30); // #24161e - rose
+
+    /// Openclaw - slate tint
+    pub const AGENT_OPENCLAW_BG: Color = Color::rgb(24, 30, 34); // #181e22 - slate
+
     // ═══════════════════════════════════════════════════════════════════════════
     // ROLE-AWARE BACKGROUND TINTS - Subtle backgrounds per message type
     // ═══════════════════════════════════════════════════════════════════════════
@@ -432,6 +444,10 @@ impl ThemePalette {
             "chatgpt" => (colors::AGENT_CHATGPT_BG, PackedRgba::rgb(16, 163, 127)), // ChatGPT green
             "opencode" => (colors::AGENT_OPENCODE_BG, colors::ROLE_USER), // Neutral/sage
             "pi_agent" => (colors::AGENT_CODEX_BG, PackedRgba::rgb(255, 140, 0)), // Orange for pi
+            "factory" | "droid" => (colors::AGENT_FACTORY_BG, PackedRgba::rgb(230, 176, 60)), // Amber
+            "clawdbot" => (colors::AGENT_CLAWDBOT_BG, PackedRgba::rgb(140, 130, 240)), // Indigo
+            "vibe" | "mistral" => (colors::AGENT_VIBE_BG, PackedRgba::rgb(220, 100, 160)), // Rose
+            "openclaw" => (colors::AGENT_OPENCLAW_BG, PackedRgba::rgb(130, 190, 210)), // Slate blue
             _ => (colors::BG_DEEP, colors::ACCENT_PRIMARY),
         };
 
@@ -443,20 +459,25 @@ impl ThemePalette {
     }
 
     /// Returns a small, legible icon for the given agent slug.
-    /// Icons favor single-width glyphs to avoid layout jitter in result headers.
+    /// Icons favor deterministic single-width glyphs to avoid layout jitter and
+    /// emoji fallback artifacts in terminal renderers.
     pub fn agent_icon(agent: &str) -> &'static str {
         match agent.to_lowercase().as_str() {
-            "codex" => "🔹",
-            "claude_code" | "claude" => "🤖",
-            "gemini" | "gemini_cli" => "💎",
-            "cline" => "🧭",
-            "amp" => "⚡",
-            "aider" => "🔧",
-            "cursor" => "🎯",
-            "chatgpt" => "💬",
-            "opencode" => "📦",
-            "pi_agent" => "🥧",
-            _ => "✨",
+            "codex" => "◆",
+            "claude_code" | "claude" => "●",
+            "gemini" | "gemini_cli" => "◇",
+            "cline" => "■",
+            "amp" => "▲",
+            "aider" => "▼",
+            "cursor" => "◈",
+            "chatgpt" => "○",
+            "opencode" => "□",
+            "pi_agent" => "△",
+            "factory" | "droid" => "▣",
+            "clawdbot" => "⬢",
+            "vibe" | "mistral" => "✦",
+            "openclaw" => "⬡",
+            _ => "•",
         }
     }
 
@@ -1054,11 +1075,11 @@ mod tests {
 
     #[test]
     fn test_theme_palette_agent_icon() {
-        assert_eq!(ThemePalette::agent_icon("codex"), "🔹");
-        assert_eq!(ThemePalette::agent_icon("claude_code"), "🤖");
-        assert_eq!(ThemePalette::agent_icon("gemini"), "💎");
-        assert_eq!(ThemePalette::agent_icon("chatgpt"), "💬");
-        assert_eq!(ThemePalette::agent_icon("unknown"), "✨");
+        assert_eq!(ThemePalette::agent_icon("codex"), "◆");
+        assert_eq!(ThemePalette::agent_icon("claude_code"), "●");
+        assert_eq!(ThemePalette::agent_icon("gemini"), "◇");
+        assert_eq!(ThemePalette::agent_icon("chatgpt"), "○");
+        assert_eq!(ThemePalette::agent_icon("unknown"), "•");
     }
 
     #[test]
@@ -1364,6 +1385,18 @@ mod tests {
                     "Agents {name_a} and {name_b} have identical icons"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn agent_icons_are_single_char_glyphs() {
+        for agent in KNOWN_AGENTS {
+            let icon = ThemePalette::agent_icon(agent);
+            assert_eq!(
+                icon.chars().count(),
+                1,
+                "Agent {agent} icon should be a single-width glyph for layout stability"
+            );
         }
     }
 
