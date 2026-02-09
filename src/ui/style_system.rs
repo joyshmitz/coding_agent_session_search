@@ -1476,7 +1476,10 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
         STYLE_SCORE_HIGH,
         Style::new().fg(to_packed(resolved.success)).bold(),
     );
-    sheet.define(STYLE_SCORE_MID, Style::new().fg(to_packed(resolved.info)));
+    sheet.define(
+        STYLE_SCORE_MID,
+        Style::new().fg(to_packed(resolved.info)).bold(),
+    );
     // Use a derived dim color for SCORE_LOW to avoid collision when info==text_subtle (e.g. Nord).
     let score_low_fg = blend(resolved.text_subtle, resolved.background, 0.35);
     sheet.define(
@@ -1512,15 +1515,15 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
     sheet.define(
         STYLE_PILL_ACTIVE,
         Style::new()
-            .fg(to_packed(resolved.secondary))
-            .bg(to_packed(blend(resolved.surface, resolved.info, 0.25)))
+            .fg(to_packed(resolved.accent))
+            .bg(to_packed(blend(resolved.surface, resolved.info, 0.35)))
             .bold(),
     );
     sheet.define(
         STYLE_PILL_INACTIVE,
         Style::new()
-            .fg(to_packed(resolved.text_subtle))
-            .bg(to_packed(blend(resolved.surface, resolved.border, 0.15))),
+            .fg(to_packed(resolved.text_muted))
+            .bg(to_packed(blend(resolved.surface, resolved.border, 0.20))),
     );
     sheet.define(
         STYLE_PILL_LABEL,
@@ -1571,7 +1574,9 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
     );
     sheet.define(
         STYLE_DETAIL_FIND_MATCH_INACTIVE,
-        Style::new().fg(to_packed(resolved.text_muted)),
+        Style::new()
+            .fg(to_packed(resolved.text))
+            .bg(to_packed(blend(resolved.surface, resolved.warning, 0.15))),
     );
 
     sheet
