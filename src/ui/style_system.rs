@@ -445,15 +445,15 @@ impl StyleOptions {
     ///
     /// | Priority | Condition | `color_profile` | `no_color` |
     /// |----------|-----------|------------------|------------|
-    /// | 1 (highest) | `CASS_NO_COLOR` is set | Mono | true |
+    /// | 1 (highest) | `CASS_NO_COLOR` is truthy | Mono | true |
     /// | 2 | `CASS_RESPECT_NO_COLOR` is truthy **and** `NO_COLOR` is set | Mono | true |
     /// | 3 | `CASS_COLOR_PROFILE` is set to a valid value | that value | false |
     /// | 4 (lowest) | None of the above | detect from COLORTERM/TERM | false |
     ///
     /// ## Cascade effects
     ///
-    /// - `no_gradient` = `CASS_NO_GRADIENT` **or** `no_color` **or** `a11y`
-    /// - `no_icons` = `CASS_NO_ICONS` (independent of color state)
+    /// - `no_gradient` = `CASS_NO_GRADIENT` (truthy) **or** `no_color` **or** `a11y`
+    /// - `no_icons` = `CASS_NO_ICONS` (truthy; independent of color state)
     /// - `a11y` = `CASS_A11Y` is truthy (adds bold/underline accents, text role markers)
     /// - `dark_mode` = `false` only for `Light` preset; `HighContrast` auto-detects
     ///
@@ -469,7 +469,7 @@ impl StyleOptions {
             .and_then(UiThemePreset::parse)
             .unwrap_or(UiThemePreset::Dark);
 
-        let no_color_enabled = values.cass_no_color.is_some()
+        let no_color_enabled = env_truthy(values.cass_no_color)
             || (env_truthy(values.cass_respect_no_color) && values.no_color.is_some());
 
         let detected_profile = ColorProfile::detect_from_env(None, values.colorterm, values.term);
@@ -481,8 +481,8 @@ impl StyleOptions {
         };
 
         let a11y = env_truthy(values.cass_a11y);
-        let no_icons = values.cass_no_icons.is_some();
-        let no_gradient = values.cass_no_gradient.is_some() || no_color_enabled || a11y;
+        let no_icons = env_truthy(values.cass_no_icons);
+        let no_gradient = env_truthy(values.cass_no_gradient) || no_color_enabled || a11y;
 
         let dark_mode = match preset {
             UiThemePreset::Light => false,
@@ -1744,6 +1744,33 @@ mod tests {
         assert_eq!(options.color_profile, ColorProfile::Mono);
     }
 
+    #[test]
+    fn cass_no_color_falsy_values_do_not_force_monochrome() {
+        for falsy in &["0", "false", "off", "no"] {
+            let options = StyleOptions::from_env_values(EnvValues {
+                no_color: None,
+                cass_respect_no_color: None,
+                cass_no_color: Some(falsy),
+                colorterm: Some("truecolor"),
+                term: Some("xterm-256color"),
+                cass_no_icons: None,
+                cass_no_gradient: None,
+                cass_a11y: Some("0"),
+                cass_theme: Some("dark"),
+                cass_color_profile: None,
+            });
+            assert!(
+                !options.no_color,
+                "CASS_NO_COLOR={falsy} must not force monochrome"
+            );
+            assert_eq!(
+                options.color_profile,
+                ColorProfile::TrueColor,
+                "CASS_NO_COLOR={falsy} should preserve detected profile"
+            );
+        }
+    }
+
     // -- env/capability edge-case tests (2dccg.10.4) --
 
     #[test]
@@ -1854,6 +1881,54 @@ mod tests {
         assert!(with_icons_off.no_icons);
         assert!(!with_icons_off.no_color);
         assert_eq!(with_icons_off.color_profile, ColorProfile::TrueColor);
+    }
+
+    #[test]
+    fn no_icons_falsy_values_do_not_disable_icons() {
+        for falsy in &["0", "false", "off", "no"] {
+            let options = StyleOptions::from_env_values(EnvValues {
+                no_color: None,
+                cass_respect_no_color: None,
+                cass_no_color: None,
+                colorterm: Some("truecolor"),
+                term: Some("xterm-256color"),
+                cass_no_icons: Some(falsy),
+                cass_no_gradient: None,
+                cass_a11y: Some("0"),
+                cass_theme: Some("dark"),
+                cass_color_profile: None,
+            });
+            assert!(
+                !options.no_icons,
+                "CASS_NO_ICONS={falsy} should keep icons enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn no_gradient_falsy_values_do_not_disable_gradients() {
+        for falsy in &["0", "false", "off", "no"] {
+            let options = StyleOptions::from_env_values(EnvValues {
+                no_color: None,
+                cass_respect_no_color: None,
+                cass_no_color: None,
+                colorterm: Some("truecolor"),
+                term: Some("xterm-256color"),
+                cass_no_icons: None,
+                cass_no_gradient: Some(falsy),
+                cass_a11y: Some("0"),
+                cass_theme: Some("dark"),
+                cass_color_profile: None,
+            });
+            assert!(
+                !options.no_gradient,
+                "CASS_NO_GRADIENT={falsy} should keep gradients enabled"
+            );
+            assert!(
+                options.gradients_enabled(),
+                "gradients should remain enabled when CASS_NO_GRADIENT is falsy"
+            );
+        }
     }
 
     #[test]

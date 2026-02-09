@@ -3478,32 +3478,48 @@ impl Default for CassApp {
             index_refresh_in_flight: false,
         };
         // Load persisted theme config (if any) and apply overrides to initial options.
-        #[cfg(not(test))]
-        {
-            let theme_path = app.data_dir.join("theme.json");
-            if theme_path.exists() {
-                match style_system::ThemeConfig::load_from_path(&theme_path) {
-                    Ok(config) => {
-                        if let Some(preset) = config.base_preset {
-                            app.theme_preset = preset;
-                            app.style_options.preset = preset;
-                            app.theme_dark = !matches!(preset, UiThemePreset::Light);
-                            app.style_options.dark_mode = app.theme_dark;
-                        }
-                        app.theme_config = Some(config);
-                    }
-                    Err(_) => {
-                        // Invalid or corrupt theme.json — silently ignore at startup.
-                    }
-                }
-            }
-        }
+        app.refresh_theme_config_from_data_dir();
         app.init_focus_graph();
         app
     }
 }
 
 impl CassApp {
+    /// Reload persisted theme configuration from `self.data_dir/theme.json`.
+    ///
+    /// Baseline always starts from env-derived style options to keep startup
+    /// deterministic. If a valid theme config exists, it may override the base
+    /// preset and color slots.
+    fn refresh_theme_config_from_data_dir(&mut self) {
+        self.theme_config = None;
+        self.theme_preset = self.style_options.preset;
+        self.theme_dark = self.style_options.dark_mode;
+        self.style_options.preset = self.theme_preset;
+        self.style_options.dark_mode = self.theme_dark;
+
+        #[cfg(not(test))]
+        {
+            let theme_path = self.data_dir.join("theme.json");
+            if !theme_path.exists() {
+                return;
+            }
+            match style_system::ThemeConfig::load_from_path(&theme_path) {
+                Ok(config) => {
+                    if let Some(preset) = config.base_preset {
+                        self.theme_preset = preset;
+                        self.style_options.preset = preset;
+                        self.theme_dark = !matches!(preset, UiThemePreset::Light);
+                        self.style_options.dark_mode = self.theme_dark;
+                    }
+                    self.theme_config = Some(config);
+                }
+                Err(_) => {
+                    // Invalid or corrupt theme.json — silently ignore at startup.
+                }
+            }
+        }
+    }
+
     /// Initialize the focus graph with all nodes, edges, and groups.
     ///
     /// Called once after construction. Sets up 3 primary surface nodes
@@ -13435,6 +13451,7 @@ pub fn run_tui_ftui(
     let data_dir = data_dir_override.unwrap_or_else(crate::default_data_dir);
     model.data_dir = data_dir.clone();
     model.db_path = data_dir.join("agent_search.db");
+    model.refresh_theme_config_from_data_dir();
 
     // Quality-first budget profile: favor full visuals and smooth transitions.
     let budget = cass_runtime_budget_config();
