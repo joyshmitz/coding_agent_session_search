@@ -7,8 +7,8 @@
 │▶   1. ?? @aider Large-snippet rendering edge case                                ││  ● Messages  │ Snippets │ Raw │ J│
 │      ▁▁▁0.6 [ci-linux] score 0.64 | [ci-linux] | ws /workspace/cass              ││Large-snippet rendering edge case │
 │      /workspace/cass/tests/regression/long_snippet.md:9                          ││agent=aider workspace=/workspace/c│
-│      The following snippet intentionally exceeds normal row budgets to exerc...  ││────────────────────────────────  │
-│                                                                                  ││  This is a deliberately long snip│
+│      The following snippet intentionally exceeds normal row budgets to           ││────────────────────────────────  │
+│      exercise truncation, striping, selection, and horizontal clipping behav...  ││  This is a deliberately long snip│
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │

@@ -221,6 +221,8 @@ pub const OPEN_CONFIRM_THRESHOLD: usize = 12;
 const PANEL_RATIO_MIN: f64 = 0.25;
 const PANEL_RATIO_MAX: f64 = 0.75;
 const FOOTER_HINT_ROOT_ID: HelpId = HelpId(1_000_000);
+const RESULTS_REVEAL_MIN_HITS: usize = 6;
+const RESULTS_REVEAL_MAX_HITS: usize = 400;
 
 #[derive(Clone, Debug)]
 struct FooterHintCandidate {
@@ -408,6 +410,12 @@ impl AnimationState {
             );
         }
         self.reveal_active = true;
+    }
+
+    /// Clear any in-flight reveal sequence.
+    pub fn clear_reveal(&mut self) {
+        self.reveal_springs.clear();
+        self.reveal_active = false;
     }
 
     /// Get the reveal progress for item at index (0.0 = hidden, 1.0 = visible).
@@ -1240,11 +1248,34 @@ pub struct CockpitTopology {
 
 impl DensityMode {
     /// Lines per result row for this density.
+    ///
+    /// Layout per density:
+    ///   Compact (2): title, meta+inline-snippet
+    ///   Cozy    (5): title, meta, location, snippet×2
+    ///   Spacious(6): title, meta, location, snippet×3
     pub fn row_height(self) -> u16 {
         match self {
             Self::Compact => 2,
-            Self::Cozy => 4,
+            Self::Cozy => 5,
             Self::Spacious => 6,
+        }
+    }
+
+    /// Expected number of dedicated snippet lines for this density.
+    pub fn snippet_lines(self) -> usize {
+        match self {
+            Self::Compact => 0, // inline preview only
+            Self::Cozy => 2,
+            Self::Spacious => 3,
+        }
+    }
+
+    /// Apply auto-fallback: Compact when terminal is narrow (< 90 cols).
+    pub fn effective(self, term_width: u16) -> Self {
+        if term_width < 90 && self != Self::Compact {
+            Self::Compact
+        } else {
+            self
         }
     }
 }
@@ -2231,6 +2262,10 @@ pub struct ResultItem {
     pub source_remote_style: ftui::Style,
     /// File location path style (subtle).
     pub location_style: ftui::Style,
+    /// Per-row reveal progress (0.0 = hidden / 1.0 = fully visible).
+    pub reveal_progress: f32,
+    /// Focus-flash intensity injected from app animation state (0.0-1.0).
+    pub focus_flash_intensity: f32,
 }
 
 fn source_display_label(source_id: &str, origin_host: Option<&str>) -> String {
@@ -2353,10 +2388,13 @@ impl ResultItem {
     }
 
     fn snippet_line_budget(&self, max_width: usize) -> usize {
+        // Snippet budget per density:
+        //   Compact (row_h=2): 0 (uses inline preview instead)
+        //   Cozy    (row_h=5): 2 dedicated snippet lines
+        //   Spacious(row_h=6): 3 dedicated snippet lines
         let base: usize = match self.row_height {
             0..=3 => 0,
-            4 => 1,
-            5 => 2,
+            4..=5 => self.row_height.saturating_sub(3) as usize,
             _ => 3,
         };
         if base == 0 {
@@ -2448,6 +2486,8 @@ impl RenderItem for ResultItem {
         } else {
             self.stripe_style
         };
+        let reveal_progress = self.reveal_progress.clamp(0.0, 1.0);
+        let reveal_lead = " ".repeat(((1.0 - reveal_progress) * 4.0).round() as usize);
 
         Block::new().style(bg_style).render(area, frame);
 
@@ -2455,6 +2495,15 @@ impl RenderItem for ResultItem {
 
         // Line 1: sel + queue + index + agent icon + agent name + title
         let sel_mark = if selected { "\u{25b6} " } else { "  " };
+        let focus_flash_active = selected && self.focus_flash_intensity > 0.08;
+        let focus_flash_span = if focus_flash_active {
+            Some(ftui::text::Span::styled(
+                "\u{2726} ",
+                self.success_style.bold(),
+            ))
+        } else {
+            None
+        };
         let queue_span = if self.queued {
             ftui::text::Span::styled("\u{2713}", self.success_style)
         } else {
@@ -2462,17 +2511,34 @@ impl RenderItem for ResultItem {
         };
         let agent_icon = super::components::theme::ThemePalette::agent_icon(&hit.agent);
         let agent_name = format!("@{}", elide_text(&hit.agent, 18));
-        let title_line = ftui::text::Line::from_spans(vec![
-            ftui::text::Span::styled(sel_mark, bg_style),
+        let mut title_spans = vec![
+            ftui::text::Span::styled(format!("{sel_mark}{reveal_lead}"), bg_style),
             queue_span,
-            ftui::text::Span::styled(format!("{:>2}. ", self.index), self.text_muted_style),
-            ftui::text::Span::styled(format!("{agent_icon} "), self.agent_accent_style),
-            ftui::text::Span::styled(format!("{agent_name} "), self.agent_accent_style),
-            ftui::text::Span::styled(
-                elide_text(title, content_width.saturating_sub(agent_name.len() + 10)),
-                self.text_primary_style.bold(),
-            ),
-        ]);
+        ];
+        if let Some(flash) = focus_flash_span {
+            title_spans.push(flash);
+        }
+        title_spans.push(ftui::text::Span::styled(
+            format!("{:>2}. ", self.index),
+            self.text_muted_style,
+        ));
+        title_spans.push(ftui::text::Span::styled(
+            format!("{agent_icon} "),
+            self.agent_accent_style,
+        ));
+        title_spans.push(ftui::text::Span::styled(
+            format!("{agent_name} "),
+            self.agent_accent_style,
+        ));
+        title_spans.push(ftui::text::Span::styled(
+            elide_text(title, content_width.saturating_sub(agent_name.len() + 10)),
+            if reveal_progress >= 0.8 {
+                self.text_primary_style.bold()
+            } else {
+                self.text_primary_style
+            },
+        ));
+        let title_line = ftui::text::Line::from_spans(title_spans);
 
         // Line 2: score bar + source badge + metadata
         let score_bar = score_bar_str(hit.score);
@@ -2537,7 +2603,14 @@ impl RenderItem for ResultItem {
             }
         }
 
-        lines.truncate(self.row_height as usize);
+        let reveal_line_budget = if reveal_progress < 0.34 {
+            1usize
+        } else if reveal_progress < 0.67 {
+            2usize
+        } else {
+            self.row_height as usize
+        };
+        lines.truncate(reveal_line_budget.min(self.row_height as usize));
         let text = ftui::text::Text::from_lines(lines);
         Paragraph::new(text).style(bg_style).render(area, frame);
     }
@@ -3618,7 +3691,8 @@ impl CassApp {
         if let Some(rect) = *self.last_results_inner.borrow()
             && rect.contains(x, y)
         {
-            let row_h = self.density_mode.row_height();
+            let term_w = self.last_content_area.borrow().map_or(120, |r| r.width);
+            let row_h = self.density_mode.effective(term_w).row_height();
             let state = self.results_list_state.borrow();
             let scroll = state.scroll_offset();
             let row_in_viewport = ((y - rect.y) / row_h.max(1)) as usize;
@@ -4531,6 +4605,27 @@ impl CassApp {
         }
     }
 
+    fn results_reveal_motion_enabled(
+        &self,
+        degradation: ftui::render::budget::DegradationLevel,
+        hit_count: usize,
+    ) -> bool {
+        self.anim.enabled
+            && degradation.render_decorative()
+            && (RESULTS_REVEAL_MIN_HITS..=RESULTS_REVEAL_MAX_HITS).contains(&hit_count)
+    }
+
+    fn results_focus_flash_intensity(
+        &self,
+        degradation: ftui::render::budget::DegradationLevel,
+        results_focused: bool,
+    ) -> f32 {
+        if !results_focused || !self.anim.enabled || !degradation.render_decorative() {
+            return 0.0;
+        }
+        (1.0 - self.anim.focus_flash_progress()).clamp(0.0, 1.0)
+    }
+
     /// Render the results list pane using VirtualizedList for O(visible) rendering.
     #[allow(clippy::too_many_arguments)]
     fn render_results_pane(
@@ -4551,6 +4646,8 @@ impl CassApp {
         row_alt_style: ftui::Style,
         row_selected_style: ftui::Style,
         text_muted_style: ftui::Style,
+        reveal_motion_enabled: bool,
+        focus_flash_intensity: f32,
     ) {
         let grouping_suffix = match self.grouping_mode {
             ResultsGrouping::Agent => String::new(),
@@ -4623,6 +4720,12 @@ impl CassApp {
                     source_local_style: styles.style(style_system::STYLE_SOURCE_LOCAL),
                     source_remote_style: styles.style(style_system::STYLE_SOURCE_REMOTE),
                     location_style: styles.style(style_system::STYLE_LOCATION),
+                    reveal_progress: if reveal_motion_enabled {
+                        self.anim.reveal_progress(i) as f32
+                    } else {
+                        1.0
+                    },
+                    focus_flash_intensity,
                 }
             })
             .collect();
@@ -9334,6 +9437,16 @@ impl super::ftui_adapter::Model for CassApp {
                 }
 
                 self.status = format!("{} results in {}ms", self.results.len(), elapsed_ms);
+                if self.anim.enabled
+                    && (RESULTS_REVEAL_MIN_HITS..=RESULTS_REVEAL_MAX_HITS)
+                        .contains(&self.results.len())
+                {
+                    self.anim.start_reveal(self.results.len());
+                    self.reveal_anim_start = Some(Instant::now());
+                } else {
+                    self.anim.clear_reveal();
+                    self.reveal_anim_start = None;
+                }
                 // Reset scroll to top for new results.
                 let mut state = self.results_list_state.borrow_mut();
                 state.scroll_to_top();
@@ -12050,7 +12163,8 @@ impl super::ftui_adapter::Model for CassApp {
             style_system::BorderTier::Rounded => BorderType::Rounded,
             style_system::BorderTier::Square | style_system::BorderTier::None => BorderType::Square,
         };
-        let row_h = self.density_mode.row_height();
+        let effective_density = self.density_mode.effective(area.width);
+        let row_h = effective_density.row_height();
         let adaptive_borders = if deco.border_tier == style_system::BorderTier::None {
             Borders::NONE
         } else {
@@ -12373,6 +12487,11 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     (&self.results[..], 0)
                 };
+                let results_focused = self.focused_region() == FocusRegion::Results;
+                let reveal_motion_enabled =
+                    self.results_reveal_motion_enabled(degradation, hits.len());
+                let focus_flash_intensity =
+                    self.results_focus_flash_intensity(degradation, results_focused);
 
                 let topo = breakpoint.search_topology();
                 if topo.dual_pane {
@@ -12397,6 +12516,8 @@ impl super::ftui_adapter::Model for CassApp {
                         row_alt_style,
                         row_selected_style,
                         text_muted_style,
+                        reveal_motion_enabled,
+                        focus_flash_intensity,
                     );
                     self.render_detail_pane(
                         frame,
@@ -12438,6 +12559,8 @@ impl super::ftui_adapter::Model for CassApp {
                                 row_alt_style,
                                 row_selected_style,
                                 text_muted_style,
+                                reveal_motion_enabled,
+                                focus_flash_intensity,
                             );
                         }
                         FocusRegion::Detail => {
@@ -12459,7 +12582,7 @@ impl super::ftui_adapter::Model for CassApp {
 
                 // ── Status footer ───────────────────────────────────────
                 let bp_label = breakpoint.footer_label();
-                let density_label = match self.density_mode {
+                let density_label = match effective_density {
                     DensityMode::Compact => "compact",
                     DensityMode::Cozy => "cozy",
                     DensityMode::Spacious => "spacious",
@@ -15972,6 +16095,124 @@ mod tests {
             "spacious rows should reserve three snippet lines"
         );
         assert_eq!(lines.len(), 3);
+    }
+
+    // =====================================================================
+    // 2dccg.9.6 — Density mode retuning tests
+    // =====================================================================
+
+    #[test]
+    fn density_row_heights_match_spec() {
+        // Spec: Compact=2, Cozy=5 (title + meta + location + snippet×2), Spacious=6
+        assert_eq!(DensityMode::Compact.row_height(), 2);
+        assert_eq!(DensityMode::Cozy.row_height(), 5);
+        assert_eq!(DensityMode::Spacious.row_height(), 6);
+    }
+
+    #[test]
+    fn density_snippet_lines_match_spec() {
+        // Spec: Compact=0 (inline only), Cozy=2, Spacious=3
+        assert_eq!(DensityMode::Compact.snippet_lines(), 0);
+        assert_eq!(DensityMode::Cozy.snippet_lines(), 2);
+        assert_eq!(DensityMode::Spacious.snippet_lines(), 3);
+    }
+
+    #[test]
+    fn density_effective_falls_back_to_compact_when_narrow() {
+        // Spec: "auto-fallback to Compact if cols < 90"
+        assert_eq!(DensityMode::Cozy.effective(89), DensityMode::Compact);
+        assert_eq!(DensityMode::Spacious.effective(89), DensityMode::Compact);
+        assert_eq!(DensityMode::Compact.effective(89), DensityMode::Compact);
+        // At 90 cols, no fallback
+        assert_eq!(DensityMode::Cozy.effective(90), DensityMode::Cozy);
+        assert_eq!(DensityMode::Spacious.effective(90), DensityMode::Spacious);
+        // Wide terminals preserve mode
+        assert_eq!(DensityMode::Cozy.effective(200), DensityMode::Cozy);
+        assert_eq!(DensityMode::Spacious.effective(200), DensityMode::Spacious);
+    }
+
+    #[test]
+    fn density_effective_boundary_values() {
+        // Boundary: 0 width should fallback
+        assert_eq!(DensityMode::Cozy.effective(0), DensityMode::Compact);
+        // Boundary: 1 below threshold
+        assert_eq!(DensityMode::Cozy.effective(89), DensityMode::Compact);
+        // Boundary: exactly at threshold
+        assert_eq!(DensityMode::Cozy.effective(90), DensityMode::Cozy);
+        // Boundary: 1 above threshold
+        assert_eq!(DensityMode::Cozy.effective(91), DensityMode::Cozy);
+    }
+
+    #[test]
+    fn cozy_density_allocates_two_snippet_lines() {
+        let mut hit = make_test_hit();
+        hit.snippet = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho".to_string();
+        let item = make_result_item(hit, DensityMode::Cozy.row_height());
+        let budget = item.snippet_line_budget(120);
+
+        assert_eq!(
+            budget, 2,
+            "cozy rows should reserve two snippet lines (row_height=5, budget=5-3=2)"
+        );
+    }
+
+    #[test]
+    fn density_cycling_covers_all_three_modes() {
+        let mut app = CassApp::default();
+        assert_eq!(app.density_mode, DensityMode::Cozy, "default is Cozy");
+
+        // Cycle: Cozy → Spacious
+        let _ = app.update(CassMsg::DensityModeCycled);
+        assert_eq!(app.density_mode, DensityMode::Spacious);
+
+        // Cycle: Spacious → Compact
+        let _ = app.update(CassMsg::DensityModeCycled);
+        assert_eq!(app.density_mode, DensityMode::Compact);
+
+        // Cycle: Compact → Cozy
+        let _ = app.update(CassMsg::DensityModeCycled);
+        assert_eq!(app.density_mode, DensityMode::Cozy);
+    }
+
+    #[test]
+    fn density_effective_wired_in_view_rendering() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = CassApp::default();
+        let mut hit = make_test_hit();
+        hit.snippet = "density-effective-test-sentinel".to_string();
+        app.panes.push(AgentPane {
+            agent: hit.agent.clone(),
+            total_count: 1,
+            hits: vec![hit],
+            selected: 0,
+        });
+        app.active_pane = 0;
+
+        // At 120 cols with Cozy: should render normally (Cozy effective)
+        app.density_mode = DensityMode::Cozy;
+        let text_wide = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+
+        // At 60 cols with Cozy: effective density is Compact (< 90 threshold)
+        let text_narrow =
+            buffer_to_text(&render_at_degradation(&app, 60, 24, DegradationLevel::Full));
+
+        // Both should render without panic — the sentinel appears in results
+        assert!(
+            text_wide.contains("density-effective-test-sentinel"),
+            "wide render should show snippet"
+        );
+        // Narrow render uses compact row_height=2, inline snippet should still appear
+        assert!(
+            text_narrow.contains("density-effective-test-sentinel"),
+            "narrow render (effective=Compact) should still show inline snippet"
+        );
     }
 
     // =====================================================================
