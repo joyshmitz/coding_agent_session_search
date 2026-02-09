@@ -20,5 +20,5 @@
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────│╰──────────────────────────────────╯
- hits:1 | query:HYB / PFX | perf:lat:— cache:cold | runtime:stable | scope:rank:balanced ctx:M src:all | view:med/cozy  
+ hits:1 | view:med/cozy | query:HYB / PFX | perf:lat:— cache:cold | runtime:stable | scope:rank:balanced ctx:M src:all  
   | Enter=open Ctrl+M/Ctrl+X=select Tab=focus F1=help                                                                   

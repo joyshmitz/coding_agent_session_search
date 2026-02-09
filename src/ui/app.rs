@@ -12801,6 +12801,11 @@ impl super::ftui_adapter::Model for CassApp {
                     value_style: status_info_s,
                 });
                 hud_lanes.push(FooterHudLane {
+                    key: "view",
+                    value: format!("{bp_label}/{density_label}"),
+                    value_style: kbd_desc_s,
+                });
+                hud_lanes.push(FooterHudLane {
                     key: "query",
                     value: query_lane,
                     value_style: kbd_desc_s,
@@ -12819,11 +12824,6 @@ impl super::ftui_adapter::Model for CassApp {
                     key: "scope",
                     value: scope_lane,
                     value_style: status_info_s,
-                });
-                hud_lanes.push(FooterHudLane {
-                    key: "view",
-                    value: format!("{bp_label}/{density_label}"),
-                    value_style: kbd_desc_s,
                 });
                 let footer_area = vertical[2];
                 if footer_area.height >= 2 {
@@ -18519,13 +18519,18 @@ mod tests {
         let mut budget = RenderBudget::from_config(&cfg);
         budget.set_degradation(DegradationLevel::SimpleBorders);
 
-        // With significant headroom, upgrades should still wait for cooldown frames.
-        for _ in 0..cfg.degradation_cooldown.saturating_sub(1) {
+        // next_frame() checks frames_since_change BEFORE incrementing it (via
+        // its internal reset() call). So the upgrade eligibility check on the
+        // N-th call sees frames_since_change = N-1. We need cooldown+1 calls
+        // total for the check to see frames_since_change == cooldown.
+        for _ in 0..cfg.degradation_cooldown {
             budget.record_frame_time(std::time::Duration::from_millis(10));
             budget.next_frame();
-            assert_eq!(budget.degradation(), DegradationLevel::SimpleBorders);
         }
+        // During cooldown, upgrade should not have fired yet.
+        assert_eq!(budget.degradation(), DegradationLevel::SimpleBorders);
 
+        // One more frame: check sees frames_since_change == cooldown → upgrade.
         budget.record_frame_time(std::time::Duration::from_millis(10));
         budget.next_frame();
         assert_eq!(budget.degradation(), DegradationLevel::Full);

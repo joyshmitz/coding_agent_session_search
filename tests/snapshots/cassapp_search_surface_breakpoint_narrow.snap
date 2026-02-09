@@ -20,5 +20,5 @@
 │                                                                             │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
- hits:1 | query:HYB / PFX | perf:lat:— cache:cold | runtime:stable             
+ hits:1 | view:narrow/compact | query:HYB / PFX | perf:lat:— cache:cold        
                                                                                
