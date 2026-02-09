@@ -1324,7 +1324,7 @@ mod tests {
                 .map(|o| o.status.success())
                 .unwrap_or(false)
         };
-        let home = std::env::var("HOME")
+        let home = dotenvy::var("HOME")
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| {

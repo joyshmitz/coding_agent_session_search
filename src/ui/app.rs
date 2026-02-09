@@ -313,7 +313,7 @@ impl AnimationState {
 
     /// Read CASS_DISABLE_ANIMATIONS from environment.
     pub fn from_env() -> Self {
-        let disabled = std::env::var("CASS_DISABLE_ANIMATIONS")
+        let disabled = dotenvy::var("CASS_DISABLE_ANIMATIONS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         Self::new(!disabled)
@@ -13417,7 +13417,7 @@ pub fn build_resize_config(
     // changepoint detection for principled steady/burst regime switching.
     // The "responsive" preset uses lower thresholds for faster detection,
     // matching cass's interactive search-as-you-type profile.
-    let bocpd_disabled = std::env::var("CASS_BOCPD")
+    let bocpd_disabled = dotenvy::var("CASS_BOCPD")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(false);
 
@@ -13433,7 +13433,7 @@ pub fn build_resize_config(
     // Evidence sink: write resize/BOCPD decision logs to data_dir.
     // Consumed by the explainability cockpit (1mfw3.3.x) for UI-facing
     // evidence summaries and the inspector's resize panel.
-    let evidence_path = std::env::var("CASS_RESIZE_EVIDENCE_FILE")
+    let evidence_path = dotenvy::var("CASS_RESIZE_EVIDENCE_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| data_dir.join("resize_evidence.jsonl"));
     let evidence_sink = if bocpd_disabled {

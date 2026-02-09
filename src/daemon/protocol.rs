@@ -13,7 +13,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Default socket path (shared between cass and xf).
 pub fn default_socket_path() -> std::path::PathBuf {
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+    let user = dotenvy::var("USER").unwrap_or_else(|_| "unknown".into());
     // Sanitize: keep only alphanumeric, dash, underscore to prevent path traversal
     let safe_user: String = user
         .chars()

@@ -544,7 +544,7 @@ fn build_stylesheet(palette: &ThemePalette, is_dark: bool, flags: &ThemeFlags) -
 
 /// Check if an env var is set and truthy (non-empty, not "0", not "false").
 fn env_truthy(name: &str) -> bool {
-    match std::env::var(name) {
+    match dotenvy::var(name) {
         Ok(val) => !val.is_empty() && val != "0" && val.to_lowercase() != "false",
         Err(_) => false,
     }
@@ -552,7 +552,7 @@ fn env_truthy(name: &str) -> bool {
 
 /// Check if an env var equals a specific value.
 fn env_is(name: &str, expected: &str) -> bool {
-    std::env::var(name).map(|v| v == expected).unwrap_or(false)
+    dotenvy::var(name).map(|v| v == expected).unwrap_or(false)
 }
 
 // ─── Color interpolation (migrated from tui.rs) ─────────────────────────────
