@@ -27039,4 +27039,229 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             elapsed
         );
     }
+
+    // =====================================================================
+    // 2dccg.11.7 — E2E stress scenarios
+    // =====================================================================
+
+    /// Stress: render 500-hit dataset at all degradation levels without panic.
+    #[test]
+    fn stress_large_dataset_all_degradation_levels() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = app_with_hits(500);
+        let _ = app.update(CassMsg::SearchRequested);
+
+        let levels = [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::NoStyling,
+            DegradationLevel::EssentialOnly,
+            DegradationLevel::Skeleton,
+        ];
+
+        for level in &levels {
+            let _buf = render_at_degradation(&app, 120, 40, *level);
+        }
+
+        // Scroll to bottom and render again at all levels
+        for _ in 0..250 {
+            let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        }
+        for level in &levels {
+            let _buf = render_at_degradation(&app, 120, 40, *level);
+        }
+    }
+
+    /// Stress: rapid theme toggling 20× with render after each toggle.
+    #[test]
+    fn stress_rapid_theme_switching_with_render() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(50);
+        let _ = app.update(CassMsg::SearchRequested);
+
+        for i in 0..20 {
+            let _ = app.update(CassMsg::ThemeToggled);
+            let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+            let text = buffer_to_text(&buf);
+            assert!(
+                !text.is_empty(),
+                "rendered text should not be empty after theme toggle {i}"
+            );
+        }
+
+        // After even number of toggles, should be back to original dark mode
+        assert!(app.theme_dark, "20 toggles should return to dark theme");
+    }
+
+    /// Stress: all degradation levels × all density modes render without panic.
+    #[test]
+    fn stress_degradation_cross_density_matrix() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = app_with_hits(30);
+        let _ = app.update(CassMsg::SearchRequested);
+
+        let levels = [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::NoStyling,
+            DegradationLevel::EssentialOnly,
+            DegradationLevel::Skeleton,
+        ];
+
+        // 3 density modes × 5 degradation levels = 15 combos
+        for _ in 0..3 {
+            for level in &levels {
+                let _buf = render_at_degradation(&app, 120, 24, *level);
+            }
+            let _ = app.update(CassMsg::DensityModeCycled);
+        }
+    }
+
+    /// Stress: responsive width sweep from 40 to 200 columns at all breakpoints.
+    #[test]
+    fn stress_responsive_width_sweep() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = app_with_hits(20);
+        let _ = app.update(CassMsg::SearchRequested);
+
+        // Sweep from narrow to ultra-wide
+        for width in (40..=200).step_by(10) {
+            let _buf = render_at_degradation(&app, width, 24, DegradationLevel::Full);
+        }
+
+        // Also sweep height
+        for height in (8..=60).step_by(4) {
+            let _buf = render_at_degradation(&app, 120, height, DegradationLevel::Full);
+        }
+    }
+
+    /// Stress: interleaved theme + density + selection + degradation transitions.
+    #[test]
+    fn stress_interleaved_transitions() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = app_with_hits(100);
+        let _ = app.update(CassMsg::SearchRequested);
+
+        let levels = [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::EssentialOnly,
+        ];
+
+        for round in 0..10 {
+            // Move selection
+            let _ = app.update(CassMsg::SelectionMoved { delta: 5 });
+            // Toggle theme
+            let _ = app.update(CassMsg::ThemeToggled);
+            // Cycle density
+            let _ = app.update(CassMsg::DensityModeCycled);
+            // Render at a degradation level
+            let level = levels[round % levels.len()];
+            let _buf = render_at_degradation(&app, 120, 24, level);
+        }
+    }
+
+    /// Stress: scroll + find behavior with help overlay toggling.
+    #[test]
+    fn stress_scroll_with_help_overlay() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = app_with_hits(100);
+        let _ = app.update(CassMsg::SearchRequested);
+
+        // Scroll through results with help toggled on/off
+        for i in 0..50 {
+            let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+            if i % 7 == 0 {
+                let _ = app.update(CassMsg::HelpToggled);
+                let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+                let _ = app.update(CassMsg::HelpToggled);
+            }
+            let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        }
+    }
+
+    /// Stress: large dataset with long content hits renders without panic.
+    #[test]
+    fn stress_long_content_hits() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = CassApp::default();
+        let hits: Vec<SearchHit> = (0..100)
+            .map(|i| SearchHit {
+                title: format!("Long hit {i} — {}", "x".repeat(200)),
+                snippet: "word ".repeat(500),
+                content: "line\n".repeat(1000),
+                content_hash: i,
+                score: 1.0 - (i as f32 * 0.005),
+                agent: "claude_code".into(),
+                source_path: format!("/very/deep/nested/path/to/file_{i}.rs"),
+                workspace: "/workspace".into(),
+                workspace_original: None,
+                created_at: None,
+                line_number: Some(i as usize),
+                match_type: Default::default(),
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+            })
+            .collect();
+        app.panes.push(AgentPane {
+            agent: "claude_code".into(),
+            total_count: hits.len(),
+            hits,
+            selected: 0,
+        });
+        app.active_pane = 0;
+
+        // Render at multiple sizes
+        for width in [60, 120, 200] {
+            let _buf = render_at_degradation(&app, width, 24, DegradationLevel::Full);
+        }
+
+        // Scroll to middle and render
+        for _ in 0..50 {
+            let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        }
+        let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+    }
+
+    /// Stress: full suite completes under 3 seconds.
+    #[test]
+    fn stress_suite_completes_under_3s() {
+        let start = std::time::Instant::now();
+
+        // Run representative stress operations
+        let mut app = app_with_hits(200);
+        let _ = app.update(CassMsg::SearchRequested);
+
+        for _ in 0..100 {
+            let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        }
+        for _ in 0..10 {
+            let _ = app.update(CassMsg::ThemeToggled);
+            let _ = app.update(CassMsg::DensityModeCycled);
+        }
+        for width in (40..=200).step_by(20) {
+            render_at_degradation(
+                &app,
+                width,
+                24,
+                ftui::render::budget::DegradationLevel::Full,
+            );
+        }
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 3000,
+            "stress suite should complete under 3s, took {:?}",
+            elapsed
+        );
+    }
 }
