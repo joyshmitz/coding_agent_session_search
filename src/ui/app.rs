@@ -13472,6 +13472,32 @@ fn cass_runtime_budget_config() -> ftui::render::budget::FrameBudgetConfig {
     }
 }
 
+fn env_truthy_opt(raw: Option<String>) -> bool {
+    raw.map(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+    .unwrap_or(false)
+}
+
+fn should_upgrade_style_profile_for_dumb_term(
+    style_options: StyleOptions,
+    term_is_dumb: bool,
+    allow_raw_dumb: bool,
+    headless: bool,
+    explicit_no_color: bool,
+    explicit_color_profile: bool,
+) -> bool {
+    term_is_dumb
+        && !allow_raw_dumb
+        && !headless
+        && !explicit_no_color
+        && !explicit_color_profile
+        && style_options.color_profile == ftui::ColorProfile::Mono
+}
+
 /// Run the cass TUI using the ftui Program runtime.
 ///
 /// This replaces the manual crossterm event loop in `run_tui()`.
@@ -13493,24 +13519,18 @@ pub fn run_tui_ftui(
     use ftui::ProgramConfig;
     use ftui::core::capability_override::{CapabilityOverride, push_override};
 
-    let env_truthy = |raw: Option<String>| {
-        raw.map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-    };
-
     // Auto-upgrade obviously bad inherited terminal profiles in interactive
     // TUI sessions. This keeps UX consistent when wrapper shells export
     // TERM=dumb even though the host terminal supports rich features.
     let term_raw = dotenvy::var("TERM").unwrap_or_default();
     let term_lower = term_raw.trim().to_ascii_lowercase();
     let term_is_dumb = term_lower == "dumb";
-    let allow_raw_dumb = env_truthy(dotenvy::var("CASS_ALLOW_DUMB_TERM").ok());
+    let allow_raw_dumb = env_truthy_opt(dotenvy::var("CASS_ALLOW_DUMB_TERM").ok());
     let headless = dotenvy::var("TUI_HEADLESS").is_ok();
+    let explicit_no_color = env_truthy_opt(dotenvy::var("CASS_NO_COLOR").ok())
+        || (env_truthy_opt(dotenvy::var("CASS_RESPECT_NO_COLOR").ok())
+            && dotenvy::var("NO_COLOR").is_ok());
+    let explicit_color_profile = dotenvy::var("CASS_COLOR_PROFILE").is_ok();
     let _caps_override = if term_is_dumb && !allow_raw_dumb && !headless {
         eprintln!(
             "info: TERM=dumb detected; enabling compatibility TUI profile (rich color + unicode, safe controls)."
@@ -13536,6 +13556,21 @@ pub fn run_tui_ftui(
     };
 
     let mut model = CassApp::default();
+    if should_upgrade_style_profile_for_dumb_term(
+        model.style_options,
+        term_is_dumb,
+        allow_raw_dumb,
+        headless,
+        explicit_no_color,
+        explicit_color_profile,
+    ) {
+        // TERM=dumb wrappers often force a monochrome inferred style profile.
+        // If the user did not explicitly opt into no-color or an explicit
+        // profile, align style profile with the rich compatibility caps.
+        model.style_options.color_profile = ftui::ColorProfile::TrueColor;
+        model.style_options.no_color = false;
+        eprintln!("info: TERM=dumb compatibility also upgraded style color profile to truecolor.");
+    }
     let data_dir = data_dir_override.unwrap_or_else(crate::default_data_dir);
     model.data_dir = data_dir.clone();
     model.db_path = data_dir.join("agent_search.db");
@@ -18494,6 +18529,90 @@ mod tests {
         budget.record_frame_time(std::time::Duration::from_millis(10));
         budget.next_frame();
         assert_eq!(budget.degradation(), DegradationLevel::Full);
+    }
+
+    #[test]
+    fn dumb_term_style_profile_upgrade_triggers_for_inherited_mono() {
+        let style_options = StyleOptions {
+            color_profile: ftui::ColorProfile::Mono,
+            no_color: false,
+            ..StyleOptions::default()
+        };
+        assert!(should_upgrade_style_profile_for_dumb_term(
+            style_options,
+            true,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn dumb_term_style_profile_upgrade_respects_explicit_no_color_intent() {
+        let style_options = StyleOptions {
+            color_profile: ftui::ColorProfile::Mono,
+            no_color: true,
+            ..StyleOptions::default()
+        };
+        assert!(!should_upgrade_style_profile_for_dumb_term(
+            style_options,
+            true,
+            false,
+            false,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn dumb_term_style_profile_upgrade_respects_explicit_profile_override() {
+        let style_options = StyleOptions {
+            color_profile: ftui::ColorProfile::Ansi16,
+            no_color: false,
+            ..StyleOptions::default()
+        };
+        assert!(!should_upgrade_style_profile_for_dumb_term(
+            style_options,
+            true,
+            false,
+            false,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn dumb_term_style_profile_upgrade_skips_when_not_in_compat_mode() {
+        let style_options = StyleOptions {
+            color_profile: ftui::ColorProfile::Mono,
+            no_color: false,
+            ..StyleOptions::default()
+        };
+        assert!(!should_upgrade_style_profile_for_dumb_term(
+            style_options,
+            true,
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(!should_upgrade_style_profile_for_dumb_term(
+            style_options,
+            true,
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_upgrade_style_profile_for_dumb_term(
+            style_options,
+            false,
+            false,
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]

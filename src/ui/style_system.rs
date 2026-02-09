@@ -947,15 +947,61 @@ impl StyleContext {
 
         let pane = super::components::theme::ThemePalette::agent_pane(agent);
         let accent = Color::rgb(pane.accent.r(), pane.accent.g(), pane.accent.b());
+        let pane_bg = Color::rgb(pane.bg.r(), pane.bg.g(), pane.bg.b());
         let base_bg_color = Color::rgb(base_bg.r(), base_bg.g(), base_bg.b());
-        let tint = blend(
-            base_bg_color,
-            accent,
-            if self.options.gradients_enabled() {
-                0.12
-            } else {
-                0.08
-            },
+        let mut tint_mix = if self.options.gradients_enabled() {
+            0.12
+        } else {
+            0.08
+        };
+        let selected_bg = self.resolved.selection_bg;
+        let base_separation =
+            ftui::style::contrast_ratio_packed(to_packed(selected_bg), to_packed(base_bg_color));
+        let min_allowed_separation = (base_separation - 0.03).max(1.01);
+        let mut tint = blend(base_bg_color, pane_bg, tint_mix);
+        let mut tint_separation =
+            ftui::style::contrast_ratio_packed(to_packed(selected_bg), to_packed(tint));
+
+        // Keep selected-row affordances visually dominant: if tinting moves row
+        // background too close to selection background, taper tint intensity.
+        if tint_separation < min_allowed_separation {
+            for _ in 0..4 {
+                tint_mix *= 0.55;
+                let candidate = blend(base_bg_color, pane_bg, tint_mix);
+                let candidate_separation = ftui::style::contrast_ratio_packed(
+                    to_packed(selected_bg),
+                    to_packed(candidate),
+                );
+                tint = candidate;
+                tint_separation = candidate_separation;
+                if candidate_separation >= min_allowed_separation {
+                    break;
+                }
+            }
+        }
+
+        // Preserve deterministic per-agent differentiation even when selection
+        // safety logic dampens the primary tint significantly.
+        let agent_hash = agent.as_bytes().iter().fold(0u32, |acc, b| {
+            acc.wrapping_mul(131).wrapping_add(u32::from(*b))
+        });
+        let signature_mix_base = if self.options.gradients_enabled() {
+            0.010
+        } else {
+            0.006
+        };
+        let signature_mix = signature_mix_base + (agent_hash % 5) as f32 * 0.0015;
+        let signature_tint = blend(tint, accent, signature_mix);
+        let signature_separation =
+            ftui::style::contrast_ratio_packed(to_packed(selected_bg), to_packed(signature_tint));
+        if signature_separation >= min_allowed_separation {
+            tint = signature_tint;
+            tint_separation = signature_separation;
+        }
+
+        debug_assert!(
+            tint_separation > 0.0,
+            "contrast ratios should always be positive"
         );
         Style::new()
             .fg(base.fg.unwrap_or_else(|| to_packed(self.resolved.text)))
@@ -3700,6 +3746,109 @@ mod tests {
             base,
             "a11y mode should not tint row backgrounds"
         );
+    }
+
+    #[test]
+    fn result_row_tints_are_pairwise_distinct_for_representative_agents() {
+        let agents = ["claude_code", "codex", "cursor", "gemini", "aider"];
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let base = ctx.style(STYLE_RESULT_ROW);
+            let mut tinted_bgs: Vec<(&str, ftui::PackedRgba)> = Vec::new();
+
+            for agent in agents {
+                let tinted = ctx.result_row_style_for_agent(base, agent);
+                let tinted_bg = tinted
+                    .bg
+                    .expect("color mode result-row tint should define background");
+                tinted_bgs.push((agent, tinted_bg));
+            }
+            let unique_count = tinted_bgs
+                .iter()
+                .map(|(_, bg)| *bg)
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            let min_buckets = if matches!(preset, UiThemePreset::HighContrast) {
+                2
+            } else {
+                4
+            };
+            assert!(
+                unique_count >= min_buckets,
+                "expected at least {min_buckets} distinct tint buckets (got {unique_count}) for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn result_row_tints_preserve_text_legibility_threshold() {
+        let agents = ["claude_code", "codex", "cursor", "gemini", "aider"];
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            for base_token in [STYLE_RESULT_ROW, STYLE_RESULT_ROW_ALT] {
+                let base = ctx.style(base_token);
+                for agent in agents {
+                    let tinted = ctx.result_row_style_for_agent(base, agent);
+                    let fg = tinted
+                        .fg
+                        .expect("result-row style should always define foreground");
+                    let bg = tinted
+                        .bg
+                        .expect("result-row style should always define background");
+                    let ratio = ftui::style::contrast_ratio_packed(fg, bg);
+                    assert!(
+                        ratio >= 4.5,
+                        "text contrast {:.2} below threshold for preset {} token {} agent {}",
+                        ratio,
+                        preset.name(),
+                        base_token,
+                        agent
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_row_affordance_remains_distinct_from_agent_tints() {
+        let agents = ["claude_code", "codex", "cursor", "gemini", "aider"];
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let selected = ctx.style(STYLE_RESULT_ROW_SELECTED);
+            let selected_bg = selected
+                .bg
+                .expect("selected-row style should define background");
+
+            for base_token in [STYLE_RESULT_ROW, STYLE_RESULT_ROW_ALT] {
+                let base = ctx.style(base_token);
+                let base_bg = base.bg.expect("base row style should define background");
+                let base_separation = ftui::style::contrast_ratio_packed(selected_bg, base_bg);
+                for agent in agents {
+                    let tinted = ctx.result_row_style_for_agent(base, agent);
+                    let tinted_bg = tinted.bg.expect("result-row tint should define background");
+                    assert_ne!(
+                        selected_bg,
+                        tinted_bg,
+                        "selected background should differ from tinted row background for preset {} token {} agent {}",
+                        preset.name(),
+                        base_token,
+                        agent
+                    );
+
+                    let separation = ftui::style::contrast_ratio_packed(selected_bg, tinted_bg);
+                    assert!(
+                        separation + 0.03 >= base_separation,
+                        "selected/tinted separation {:.3} regressed too far below base {:.3} for preset {} token {} agent {}",
+                        separation,
+                        base_separation,
+                        preset.name(),
+                        base_token,
+                        agent
+                    );
+                }
+            }
+        }
     }
 
     #[test]
