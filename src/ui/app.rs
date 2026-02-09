@@ -23046,6 +23046,197 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     }
 
     // =========================================================================
+    // 2dccg.11.2 — Interaction state machine and event routing tests
+    // =========================================================================
+
+    #[test]
+    fn palette_visible_survives_selection_moved() {
+        use super::super::test_log::{Category, TestLogger};
+
+        let log = TestLogger::new("11.2.palette_state_resilience");
+        let mut app = app_with_hits(5);
+
+        let _ = app.update(CassMsg::PaletteOpened);
+        log.step_start(Category::Interaction, r#""palette opened""#.to_string());
+        assert!(app.command_palette.is_visible());
+
+        // SelectionMoved dispatched while palette is open should not crash or close palette
+        let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+
+        if app.command_palette.is_visible() {
+            log.pass(
+                Category::Interaction,
+                r#""palette remains visible after selection move""#.to_string(),
+            );
+        } else {
+            log.fail(
+                Category::Interaction,
+                r#""palette closed unexpectedly after selection move""#.to_string(),
+            );
+        }
+        assert!(
+            app.command_palette.is_visible(),
+            "palette should remain visible during selection events"
+        );
+    }
+
+    #[test]
+    fn modal_dismiss_order_help_then_palette() {
+        let mut app = CassApp::default();
+
+        // Open help, then palette
+        let _ = app.update(CassMsg::HelpToggled);
+        assert!(app.show_help);
+
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.command_palette.is_visible());
+
+        // Close palette first (top of stack)
+        let _ = app.update(CassMsg::PaletteClosed);
+        assert!(
+            !app.command_palette.is_visible(),
+            "palette should close first"
+        );
+        assert!(app.show_help, "help should remain open");
+
+        // Next toggle closes help
+        let _ = app.update(CassMsg::HelpToggled);
+        assert!(!app.show_help, "help should close second");
+    }
+
+    #[test]
+    fn theme_change_during_palette_preserves_palette_state() {
+        let mut app = app_with_hits(5);
+        let _ = app.update(CassMsg::PaletteOpened);
+        app.palette_state.selected = 2;
+
+        let _ = app.update(CassMsg::ThemeToggled);
+
+        assert!(
+            app.command_palette.is_visible(),
+            "palette should remain visible after theme toggle"
+        );
+        assert_eq!(
+            app.palette_state.selected, 2,
+            "palette selection should be preserved after theme toggle"
+        );
+    }
+
+    #[test]
+    fn focus_region_transitions_are_deterministic() {
+        use super::super::test_log::{Category, TestLogger};
+
+        let log = TestLogger::new("11.2.focus_determinism");
+        let mut app = app_with_hits(5);
+
+        // Verify deterministic focus transitions
+        let sequence = [
+            (
+                CassMsg::FocusToggled,
+                FocusRegion::Detail,
+                "toggle to detail",
+            ),
+            (
+                CassMsg::FocusToggled,
+                FocusRegion::Results,
+                "toggle back to results",
+            ),
+        ];
+
+        for (msg, expected, label) in sequence {
+            let _ = app.update(msg);
+            let actual = app.focused_region();
+            if actual == expected {
+                log.pass(
+                    Category::Interaction,
+                    format!(r#""{label}: got {actual:?}""#),
+                );
+            } else {
+                log.fail(
+                    Category::Interaction,
+                    format!(
+                        r#"{{"msg":"{label}","expected":"{expected:?}","actual":"{actual:?}"}}"#
+                    ),
+                );
+            }
+            assert_eq!(actual, expected, "focus transition: {label}");
+        }
+    }
+
+    #[test]
+    fn rapid_density_cycling_is_idempotent_after_full_cycle() {
+        let mut app = CassApp::default();
+        let initial = app.density_mode;
+
+        // Full cycle: Cozy → Spacious → Compact → Cozy
+        for _ in 0..3 {
+            let _ = app.update(CassMsg::DensityModeCycled);
+        }
+        assert_eq!(
+            app.density_mode, initial,
+            "3 density cycles should return to initial state"
+        );
+
+        // Double full cycle
+        for _ in 0..6 {
+            let _ = app.update(CassMsg::DensityModeCycled);
+        }
+        assert_eq!(
+            app.density_mode, initial,
+            "6 density cycles should return to initial state"
+        );
+    }
+
+    #[test]
+    fn search_mode_cycling_returns_to_initial() {
+        let mut app = CassApp::default();
+        let initial_mode = app.search_mode;
+
+        // SearchModeCycled should cycle through all modes and return
+        // Count how many variants exist by cycling until we return
+        let mut count = 0;
+        loop {
+            let _ = app.update(CassMsg::SearchModeCycled);
+            count += 1;
+            if app.search_mode == initial_mode || count > 10 {
+                break;
+            }
+        }
+        assert_eq!(
+            app.search_mode, initial_mode,
+            "search mode should cycle back to initial after {count} steps"
+        );
+        assert!(
+            count <= 10,
+            "search mode cycle should complete within 10 steps"
+        );
+    }
+
+    #[test]
+    fn filter_clear_all_resets_all_filter_state() {
+        let mut app = CassApp::default();
+
+        // Set various filters
+        let mut agents = std::collections::HashSet::new();
+        agents.insert("claude_code".to_string());
+        let _ = app.update(CassMsg::FilterAgentSet(agents));
+        let _ = app.update(CassMsg::TimePresetCycled); // All → Today
+
+        // Clear all
+        let _ = app.update(CassMsg::FiltersClearAll);
+
+        assert!(
+            app.filters.agents.is_empty(),
+            "agents filter should be cleared"
+        );
+        assert_eq!(
+            app.time_preset,
+            TimePreset::All,
+            "time preset should reset to All"
+        );
+    }
+
+    // =========================================================================
     // Inspector Overlay Tests
     // =========================================================================
 
