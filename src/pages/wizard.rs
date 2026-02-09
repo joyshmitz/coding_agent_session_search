@@ -70,9 +70,6 @@ pub struct WizardState {
     pub target: DeployTarget,
     pub output_dir: PathBuf,
     pub repo_name: Option<String>,
-    pub cloudflare_branch: Option<String>,
-    pub cloudflare_account_id: Option<String>,
-    pub cloudflare_api_token: Option<String>,
 
     // Database path
     pub db_path: PathBuf,
@@ -96,7 +93,7 @@ pub struct WizardState {
     // Attachment support
     pub include_attachments: bool,
 
-    // Final site directory after bundle (for deployment step)
+    // Final output location (set after export)
     pub final_site_dir: Option<PathBuf>,
 }
 
@@ -121,9 +118,6 @@ impl Default for WizardState {
             target: DeployTarget::Local,
             output_dir: PathBuf::from("cass-export"),
             repo_name: None,
-            cloudflare_branch: None,
-            cloudflare_account_id: None,
-            cloudflare_api_token: None,
             db_path,
             exclusions: ExclusionSet::new(),
             last_summary: None,
@@ -167,31 +161,6 @@ impl PagesWizard {
     /// Set whether to include attachments in the export.
     pub fn set_include_attachments(&mut self, include: bool) {
         self.state.include_attachments = include;
-    }
-
-    /// Preselect a deployment target for the wizard.
-    pub fn set_deploy_target(&mut self, target: DeployTarget) {
-        self.state.target = target;
-    }
-
-    /// Prepopulate the repository/project name.
-    pub fn set_repo_name(&mut self, name: impl Into<String>) {
-        self.state.repo_name = Some(name.into());
-    }
-
-    /// Set Cloudflare deployment branch (defaults to "main" if unset).
-    pub fn set_cloudflare_branch(&mut self, branch: impl Into<String>) {
-        self.state.cloudflare_branch = Some(branch.into());
-    }
-
-    /// Set Cloudflare account ID for API-token auth.
-    pub fn set_cloudflare_account_id(&mut self, account_id: impl Into<String>) {
-        self.state.cloudflare_account_id = Some(account_id.into());
-    }
-
-    /// Set Cloudflare API token for API-token auth.
-    pub fn set_cloudflare_api_token(&mut self, api_token: impl Into<String>) {
-        self.state.cloudflare_api_token = Some(api_token.into());
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -641,15 +610,9 @@ impl PagesWizard {
             "Cloudflare Pages (requires wrangler CLI)",
         ];
 
-        let default_target = match self.state.target {
-            DeployTarget::GitHubPages => 1,
-            DeployTarget::CloudflarePages => 2,
-            DeployTarget::Local => 0,
-        };
-
         let target_selection = Select::with_theme(theme)
             .with_prompt("Where would you like to deploy?")
-            .default(default_target)
+            .default(0)
             .items(&targets)
             .interact()?;
 
@@ -670,7 +633,7 @@ impl PagesWizard {
         self.state.output_dir = PathBuf::from(
             Input::<String>::with_theme(theme)
                 .with_prompt("Output directory")
-                .default(self.state.output_dir.to_string_lossy().to_string())
+                .default("cass-export".to_string())
                 .interact_text()?,
         );
 
@@ -687,7 +650,7 @@ impl PagesWizard {
             self.state.repo_name = Some(
                 Input::<String>::with_theme(theme)
                     .with_prompt("Repository/project name")
-                    .default(self.state.repo_name.clone().unwrap_or(default_repo))
+                    .default(default_repo)
                     .interact_text()?,
             );
 
@@ -813,9 +776,8 @@ impl PagesWizard {
                     .iter()
                     .take(2)
                     .map(|t| {
-                        if t.chars().count() > 30 {
-                            let truncated: String = t.chars().take(27).collect();
-                            format!("{truncated}...")
+                        if t.len() > 30 {
+                            format!("{}...", &t[..27])
                         } else {
                             t.clone()
                         }
@@ -1746,9 +1708,6 @@ impl PagesWizard {
                 pb3.set_message(format!("{}: {}", phase, msg));
             })?;
 
-        // Save final site directory for deployment step
-        self.state.final_site_dir = Some(bundle_result.site_dir.clone());
-
         pb3.finish_with_message(format!(
             "✓ Bundle complete: {} files, fingerprint {}",
             bundle_result.total_files,
@@ -1825,14 +1784,6 @@ impl PagesWizard {
         writeln!(term, "\n{}", style("Step 9 of 9: Deployment").bold())?;
         writeln!(term, "{}", style("─".repeat(40)).dim())?;
 
-        // Use the final site directory (e.g. cass-export-bundle/site) if available,
-        // otherwise fallback to output_dir (intermediate) which is likely wrong but safe fallback.
-        let deploy_dir = self
-            .state
-            .final_site_dir
-            .as_ref()
-            .unwrap_or(&self.state.output_dir);
-
         match self.state.target {
             DeployTarget::Local => {
                 writeln!(term)?;
@@ -1841,7 +1792,7 @@ impl PagesWizard {
                 writeln!(
                     term,
                     "Your archive has been exported to: {}",
-                    style(deploy_dir.display()).cyan()
+                    style(self.state.output_dir.display()).cyan()
                 )?;
                 writeln!(term)?;
                 writeln!(term, "To preview locally, run:")?;
@@ -1850,7 +1801,7 @@ impl PagesWizard {
                     "  {}",
                     style(format!(
                         "cd {} && python -m http.server 8080",
-                        deploy_dir.display()
+                        self.state.output_dir.display()
                     ))
                     .dim()
                 )?;
@@ -1878,7 +1829,7 @@ impl PagesWizard {
                 match deployer.check_prerequisites() {
                     Ok(prereqs) if prereqs.is_ready() => {
                         // Deploy with progress output
-                        match deployer.deploy(deploy_dir, |_phase, msg| {
+                        match deployer.deploy(&self.state.output_dir, |_phase, msg| {
                             let _ = writeln!(term, "    {} {}", style("•").dim(), msg);
                         }) {
                             Ok(result) => {
@@ -1903,7 +1854,7 @@ impl PagesWizard {
                                 writeln!(
                                     term,
                                     "To deploy manually, push the {} directory to a gh-pages branch.",
-                                    deploy_dir.display()
+                                    self.state.output_dir.display()
                                 )?;
                             }
                         }
@@ -1923,7 +1874,7 @@ impl PagesWizard {
                         writeln!(
                             term,
                             "To deploy manually after fixing prerequisites, push the {} directory to a gh-pages branch.",
-                            deploy_dir.display()
+                            self.state.output_dir.display()
                         )?;
                     }
                     Err(e) => {
@@ -1938,7 +1889,7 @@ impl PagesWizard {
                         writeln!(
                             term,
                             "To deploy manually, push the {} directory to a gh-pages branch.",
-                            deploy_dir.display()
+                            self.state.output_dir.display()
                         )?;
                     }
                 }
@@ -1958,35 +1909,20 @@ impl PagesWizard {
                     .unwrap_or_else(|| "cass-archive".to_string());
 
                 // Configure the deployer
-                let branch = self
-                    .state
-                    .cloudflare_branch
-                    .clone()
-                    .unwrap_or_else(|| "main".to_string());
-                let account_id = self
-                    .state
-                    .cloudflare_account_id
-                    .clone()
-                    .or_else(|| dotenvy::var("CLOUDFLARE_ACCOUNT_ID").ok());
-                let api_token = self
-                    .state
-                    .cloudflare_api_token
-                    .clone()
-                    .or_else(|| dotenvy::var("CLOUDFLARE_API_TOKEN").ok());
                 let deployer = CloudflareDeployer::new(CloudflareConfig {
                     project_name: project_name.clone(),
                     custom_domain: None,
                     create_if_missing: true,
-                    branch,
-                    account_id,
-                    api_token,
+                    branch: "main".to_string(),
+                    account_id: dotenvy::var("CLOUDFLARE_ACCOUNT_ID").ok(),
+                    api_token: dotenvy::var("CLOUDFLARE_API_TOKEN").ok(),
                 });
 
                 // Check prerequisites first
                 match deployer.check_prerequisites() {
                     Ok(prereqs) if prereqs.is_ready() => {
                         // Deploy with progress output
-                        match deployer.deploy(deploy_dir, |_phase, msg| {
+                        match deployer.deploy(&self.state.output_dir, |_phase, msg| {
                             let _ = writeln!(term, "    {} {}", style("•").dim(), msg);
                         }) {
                             Ok(result) => {
@@ -2013,14 +1949,14 @@ impl PagesWizard {
                                 writeln!(
                                     term,
                                     "To deploy manually, use wrangler to deploy the {} directory:",
-                                    deploy_dir.display()
+                                    self.state.output_dir.display()
                                 )?;
                                 writeln!(
                                     term,
                                     "  {}",
                                     style(format!(
                                         "wrangler pages deploy {} --project-name {}",
-                                        deploy_dir.display(),
+                                        self.state.output_dir.display(),
                                         project_name
                                     ))
                                     .dim()
@@ -2042,7 +1978,7 @@ impl PagesWizard {
                             "  {}",
                             style(format!(
                                 "wrangler pages deploy {} --project-name {}",
-                                deploy_dir.display(),
+                                self.state.output_dir.display(),
                                 project_name
                             ))
                             .dim()
@@ -2060,14 +1996,14 @@ impl PagesWizard {
                         writeln!(
                             term,
                             "To deploy manually, use wrangler to deploy the {} directory:",
-                            deploy_dir.display()
+                            self.state.output_dir.display()
                         )?;
                         writeln!(
                             term,
                             "  {}",
                             style(format!(
                                 "wrangler pages deploy {} --project-name {}",
-                                deploy_dir.display(),
+                                self.state.output_dir.display(),
                                 project_name
                             ))
                             .dim()
