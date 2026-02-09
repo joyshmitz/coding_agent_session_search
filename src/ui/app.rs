@@ -27264,4 +27264,100 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             elapsed
         );
     }
+
+    // =====================================================================
+    // 2dccg.7.1 — Screenshot capture tests (text-based visual evidence)
+    // =====================================================================
+
+    /// Generate text-based screenshot captures demonstrating ftui visual quality.
+    /// Writes captures to test-results/screenshots/ for evidence bundle consumption.
+    #[test]
+    fn capture_ftui_screenshots() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let out_dir = std::path::Path::new("test-results/screenshots");
+        std::fs::create_dir_all(out_dir).expect("create screenshots dir");
+
+        let mut app = app_with_rich_visual_fixture();
+        let _ = app.update(CassMsg::SearchRequested);
+
+        // Capture 1: Search results (dark theme, 120×24)
+        let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+        std::fs::write(out_dir.join("01_search_results_dark_120x24.txt"), &text)
+            .expect("write screenshot");
+        assert!(!text.is_empty());
+
+        // Capture 2: Light theme
+        let _ = app.update(CassMsg::ThemeToggled);
+        let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+        std::fs::write(out_dir.join("02_search_results_light_120x24.txt"), &text)
+            .expect("write screenshot");
+        let _ = app.update(CassMsg::ThemeToggled); // back to dark
+
+        // Capture 3: Cozy density
+        let _ = app.update(CassMsg::DensityModeCycled); // → Cozy
+        let buf = render_at_degradation(&app, 120, 30, DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+        std::fs::write(out_dir.join("03_cozy_density_120x30.txt"), &text)
+            .expect("write screenshot");
+
+        // Capture 4: Spacious density
+        let _ = app.update(CassMsg::DensityModeCycled); // → Spacious
+        let buf = render_at_degradation(&app, 140, 35, DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+        std::fs::write(out_dir.join("04_spacious_density_140x35.txt"), &text)
+            .expect("write screenshot");
+        let _ = app.update(CassMsg::DensityModeCycled); // → Compact
+
+        // Capture 5: Help overlay
+        let _ = app.update(CassMsg::HelpToggled);
+        let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+        std::fs::write(out_dir.join("05_help_overlay_120x24.txt"), &text)
+            .expect("write screenshot");
+        let _ = app.update(CassMsg::HelpToggled);
+
+        // Capture 6: Wide terminal (200 cols)
+        let buf = render_at_degradation(&app, 200, 40, DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+        std::fs::write(out_dir.join("06_wide_terminal_200x40.txt"), &text)
+            .expect("write screenshot");
+
+        // Capture 7: Narrow terminal (60 cols)
+        let buf = render_at_degradation(&app, 60, 24, DegradationLevel::Full);
+        let text = buffer_to_text(&buf);
+        std::fs::write(out_dir.join("07_narrow_terminal_60x24.txt"), &text)
+            .expect("write screenshot");
+
+        // Capture 8: SimpleBorders degradation
+        let buf = render_at_degradation(&app, 120, 24, DegradationLevel::SimpleBorders);
+        let text = buffer_to_text(&buf);
+        std::fs::write(out_dir.join("08_simple_borders_120x24.txt"), &text)
+            .expect("write screenshot");
+
+        // Write manifest
+        let manifest = format!(
+            concat!(
+                "# Screenshot Captures\n\n",
+                "Generated: {}\n",
+                "Commit: {}\n\n",
+                "| File | Description |\n",
+                "|------|-------------|\n",
+                "| 01_search_results_dark_120x24.txt | Dark theme, search results, 120×24 |\n",
+                "| 02_search_results_light_120x24.txt | Light theme, search results, 120×24 |\n",
+                "| 03_cozy_density_120x30.txt | Cozy density mode, 120×30 |\n",
+                "| 04_spacious_density_140x35.txt | Spacious density mode, 140×35 |\n",
+                "| 05_help_overlay_120x24.txt | Help overlay visible, 120×24 |\n",
+                "| 06_wide_terminal_200x40.txt | Ultra-wide terminal, 200×40 |\n",
+                "| 07_narrow_terminal_60x24.txt | Narrow terminal, 60×24 |\n",
+                "| 08_simple_borders_120x24.txt | SimpleBorders degradation, 120×24 |\n",
+            ),
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+            option_env!("GIT_SHA").unwrap_or("local"),
+        );
+        std::fs::write(out_dir.join("MANIFEST.md"), manifest).expect("write manifest");
+    }
 }
