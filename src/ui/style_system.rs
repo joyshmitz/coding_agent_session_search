@@ -893,7 +893,73 @@ impl StyleContext {
     /// Return an accent-colored style for the given agent slug.
     pub fn agent_accent_style(&self, agent: &str) -> Style {
         let pane = super::components::theme::ThemePalette::agent_pane(agent);
-        Style::new().fg(pane.accent).bold()
+        if self.options.no_color
+            || self.options.a11y
+            || !self.options.color_profile.supports_color()
+        {
+            return Style::new().fg(pane.accent).bold();
+        }
+
+        let accent = Color::rgb(pane.accent.r(), pane.accent.g(), pane.accent.b());
+        let badge_bg = blend(
+            self.resolved.surface,
+            accent,
+            if self.options.gradients_enabled() {
+                0.22
+            } else {
+                0.14
+            },
+        );
+
+        // Pick whichever semantic foreground keeps the strongest contrast.
+        let mut best_fg = self.resolved.text;
+        let mut best_ratio =
+            ftui::style::contrast_ratio_packed(to_packed(best_fg), to_packed(badge_bg));
+        for candidate in [self.resolved.selection_fg, accent] {
+            let ratio =
+                ftui::style::contrast_ratio_packed(to_packed(candidate), to_packed(badge_bg));
+            if ratio > best_ratio {
+                best_ratio = ratio;
+                best_fg = candidate;
+            }
+        }
+
+        Style::new()
+            .fg(to_packed(best_fg))
+            .bg(to_packed(badge_bg))
+            .bold()
+    }
+
+    /// Tint a base results-row style with a subtle per-agent accent.
+    ///
+    /// This restores scan-friendly visual grouping in the list without
+    /// sacrificing legibility or selected-row affordances.
+    pub fn result_row_style_for_agent(&self, base: Style, agent: &str) -> Style {
+        let Some(base_bg) = base.bg else {
+            return base;
+        };
+        if self.options.no_color
+            || self.options.a11y
+            || !self.options.color_profile.supports_color()
+        {
+            return base;
+        }
+
+        let pane = super::components::theme::ThemePalette::agent_pane(agent);
+        let accent = Color::rgb(pane.accent.r(), pane.accent.g(), pane.accent.b());
+        let base_bg_color = Color::rgb(base_bg.r(), base_bg.g(), base_bg.b());
+        let tint = blend(
+            base_bg_color,
+            accent,
+            if self.options.gradients_enabled() {
+                0.12
+            } else {
+                0.08
+            },
+        );
+        Style::new()
+            .fg(base.fg.unwrap_or_else(|| to_packed(self.resolved.text)))
+            .bg(to_packed(tint))
     }
 
     /// Return a score-magnitude style (high/mid/low).
@@ -3517,6 +3583,123 @@ mod tests {
                 "agent_accent_style({agent}) must be bold"
             );
         }
+    }
+
+    #[test]
+    fn agent_accent_style_adds_badge_bg_in_color_modes() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let style = ctx.agent_accent_style("codex");
+            let fg = style.fg.expect("agent accent style should define fg");
+            let bg = style.bg.expect("agent accent style should define bg tint");
+            assert!(
+                style.has_attr(ftui::StyleFlags::BOLD),
+                "agent accent style should remain bold for preset {}",
+                preset.name()
+            );
+            assert_ne!(
+                Some(bg),
+                Some(to_packed(ctx.resolved.surface)),
+                "badge bg should differ from plain surface background for preset {}",
+                preset.name()
+            );
+            let ratio = ftui::style::contrast_ratio_packed(fg, bg);
+            assert!(
+                ratio >= 3.0,
+                "agent accent badge contrast too low ({ratio:.2}) for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn agent_accent_style_uses_fg_only_in_no_color_and_a11y_modes() {
+        let no_color_ctx = StyleContext::from_options(StyleOptions {
+            preset: UiThemePreset::Dark,
+            dark_mode: true,
+            color_profile: ColorProfile::Mono,
+            no_color: true,
+            no_icons: false,
+            no_gradient: true,
+            a11y: false,
+        });
+        let no_color_style = no_color_ctx.agent_accent_style("codex");
+        assert!(
+            no_color_style.bg.is_none(),
+            "no-color mode should avoid accent background tint"
+        );
+
+        let a11y_ctx = StyleContext::from_options(StyleOptions {
+            preset: UiThemePreset::Dark,
+            dark_mode: true,
+            color_profile: ColorProfile::TrueColor,
+            no_color: false,
+            no_icons: false,
+            no_gradient: true,
+            a11y: true,
+        });
+        let a11y_style = a11y_ctx.agent_accent_style("codex");
+        assert!(
+            a11y_style.bg.is_none(),
+            "a11y mode should avoid accent background tint"
+        );
+    }
+
+    #[test]
+    fn result_row_style_for_agent_tints_background_when_color_enabled() {
+        let ctx = context_for_preset(UiThemePreset::Dark);
+        let base = ctx.style(STYLE_RESULT_ROW);
+        let tinted = ctx.result_row_style_for_agent(base, "codex");
+        assert!(base.bg.is_some(), "base row style should have a background");
+        assert!(
+            tinted.bg.is_some(),
+            "tinted row style should retain a background"
+        );
+        assert_eq!(
+            tinted.fg, base.fg,
+            "row tinting should preserve existing foreground color"
+        );
+        assert_ne!(
+            tinted.bg, base.bg,
+            "row tinting should shift background toward agent accent"
+        );
+    }
+
+    #[test]
+    fn result_row_style_for_agent_preserves_base_style_in_no_color_or_a11y() {
+        let base = Style::new()
+            .fg(to_packed(Color::rgb(230, 230, 230)))
+            .bg(to_packed(Color::rgb(32, 36, 48)));
+
+        let no_color_ctx = StyleContext::from_options(StyleOptions {
+            preset: UiThemePreset::Dark,
+            dark_mode: true,
+            color_profile: ColorProfile::Mono,
+            no_color: true,
+            no_icons: false,
+            no_gradient: true,
+            a11y: false,
+        });
+        assert_eq!(
+            no_color_ctx.result_row_style_for_agent(base, "codex"),
+            base,
+            "no-color mode should not tint row backgrounds"
+        );
+
+        let a11y_ctx = StyleContext::from_options(StyleOptions {
+            preset: UiThemePreset::Dark,
+            dark_mode: true,
+            color_profile: ColorProfile::TrueColor,
+            no_color: false,
+            no_icons: false,
+            no_gradient: true,
+            a11y: true,
+        });
+        assert_eq!(
+            a11y_ctx.result_row_style_for_agent(base, "codex"),
+            base,
+            "a11y mode should not tint row backgrounds"
+        );
     }
 
     #[test]
