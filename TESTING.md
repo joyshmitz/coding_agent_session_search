@@ -400,6 +400,70 @@ Push to a branch and let GitHub Actions run them:
 
 ---
 
+## Snapshot Baseline Regeneration & Review (FrankenTUI)
+
+Snapshot baselines are a **UI contract**, not a convenience artifact. Never run blanket blesses without proving why each change is intentional.
+
+### Snapshot Suites and Ownership
+
+| Snapshot suite | Test entrypoint | Snapshot files |
+|----------------|-----------------|----------------|
+| Core ftui harness smoke baselines | `tests/ftui_harness_snapshots.rs` (`ftui_snapshot_*`) | `tests/snapshots/ftui_*.snap` / `tests/snapshots/ftui_*.ansi.snap` |
+| Cass affordance baselines | `src/ui/app.rs` (`snapshot_baseline_*`) | `tests/snapshots/cassapp_baseline_*.snap` |
+| Search-surface regressions | `src/ui/app.rs` (`snapshot_search_surface_*`) | `tests/snapshots/cassapp_search_surface_*.snap` |
+
+### Default Verification (No Regeneration)
+
+Run these first to confirm whether snapshots are stale:
+
+```bash
+cargo test snapshot_baseline_ -- --nocapture
+cargo test snapshot_search_surface_ -- --nocapture
+cargo test --test ftui_harness_snapshots -- --nocapture
+```
+
+### Targeted Regeneration (Intentional Changes Only)
+
+Use `BLESS=1` only for the suite you intentionally changed:
+
+```bash
+BLESS=1 cargo test snapshot_baseline_ -- --nocapture
+BLESS=1 cargo test snapshot_search_surface_ -- --nocapture
+BLESS=1 cargo test --test ftui_harness_snapshots -- --nocapture
+```
+
+### Mandatory Review Protocol
+
+1. Regenerate only targeted snapshots (never all suites by default).
+2. Inspect diffs directly:
+   ```bash
+   git diff -- tests/snapshots/*.snap
+   ```
+3. Validate behavior guards still pass:
+   ```bash
+   cargo test search_surface_interaction_matrix_enter_click_escape -- --nocapture
+   cargo test detail_markdown_ -- --nocapture
+   cargo test markdown_theme_ -- --nocapture
+   ```
+4. Run project quality gates:
+   ```bash
+   cargo fmt --check
+   cargo check --all-targets
+   cargo clippy --all-targets -- -D warnings
+   ```
+5. In the bead/PR note, explicitly record:
+   - Which snapshot suite was regenerated
+   - Why each changed region is intentional
+   - Which non-snapshot behavioral tests were run as guards
+
+### Snapshot Diff Heuristics for Reviewers
+
+- **Expected:** spacing, border glyph, color-role, and layout shifts that map to an intentional UI change in the bead scope.
+- **Suspicious:** missing footer/help hints, removed role gutters, vanished filter pill hierarchy, clipped text, or theme-specific parity drift (dark vs light mismatch).
+- **Reject if present:** unrelated snapshot churn outside touched feature scope, unexplained multiline reflow across untouched panes, or regressions in interaction guard tests.
+
+---
+
 ## Coverage Policy
 
 ### Threshold Requirements
@@ -662,4 +726,4 @@ fn test_parsing() { }
 
 ---
 
-*Last updated: 2026-01-27*
+*Last updated: 2026-02-09*
