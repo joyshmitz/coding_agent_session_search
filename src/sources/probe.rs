@@ -852,16 +852,18 @@ AGENT_DATA=~/.codex/sessions|50|10
         assert_eq!(result.connection_time_ms, 100);
 
         // Check cass status
-        match &result.cass_status {
-            CassStatus::Indexed {
-                version,
-                session_count,
-                ..
-            } => {
-                assert_eq!(version, "0.1.50");
-                assert_eq!(*session_count, 1234);
-            }
-            _ => panic!("Expected Indexed status"),
+        assert!(
+            matches!(&result.cass_status, CassStatus::Indexed { .. }),
+            "expected Indexed status"
+        );
+        if let CassStatus::Indexed {
+            version,
+            session_count,
+            ..
+        } = &result.cass_status
+        {
+            assert_eq!(version, "0.1.50");
+            assert_eq!(*session_count, 1234);
         }
 
         // Check system info
@@ -987,7 +989,7 @@ MEM_AVAIL_KB=4194304
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // Ensure HOME is set for the probe script (may not be set in some test environments)
-        if std::env::var("HOME").is_err()
+        if dotenvy::var("HOME").is_err()
             && let Some(dirs) = directories::BaseDirs::new()
         {
             cmd.env("HOME", dirs.home_dir());

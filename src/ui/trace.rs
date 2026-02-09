@@ -77,8 +77,8 @@ impl SystemInfo {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             cass_version: env!("CARGO_PKG_VERSION").to_string(),
-            term: std::env::var("TERM").ok(),
-            colorterm: std::env::var("COLORTERM").ok(),
+            term: dotenvy::var("TERM").ok(),
+            colorterm: dotenvy::var("COLORTERM").ok(),
             terminal_size: None, // filled by caller if available
             timestamp: chrono::Utc::now().to_rfc3339(),
         }
