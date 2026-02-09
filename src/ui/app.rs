@@ -16340,17 +16340,17 @@ mod tests {
         assert_eq!(app.panes[0].selected, 0);
 
         let _ = app.update(CassMsg::PageScrolled { delta: 1 });
-        let after_page_down = app.panes[0].selected;
+        let after_page_down = app.results_list_state.borrow().scroll_offset();
         assert!(
             after_page_down > 0,
-            "test_id=9.5.interaction.page component=selection expected=advance actual={after_page_down}"
+            "test_id=9.5.interaction.page component=scroll expected=advance actual={after_page_down}"
         );
 
         let _ = app.update(CassMsg::PageScrolled { delta: -1 });
-        let after_page_up = app.panes[0].selected;
+        let after_page_up = app.results_list_state.borrow().scroll_offset();
         assert!(
             after_page_up <= after_page_down,
-            "test_id=9.5.interaction.page component=selection expected=non-increase actual_down={} actual_up={}",
+            "test_id=9.5.interaction.page component=scroll expected=non-increase actual_down={} actual_up={}",
             after_page_down,
             after_page_up
         );
