@@ -4,11 +4,11 @@
 │All agents › All workspaces › Any time › Balanced › all sources                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭Results (1)───────────────────────────────────────────────────────────────────────│╭Detail [Messages] ↩───────────────╮
-│▶   1. ?? @aider Large-snippet rendering edge case                                ││  ● Messages  │ Snippets │ Raw │ J│
-│      ▁▁▁0.6 [ci-linux] score 0.64 | [ci-linux] | ws /workspace/cass              ││Large-snippet rendering edge case │
-│      /workspace/cass/tests/regression/long_snippet.md:9                          ││agent=aider workspace=/workspace/c│
-│      The following snippet intentionally exceeds normal row budgets to           ││────────────────────────────────  │
-│      exercise truncation, striping, selection, and horizontal clipping behav...  ││  This is a deliberately long snip│
+│▶   1. ▼ @aider Large-snippet rendering edge case                                 ││  ● Messages  │ Snippets │ Raw │ J│
+│      M█▇ 6.4 [ci-linux] mt suffix │ ws /workspace/cass                           ││Large-snippet rendering edge case │
+│      /workspace/cass/tests/regression/long_snippet.md:9                          ││agent=aider │ ws=/workspace/cass ││
+│    │ The following snippet intentionally exceeds normal row budgets to           ││────────────────────────────────  │
+│    │ exercise truncation, striping, selection, and horizontal clipping beh...    ││  This is a deliberately long snip│
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │

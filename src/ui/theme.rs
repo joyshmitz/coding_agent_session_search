@@ -659,7 +659,7 @@ mod tests {
     fn icons_shown_by_default() {
         let flags = ThemeFlags::all_enabled();
         let theme = CassTheme::with_options(ThemePreset::Dark, ColorProfile::TrueColor, flags);
-        assert_eq!(theme.agent_icon("codex"), "\u{1f539}"); // 🔹
+        assert_eq!(theme.agent_icon("codex"), "\u{25c6}"); // ◆
     }
 
     #[test]
