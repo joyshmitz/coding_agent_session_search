@@ -17098,6 +17098,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn detail_markdown_renderer_setup_cost_stays_below_render_work() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        use crate::ui::style_system::UiThemePreset;
+
+        let markdown_doc = [
+            "# Heading",
+            "",
+            "Theme-coherent markdown should stay readable after toggles.",
+            "",
+            "```rust",
+            "fn parse_markdown_theme(input: &str) -> Option<String> {",
+            "    Some(input.trim().to_string())",
+            "}",
+            "```",
+            "",
+            "- bullet one",
+            "- bullet two",
+            "- bullet three",
+            "",
+            "> blockquote",
+        ]
+        .join("\n")
+        .repeat(24);
+
+        for (preset, dark_mode) in [
+            (UiThemePreset::Dark, true),
+            (UiThemePreset::Light, false),
+            (UiThemePreset::HighContrast, true),
+            (UiThemePreset::Catppuccin, true),
+        ] {
+            let styles = StyleContext::from_options(StyleOptions {
+                preset,
+                dark_mode,
+                ..StyleOptions::default()
+            });
+
+            let setup_iterations = 300u32;
+            let setup_start = Instant::now();
+            for _ in 0..setup_iterations {
+                black_box(MarkdownRenderer::new(styles.markdown_theme()));
+            }
+            let setup_elapsed = setup_start.elapsed();
+
+            let render_iterations = 120u32;
+            let renderer = MarkdownRenderer::new(styles.markdown_theme());
+            let render_start = Instant::now();
+            for _ in 0..render_iterations {
+                black_box(renderer.render(&markdown_doc));
+            }
+            let render_elapsed = render_start.elapsed();
+
+            let setup_us = setup_elapsed.as_secs_f64() * 1_000_000.0 / setup_iterations as f64;
+            let render_us = render_elapsed.as_secs_f64() * 1_000_000.0 / render_iterations as f64;
+
+            assert!(
+                setup_us <= render_us * 2.0,
+                "markdown setup unexpectedly expensive for {:?}: setup={setup_us:.2}us render={render_us:.2}us",
+                preset
+            );
+        }
+    }
+
     // ==================== Analytics surface tests ====================
 
     #[test]
@@ -21255,6 +21320,321 @@ mod tests {
             "render cost grew from {}ms to {}ms over 5 iterations — possible leak",
             first,
             last
+        );
+    }
+
+    // -- Markdown theming profiling (2dccg.3.4) ------------------------------
+
+    /// Realistic markdown content for profiling (moderate complexity).
+    const MARKDOWN_PROFILE_CONTENT: &str = "\
+# Authentication Module Refactor
+
+## Summary
+Refactored the auth module to use **JWT tokens** with `refresh_token` rotation.
+
+### Changes
+- Replaced session cookies with signed JWTs
+- Added `HMAC-SHA256` signature verification
+- Implemented sliding window rate limiting
+
+```rust
+fn verify_token(token: &str) -> Result<Claims> {
+    let key = load_signing_key()?;
+    decode::<Claims>(token, &key, &Validation::default())
+}
+```
+
+> **Note**: Migration requires updating all API clients to send
+> Bearer tokens instead of cookies.
+
+| Endpoint | Old Auth | New Auth |
+|----------|----------|----------|
+| `/api/users` | Cookie | JWT |
+| `/api/admin` | Cookie+CSRF | JWT+Role |
+| `/webhook` | API Key | JWT+Scope |
+
+1. Deploy auth service first
+2. Run migration script: `./scripts/migrate_sessions.sh`
+3. Verify with `curl -H 'Authorization: Bearer ...'`
+
+---
+
+See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
+";
+
+    fn make_markdown_messages(count: usize) -> Vec<crate::model::types::Message> {
+        (0..count)
+            .map(|i| crate::model::types::Message {
+                id: Some(i as i64),
+                idx: i as i64,
+                role: if i % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Agent
+                },
+                author: Some("test".into()),
+                created_at: Some(1_700_000_000 + i as i64 * 60),
+                content: MARKDOWN_PROFILE_CONTENT.to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn app_with_markdown_detail(msg_count: usize) -> CassApp {
+        use std::path::PathBuf;
+
+        let mut app = app_with_hits(3);
+        let messages = make_markdown_messages(msg_count);
+        let cv = ConversationView {
+            convo: crate::model::types::Conversation {
+                id: Some(1),
+                agent_slug: "claude_code".to_string(),
+                workspace: Some(PathBuf::from("/projects/test")),
+                external_id: Some("conv-md-profile".to_string()),
+                title: Some("Markdown Profiling".to_string()),
+                source_path: PathBuf::from("/test/md_session.jsonl"),
+                started_at: Some(1_700_000_000),
+                ended_at: Some(1_700_003_600),
+                approx_tokens: Some(4096),
+                metadata_json: serde_json::json!({}),
+                messages: Vec::new(),
+                source_id: "local".to_string(),
+                origin_host: None,
+            },
+            messages,
+            workspace: None,
+        };
+        app.cached_detail = Some(("/test/md_session.jsonl".to_string(), cv));
+        app
+    }
+
+    /// Budget: MarkdownRenderer construction must be negligible (<1ms).
+    #[test]
+    fn perf_profile_markdown_renderer_construction() {
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            let theme = styles.markdown_theme();
+            let _renderer = MarkdownRenderer::new(theme);
+        }
+        let elapsed = start.elapsed();
+        let per_call_us = elapsed.as_micros() / 100;
+        assert!(
+            per_call_us < 1000,
+            "MarkdownRenderer::new() averaged {per_call_us}us — should be <1000us"
+        );
+    }
+
+    /// Budget: Rendering moderate markdown (<5ms per message).
+    #[test]
+    fn perf_profile_markdown_render_per_message() {
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let renderer = MarkdownRenderer::new(styles.markdown_theme());
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            let _rendered = renderer.render(MARKDOWN_PROFILE_CONTENT);
+        }
+        let elapsed = start.elapsed();
+        let per_render_us = elapsed.as_micros() / 50;
+        assert!(
+            per_render_us < 5000,
+            "markdown render averaged {per_render_us}us — should be <5000us for moderate content"
+        );
+    }
+
+    /// Budget: is_likely_markdown detection is cheap (<100us).
+    #[test]
+    fn perf_profile_markdown_detection() {
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            let _det = is_likely_markdown(MARKDOWN_PROFILE_CONTENT);
+        }
+        let elapsed = start.elapsed();
+        let per_call_us = elapsed.as_micros() / 1000;
+        assert!(
+            per_call_us < 100,
+            "is_likely_markdown averaged {per_call_us}us — should be <100us"
+        );
+    }
+
+    /// Budget: build_messages_lines with 10 markdown messages < 50ms.
+    #[test]
+    fn perf_profile_build_messages_lines_markdown() {
+        let app = app_with_markdown_detail(10);
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+
+        let start = std::time::Instant::now();
+        let lines = app.build_messages_lines(&hit, 120, &styles);
+        let elapsed = start.elapsed();
+
+        assert!(!lines.is_empty(), "should produce rendered markdown lines");
+        assert!(
+            elapsed.as_millis() < 50,
+            "build_messages_lines (10 md messages) took {:?} — should be <50ms",
+            elapsed
+        );
+    }
+
+    /// Budget: build_messages_lines with plain text (no markdown) < 10ms.
+    #[test]
+    fn perf_profile_build_messages_lines_plain_text() {
+        use std::path::PathBuf;
+
+        let mut app = app_with_hits(3);
+        let plain_messages: Vec<crate::model::types::Message> = (0..10)
+            .map(|i| crate::model::types::Message {
+                id: Some(i),
+                idx: i,
+                role: MessageRole::User,
+                author: Some("test".into()),
+                created_at: Some(1_700_000_000),
+                content: "This is a plain text message without any markdown syntax.\nIt has multiple lines.\nBut no headings, code blocks, or formatting."
+                    .to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            })
+            .collect();
+        let cv = ConversationView {
+            convo: crate::model::types::Conversation {
+                id: Some(1),
+                agent_slug: "claude_code".into(),
+                workspace: Some(PathBuf::from("/test")),
+                external_id: None,
+                title: Some("Plain Text Conv".into()),
+                source_path: PathBuf::from("/test/plain.jsonl"),
+                started_at: Some(1_700_000_000),
+                ended_at: None,
+                approx_tokens: None,
+                metadata_json: serde_json::json!({}),
+                messages: Vec::new(),
+                source_id: "local".into(),
+                origin_host: None,
+            },
+            messages: plain_messages,
+            workspace: None,
+        };
+        app.cached_detail = Some(("/test/plain.jsonl".into(), cv));
+
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+
+        let start = std::time::Instant::now();
+        let lines = app.build_messages_lines(&hit, 120, &styles);
+        let elapsed = start.elapsed();
+
+        assert!(!lines.is_empty());
+        assert!(
+            elapsed.as_millis() < 10,
+            "build_messages_lines (10 plain messages) took {:?} — should be <10ms",
+            elapsed
+        );
+    }
+
+    /// Full detail pane render with markdown content stays within budget.
+    #[test]
+    fn perf_profile_detail_pane_render_with_markdown() {
+        let app = app_with_markdown_detail(10);
+        let start = std::time::Instant::now();
+        let _ = render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < PERF_RENDER_SINGLE_BUDGET_MS,
+            "detail pane with 10 md messages took {:?} — exceeds {}ms budget",
+            elapsed,
+            PERF_RENDER_SINGLE_BUDGET_MS
+        );
+    }
+
+    /// Repeated renders of markdown detail pane don't show growing cost.
+    #[test]
+    fn perf_profile_markdown_no_accumulation() {
+        let app = app_with_markdown_detail(10);
+        let mut times = Vec::with_capacity(5);
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            let _ =
+                render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
+            times.push(start.elapsed().as_millis());
+        }
+        let first = times[0].max(1);
+        let last = times[4];
+        assert!(
+            last <= first * 3,
+            "markdown render cost grew from {}ms to {}ms — possible leak",
+            first,
+            last
+        );
+    }
+
+    /// Theme toggle correctly invalidates markdown rendering (new colors).
+    #[test]
+    fn perf_profile_theme_switch_invalidates_markdown() {
+        use ftui::Model;
+
+        let mut app = app_with_markdown_detail(3);
+        let hit = make_test_hit();
+
+        // Render with dark theme
+        let dark_styles = StyleContext::from_options(StyleOptions::default());
+        let dark_lines = app.build_messages_lines(&hit, 120, &dark_styles);
+
+        // Switch to light
+        let _ = app.update(CassMsg::ThemeToggled);
+        let mut light_options = StyleOptions::default();
+        light_options.preset = UiThemePreset::Light;
+        let light_styles = StyleContext::from_options(light_options);
+        let light_lines = app.build_messages_lines(&hit, 120, &light_styles);
+
+        // Lines should have different styles (different theme colors)
+        let dark_h1_fg = markdown_span_fg_for_text(&dark_lines, "Authentication");
+        let light_h1_fg = markdown_span_fg_for_text(&light_lines, "Authentication");
+
+        assert!(
+            dark_h1_fg.is_some(),
+            "dark theme heading should have fg color"
+        );
+        assert!(
+            light_h1_fg.is_some(),
+            "light theme heading should have fg color"
+        );
+        assert_ne!(
+            dark_h1_fg, light_h1_fg,
+            "theme switch should produce different heading colors: dark={dark_h1_fg:?} light={light_h1_fg:?}"
+        );
+    }
+
+    /// Markdown theming overhead relative to plain text rendering is acceptable.
+    #[test]
+    fn perf_profile_markdown_vs_plain_overhead_ratio() {
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let renderer = MarkdownRenderer::new(styles.markdown_theme());
+
+        // Benchmark markdown
+        let md_start = std::time::Instant::now();
+        for _ in 0..20 {
+            let _r = renderer.render(MARKDOWN_PROFILE_CONTENT);
+        }
+        let md_us = md_start.elapsed().as_micros();
+
+        // Benchmark plain text equivalent (same length, split to lines)
+        let plain_content = "x".repeat(MARKDOWN_PROFILE_CONTENT.len());
+        let plain_start = std::time::Instant::now();
+        for _ in 0..20 {
+            let _lines: Vec<&str> = plain_content.lines().collect();
+        }
+        let plain_us = plain_start.elapsed().as_micros().max(1);
+
+        // Markdown rendering should not be more than 1000x slower than
+        // a simple line split — generous bound for parser overhead.
+        let ratio = md_us / plain_us;
+        assert!(
+            ratio < 1000,
+            "markdown/plain ratio = {}x — overhead is excessive (md={}us plain={}us)",
+            ratio,
+            md_us,
+            plain_us
         );
     }
 
