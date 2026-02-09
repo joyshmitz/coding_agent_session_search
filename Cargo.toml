@@ -23,7 +23,7 @@ console = "*"
 colored = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
-tru = { git = "https://github.com/Dicklesworthstone/toon_rust" }
+toon = { git = "https://github.com/Dicklesworthstone/toon_rust" }
 tempfile = "*"
 rmp-serde = "*"  # MessagePack for binary metadata serialization (Opt 3.1)
 toml = "*"
