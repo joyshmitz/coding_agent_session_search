@@ -87,3 +87,8 @@ session_export.html
 /storage.sqlite3
 /storage.sqlite3-wal
 /storage.sqlite3-shm
+
+# Agent probe/scratch files and temp directories
+.tmp_write_probe
+.tmp_*
+.tmp/
