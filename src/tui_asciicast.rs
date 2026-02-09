@@ -59,6 +59,7 @@ pub fn run_tui_with_asciicast(recording_path: &Path, interactive: bool) -> Resul
             .take_writer()
             .context("take PTY writer for input forwarding")?,
     );
+    let mut stdin_forwarder: Option<std::thread::JoinHandle<()>> = None;
 
     let allow_input = interactive
         && io::stdin().is_terminal()
@@ -68,7 +69,7 @@ pub fn run_tui_with_asciicast(recording_path: &Path, interactive: bool) -> Resul
     let _raw_mode = RawModeGuard::new(allow_input)?;
 
     if allow_input && let Some(writer) = writer_keepalive.take() {
-        std::thread::spawn(move || forward_stdin(writer));
+        stdin_forwarder = Some(std::thread::spawn(move || forward_stdin(writer)));
     }
 
     let recorder = AsciicastRecorder::new(recording_path, cols, rows)
@@ -96,6 +97,14 @@ pub fn run_tui_with_asciicast(recording_path: &Path, interactive: bool) -> Resul
     let status = child
         .wait()
         .context("wait for TUI child process to exit after recording")?;
+
+    if let Some(handle) = stdin_forwarder.take()
+        && handle.is_finished()
+    {
+        let _ = handle.join();
+    }
+    // If stdin is still blocked on read(), dropping the handle intentionally detaches.
+
     if !status.success() {
         bail!("TUI exited with non-zero status while recording: {status}");
     }
