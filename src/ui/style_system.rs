@@ -4194,4 +4194,238 @@ mod tests {
             }
         }
     }
+
+    // =====================================================================
+    // 2dccg.11.1 — Rendering-facing style invariants with structured logging
+    // =====================================================================
+
+    #[test]
+    fn rendering_token_affordance_matrix_with_logging() {
+        use super::super::test_log::{Category, TestLogger};
+
+        let log = TestLogger::new("11.1.affordance_matrix");
+
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            log.step_start(Category::Style, format!(r#""preset:{:?}""#, preset));
+
+            // Pill active must have background affordance
+            let pill_active = ctx.style(STYLE_PILL_ACTIVE);
+            if pill_active.bg.is_some() {
+                log.pass(
+                    Category::Style,
+                    format!(r#""pill_active bg present for {:?}""#, preset),
+                );
+            } else {
+                log.fail(
+                    Category::Style,
+                    format!(
+                        r#"{{"msg":"pill_active bg missing","preset":"{:?}"}}"#,
+                        preset
+                    ),
+                );
+                panic!("STYLE_PILL_ACTIVE must have bg for {:?}", preset);
+            }
+
+            // Tab active must have background
+            let tab_active = ctx.style(STYLE_TAB_ACTIVE);
+            if tab_active.bg.is_some() {
+                log.pass(
+                    Category::Style,
+                    format!(r#""tab_active bg present for {:?}""#, preset),
+                );
+            } else {
+                log.fail(
+                    Category::Style,
+                    format!(
+                        r#"{{"msg":"tab_active bg missing","preset":"{:?}"}}"#,
+                        preset
+                    ),
+                );
+                panic!("STYLE_TAB_ACTIVE must have bg for {:?}", preset);
+            }
+
+            // Tab inactive must differ from active
+            let tab_inactive = ctx.style(STYLE_TAB_INACTIVE);
+            if tab_active.fg != tab_inactive.fg || tab_active.bg != tab_inactive.bg {
+                log.pass(
+                    Category::Style,
+                    format!(r#""tab active/inactive distinct for {:?}""#, preset),
+                );
+            } else {
+                log.fail(
+                    Category::Style,
+                    format!(
+                        r#"{{"msg":"tab active/inactive identical","preset":"{:?}"}}"#,
+                        preset
+                    ),
+                );
+                panic!("TAB_ACTIVE and TAB_INACTIVE must differ for {:?}", preset);
+            }
+
+            // Score hierarchy
+            let high = ctx.style(STYLE_SCORE_HIGH);
+            let mid = ctx.style(STYLE_SCORE_MID);
+            let low = ctx.style(STYLE_SCORE_LOW);
+            if high.fg != mid.fg && mid.fg != low.fg {
+                log.pass(
+                    Category::Style,
+                    format!(r#""score hierarchy preserved for {:?}""#, preset),
+                );
+            } else {
+                log.fail(
+                    Category::Style,
+                    format!(
+                        r#"{{"msg":"score hierarchy broken","preset":"{:?}"}}"#,
+                        preset
+                    ),
+                );
+                panic!(
+                    "Score HIGH/MID/LOW must be pairwise distinct for {:?}",
+                    preset
+                );
+            }
+
+            // Role gutters pairwise distinct
+            let user = ctx.style(STYLE_ROLE_GUTTER_USER);
+            let asst = ctx.style(STYLE_ROLE_GUTTER_ASSISTANT);
+            let tool = ctx.style(STYLE_ROLE_GUTTER_TOOL);
+            let sys = ctx.style(STYLE_ROLE_GUTTER_SYSTEM);
+            let roles = [
+                ("user", user.fg),
+                ("assistant", asst.fg),
+                ("tool", tool.fg),
+                ("system", sys.fg),
+            ];
+            let mut distinct = true;
+            for i in 0..roles.len() {
+                for j in (i + 1)..roles.len() {
+                    if roles[i].1 == roles[j].1 {
+                        distinct = false;
+                    }
+                }
+            }
+            if distinct {
+                log.pass(
+                    Category::Style,
+                    format!(r#""role gutters pairwise distinct for {:?}""#, preset),
+                );
+            } else {
+                log.fail(
+                    Category::Style,
+                    format!(
+                        r#"{{"msg":"role gutters not pairwise distinct","preset":"{:?}"}}"#,
+                        preset
+                    ),
+                );
+                panic!("Role gutters must be pairwise distinct for {:?}", preset);
+            }
+
+            log.step_end(Category::Style, format!(r#""preset:{:?} done""#, preset));
+        }
+
+        let (pass, fail, _) = log.summary();
+        assert!(
+            fail == 0,
+            "rendering affordance matrix: {pass} pass, {fail} fail"
+        );
+    }
+
+    #[test]
+    fn markdown_theme_preset_coherence_with_logging() {
+        use super::super::test_log::{Category, TestLogger};
+
+        let log = TestLogger::new("11.1.markdown_coherence");
+
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let md_theme = ctx.markdown_theme();
+
+            // Markdown theme should not be all-default
+            let default_md = MarkdownTheme::default();
+            if format!("{:?}", md_theme) != format!("{:?}", default_md) {
+                log.pass(
+                    Category::Theme,
+                    format!(r#""markdown_theme non-default for {:?}""#, preset),
+                );
+            } else {
+                log.fail(
+                    Category::Theme,
+                    format!(
+                        r#"{{"msg":"markdown_theme is default","preset":"{:?}"}}"#,
+                        preset
+                    ),
+                );
+                panic!("markdown_theme() must be non-default for {:?}", preset);
+            }
+
+            // Code inline should have background
+            if md_theme.code_inline.bg.is_some() {
+                log.pass(
+                    Category::Theme,
+                    format!(r#""code_inline has bg for {:?}""#, preset),
+                );
+            } else {
+                log.fail(
+                    Category::Theme,
+                    format!(
+                        r#"{{"msg":"code_inline bg missing","preset":"{:?}"}}"#,
+                        preset
+                    ),
+                );
+                panic!("code_inline must have bg for {:?}", preset);
+            }
+        }
+
+        let (pass, fail, _) = log.summary();
+        assert!(fail == 0, "markdown coherence: {pass} pass, {fail} fail");
+    }
+
+    #[test]
+    fn degradation_affordance_preservation_with_logging() {
+        use super::super::test_log::{Category, TestLogger};
+        use crate::ui::app::LayoutBreakpoint as LB;
+        use ftui::render::budget::DegradationLevel;
+
+        let log = TestLogger::new("11.1.degradation_affordance");
+        let opts = StyleOptions::default();
+
+        // At Full degradation, DecorativePolicy should allow all decorations
+        let full_policy = DecorativePolicy::resolve(opts, DegradationLevel::Full, LB::Wide, true);
+        if full_policy.use_gradients && full_policy.show_icons {
+            log.pass(
+                Category::Degradation,
+                r#""Full allows gradients+icons""#.to_string(),
+            );
+        } else {
+            log.fail(
+                Category::Degradation,
+                format!(
+                    r#"{{"msg":"Full degradation restricts decorations","gradients":{},"icons":{}}}"#,
+                    full_policy.use_gradients, full_policy.show_icons
+                ),
+            );
+        }
+
+        // At EssentialOnly, decorations should be restricted
+        let essential_policy =
+            DecorativePolicy::resolve(opts, DegradationLevel::EssentialOnly, LB::Wide, true);
+        if !essential_policy.use_gradients {
+            log.pass(
+                Category::Degradation,
+                r#""EssentialOnly restricts gradients""#.to_string(),
+            );
+        } else {
+            log.fail(
+                Category::Degradation,
+                r#""EssentialOnly should restrict gradients""#.to_string(),
+            );
+        }
+
+        let (pass, fail, _) = log.summary();
+        assert!(
+            fail == 0,
+            "degradation affordance: {pass} pass, {fail} fail"
+        );
+    }
 }
