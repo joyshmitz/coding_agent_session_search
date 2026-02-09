@@ -13,16 +13,16 @@ Aggregates sessions from Codex, Claude Code, Gemini CLI, Cline, OpenCode, Amp, C
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh?$(date +%s)" \
-  | bash -s -- --easy-mode --verify --version v0.1.64
+  | bash -s -- --easy-mode --verify
 ```
 
 ```powershell
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.ps1 | iex
-install.ps1 -EasyMode -Verify -Version v0.1.64
+install.ps1 -EasyMode -Verify
 ```
 
-**Release gate note:** install scripts are currently pinned to `v0.1.64` (last ratatui build) unless you explicitly pass `--version`/`-Version`.
+Installs the latest release by default. Pass `--version <tag>` / `-Version <tag>` to pin a specific version.
 
 **Or via package managers:**
 
@@ -69,7 +69,7 @@ cass robot-docs schemas
 <div align="center">
 
 ### Search Results Across All Your Agents
-*Three-pane layout: filter bar, results list with color-coded agents (Claude, Codex, Gemini, Pi-Agent, etc.), and syntax-highlighted detail preview*
+*Three-pane layout with semantic styling: filter bar with pills, results list with color-coded agents and score tiers, and syntax-highlighted detail preview with tab navigation*
 
 <img src="screenshots/screenshot_01.webp" alt="Main TUI showing search results across multiple coding agents" width="800">
 
@@ -2068,7 +2068,7 @@ scoop install dicklesworthstone/cass
 **Alternative: Install Script**
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh?$(date +%s)" \
-  | bash -s -- --easy-mode --verify --version v0.1.64
+  | bash -s -- --easy-mode --verify
 ```
 
 **Alternative: GitHub Release Binaries**
@@ -2076,12 +2076,13 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_ses
 2. Verify `SHA256SUMS.txt` against the downloaded archive.
 3. Extract and move `cass` into your PATH.
 
-Example (Linux x86_64):
+Example (Linux x86_64, replace `VERSION` with desired release tag):
 ```bash
+VERSION=latest  # or e.g. v0.1.65
 curl -L -o cass-linux-amd64.tar.gz \
-  https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v0.1.64/cass-linux-amd64.tar.gz
+  "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/${VERSION}/cass-linux-amd64.tar.gz"
 curl -L -o SHA256SUMS.txt \
-  https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v0.1.64/SHA256SUMS.txt
+  "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/${VERSION}/SHA256SUMS.txt"
 sha256sum -c SHA256SUMS.txt
 tar -xzf cass-linux-amd64.tar.gz
 install -m 755 cass ~/.local/bin/cass
@@ -2404,7 +2405,7 @@ Selecting "Update Now" runs the same verified installer used for initial install
 macOS/Linux:
 
 ```bash
-curl -fsSL https://...install.sh | bash -s -- --easy-mode --verify --version v0.1.64
+curl -fsSL https://...install.sh | bash -s -- --easy-mode --verify
 ```
 
 Windows (PowerShell):
@@ -2542,6 +2543,24 @@ cargo test
 cargo test --test e2e_index_tui
 cargo test --test install_scripts
 ```
+
+### Snapshot Baseline Workflow (FrankenTUI)
+
+Use targeted snapshot runs; do not blindly bless everything:
+
+```bash
+# Verify current baselines
+cargo test snapshot_baseline_ -- --nocapture
+cargo test snapshot_search_surface_ -- --nocapture
+cargo test --test ftui_harness_snapshots -- --nocapture
+
+# Regenerate only the suite you intentionally changed
+BLESS=1 cargo test snapshot_baseline_ -- --nocapture
+```
+
+The full regeneration/review protocol (required reviewer checklist, behavioral guard tests,
+and quality gates) lives in `TESTING.md` under
+`Snapshot Baseline Regeneration & Review (FrankenTUI)`.
 
 ### HTML Export E2E Logging
 
