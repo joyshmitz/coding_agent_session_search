@@ -110,7 +110,7 @@ use ftui::runtime::input_macro::{MacroPlayback, MacroRecorder};
 
 use crate::model::types::MessageRole;
 use crate::search::model_manager::SemanticAvailability;
-use crate::search::query::{QuerySuggestion, SearchFilters, SearchHit, SearchMode};
+use crate::search::query::{MatchType, QuerySuggestion, SearchFilters, SearchHit, SearchMode};
 use crate::sources::provenance::SourceFilter;
 use crate::storage::sqlite::SqliteStorage;
 use crate::ui::components::export_modal::{ExportField, ExportModalState, ExportProgress};
@@ -2331,21 +2331,15 @@ impl ResultItem {
         }
     }
 
-    fn metadata_line(&self, max_width: usize) -> String {
-        let hit = &self.hit;
-        let mut parts = vec![
-            format!("score {:.2}", hit.score),
-            self.source_badge(),
-            format!("ws {}", elide_text(&hit.workspace, 32)),
-        ];
-        if let Some(ts) = hit
-            .created_at
-            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
-            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-        {
-            parts.push(ts);
+    fn match_type_label(&self) -> &'static str {
+        match self.hit.match_type {
+            MatchType::Exact => "exact",
+            MatchType::Prefix => "prefix",
+            MatchType::Suffix => "suffix",
+            MatchType::Substring => "substr",
+            MatchType::Wildcard => "wild",
+            MatchType::ImplicitWildcard => "auto",
         }
-        elide_text(&parts.join(" | "), max_width)
     }
 
     fn snippet_source(&self) -> &str {
@@ -2569,14 +2563,36 @@ impl RenderItem for ResultItem {
             meta_spans.push(ftui::text::Span::styled(" · ", self.text_muted_style));
             meta_spans.push(ftui::text::Span::styled(
                 snippet_preview,
-                self.text_subtle_style,
-            ));
-        } else {
-            let meta = self.metadata_line(content_width.saturating_sub(20));
-            meta_spans.push(ftui::text::Span::styled(
-                format!(" {meta}"),
                 self.text_muted_style,
             ));
+        } else {
+            // Structured metadata with per-field styling for visual hierarchy
+            let hit = &self.hit;
+            let ws_label = elide_text(&hit.workspace, 32);
+            meta_spans.push(ftui::text::Span::styled(" ", bg_style));
+            meta_spans.push(ftui::text::Span::styled(
+                format!("mt {}", self.match_type_label()),
+                self.text_subtle_style,
+            ));
+            meta_spans.push(ftui::text::Span::styled(
+                " \u{2502} ",
+                self.text_subtle_style,
+            ));
+            meta_spans.push(ftui::text::Span::styled(
+                format!("ws {ws_label}"),
+                self.text_primary_style,
+            ));
+            if let Some(ts) = hit
+                .created_at
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+            {
+                meta_spans.push(ftui::text::Span::styled(
+                    " \u{2502} ",
+                    self.text_subtle_style,
+                ));
+                meta_spans.push(ftui::text::Span::styled(ts, self.text_muted_style));
+            }
         }
         let meta_line = ftui::text::Line::from_spans(meta_spans);
 
@@ -2593,12 +2609,12 @@ impl RenderItem for ResultItem {
         }
 
         if self.row_height >= 4 {
-            let snippet_budget = self.snippet_line_budget(content_width.saturating_sub(6));
-            let snippet_lines = self.snippet_lines(content_width.saturating_sub(6), snippet_budget);
+            let snippet_budget = self.snippet_line_budget(content_width.saturating_sub(8));
+            let snippet_lines = self.snippet_lines(content_width.saturating_sub(8), snippet_budget);
             for snippet in snippet_lines {
                 lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("      ", bg_style),
-                    ftui::text::Span::styled(snippet, self.text_subtle_style),
+                    ftui::text::Span::styled("    \u{2502} ", self.text_subtle_style),
+                    ftui::text::Span::styled(snippet, self.text_muted_style),
                 ]));
             }
         }
@@ -2620,16 +2636,61 @@ impl RenderItem for ResultItem {
     }
 }
 
-/// Build a Unicode score bar from a score (0.0-10.0).
+/// Normalize search scores for UI cues.
+///
+/// Search backends may emit either fractional `0.0..1.0` relevance or legacy
+/// `0.0..10.0` scores. The UI uses a unified `0.0..10.0` scale so score bars
+/// and high/mid/low tier styles remain meaningful across both formats.
+fn normalize_score_for_visuals(score: f32) -> f32 {
+    if !score.is_finite() {
+        return 0.0;
+    }
+    let non_negative = score.max(0.0);
+    if non_negative <= 1.0 {
+        (non_negative * 10.0).clamp(0.0, 10.0)
+    } else {
+        non_negative.clamp(0.0, 10.0)
+    }
+}
+
+fn score_display_label(score: f32) -> String {
+    if !score.is_finite() {
+        return "n/a".to_string();
+    }
+    let visual = normalize_score_for_visuals(score);
+    if (0.0..=1.0).contains(&score) {
+        format!("{score:.3} ({visual:.1}/10)")
+    } else {
+        format!("{visual:.1}/10")
+    }
+}
+
+/// Build a Unicode score bar from a score (normalized to `0.0..10.0`).
+///
+/// Uses progressive fill blocks for a richer visual — each of the 3 columns
+/// advances independently so partial fills look like a rising meter rather
+/// than a flat row.
 fn score_bar_str(score: f32) -> String {
     const BLOCKS: &[char] = &[
         ' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
         '\u{2588}',
     ];
-    let level = ((score.clamp(0.0, 10.0) / 10.0) * 8.0).round() as usize;
-    let bar_char = BLOCKS[level.min(BLOCKS.len() - 1)];
-    let filled: String = std::iter::repeat_n(bar_char, 3).collect();
-    format!("{filled}{score:.1}")
+    let clamped = normalize_score_for_visuals(score);
+    // Map score into 24 discrete steps (3 columns × 8 levels each)
+    let total_steps = ((clamped / 10.0) * 24.0).round() as usize;
+    let mut bar = String::with_capacity(6);
+    for col in 0..3 {
+        let col_level = total_steps.saturating_sub(col * 8).min(8);
+        bar.push(BLOCKS[col_level]);
+    }
+    let tier = if clamped >= 8.0 {
+        "H"
+    } else if clamped >= 5.0 {
+        "M"
+    } else {
+        "L"
+    };
+    format!("{tier}{bar}{clamped:.1}")
 }
 
 /// Parse a hint string like " | key1=desc key2=desc" into styled spans.
@@ -4728,7 +4789,7 @@ impl CassApp {
                     stripe_style: if even { row_style } else { row_alt_style },
                     selected_style: row_selected_style,
                     agent_accent_style: styles.agent_accent_style(&hit.agent),
-                    score_style: styles.score_style(hit.score),
+                    score_style: styles.score_style(normalize_score_for_visuals(hit.score)),
                     text_primary_style: styles.style(style_system::STYLE_TEXT_PRIMARY),
                     text_muted_style: styles.style(style_system::STYLE_TEXT_MUTED),
                     text_subtle_style: styles.style(style_system::STYLE_TEXT_SUBTLE),
@@ -4820,37 +4881,52 @@ impl CassApp {
             ftui::text::Span::styled(title.to_string(), header_style),
         ]));
 
-        // Metadata line: agent, workspace, timestamp, score
+        // Metadata line: agent, workspace, timestamp, score — with per-field styling
         let meta_style = styles.style(style_system::STYLE_TEXT_MUTED);
-        let ts_str = hit
-            .created_at
-            .map(|ts| {
-                chrono::DateTime::from_timestamp(ts, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| ts.to_string())
-            })
-            .unwrap_or_default();
+        let label_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
+        let agent_style = styles.agent_accent_style(&hit.agent);
+        let score_s = styles.score_style(normalize_score_for_visuals(hit.score));
         let source_label = source_display_label(&hit.source_id, hit.origin_host.as_deref());
         let source_kind = normalized_source_kind(Some(hit.origin_kind.as_str()), &hit.source_id);
-        let mut meta_parts = vec![
-            format!("agent={}", hit.agent),
-            format!("workspace={}", hit.workspace),
-            format!("source={source_label}"),
-            format!("source_kind={source_kind}"),
-            format!("score={:.3}", hit.score),
+        let sep = ftui::text::Span::styled(" \u{2502} ", label_style);
+        let mut meta_spans = vec![
+            ftui::text::Span::styled("agent=", label_style),
+            ftui::text::Span::styled(hit.agent.clone(), agent_style),
+            sep.clone(),
+            ftui::text::Span::styled("ws=", label_style),
+            ftui::text::Span::styled(hit.workspace.clone(), meta_style),
+            sep.clone(),
+            ftui::text::Span::styled("source=", label_style),
+            ftui::text::Span::styled(
+                format!("{source_label} ({source_kind})"),
+                if source_kind == "remote" {
+                    styles.style(style_system::STYLE_SOURCE_REMOTE)
+                } else {
+                    styles.style(style_system::STYLE_SOURCE_LOCAL)
+                },
+            ),
+            sep.clone(),
+            ftui::text::Span::styled("score=", label_style),
+            ftui::text::Span::styled(score_display_label(hit.score), score_s),
         ];
         if let Some(ws_original) = hit.workspace_original.as_deref()
             && ws_original != hit.workspace
         {
-            meta_parts.push(format!("workspace_original={ws_original}"));
+            meta_spans.push(sep.clone());
+            meta_spans.push(ftui::text::Span::styled(
+                format!("ws_orig={ws_original}"),
+                meta_style,
+            ));
         }
-        if !ts_str.is_empty() {
-            meta_parts.push(ts_str);
+        if let Some(ts) = hit.created_at.map(|ts| {
+            chrono::DateTime::from_timestamp(ts, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| ts.to_string())
+        }) {
+            meta_spans.push(sep);
+            meta_spans.push(ftui::text::Span::styled(ts, meta_style));
         }
-        let meta_text = meta_parts.join(" ");
-        lines.push(ftui::text::Line::from_spans(vec![
-            ftui::text::Span::styled(meta_text, meta_style),
-        ]));
+        lines.push(ftui::text::Line::from_spans(meta_spans));
 
         // Separator
         let sep = "\u{2500}".repeat(inner_width.saturating_sub(2) as usize);
@@ -9670,14 +9746,23 @@ impl super::ftui_adapter::Model for CassApp {
                     self.detail_scroll = new_scroll.max(0) as u16;
                 } else if let Some(pane) = self.panes.get_mut(self.active_pane) {
                     let total = pane.hits.len();
-                    let mut state = self.results_list_state.borrow_mut();
-                    if delta > 0 {
-                        state.page_down(total);
-                    } else {
-                        state.page_up(total);
+                    if total == 0 {
+                        return ftui::Cmd::none();
                     }
-                    // Sync pane selection with VirtualizedListState
-                    pane.selected = state.selected.unwrap_or(0);
+                    let mut state = self.results_list_state.borrow_mut();
+                    // Page keys should move selection by a viewport-sized step.
+                    let page_size = state.visible_count().max(1);
+                    let steps = delta.unsigned_abs() as usize;
+                    let step_size = page_size.saturating_mul(steps);
+                    let target = if delta > 0 {
+                        pane.selected
+                            .saturating_add(step_size)
+                            .min(total.saturating_sub(1))
+                    } else {
+                        pane.selected.saturating_sub(step_size)
+                    };
+                    pane.selected = target;
+                    state.select(Some(target));
                 }
                 ftui::Cmd::none()
             }
@@ -16354,20 +16439,21 @@ mod tests {
         let mut app = app_with_hits(120);
         // Virtualized page movement relies on a rendered viewport row count.
         render_at_degradation(&app, 140, 24, DegradationLevel::Full);
+        let page_size = app.results_list_state.borrow().visible_count().max(1);
         assert_eq!(app.panes[0].selected, 0);
 
         let _ = app.update(CassMsg::PageScrolled { delta: 1 });
-        let after_page_down = app.results_list_state.borrow().scroll_offset();
+        let after_page_down = app.panes[0].selected;
         assert!(
-            after_page_down > 0,
-            "test_id=9.5.interaction.page component=scroll expected=advance actual={after_page_down}"
+            after_page_down >= page_size.min(app.panes[0].hits.len().saturating_sub(1)),
+            "test_id=9.5.interaction.page component=selection expected=page-advance actual={after_page_down} page_size={page_size}"
         );
 
         let _ = app.update(CassMsg::PageScrolled { delta: -1 });
-        let after_page_up = app.results_list_state.borrow().scroll_offset();
+        let after_page_up = app.panes[0].selected;
         assert!(
             after_page_up <= after_page_down,
-            "test_id=9.5.interaction.page component=scroll expected=non-increase actual_down={} actual_up={}",
+            "test_id=9.5.interaction.page component=selection expected=non-increase actual_down={} actual_up={}",
             after_page_down,
             after_page_up
         );
@@ -16383,6 +16469,64 @@ mod tests {
         assert_eq!(
             app.panes[0].selected, 0,
             "test_id=9.5.interaction.home-end component=home-jump expected=first-row"
+        );
+    }
+
+    #[test]
+    fn repeated_page_scroll_clamps_at_bounds() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = app_with_hits(120);
+        render_at_degradation(&app, 140, 24, DegradationLevel::Full);
+
+        let last = app.panes[0].hits.len().saturating_sub(1);
+        for _ in 0..100 {
+            let _ = app.update(CassMsg::PageScrolled { delta: 1 });
+        }
+        assert_eq!(
+            app.panes[0].selected, last,
+            "test_id=9.5.interaction.page-bounds component=selection expected=clamp-end"
+        );
+
+        for _ in 0..100 {
+            let _ = app.update(CassMsg::PageScrolled { delta: -1 });
+        }
+        assert_eq!(
+            app.panes[0].selected, 0,
+            "test_id=9.5.interaction.page-bounds component=selection expected=clamp-start"
+        );
+    }
+
+    #[test]
+    fn detail_page_scroll_does_not_mutate_result_selection() {
+        let mut app = app_with_hits(120);
+        let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(
+            app.focused_region(),
+            FocusRegion::Detail,
+            "precondition: focus should be detail"
+        );
+
+        let selected_before = app.panes[0].selected;
+        app.detail_scroll = 10;
+        let _ = app.update(CassMsg::PageScrolled { delta: 1 });
+        assert_eq!(
+            app.panes[0].selected, selected_before,
+            "test_id=9.5.interaction.detail-page component=selection expected=unchanged"
+        );
+        assert_eq!(
+            app.detail_scroll, 30,
+            "test_id=9.5.interaction.detail-page component=detail-scroll expected=increment"
+        );
+
+        let _ = app.update(CassMsg::PageScrolled { delta: -1 });
+        assert_eq!(
+            app.panes[0].selected, selected_before,
+            "test_id=9.5.interaction.detail-page component=selection expected=unchanged-after-pageup"
+        );
+        assert_eq!(
+            app.detail_scroll, 10,
+            "test_id=9.5.interaction.detail-page component=detail-scroll expected=decrement"
         );
     }
 
@@ -16460,6 +16604,76 @@ mod tests {
         assert_eq!(ctx.score_style(8.0), ctx.style(STYLE_SCORE_HIGH));
         assert_eq!(ctx.score_style(5.0), ctx.style(STYLE_SCORE_MID));
         assert_eq!(ctx.score_style(4.99), ctx.style(STYLE_SCORE_LOW));
+
+        // Fractional relevance scores (0.0..1.0) should map to the same visual tiers.
+        assert_eq!(
+            ctx.score_style(normalize_score_for_visuals(0.95)),
+            ctx.style(STYLE_SCORE_HIGH),
+            "fractional 0.95 should map to SCORE_HIGH"
+        );
+        assert_eq!(
+            ctx.score_style(normalize_score_for_visuals(0.64)),
+            ctx.style(STYLE_SCORE_MID),
+            "fractional 0.64 should map to SCORE_MID"
+        );
+        assert_eq!(
+            ctx.score_style(normalize_score_for_visuals(0.22)),
+            ctx.style(STYLE_SCORE_LOW),
+            "fractional 0.22 should map to SCORE_LOW"
+        );
+    }
+
+    #[test]
+    fn score_normalization_and_bar_labels_support_fractional_relevance() {
+        assert!((normalize_score_for_visuals(0.95) - 9.5).abs() < 0.001);
+        assert!((normalize_score_for_visuals(0.64) - 6.4).abs() < 0.001);
+        assert!((normalize_score_for_visuals(0.22) - 2.2).abs() < 0.001);
+        assert!((normalize_score_for_visuals(9.2) - 9.2).abs() < 0.001);
+
+        let high = score_bar_str(0.95);
+        let mid = score_bar_str(0.64);
+        let low = score_bar_str(0.22);
+
+        assert!(high.starts_with('H'), "expected HIGH-tier prefix in {high}");
+        assert!(mid.starts_with('M'), "expected MID-tier prefix in {mid}");
+        assert!(low.starts_with('L'), "expected LOW-tier prefix in {low}");
+
+        assert!(
+            high.contains("9.5"),
+            "fractional 0.95 should render as 9.5/10 in score bar: {high}"
+        );
+        assert!(
+            mid.contains("6.4"),
+            "fractional 0.64 should render as 6.4/10 in score bar: {mid}"
+        );
+        assert!(
+            low.contains("2.2"),
+            "fractional 0.22 should render as 2.2/10 in score bar: {low}"
+        );
+    }
+
+    #[test]
+    fn results_metadata_includes_match_type_cue_for_scanning() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(1);
+        app.panes[0].hits[0].match_type = MatchType::ImplicitWildcard;
+        app.panes[0].hits[0].score = 0.64;
+        app.panes[0].hits[0].workspace = "/workspace/parity".to_string();
+        app.active_pane = 0;
+        app.density_mode = DensityMode::Cozy;
+
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            text.contains("mt auto"),
+            "results row metadata should include compact match-type cue"
+        );
     }
 
     #[test]
@@ -17412,8 +17626,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("source=laptop"));
-        assert!(text.contains("source_kind=remote"));
-        assert!(text.contains("workspace_original=/home/user/projects/test"));
+        assert!(
+            text.contains("(remote)"),
+            "source kind should appear parenthesized: {text}"
+        );
+        assert!(text.contains("ws_orig=/home/user/projects/test"));
     }
 
     #[test]
