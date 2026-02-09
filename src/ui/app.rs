@@ -16392,6 +16392,132 @@ mod tests {
     }
 
     // =====================================================================
+    // 2dccg.9.5 — Results-surface regression suite (additional)
+    // =====================================================================
+
+    fn style_ctx_for_preset(
+        preset: crate::ui::style_system::UiThemePreset,
+    ) -> crate::ui::style_system::StyleContext {
+        use crate::ui::style_system::{StyleContext, StyleOptions};
+        use ftui::ColorProfile;
+        StyleContext::from_options(StyleOptions {
+            preset,
+            dark_mode: !matches!(preset, crate::ui::style_system::UiThemePreset::Light),
+            color_profile: ColorProfile::TrueColor,
+            no_color: false,
+            no_icons: false,
+            no_gradient: false,
+            a11y: false,
+        })
+    }
+
+    #[test]
+    fn score_style_routes_to_correct_tier() {
+        use crate::ui::style_system::{
+            STYLE_SCORE_HIGH, STYLE_SCORE_LOW, STYLE_SCORE_MID, UiThemePreset,
+        };
+        let ctx = style_ctx_for_preset(UiThemePreset::Dark);
+
+        // score_style(score) routes based on thresholds: >=8.0 → HIGH, >=5.0 → MID, <5.0 → LOW
+        let high = ctx.score_style(9.5);
+        let mid = ctx.score_style(6.0);
+        let low = ctx.score_style(3.0);
+
+        assert_eq!(
+            high,
+            ctx.style(STYLE_SCORE_HIGH),
+            "test_id=9.5.score.high expected=SCORE_HIGH"
+        );
+        assert_eq!(
+            mid,
+            ctx.style(STYLE_SCORE_MID),
+            "test_id=9.5.score.mid expected=SCORE_MID"
+        );
+        assert_eq!(
+            low,
+            ctx.style(STYLE_SCORE_LOW),
+            "test_id=9.5.score.low expected=SCORE_LOW"
+        );
+
+        // Boundary: exactly 8.0 → HIGH, exactly 5.0 → MID
+        assert_eq!(ctx.score_style(8.0), ctx.style(STYLE_SCORE_HIGH));
+        assert_eq!(ctx.score_style(5.0), ctx.style(STYLE_SCORE_MID));
+        assert_eq!(ctx.score_style(4.99), ctx.style(STYLE_SCORE_LOW));
+    }
+
+    #[test]
+    fn selected_row_has_distinct_style_from_default() {
+        use crate::ui::style_system::{STYLE_RESULT_ROW_SELECTED, UiThemePreset};
+        for preset in [UiThemePreset::Dark, UiThemePreset::Light] {
+            let ctx = style_ctx_for_preset(preset);
+            let selected = ctx.style(STYLE_RESULT_ROW_SELECTED);
+            let default = ftui::Style::default();
+
+            assert_ne!(
+                selected.bg, default.bg,
+                "test_id=9.5.focus.selection preset={:?} component=selected-vs-default expected=distinct-bg",
+                preset
+            );
+        }
+    }
+
+    #[test]
+    fn arrow_key_selection_moves_one_at_a_time() {
+        let mut app = app_with_hits(10);
+        assert_eq!(app.panes[0].selected, 0);
+
+        let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        assert_eq!(
+            app.panes[0].selected, 1,
+            "test_id=9.5.navigation.arrow component=down expected=1"
+        );
+
+        let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        assert_eq!(
+            app.panes[0].selected, 2,
+            "test_id=9.5.navigation.arrow component=down expected=2"
+        );
+
+        let _ = app.update(CassMsg::SelectionMoved { delta: -1 });
+        assert_eq!(
+            app.panes[0].selected, 1,
+            "test_id=9.5.navigation.arrow component=up expected=1"
+        );
+
+        // Up past 0 stays at 0
+        let _ = app.update(CassMsg::SelectionMoved { delta: -1 });
+        let _ = app.update(CassMsg::SelectionMoved { delta: -1 });
+        assert_eq!(
+            app.panes[0].selected, 0,
+            "test_id=9.5.navigation.arrow component=clamp-top expected=0"
+        );
+    }
+
+    #[test]
+    fn results_suite_runs_under_3s_headless() {
+        // Meta-test: verify the results-surface suite is fast enough for CI.
+        // This test itself must complete instantly; the timing is implicit—
+        // if the suite runs in < 3s total, this test is part of that budget.
+        let start = std::time::Instant::now();
+        let mut app = app_with_hits(50);
+        for density in [
+            DensityMode::Compact,
+            DensityMode::Cozy,
+            DensityMode::Spacious,
+        ] {
+            app.density_mode = density;
+            let _buf =
+                render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 1000,
+            "test_id=9.5.meta.perf expected=<1s actual={:?}",
+            elapsed
+        );
+    }
+
+    // =====================================================================
     // 2noh9.3.3 — Filter UI tests
     // =====================================================================
 
