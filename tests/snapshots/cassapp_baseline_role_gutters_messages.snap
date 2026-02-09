@@ -1,0 +1,20 @@
+╭Detail [Messages] ↩───────────────────────────────────────────────────────────────────────────╮
+│  ● Messages  │ Snippets │ Raw │ Json                                                         │
+│Large-snippet rendering edge case                                                             │
+│agent=aider workspace=/workspace/cass source=ci-linux source_kind=remote score=0.640 workspace│
+│────────────────────────────────────────────────────────────────────────────────────────────  │
+│▌  User (operator) 22:13:20                                                                  │
+│▌ User intent: improve visual hierarchy and readability.                                      │
+│                                                                                              │
+│▌ ✓ Agent (cass) 22:13:30                                                                     │
+│▌ Assistant response: proposing tab, find-bar, and pill refinements.                          │
+│                                                                                              │
+│▌ ⚙ Tool (ubs) 22:13:40                                                                       │
+│▌ Tool output: scan completed with deterministic fixture checks.                              │
+│                                                                                              │
+│▌ ℹ System (runtime) 22:13:50                                                                 │
+│▌ System event: render budget remains stable at full quality.                                 │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯

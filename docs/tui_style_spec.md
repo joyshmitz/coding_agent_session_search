@@ -77,6 +77,30 @@ Scope: FrankenTUI (ftui) Elm-architecture UI (interactive + robot-safe fallbacks
 - Footer HUD: left = help strip; middle = progress/indexer sparkline; right = latency/cache badges.
 - Empty states: icon + friendly copy + 3 quick buttons; must fit in 80x24.
 
+## Detail Find Bar Token Contract (2dccg.4.1)
+
+### Semantic tokens
+- `STYLE_DETAIL_FIND_CONTAINER` (`detail.find.container`): container surface for the inline find row in detail pane.
+- `STYLE_DETAIL_FIND_QUERY` (`detail.find.query`): active query text emphasis.
+- `STYLE_DETAIL_FIND_MATCH_ACTIVE` (`detail.find.match.active`): current match indicator (high-emphasis state).
+- `STYLE_DETAIL_FIND_MATCH_INACTIVE` (`detail.find.match.inactive`): total/secondary match count (low-emphasis state).
+
+### Part → token mapping
+- Find bar row container/background: `STYLE_DETAIL_FIND_CONTAINER`
+- Query text after `/`: `STYLE_DETAIL_FIND_QUERY`
+- Current match segment (`current/total` current portion): `STYLE_DETAIL_FIND_MATCH_ACTIVE`
+- Remaining match metadata (total, no-match state): `STYLE_DETAIL_FIND_MATCH_INACTIVE`
+
+### Theme and degradation expectations
+- Theme-aware: all four tokens derive from semantic theme palette (`surface`, `overlay`, `accent`, `selection_*`, `text_muted`) and therefore follow preset changes automatically.
+- `DegradationLevel::Full` / `SimpleBorders`: render full token styling (container background + emphasized query/current match).
+- `DegradationLevel::NoStyling` / `EssentialOnly`: rendering layer falls back to structural/plain text while preserving information order and keyboard behavior (`/`, `n`, `N`, `Esc`).
+
+### Contrast and focus guidance
+- Current match state must remain visually stronger than inactive match metadata.
+- Container background must be distinct from surrounding detail content in all presets.
+- Query emphasis must not rely on color alone (bold retained for emphasis in mono/high-contrast modes).
+
 ## Accessibility & Resilience
 - Colorblind support: role gutters pair color with pattern (solid vs dotted vs dashed) in gutters when `CASS_A11Y=1`.
 - Mouse optional; all interactions keyboard-first.
@@ -107,3 +131,6 @@ Scope: FrankenTUI (ftui) Elm-architecture UI (interactive + robot-safe fallbacks
 - Defines concrete tokens, spacing, motion budgets, opt-out flags.
 - Addresses accessibility (contrast + patterns) and low-end terminal fallback.
 - Provides guardrails for perf and persistence defaults.
+
+## Related docs
+- `docs/ftui_visual_parity_rubric.md` (deterministic release-gate scoring rubric for ratatui vs FTUI visual parity)
