@@ -283,6 +283,64 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # TUI E2E matrix: themes × degradation × breakpoints (2dccg.11.4)
+  e2e-tui-matrix:
+    name: TUI E2E Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@881ba7bf39a41cda34ac9e123fb41b44ed08232f # nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+
+      - name: Run TUI stress and E2E scenario tests
+        run: |
+          set -euo pipefail
+          cargo test --lib 'stress_' -- --nocapture 2>&1 | tee test-results-stress.txt
+          cargo test --lib 'e2e_scenario' -- --nocapture 2>&1 | tee test-results-e2e.txt
+          cargo test --lib 'cross_theme_degradation' -- --nocapture 2>&1 | tee test-results-matrix.txt
+          cargo test --lib 'rendering_token_affordance' -- --nocapture 2>&1 | tee test-results-affordance.txt
+          cargo test --lib 'density_' -- --nocapture 2>&1 | tee test-results-density.txt
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Generate TUI matrix summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/tui-matrix
+          {
+            echo "# TUI E2E Matrix Summary"
+            echo ""
+            echo "**Generated:** $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "**Commit:** ${{ github.sha }}"
+            echo ""
+            echo "## Test Categories"
+            echo ""
+            for f in test-results-*.txt; do
+              category=$(echo "$f" | sed 's/test-results-//; s/\.txt//')
+              passed=$(grep -c "^test .* ok$" "$f" 2>/dev/null || echo 0)
+              failed=$(grep -c "^test .* FAILED$" "$f" 2>/dev/null || echo 0)
+              echo "- **${category}**: ${passed} passed, ${failed} failed"
+            done
+          } > test-results/tui-matrix/summary.md
+          cat test-results/tui-matrix/summary.md
+
+      - name: Upload TUI matrix artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: tui-e2e-matrix
+          path: |
+            test-results-*.txt
+            test-results/tui-matrix/summary.md
+          retention-days: 14
+
   # Crypto test vectors
   crypto-vectors:
     name: Crypto Test Vectors
