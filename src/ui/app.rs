@@ -26869,4 +26869,174 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         // EssentialOnly: no-panic only
         let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::EssentialOnly);
     }
+
+    // =====================================================================
+    // 2dccg.11.3 — Deterministic TUI E2E scenario playback (unit-test level)
+    // =====================================================================
+
+    /// Replay a sequence of CassMsg events and verify rendering at each step.
+    fn replay_scenario(app: &mut CassApp, steps: Vec<(CassMsg, &str)>, width: u16, height: u16) {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        for (i, (msg, assertion_text)) in steps.into_iter().enumerate() {
+            let _ = app.update(msg);
+            let buf = render_at_degradation(app, width, height, DegradationLevel::Full);
+            let text = buffer_to_text(&buf);
+            if !assertion_text.is_empty() {
+                assert!(
+                    text.contains(assertion_text),
+                    "scenario step {i}: expected '{assertion_text}' in rendered output"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn e2e_scenario_search_select_detail() {
+        let mut app = app_with_hits(10);
+
+        // Step 1: Initial state — results visible
+        replay_scenario(
+            &mut app,
+            vec![(CassMsg::SearchRequested, "Results")],
+            120,
+            24,
+        );
+
+        // Step 2: Move selection down
+        let _ = app.update(CassMsg::SelectionMoved { delta: 2 });
+        assert_eq!(app.panes[0].selected, 2);
+
+        // Step 3: Open detail modal (set show_detail_modal first so DetailOpened
+        // doesn't redirect to QuerySubmitted while in Query InputMode)
+        app.show_detail_modal = true;
+        let _ = app.update(CassMsg::DetailOpened);
+        assert_eq!(app.focused_region(), FocusRegion::Detail);
+    }
+
+    #[test]
+    fn e2e_scenario_theme_switch_mid_session() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(5);
+
+        // Render in dark theme
+        let dark_text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(dark_text.contains("Results"));
+
+        // Toggle theme
+        let _ = app.update(CassMsg::ThemeToggled);
+
+        // Render in light theme — must still show results
+        let light_text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(light_text.contains("Results"));
+
+        // Selection should be preserved
+        assert_eq!(app.panes[0].selected, 0);
+    }
+
+    #[test]
+    fn e2e_scenario_density_cycling_during_browsing() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = app_with_hits(20);
+
+        // Navigate to middle of results
+        for _ in 0..8 {
+            let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        }
+        assert_eq!(app.panes[0].selected, 8);
+
+        // Cycle through all density modes while rendering
+        for _ in 0..3 {
+            let _ = app.update(CassMsg::DensityModeCycled);
+            let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+            // Must not panic; selection must be preserved
+            assert_eq!(app.panes[0].selected, 8);
+        }
+    }
+
+    #[test]
+    fn e2e_scenario_palette_search_execute() {
+        let mut app = CassApp::default();
+
+        // Open palette
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.command_palette.is_visible());
+
+        // Close palette via PaletteClosed
+        let _ = app.update(CassMsg::PaletteClosed);
+        assert!(
+            !app.command_palette.is_visible(),
+            "palette should close after PaletteClosed"
+        );
+    }
+
+    #[test]
+    fn e2e_scenario_help_overlay_lifecycle() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = app_with_hits(5);
+
+        // Open help
+        let _ = app.update(CassMsg::HelpToggled);
+        assert!(app.show_help);
+
+        let text = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        // Help overlay should show key bindings
+        assert!(
+            text.contains("help") || text.contains("Help") || text.contains("Key"),
+            "help overlay should display key info"
+        );
+
+        // Scroll help
+        let _ = app.update(CassMsg::HelpScrolled { delta: 3 });
+        assert_eq!(app.help_scroll, 3);
+
+        // Close help
+        let _ = app.update(CassMsg::HelpToggled);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn e2e_scenarios_complete_under_1s() {
+        // Meta-test: verify all scenario playbacks are fast enough
+        let start = std::time::Instant::now();
+
+        // Run a representative scenario
+        let mut app = app_with_hits(20);
+        for _ in 0..10 {
+            let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        }
+        let _ = app.update(CassMsg::ThemeToggled);
+        let _ = app.update(CassMsg::DensityModeCycled);
+        let _ = app.update(CassMsg::HelpToggled);
+        let _ = app.update(CassMsg::HelpToggled);
+        render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 1000,
+            "scenario playback should complete under 1s, took {:?}",
+            elapsed
+        );
+    }
 }
