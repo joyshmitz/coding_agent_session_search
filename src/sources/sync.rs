@@ -33,7 +33,7 @@ use thiserror::Error;
 use super::config::{SourceDefinition, discover_ssh_hosts};
 use ssh2::{Session, Sftp};
 use std::io::{Read as IoRead, Write as IoWrite};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 
 /// Errors that can occur during sync operations.
 #[derive(Error, Debug)]
@@ -631,11 +631,13 @@ impl SyncEngine {
         let timeout = std::time::Duration::from_secs(self.connection_timeout);
         let _ = tcp.set_read_timeout(Some(timeout));
         let _ = tcp.set_write_timeout(Some(timeout));
+        let tcp_shutdown = tcp.try_clone().ok();
 
         // Create SSH session
         let mut session = match Session::new() {
             Ok(s) => s,
             Err(e) => {
+                let _ = tcp.shutdown(Shutdown::Both);
                 return PathSyncResult {
                     remote_path: remote_path.to_string(),
                     local_path,
@@ -648,8 +650,15 @@ impl SyncEngine {
         };
 
         session.set_tcp_stream(tcp);
+        let close_connections = |session: &mut Session, reason: &str| {
+            let _ = session.disconnect(None, reason, None);
+            if let Some(stream) = tcp_shutdown.as_ref() {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        };
 
         if let Err(e) = session.handshake() {
+            close_connections(&mut session, "handshake failed");
             return PathSyncResult {
                 remote_path: remote_path.to_string(),
                 local_path,
@@ -662,6 +671,7 @@ impl SyncEngine {
 
         // Authenticate - try agent first, then key file
         if let Err(e) = self.authenticate_ssh(&session, &username, identity_file) {
+            close_connections(&mut session, "authentication failed");
             return PathSyncResult {
                 remote_path: remote_path.to_string(),
                 local_path,
@@ -676,6 +686,7 @@ impl SyncEngine {
         let sftp = match session.sftp() {
             Ok(s) => s,
             Err(e) => {
+                close_connections(&mut session, "sftp open failed");
                 return PathSyncResult {
                     remote_path: remote_path.to_string(),
                     local_path,
@@ -705,6 +716,7 @@ impl SyncEngine {
             &mut files_transferred,
             &mut bytes_transferred,
         ) {
+            close_connections(&mut session, "sftp download failed");
             return PathSyncResult {
                 remote_path: remote_path.to_string(),
                 local_path,
@@ -727,6 +739,7 @@ impl SyncEngine {
             "SFTP sync completed"
         );
 
+        close_connections(&mut session, "sync complete");
         PathSyncResult {
             remote_path: remote_path.to_string(),
             local_path,
