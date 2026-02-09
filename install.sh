@@ -6,7 +6,7 @@ shopt -s lastpipe 2>/dev/null || true
 VERSION="${VERSION:-}"
 OWNER="${OWNER:-Dicklesworthstone}"
 REPO="${REPO:-coding_agent_session_search}"
-PINNED_RATATUI_VERSION="${PINNED_RATATUI_VERSION:-v0.1.64}"
+FALLBACK_VERSION="${FALLBACK_VERSION:-}"
 DEST_DEFAULT="$HOME/.local/bin"
 DEST="${DEST:-$DEST_DEFAULT}"
 EASY=0
@@ -28,8 +28,22 @@ err() { log "\033[0;31m✗\033[0m $*"; }
 
 resolve_version() {
   if [ -n "$VERSION" ]; then return 0; fi
-  VERSION="$PINNED_RATATUI_VERSION"
-  info "Using pinned stable version: $VERSION"
+  # Fetch latest release tag from GitHub API
+  local latest=""
+  if command -v curl >/dev/null 2>&1; then
+    latest=$(curl -fsSL "https://api.github.com/repos/$OWNER/$REPO/releases/latest" 2>/dev/null \
+      | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+  fi
+  if [ -n "$latest" ]; then
+    VERSION="$latest"
+    info "Using latest release: $VERSION"
+  elif [ -n "$FALLBACK_VERSION" ]; then
+    VERSION="$FALLBACK_VERSION"
+    info "Using fallback version: $VERSION"
+  else
+    err "Could not determine latest version. Pass --version <tag> explicitly."
+    exit 1
+  fi
 }
 
 maybe_add_path() {

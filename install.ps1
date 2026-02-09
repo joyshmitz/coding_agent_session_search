@@ -11,12 +11,17 @@ Param(
 )
 
 $ErrorActionPreference = "Stop"
-$PinnedRatatuiVersion = "v0.1.64"
 
-# Use pinned stable version unless explicitly overridden.
+# Resolve version: fetch latest release from GitHub unless explicitly set.
 if (-not $Version) {
-  $Version = $PinnedRatatuiVersion
-  Write-Host "Using pinned stable version: $Version"
+  try {
+    $releaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases/latest" -UseBasicParsing
+    $Version = $releaseInfo.tag_name
+    Write-Host "Using latest release: $Version"
+  } catch {
+    Write-Error "Could not determine latest version. Pass -Version <tag> explicitly."
+    exit 1
+  }
 }
 $os = "windows"
 $arch = if ([Environment]::Is64BitProcess) { "x86_64" } else { "x86" }
