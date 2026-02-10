@@ -589,15 +589,37 @@ impl SyncEngine {
             .and_then(|h| h.hostname.as_deref())
             .unwrap_or(ssh_host);
         let port = host_config.and_then(|h| h.port).unwrap_or(22);
-        // Default to current user, never fall back to "root" for security
-        // Try USER, then LOGNAME, then fail with descriptive error in username resolution
-        let default_user = dotenvy::var("USER")
-            .or_else(|_| dotenvy::var("LOGNAME"))
-            .unwrap_or_else(|_| "nobody".to_string());
-        let username = ssh_user
-            .map(|s| s.to_string())
-            .or_else(|| host_config.and_then(|h| h.user.clone()))
-            .unwrap_or(default_user);
+        // Resolve username deterministically; never guess with a sentinel value.
+        let normalize_username = |value: Option<String>| {
+            value.and_then(|candidate| {
+                let trimmed = candidate.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        };
+        let username = match normalize_username(ssh_user.map(|s| s.to_string()))
+            .or_else(|| normalize_username(host_config.and_then(|h| h.user.clone())))
+            .or_else(|| normalize_username(dotenvy::var("USER").ok()))
+            .or_else(|| normalize_username(dotenvy::var("LOGNAME").ok()))
+        {
+            Some(user) => user,
+            None => {
+                return PathSyncResult {
+                    remote_path: remote_path.to_string(),
+                    local_path,
+                    success: false,
+                    error: Some(format!(
+                        "Unable to determine SSH username for host '{}' (missing/blank user@host, SSH config user, USER, and LOGNAME)",
+                        host
+                    )),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    ..Default::default()
+                };
+            }
+        };
         let identity_file = host_config.and_then(|h| h.identity_file.as_deref());
 
         tracing::debug!(

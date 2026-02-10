@@ -310,12 +310,11 @@ mod tests {
         let encoded = encode_message(&msg).unwrap();
         let decoded: FramedMessage<Request> = decode_message(&encoded[4..]).unwrap();
 
+        assert!(matches!(&decoded.payload, Request::Embed { .. }));
         if let Request::Embed { texts, model, dims } = decoded.payload {
             assert_eq!(texts, vec!["hello", "world"]);
             assert_eq!(model, "all-MiniLM-L6-v2");
             assert!(dims.is_none());
-        } else {
-            panic!("expected Embed request");
         }
     }
 
@@ -332,6 +331,7 @@ mod tests {
         let encoded = encode_message(&msg).unwrap();
         let decoded: FramedMessage<Request> = decode_message(&encoded[4..]).unwrap();
 
+        assert!(matches!(&decoded.payload, Request::Rerank { .. }));
         if let Request::Rerank {
             query,
             documents,
@@ -341,8 +341,6 @@ mod tests {
             assert_eq!(query, "test query");
             assert_eq!(documents, vec!["doc1", "doc2"]);
             assert_eq!(model, "ms-marco-MiniLM-L-6-v2");
-        } else {
-            panic!("expected Rerank request");
         }
     }
 
@@ -360,11 +358,10 @@ mod tests {
         let encoded = encode_message(&msg).unwrap();
         let decoded: FramedMessage<Response> = decode_message(&encoded[4..]).unwrap();
 
+        assert!(matches!(&decoded.payload, Response::Health(_)));
         if let Response::Health(status) = decoded.payload {
             assert_eq!(status.uptime_secs, 120);
             assert!(status.ready);
-        } else {
-            panic!("expected Health response");
         }
     }
 
@@ -382,12 +379,11 @@ mod tests {
         let encoded = encode_message(&msg).unwrap();
         let decoded: FramedMessage<Response> = decode_message(&encoded[4..]).unwrap();
 
+        assert!(matches!(&decoded.payload, Response::Error(_)));
         if let Response::Error(err) = decoded.payload {
             assert_eq!(err.code, ErrorCode::Overloaded);
             assert!(err.retryable);
             assert_eq!(err.retry_after_ms, Some(1000));
-        } else {
-            panic!("expected Error response");
         }
     }
 
@@ -413,12 +409,11 @@ mod tests {
         let encoded = encode_message(&msg).unwrap();
         let decoded: FramedMessage<Response> = decode_message(&encoded[4..]).unwrap();
 
+        assert!(matches!(&decoded.payload, Response::Embed(_)));
         if let Response::Embed(resp) = decoded.payload {
             assert_eq!(resp.embeddings.len(), 2);
             assert_eq!(resp.embeddings[0], vec![0.1, 0.2, 0.3]);
             assert_eq!(resp.model, "minilm-384");
-        } else {
-            panic!("expected Embed response");
         }
     }
 
@@ -435,10 +430,9 @@ mod tests {
         let encoded = encode_message(&msg).unwrap();
         let decoded: FramedMessage<Response> = decode_message(&encoded[4..]).unwrap();
 
+        assert!(matches!(&decoded.payload, Response::Rerank(_)));
         if let Response::Rerank(resp) = decoded.payload {
             assert_eq!(resp.scores, vec![0.95, 0.72, 0.31]);
-        } else {
-            panic!("expected Rerank response");
         }
     }
 }

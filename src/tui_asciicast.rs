@@ -2,7 +2,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use ftui::runtime::{AsciicastRecorder, AsciicastWriter};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{self, IsTerminal, Read, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
 /// Run the current `cass tui` invocation inside a PTY and mirror output to an
 /// asciicast v2 file.
@@ -60,6 +67,9 @@ pub fn run_tui_with_asciicast(recording_path: &Path, interactive: bool) -> Resul
             .context("take PTY writer for input forwarding")?,
     );
     let mut stdin_forwarder: Option<std::thread::JoinHandle<()>> = None;
+    let mut stdin_stop_requested: Option<Arc<AtomicBool>> = None;
+    #[cfg(unix)]
+    let mut _stdin_nonblocking_guard: Option<StdinNonBlockingGuard> = None;
 
     let allow_input = interactive
         && io::stdin().is_terminal()
@@ -69,41 +79,76 @@ pub fn run_tui_with_asciicast(recording_path: &Path, interactive: bool) -> Resul
     let _raw_mode = RawModeGuard::new(allow_input)?;
 
     if allow_input && let Some(writer) = writer_keepalive.take() {
-        stdin_forwarder = Some(std::thread::spawn(move || forward_stdin(writer)));
-    }
-
-    let recorder = AsciicastRecorder::new(recording_path, cols, rows)
-        .with_context(|| format!("create asciicast file at {}", recording_path.display()))?;
-    let mut mirror = AsciicastWriter::new(io::stdout(), recorder);
-
-    let mut buf = [0_u8; 8192];
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                mirror
-                    .write_all(&buf[..n])
-                    .context("write PTY output to terminal/asciicast mirror")?;
-            }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(err) if is_pty_eof_error(&err) => break,
-            Err(err) => return Err(err).context("read PTY output"),
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        {
+            _stdin_nonblocking_guard = StdinNonBlockingGuard::new(io::stdin().as_raw_fd()).ok();
         }
+        let stop_for_thread = Arc::clone(&stop_requested);
+        stdin_forwarder = Some(std::thread::spawn(move || {
+            forward_stdin(writer, stop_for_thread)
+        }));
+        stdin_stop_requested = Some(stop_requested);
     }
 
-    let _ = mirror.finish().context("finalize asciicast recording")?;
-    drop(writer_keepalive);
+    let run_result: Result<_> = (|| {
+        let recorder = AsciicastRecorder::new(recording_path, cols, rows)
+            .with_context(|| format!("create asciicast file at {}", recording_path.display()))?;
+        let mut mirror = AsciicastWriter::new(io::stdout(), recorder);
 
-    let status = child
-        .wait()
-        .context("wait for TUI child process to exit after recording")?;
+        let mut buf = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    mirror
+                        .write_all(&buf[..n])
+                        .context("write PTY output to terminal/asciicast mirror")?;
+                }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) if is_pty_eof_error(&err) => break,
+                Err(err) => return Err(err).context("read PTY output"),
+            }
+        }
 
-    if let Some(handle) = stdin_forwarder.take()
-        && handle.is_finished()
-    {
-        let _ = handle.join();
+        let _ = mirror.finish().context("finalize asciicast recording")?;
+        let _ = writer_keepalive.take();
+
+        child
+            .wait()
+            .context("wait for TUI child process to exit after recording")
+    })();
+
+    if let Some(stop_requested) = stdin_stop_requested.take() {
+        stop_requested.store(true, Ordering::Relaxed);
     }
-    // If stdin is still blocked on read(), dropping the handle intentionally detaches.
+
+    if let Some(handle) = stdin_forwarder.take() {
+        #[cfg(unix)]
+        {
+            if _stdin_nonblocking_guard.is_some() || handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
+        // If stdin could not be switched to nonblocking and the reader is still
+        // blocked, dropping the handle intentionally detaches.
+    }
+
+    let status = match run_result {
+        Ok(status) => status,
+        Err(err) => {
+            let _ = writer_keepalive.take();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(err);
+        }
+    };
 
     if !status.success() {
         bail!("TUI exited with non-zero status while recording: {status}");
@@ -122,11 +167,14 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn forward_stdin(mut child_writer: Box<dyn Write + Send>) {
+fn forward_stdin(mut child_writer: Box<dyn Write + Send>, stop_requested: Arc<AtomicBool>) {
     let stdin = io::stdin();
     let mut stdin_lock = stdin.lock();
     let mut buf = [0_u8; 256];
     loop {
+        if stop_requested.load(Ordering::Relaxed) {
+            break;
+        }
         match stdin_lock.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
@@ -138,6 +186,9 @@ fn forward_stdin(mut child_writer: Box<dyn Write + Send>) {
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             Err(_) => break,
         }
     }
@@ -200,6 +251,42 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.enabled {
             let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+}
+
+#[cfg(unix)]
+struct StdinNonBlockingGuard {
+    fd: RawFd,
+    old_flags: libc::c_int,
+}
+
+#[cfg(unix)]
+impl StdinNonBlockingGuard {
+    fn new(fd: RawFd) -> io::Result<Self> {
+        // SAFETY: fcntl does not outlive `fd` and is called with valid command
+        // constants; errors are surfaced via last_os_error.
+        let old_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if old_flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: same as above; we preserve and later restore original flags.
+        let set_result = unsafe { libc::fcntl(fd, libc::F_SETFL, old_flags | libc::O_NONBLOCK) };
+        if set_result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(Self { fd, old_flags })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StdinNonBlockingGuard {
+    fn drop(&mut self) {
+        // SAFETY: best-effort restoration of original descriptor flags.
+        unsafe {
+            let _ = libc::fcntl(self.fd, libc::F_SETFL, self.old_flags);
         }
     }
 }
