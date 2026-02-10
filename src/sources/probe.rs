@@ -39,7 +39,10 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use super::config::DiscoveredHost;
+use super::{
+    config::DiscoveredHost, host_key_verification_error, is_host_key_verification_failure,
+    strict_ssh_cli_tokens,
+};
 
 /// Default connection timeout in seconds.
 pub const DEFAULT_PROBE_TIMEOUT: u64 = 10;
@@ -337,16 +340,11 @@ echo "===PROBE_END==="
 pub fn probe_host(host: &DiscoveredHost, timeout_secs: u64) -> HostProbeResult {
     let start = Instant::now();
 
-    // Build SSH command with appropriate options
-    // Use UserKnownHostsFile=/dev/null to avoid polluting known_hosts during mass probing
-    let ssh_opts = format!(
-        "-o BatchMode=yes -o ConnectTimeout={} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null",
-        timeout_secs
-    );
-
+    // Build SSH command with strict host key verification.
+    // Security-first: do not auto-trust unknown hosts during probing.
     // Use the host alias directly (SSH config handles Port, User, IdentityFile, ProxyJump, etc.)
     let mut cmd = Command::new("ssh");
-    cmd.args(ssh_opts.split_whitespace())
+    cmd.args(strict_ssh_cli_tokens(timeout_secs))
         .arg("--")
         .arg(&host.name)
         .arg("bash -s")
@@ -395,8 +393,8 @@ pub fn probe_host(host: &DiscoveredHost, timeout_secs: u64) -> HostProbeResult {
             "Connection timed out".to_string()
         } else if stderr.contains("Permission denied") {
             "Permission denied (key not loaded in ssh-agent?)".to_string()
-        } else if stderr.contains("Host key verification failed") {
-            "Host key verification failed".to_string()
+        } else if is_host_key_verification_failure(&stderr) {
+            host_key_verification_error(&host.name)
         } else if stderr.contains("No route to host") {
             "No route to host".to_string()
         } else {
