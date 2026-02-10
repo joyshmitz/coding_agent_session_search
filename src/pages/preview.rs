@@ -198,8 +198,11 @@ async fn head_content_length(
     head_content_length_with_metadata_hint(file_path, metadata_length).await
 }
 
-/// Handle a single HTTP request.
-async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
+/// Handle a single HTTP request against an already-canonicalized site root.
+async fn handle_request_with_site_root(
+    site_root_canonical: &std::path::Path,
+    request: &str,
+) -> Vec<u8> {
     // Parse the request line
     let request_line = request.lines().next().unwrap_or("");
     let parts: Vec<&str> = request_line.split_whitespace().collect();
@@ -234,9 +237,9 @@ async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
 
     // Determine the file path
     let file_path = if request_path.is_empty() || request_path == "/" {
-        site_dir.join("index.html")
+        site_root_canonical.join("index.html")
     } else {
-        site_dir.join(request_path)
+        site_root_canonical.join(request_path)
     };
 
     // Canonicalize to prevent path traversal
@@ -255,14 +258,7 @@ async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
     };
 
     // Ensure the path is within the site directory
-    let site_canonical = match site_dir.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            return build_response(500, "text/plain", b"Internal Server Error".to_vec());
-        }
-    };
-
-    if !canonical.starts_with(&site_canonical) {
+    if !canonical.starts_with(site_root_canonical) {
         return build_response(400, "text/plain", b"Invalid Path".to_vec());
     }
 
@@ -336,6 +332,20 @@ async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
             }
         }
     }
+}
+
+/// Handle a single HTTP request.
+///
+/// This wrapper canonicalizes the provided site directory once per call and then
+/// delegates to the canonical-root hot path handler.
+async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
+    let site_root_canonical = match site_dir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return build_response(500, "text/plain", b"Internal Server Error".to_vec());
+        }
+    };
+    handle_request_with_site_root(&site_root_canonical, request).await
 }
 
 /// Start the preview server.
@@ -423,7 +433,7 @@ pub async fn start_preview_server(config: PreviewConfig) -> Result<(), PreviewEr
                             let request = String::from_utf8_lossy(&buf[..n]);
 
                             // Handle the request
-                            let response = handle_request(&site_dir, &request).await;
+                            let response = handle_request_with_site_root(&site_dir, &request).await;
 
                             // Send the response
                             let _ = stream.write_all(&response).await;
@@ -688,5 +698,31 @@ mod tests {
             body.len()
         );
         assert!(head_str.ends_with("\r\n\r\n"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_with_site_root_precanonicalized() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let site_dir = temp_dir.path();
+        std::fs::write(site_dir.join("index.html"), "<html>canonical</html>").expect("write index");
+        let canonical_root = site_dir.canonicalize().expect("canonicalize root");
+
+        let response = handle_request_with_site_root(&canonical_root, "GET / HTTP/1.1\r\n").await;
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(response_str.contains("HTTP/1.1 200 OK"));
+        assert!(response_str.contains("canonical"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_wrapper_accepts_uncanonicalized_site_dir() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let site_dir = temp_dir.path();
+        std::fs::write(site_dir.join("index.html"), "<html>wrapper</html>").expect("write index");
+        let dotted = site_dir.join(".");
+
+        let response = handle_request(&dotted, "GET / HTTP/1.1\r\n").await;
+        let response_str = String::from_utf8_lossy(&response);
+        assert!(response_str.contains("HTTP/1.1 200 OK"));
+        assert!(response_str.contains("wrapper"));
     }
 }
