@@ -12162,9 +12162,8 @@ impl super::ftui_adapter::Model for CassApp {
             }
             // -- Macro recording/playback -----------------------------------------
             CassMsg::MacroRecordingToggled => {
-                if self.macro_recorder.is_some() {
+                if let Some(recorder) = self.macro_recorder.take() {
                     // Stop recording and save.
-                    let recorder = self.macro_recorder.take().unwrap();
                     let recorded = recorder.finish();
                     let macro_dir = macro_save_dir();
                     if let Err(e) = std::fs::create_dir_all(&macro_dir) {

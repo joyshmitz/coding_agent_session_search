@@ -367,11 +367,7 @@ pub fn run_pages_export(
         return Ok(());
     }
 
-    let db_path = db_path.unwrap_or_else(|| {
-        directories::ProjectDirs::from("com", "dicklesworthstone", "coding-agent-search")
-            .map(|dirs| dirs.data_dir().join("agent_search.db"))
-            .expect("Could not determine data directory")
-    });
+    let db_path = db_path.unwrap_or_else(crate::default_db_path);
 
     let since_dt = since
         .as_deref()

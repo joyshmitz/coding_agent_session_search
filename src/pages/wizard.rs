@@ -104,10 +104,7 @@ pub struct WizardState {
 
 impl Default for WizardState {
     fn default() -> Self {
-        let db_path =
-            directories::ProjectDirs::from("com", "dicklesworthstone", "coding-agent-search")
-                .map(|dirs| dirs.data_dir().join("agent_search.db"))
-                .expect("Could not determine data directory");
+        let db_path = crate::default_db_path();
 
         Self {
             agents: Vec::new(),
@@ -680,19 +677,13 @@ impl PagesWizard {
         // Repository name for remote deployment
         if self.state.target != DeployTarget::Local {
             let default_repo = format!("cass-archive-{}", chrono::Utc::now().format("%Y%m%d"));
-            self.state.repo_name = Some(
-                Input::<String>::with_theme(theme)
-                    .with_prompt("Repository/project name")
-                    .default(default_repo)
-                    .interact_text()?,
-            );
+            let repo_name = Input::<String>::with_theme(theme)
+                .with_prompt("Repository/project name")
+                .default(default_repo)
+                .interact_text()?;
+            self.state.repo_name = Some(repo_name.clone());
 
-            writeln!(
-                term,
-                "  {} Repo: {}",
-                style("✓").green(),
-                self.state.repo_name.as_ref().unwrap()
-            )?;
+            writeln!(term, "  {} Repo: {}", style("✓").green(), repo_name)?;
         }
 
         Ok(())
@@ -1058,6 +1049,16 @@ impl PagesWizard {
             None
         };
 
+        let summary = if let Some(summary) = self.state.last_summary.clone() {
+            summary
+        } else {
+            let generated = self
+                .generate_prepublish_summary()
+                .context("Failed to generate pre-publish summary for confirmation")?;
+            self.state.last_summary = Some(generated.clone());
+            generated
+        };
+
         let config = ConfirmationConfig {
             has_secrets: self.state.secret_scan_has_findings,
             has_critical_secrets: self.state.secret_scan_has_critical,
@@ -1067,11 +1068,7 @@ impl PagesWizard {
             password_entropy_bits: self.state.password_entropy_bits,
             has_recovery_key: self.state.generate_recovery,
             recovery_key_phrase: None, // Will be set after generation
-            summary: self
-                .state
-                .last_summary
-                .clone()
-                .expect("Summary should be generated before confirmation"),
+            summary,
         };
 
         let mut flow = ConfirmationFlow::new(config);
@@ -1555,11 +1552,10 @@ impl PagesWizard {
 
         // Phase 1: Database Export with progress
         let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
-        );
+        let spinner_style = ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .context("build progress spinner style for export phase")?;
+        pb.set_style(spinner_style);
         pb.enable_steady_tick(Duration::from_millis(100));
         pb.set_message("Filtering and exporting conversations...");
 
@@ -1635,11 +1631,10 @@ impl PagesWizard {
             std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
         } else {
             let pb2 = ProgressBar::new_spinner();
-            pb2.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.cyan} {msg}")
-                    .unwrap(),
-            );
+            let spinner_style = ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} {msg}")
+                .context("build progress spinner style for encryption phase")?;
+            pb2.set_style(spinner_style);
             pb2.enable_steady_tick(Duration::from_millis(100));
             pb2.set_message("Encrypting archive...");
 
@@ -1673,11 +1668,10 @@ impl PagesWizard {
 
         // Phase 3: Build static site bundle
         let pb3 = ProgressBar::new_spinner();
-        pb3.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
-        );
+        let spinner_style = ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .context("build progress spinner style for bundle phase")?;
+        pb3.set_style(spinner_style);
         pb3.enable_steady_tick(Duration::from_millis(100));
         pb3.set_message("Building static site bundle...");
 
