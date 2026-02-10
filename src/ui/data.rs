@@ -104,10 +104,13 @@ impl ConversationCache {
         }
     }
 
-    /// Hash a source path to a u64 key using fxhash.
+    /// Hash a source path to a u64 key using rustc-hash's FxHasher.
     #[inline]
     fn hash_key(source_path: &str) -> u64 {
-        fxhash::hash64(source_path)
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        source_path.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Get the shard index for a given hash.
@@ -913,7 +916,7 @@ mod tests {
 
         // Insert more entries than a single shard can hold
         // All entries go to same shard by using paths that hash to same shard
-        // (in practice, fxhash distributes well, so we insert many entries)
+        // (in practice, FxHasher distributes well, so we insert many entries)
         for i in 0..100 {
             let view = make_test_view(i);
             let source_path = format!("/test/path/{}.jsonl", i);

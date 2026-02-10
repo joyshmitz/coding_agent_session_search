@@ -77,6 +77,43 @@ pub mod provenance;
 pub mod setup;
 pub mod sync;
 
+/// Canonical SSH stderr marker for host-key verification failures.
+pub(crate) const HOST_KEY_VERIFICATION_FAILED: &str = "Host key verification failed";
+
+/// Build strict SSH CLI tokens with consistent trust policy.
+///
+/// The returned vector contains full `ssh` argument tokens:
+/// `-o BatchMode=yes -o ConnectTimeout=<secs> -o StrictHostKeyChecking=yes`.
+pub(crate) fn strict_ssh_cli_tokens(connect_timeout_secs: u64) -> Vec<String> {
+    vec![
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        format!("ConnectTimeout={connect_timeout_secs}"),
+        "-o".to_string(),
+        "StrictHostKeyChecking=yes".to_string(),
+    ]
+}
+
+/// Build strict SSH command string for tools that require a single shell fragment.
+pub(crate) fn strict_ssh_command_for_rsync(connect_timeout_secs: u64) -> String {
+    format!(
+        "ssh -o BatchMode=yes -o ConnectTimeout={connect_timeout_secs} -o StrictHostKeyChecking=yes"
+    )
+}
+
+/// Whether stderr indicates SSH host-key verification failure.
+pub(crate) fn is_host_key_verification_failure(stderr: &str) -> bool {
+    stderr.contains(HOST_KEY_VERIFICATION_FAILED)
+}
+
+/// Standard user-facing error for host-key verification failures.
+pub(crate) fn host_key_verification_error(host: &str) -> String {
+    format!(
+        "Host key verification failed for {host} (add/verify host key in ~/.ssh/known_hosts first)"
+    )
+}
+
 // Re-export commonly used config types
 pub use config::{
     BackupInfo, ConfigError, ConfigPreview, DiscoveredHost, MergeResult, PathMapping, Platform,

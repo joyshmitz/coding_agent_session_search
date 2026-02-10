@@ -32,7 +32,11 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::probe::{CassStatus, HostProbeResult};
+use super::{
+    host_key_verification_error, is_host_key_verification_failure,
+    probe::{CassStatus, HostProbeResult},
+    strict_ssh_cli_tokens,
+};
 
 // =============================================================================
 // Constants
@@ -490,12 +494,7 @@ fi
         let timeout_secs = timeout.as_secs().min(self.ssh_timeout);
 
         let mut cmd = Command::new("ssh");
-        cmd.arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg(format!("ConnectTimeout={}", timeout_secs.min(30)))
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
+        cmd.args(strict_ssh_cli_tokens(timeout_secs.min(30)))
             .arg("-o")
             .arg("LogLevel=ERROR")
             .arg("--")
@@ -517,13 +516,24 @@ fi
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if is_host_key_verification_failure(&stderr) {
+                return Err(IndexError::SshFailed(host_key_verification_error(
+                    &self.host,
+                )));
+            }
             if stderr.contains("Connection refused")
                 || stderr.contains("Connection timed out")
                 || stderr.contains("Permission denied")
             {
                 return Err(IndexError::SshFailed(stderr.trim().to_string()));
             }
-            // Non-zero exit might be OK for some commands, return stdout
+            // Fail fast on any other non-zero exit — surface the exit code and
+            // stderr so operators can diagnose the root cause immediately.
+            let code = output.status.code().unwrap_or(-1);
+            return Err(IndexError::SshFailed(format!(
+                "Remote script exited with code {code}: {}",
+                stderr.trim()
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())

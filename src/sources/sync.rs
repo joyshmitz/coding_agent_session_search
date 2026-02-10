@@ -30,7 +30,11 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use super::config::{SourceDefinition, discover_ssh_hosts};
+use super::{
+    config::{SourceDefinition, discover_ssh_hosts},
+    host_key_verification_error, is_host_key_verification_failure, strict_ssh_cli_tokens,
+    strict_ssh_command_for_rsync,
+};
 use ssh2::{Session, Sftp};
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::net::{Shutdown, TcpStream};
@@ -223,13 +227,8 @@ impl SyncEngine {
     ///
     /// This is called once per source sync to avoid repeated SSH calls for each path.
     fn get_remote_home(&self, host: &str) -> Result<String, SyncError> {
-        let ssh_opts = format!(
-            "-o BatchMode=yes -o ConnectTimeout={} -o StrictHostKeyChecking=accept-new",
-            self.connection_timeout
-        );
-
         let output = Command::new("ssh")
-            .args(ssh_opts.split_whitespace())
+            .args(strict_ssh_cli_tokens(self.connection_timeout))
             .arg("--")
             .arg(host)
             .arg("echo $HOME")
@@ -238,6 +237,9 @@ impl SyncEngine {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if is_host_key_verification_failure(&stderr) {
+                return Err(SyncError::SshFailed(host_key_verification_error(host)));
+            }
             return Err(SyncError::SshFailed(format!(
                 "Failed to get remote home directory: {}",
                 stderr.trim()
@@ -419,10 +421,7 @@ impl SyncEngine {
         // Build rsync command
         // NOTE: NO --delete flag! Safe additive sync only.
         let remote_spec = format!("{}:{}", host, expanded_path);
-        let ssh_opts = format!(
-            "ssh -o BatchMode=yes -o ConnectTimeout={} -o StrictHostKeyChecking=accept-new",
-            self.connection_timeout
-        );
+        let ssh_opts = strict_ssh_command_for_rsync(self.connection_timeout);
 
         let mut cmd = Command::new("rsync");
         cmd.args([
@@ -482,6 +481,8 @@ impl SyncEngine {
                 || stderr.contains("Connection timed out")
             {
                 format!("SSH connection failed: {}", stderr.trim())
+            } else if is_host_key_verification_failure(&stderr) {
+                host_key_verification_error(host)
             } else if stderr.contains("No such file or directory") {
                 format!("Remote path not found: {}", expanded_path)
             } else if stderr.contains("Permission denied") {

@@ -31,7 +31,11 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::probe::{ResourceInfo, SystemInfo};
+use super::{
+    host_key_verification_error, is_host_key_verification_failure,
+    probe::{ResourceInfo, SystemInfo},
+    strict_ssh_cli_tokens,
+};
 
 // =============================================================================
 // Constants
@@ -918,12 +922,7 @@ cass --version 2>&1 || echo "VERIFY_FAILED"
         let timeout_secs = timeout.as_secs();
 
         let mut cmd = Command::new("ssh");
-        cmd.arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg(format!("ConnectTimeout={}", timeout_secs.min(30)))
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
+        cmd.args(strict_ssh_cli_tokens(timeout_secs.min(30)))
             .arg("-o")
             .arg("LogLevel=ERROR")
             .arg("--")
@@ -945,13 +944,24 @@ cass --version 2>&1 || echo "VERIFY_FAILED"
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if is_host_key_verification_failure(&stderr) {
+                return Err(InstallError::SshFailed(host_key_verification_error(
+                    &self.host,
+                )));
+            }
             if stderr.contains("Connection refused")
                 || stderr.contains("Connection timed out")
                 || stderr.contains("Permission denied")
             {
                 return Err(InstallError::SshFailed(stderr.trim().to_string()));
             }
-            // Non-zero exit might be OK for some commands, return stdout
+            // Fail fast on any other non-zero exit — surface the exit code and
+            // stderr so operators can diagnose the root cause immediately.
+            let code = output.status.code().unwrap_or(-1);
+            return Err(InstallError::SshFailed(format!(
+                "Remote script exited with code {code}: {}",
+                stderr.trim()
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
