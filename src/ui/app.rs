@@ -3552,9 +3552,17 @@ impl CassApp {
     /// deterministic. If a valid theme config exists, it may override the base
     /// preset and color slots.
     fn refresh_theme_config_from_data_dir(&mut self) {
+        fn startup_preset(preset: UiThemePreset) -> UiThemePreset {
+            if matches!(preset, UiThemePreset::Light) {
+                UiThemePreset::Dark
+            } else {
+                preset
+            }
+        }
+
         self.theme_config = None;
-        self.theme_preset = self.style_options.preset;
-        self.theme_dark = self.style_options.dark_mode;
+        self.theme_preset = startup_preset(self.style_options.preset);
+        self.theme_dark = true;
         self.style_options.preset = self.theme_preset;
         self.style_options.dark_mode = self.theme_dark;
 
@@ -3567,9 +3575,10 @@ impl CassApp {
             match style_system::ThemeConfig::load_from_path(&theme_path) {
                 Ok(config) => {
                     if let Some(preset) = config.base_preset {
+                        let preset = startup_preset(preset);
                         self.theme_preset = preset;
                         self.style_options.preset = preset;
-                        self.theme_dark = !matches!(preset, UiThemePreset::Light);
+                        self.theme_dark = true;
                         self.style_options.dark_mode = self.theme_dark;
                     }
                     self.theme_config = Some(config);
@@ -6547,7 +6556,7 @@ impl CassApp {
                     shortcuts::RANKING
                 ),
                 format!(
-                    "{} theme: dark/light | {} toggle border style",
+                    "{} theme: dark/light (Alt+T or Ctrl+T also works) | {} toggle border style",
                     shortcuts::THEME,
                     shortcuts::BORDERS
                 ),
@@ -6605,7 +6614,7 @@ impl CassApp {
                     shortcuts::PANE_FILTER
                 ),
                 format!(
-                    "{}/? toggle this help; {} quit (or back from detail)",
+                    "{}/?/Alt+H toggle this help; {} quit (or back from detail)",
                     shortcuts::HELP,
                     shortcuts::QUIT
                 ),
@@ -6666,7 +6675,7 @@ impl CassApp {
         let title = if self.help_pinned {
             "Quick Start & Shortcuts (pinned)"
         } else {
-            "Quick Start & Shortcuts (F1 or ? to toggle)"
+            "Quick Start & Shortcuts (F1, ?, or Alt+H)"
         };
         let outer = Block::new()
             .borders(Borders::ALL)
@@ -8457,6 +8466,97 @@ pub trait PersistenceService: Send + Sync {
     fn reset(&self) -> Result<(), String>;
 }
 
+/// In-process search service backed by Tantivy + SQLite storage.
+#[derive(Clone)]
+struct TantivySearchService {
+    client: Arc<crate::search::query::SearchClient>,
+}
+
+impl TantivySearchService {
+    fn new(client: Arc<crate::search::query::SearchClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl SearchService for TantivySearchService {
+    fn execute(&self, params: &SearchParams) -> Result<SearchResult, String> {
+        use crate::search::query::{FieldMask, SearchResult as BackendSearchResult};
+
+        let started = Instant::now();
+        let limit = params.limit.max(1);
+        let sparse_threshold = 3;
+        let field_mask = FieldMask::new(true, true, true, true);
+
+        let execute_mode = |mode: SearchMode| -> Result<BackendSearchResult, String> {
+            match mode {
+                SearchMode::Lexical => self
+                    .client
+                    .search_with_fallback(
+                        &params.query,
+                        params.filters.clone(),
+                        limit,
+                        0,
+                        sparse_threshold,
+                        field_mask,
+                    )
+                    .map_err(|e| e.to_string()),
+                SearchMode::Semantic => {
+                    let (hits, ann_stats) = self
+                        .client
+                        .search_semantic(
+                            &params.query,
+                            params.filters.clone(),
+                            limit,
+                            0,
+                            field_mask,
+                            false,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    Ok(crate::search::query::SearchResult {
+                        hits,
+                        wildcard_fallback: false,
+                        cache_stats: crate::search::query::CacheStats::default(),
+                        suggestions: Vec::new(),
+                        ann_stats,
+                    })
+                }
+                SearchMode::Hybrid => self
+                    .client
+                    .search_hybrid(
+                        &params.query,
+                        &params.query,
+                        params.filters.clone(),
+                        limit,
+                        0,
+                        sparse_threshold,
+                        field_mask,
+                        false,
+                    )
+                    .map_err(|e| e.to_string()),
+            }
+        };
+
+        // Semantic/hybrid modes can be unavailable if embedders are not installed.
+        // Fall back to lexical so typing always returns results instead of no-op.
+        let backend = match execute_mode(params.mode) {
+            Ok(result) => result,
+            Err(err) if matches!(params.mode, SearchMode::Semantic | SearchMode::Hybrid) => {
+                execute_mode(SearchMode::Lexical).map_err(|fallback_err| {
+                    format!("search failed ({err}); lexical fallback failed: {fallback_err}")
+                })?
+            }
+            Err(err) => return Err(err),
+        };
+
+        Ok(SearchResult {
+            hits: backend.hits,
+            elapsed_ms: started.elapsed().as_millis(),
+            suggestions: backend.suggestions,
+            wildcard_fallback: backend.wildcard_fallback,
+        })
+    }
+}
+
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(60);
 const STATE_SAVE_DEBOUNCE: Duration = Duration::from_millis(450);
 
@@ -8485,6 +8585,12 @@ impl From<super::ftui_adapter::Event> for CassMsg {
 
         match event {
             Event::Key(key) => {
+                // Ignore key-release events so toggle shortcuts (F1/F2, etc.)
+                // do not fire twice on terminals that report press+release.
+                if key.kind == ftui::KeyEventKind::Release {
+                    return CassMsg::Tick;
+                }
+
                 let ctrl = key.modifiers.contains(Modifiers::CTRL);
                 let alt = key.modifiers.contains(Modifiers::ALT);
                 let shift = key.modifiers.contains(Modifiers::SHIFT);
@@ -8500,10 +8606,14 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     // -- Help -----------------------------------------------------
                     KeyCode::F(1) => CassMsg::HelpToggled,
                     KeyCode::Char('?') => CassMsg::HelpToggled,
+                    KeyCode::Char('h') if alt => CassMsg::HelpToggled,
+                    KeyCode::Char('H') if alt => CassMsg::HelpToggled,
 
                     // -- Theme ----------------------------------------------------
                     KeyCode::F(2) => CassMsg::ThemeToggled,
                     KeyCode::Char('t') if ctrl && !shift => CassMsg::ThemeToggled,
+                    KeyCode::Char('t') if alt => CassMsg::ThemeToggled,
+                    KeyCode::Char('T') if alt => CassMsg::ThemeToggled,
 
                     // -- Filters --------------------------------------------------
                     KeyCode::F(3) if shift => CassMsg::FilterAgentSet(HashSet::new()),
@@ -8699,6 +8809,14 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                         y: mouse.y,
                     },
                     _ => CassMsg::Tick,
+                }
+            }
+
+            Event::Paste(paste) => {
+                if paste.text.is_empty() {
+                    CassMsg::Tick
+                } else {
+                    CassMsg::QueryChanged(paste.text)
                 }
             }
 
@@ -9400,6 +9518,57 @@ impl super::ftui_adapter::Model for CassApp {
                 // Suppress all other query input on sources surface.
                 CassMsg::QueryChanged(_) => {
                     return ftui::Cmd::none();
+                }
+                _ => {}
+            }
+        }
+
+        // Non-query input modes (agent/workspace/date/pane) own keyboard
+        // editing. Route printable/backspace/enter/esc here so those modes
+        // are actually interactive.
+        if self.surface == AppSurface::Search && self.input_mode != InputMode::Query {
+            match &msg {
+                CassMsg::QueryChanged(text) => {
+                    if text.is_empty() {
+                        self.input_buffer.pop();
+                    } else {
+                        self.input_buffer.push_str(text);
+                    }
+                    if self.input_mode == InputMode::PaneFilter {
+                        self.pane_filter = Some(self.input_buffer.clone());
+                    }
+                    return ftui::Cmd::none();
+                }
+                CassMsg::QueryCleared => {
+                    self.input_buffer.clear();
+                    if self.input_mode == InputMode::PaneFilter {
+                        self.pane_filter = Some(String::new());
+                    }
+                    return ftui::Cmd::none();
+                }
+                CassMsg::QueryWordDeleted => {
+                    let trimmed = self.input_buffer.trim_end();
+                    let new_end = trimmed
+                        .rfind(|c: char| c.is_whitespace())
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
+                    self.input_buffer.truncate(new_end);
+                    if self.input_mode == InputMode::PaneFilter {
+                        self.pane_filter = Some(self.input_buffer.clone());
+                    }
+                    return ftui::Cmd::none();
+                }
+                CassMsg::DetailOpened | CassMsg::QuerySubmitted => {
+                    if self.input_mode == InputMode::PaneFilter {
+                        return self.update(CassMsg::PaneFilterClosed { apply: true });
+                    }
+                    return self.update(CassMsg::InputModeApplied);
+                }
+                CassMsg::QuitRequested => {
+                    if self.input_mode == InputMode::PaneFilter {
+                        return self.update(CassMsg::PaneFilterClosed { apply: false });
+                    }
+                    return self.update(CassMsg::InputModeCancelled);
                 }
                 _ => {}
             }
@@ -10254,11 +10423,14 @@ impl super::ftui_adapter::Model for CassApp {
 
             // -- Pane filter --------------------------------------------------
             CassMsg::PaneFilterOpened => {
-                self.pane_filter = Some(String::new());
+                let seed = self.pane_filter.clone().unwrap_or_default();
+                self.pane_filter = Some(seed.clone());
                 self.input_mode = InputMode::PaneFilter;
+                self.input_buffer = seed;
                 ftui::Cmd::none()
             }
             CassMsg::PaneFilterChanged(text) => {
+                self.input_buffer = text.clone();
                 self.pane_filter = Some(text);
                 ftui::Cmd::none()
             }
@@ -10267,6 +10439,7 @@ impl super::ftui_adapter::Model for CassApp {
                     self.pane_filter = None;
                 }
                 self.input_mode = InputMode::Query;
+                self.input_buffer.clear();
                 ftui::Cmd::none()
             }
 
@@ -11210,12 +11383,10 @@ impl super::ftui_adapter::Model for CassApp {
                 self.match_mode = state.match_mode;
                 self.ranking_mode = state.ranking_mode;
                 self.context_window = state.context_window;
-                self.theme_dark = state.theme_dark;
-                self.theme_preset = if self.theme_dark {
-                    UiThemePreset::Dark
-                } else {
-                    UiThemePreset::Light
-                };
+                // Always boot into dark mode. Persisted light-mode preference is
+                // intentionally ignored so defaults remain consistent.
+                self.theme_dark = true;
+                self.theme_preset = UiThemePreset::Dark;
                 self.style_options.dark_mode = self.theme_dark;
                 self.style_options.preset = self.theme_preset;
                 self.density_mode = state.density_mode;
@@ -13574,6 +13745,41 @@ pub fn run_tui_ftui(
     model.data_dir = data_dir.clone();
     model.db_path = data_dir.join("agent_search.db");
     model.refresh_theme_config_from_data_dir();
+    model.search_service = match crate::search::tantivy::index_dir(&data_dir) {
+        Ok(index_path) => match crate::search::query::SearchClient::open_with_options(
+            &index_path,
+            Some(&model.db_path),
+            crate::search::query::SearchClientOptions {
+                enable_reload: true,
+                enable_warm: true,
+            },
+        ) {
+            Ok(Some(client)) => {
+                let service = TantivySearchService::new(Arc::new(client));
+                Some(Arc::new(service))
+            }
+            Ok(None) => {
+                if model.status.is_empty() {
+                    model.status =
+                        "Search index not found. Run `cass index --full` to enable search."
+                            .to_string();
+                }
+                None
+            }
+            Err(e) => {
+                if model.status.is_empty() {
+                    model.status = format!("Search unavailable: failed to open index ({e})");
+                }
+                None
+            }
+        },
+        Err(e) => {
+            if model.status.is_empty() {
+                model.status = format!("Search unavailable: failed to resolve index path ({e})");
+            }
+            None
+        }
+    };
 
     // Quality-first budget profile: favor full visuals and smooth transitions.
     let budget = cass_runtime_budget_config();
@@ -14353,6 +14559,43 @@ mod tests {
     }
 
     #[test]
+    fn event_mapping_alt_h_maps_to_help_toggled() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('h')).with_modifiers(Modifiers::ALT));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::HelpToggled));
+    }
+
+    #[test]
+    fn event_mapping_alt_t_maps_to_theme_toggled() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('t')).with_modifiers(Modifiers::ALT));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::ThemeToggled));
+    }
+
+    #[test]
+    fn event_mapping_key_release_is_ignored() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::F(1)).with_kind(ftui::KeyEventKind::Release));
+        assert!(matches!(CassMsg::from(event), CassMsg::Tick));
+    }
+
+    #[test]
+    fn event_mapping_paste_maps_to_query_changed() {
+        use crate::ui::ftui_adapter::Event;
+
+        let event = Event::Paste(ftui::PasteEvent::bracketed("auth error"));
+        assert!(matches!(
+            CassMsg::from(event),
+            CassMsg::QueryChanged(q) if q == "auth error"
+        ));
+    }
+
+    #[test]
     fn persisted_state_constructible() {
         let _state = PersistedState {
             search_mode: SearchMode::Lexical,
@@ -14467,6 +14710,34 @@ mod tests {
             loaded.saved_views[0].source_filter,
             SourceFilter::SourceId(ref id) if id == "legacy-source"
         ));
+    }
+
+    #[test]
+    fn state_loaded_always_defaults_to_dark_theme() {
+        let mut app = CassApp::default();
+        let mut state = persisted_state_defaults();
+        state.theme_dark = false;
+
+        let _ = app.update(CassMsg::StateLoaded(Box::new(state)));
+
+        assert!(app.theme_dark);
+        assert_eq!(app.theme_preset, UiThemePreset::Dark);
+        assert!(app.style_options.dark_mode);
+        assert_eq!(app.style_options.preset, UiThemePreset::Dark);
+    }
+
+    #[test]
+    fn refresh_theme_config_coerces_light_startup_to_dark() {
+        let mut app = CassApp::default();
+        app.style_options.preset = UiThemePreset::Light;
+        app.style_options.dark_mode = false;
+
+        app.refresh_theme_config_from_data_dir();
+
+        assert!(app.theme_dark);
+        assert_eq!(app.theme_preset, UiThemePreset::Dark);
+        assert!(app.style_options.dark_mode);
+        assert_eq!(app.style_options.preset, UiThemePreset::Dark);
     }
 
     #[test]
@@ -15370,6 +15641,51 @@ mod tests {
         let _ = app.update(CassMsg::QueryChanged(String::new())); // backspace
         assert_eq!(app.query, "hell");
         assert_eq!(app.cursor_pos, 4);
+    }
+
+    #[test]
+    fn non_query_input_mode_routes_typing_to_input_buffer() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::InputModeEntered(InputMode::Agent));
+        assert_eq!(app.input_mode, InputMode::Agent);
+
+        let _ = app.update(CassMsg::QueryChanged("c".into()));
+        let _ = app.update(CassMsg::QueryChanged("o".into()));
+        let _ = app.update(CassMsg::QueryChanged("d".into()));
+        assert_eq!(app.input_buffer, "cod");
+        assert!(
+            app.query.is_empty(),
+            "query should not change while editing non-query input mode"
+        );
+
+        let _ = app.update(CassMsg::QueryChanged(String::new())); // backspace
+        assert_eq!(app.input_buffer, "co");
+
+        let cmd = app.update(CassMsg::DetailOpened); // Enter applies mode
+        if let Some(msg) = extract_msg(cmd) {
+            let _ = app.update(msg);
+        }
+        assert_eq!(app.input_mode, InputMode::Query);
+        assert!(app.input_buffer.is_empty());
+        assert!(app.filters.agents.contains("co"));
+    }
+
+    #[test]
+    fn pane_filter_mode_typing_updates_pane_filter_and_esc_cancels() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaneFilterOpened);
+        assert_eq!(app.input_mode, InputMode::PaneFilter);
+
+        let _ = app.update(CassMsg::QueryChanged("e".into()));
+        let _ = app.update(CassMsg::QueryChanged("r".into()));
+        let _ = app.update(CassMsg::QueryChanged("r".into()));
+        assert_eq!(app.input_buffer, "err");
+        assert_eq!(app.pane_filter.as_deref(), Some("err"));
+
+        let _ = app.update(CassMsg::QuitRequested); // Esc cancels pane filter
+        assert_eq!(app.input_mode, InputMode::Query);
+        assert!(app.input_buffer.is_empty());
+        assert!(app.pane_filter.is_none());
     }
 
     #[test]
