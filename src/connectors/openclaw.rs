@@ -33,13 +33,13 @@ impl OpenClawConnector {
         Self
     }
 
-    fn sessions_root() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".openclaw")
-            .join("agents")
-            .join("openclaw")
-            .join("sessions")
+    fn sessions_root() -> Option<PathBuf> {
+        dirs::home_dir().map(|home| {
+            home.join(".openclaw")
+                .join("agents")
+                .join("openclaw")
+                .join("sessions")
+        })
     }
 
     fn looks_like_openclaw_storage(path: &Path) -> bool {
@@ -100,25 +100,30 @@ impl OpenClawConnector {
 
 impl Connector for OpenClawConnector {
     fn detect(&self) -> DetectionResult {
-        let root = Self::sessions_root();
+        let Some(root) = Self::sessions_root() else {
+            return DetectionResult::not_found();
+        };
         if root.exists() && root.is_dir() {
-            DetectionResult {
+            return DetectionResult {
                 detected: true,
                 evidence: vec![format!("found {}", root.display())],
                 root_paths: vec![root],
+            };
+        }
+
+        // Also check parent dir in case sessions dir hasn't been created yet.
+        let Some(home) = dirs::home_dir() else {
+            return DetectionResult::not_found();
+        };
+        let parent = home.join(".openclaw");
+        if parent.exists() {
+            DetectionResult {
+                detected: true,
+                evidence: vec![format!("found {}", parent.display())],
+                root_paths: vec![root],
             }
         } else {
-            // Also check parent dir in case sessions dir hasn't been created yet
-            let parent = dirs::home_dir().unwrap_or_default().join(".openclaw");
-            if parent.exists() {
-                DetectionResult {
-                    detected: true,
-                    evidence: vec![format!("found {}", parent.display())],
-                    root_paths: vec![Self::sessions_root()],
-                }
-            } else {
-                DetectionResult::not_found()
-            }
+            DetectionResult::not_found()
         }
     }
 
@@ -128,11 +133,10 @@ impl Connector for OpenClawConnector {
         if ctx.use_default_detection() {
             if Self::looks_like_openclaw_storage(&ctx.data_dir) && ctx.data_dir.exists() {
                 roots.push(ctx.data_dir.clone());
-            } else {
-                let root = Self::sessions_root();
-                if root.exists() {
-                    roots.push(root);
-                }
+            } else if let Some(root) = Self::sessions_root()
+                && root.exists()
+            {
+                roots.push(root);
             }
         } else {
             for root in &ctx.scan_roots {

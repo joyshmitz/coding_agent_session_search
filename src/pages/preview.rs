@@ -122,14 +122,26 @@ fn guess_mime_type(path: &std::path::Path) -> &'static str {
 
 /// Build an HTTP response with the given status code, content type, and body.
 fn build_response(status: u16, content_type: &str, body: Vec<u8>) -> Vec<u8> {
+    build_response_with_content_length(status, content_type, body, None)
+}
+
+/// Build an HTTP response with an optional explicit Content-Length override.
+fn build_response_with_content_length(
+    status: u16,
+    content_type: &str,
+    body: Vec<u8>,
+    content_length_override: Option<usize>,
+) -> Vec<u8> {
     let status_text = match status {
         200 => "OK",
         304 => "Not Modified",
         400 => "Bad Request",
+        405 => "Method Not Allowed",
         404 => "Not Found",
         500 => "Internal Server Error",
         _ => "Unknown",
     };
+    let content_length = content_length_override.unwrap_or(body.len());
 
     let headers = format!(
         "HTTP/1.1 {} {}\r\n\
@@ -141,10 +153,7 @@ fn build_response(status: u16, content_type: &str, body: Vec<u8>) -> Vec<u8> {
          Cache-Control: no-cache\r\n\
          Connection: close\r\n\
          \r\n",
-        status,
-        status_text,
-        content_type,
-        body.len()
+        status, status_text, content_type, content_length
     );
 
     let mut response = headers.into_bytes();
@@ -167,7 +176,7 @@ async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
 
     // Only support GET and HEAD
     if method != "GET" && method != "HEAD" {
-        return build_response(400, "text/plain", b"Method Not Allowed".to_vec());
+        return build_response(405, "text/plain", b"Method Not Allowed".to_vec());
     }
 
     // Strip query/fragment, then decode URL and sanitize path
@@ -233,8 +242,8 @@ async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
         Ok(contents) => {
             let mime = guess_mime_type(&file_to_read);
             if method == "HEAD" {
-                // For HEAD requests, return headers only
-                build_response(200, mime, vec![])
+                // HEAD responses must advertise the same representation length as GET.
+                build_response_with_content_length(200, mime, Vec::new(), Some(contents.len()))
             } else {
                 build_response(200, mime, contents)
             }
@@ -467,7 +476,8 @@ mod tests {
         let site_dir = std::path::Path::new("/tmp");
         let response = handle_request(site_dir, "POST / HTTP/1.1\r\n").await;
         let response_str = String::from_utf8_lossy(&response);
-        assert!(response_str.contains("400") || response_str.contains("Method Not Allowed"));
+        assert!(response_str.contains("HTTP/1.1 405 Method Not Allowed"));
+        assert!(response_str.contains("Method Not Allowed"));
     }
 
     #[tokio::test]
@@ -507,5 +517,36 @@ mod tests {
         let sw_str = String::from_utf8_lossy(&sw_response);
         assert!(sw_str.contains("HTTP/1.1 200 OK"));
         assert!(sw_str.contains("Content-Type: application/javascript; charset=utf-8"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_head_preserves_content_length() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let site_dir = temp_dir.path();
+        let body = "<!doctype html><html>head-check</html>";
+        std::fs::write(site_dir.join("index.html"), body).expect("write index");
+
+        let get_response = handle_request(site_dir, "GET / HTTP/1.1\r\n").await;
+        let head_response = handle_request(site_dir, "HEAD / HTTP/1.1\r\n").await;
+
+        let get_str = String::from_utf8_lossy(&get_response);
+        let head_str = String::from_utf8_lossy(&head_response);
+
+        fn content_length(resp: &str) -> Option<usize> {
+            resp.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("Content-Length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+        }
+
+        let get_len = content_length(&get_str).expect("GET content-length");
+        let head_len = content_length(&head_str).expect("HEAD content-length");
+        assert_eq!(head_len, get_len);
+        assert!(head_str.ends_with("\r\n\r\n"));
+        assert!(!head_str.contains("head-check"));
     }
 }

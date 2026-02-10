@@ -213,11 +213,7 @@ impl ProfilePreferences {
 
     /// Get the default path for profile preferences.
     fn default_path() -> Result<PathBuf> {
-        let data_dir =
-            directories::ProjectDirs::from("com", "dicklesworthstone", "coding-agent-search")
-                .context("Could not determine data directory")?
-                .data_dir()
-                .to_path_buf();
+        let data_dir = crate::default_data_dir();
         Ok(data_dir.join("profile_prefs.toml"))
     }
 
@@ -489,5 +485,11 @@ mod tests {
 
         assert_eq!(deserialized.default_profile, ShareProfile::Public);
         assert_eq!(deserialized.last_used, Some(ShareProfile::Team));
+    }
+
+    #[test]
+    fn test_preferences_path_uses_default_data_dir() {
+        let path = ProfilePreferences::default_path().expect("default path");
+        assert_eq!(path, crate::default_data_dir().join("profile_prefs.toml"));
     }
 }
