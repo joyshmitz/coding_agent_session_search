@@ -198,6 +198,18 @@ async fn head_content_length(
     head_content_length_with_metadata_hint(file_path, metadata_length).await
 }
 
+async fn head_content_length_from_hint_or_fs(
+    file_path: &std::path::Path,
+    metadata_length_hint: Option<u64>,
+) -> std::io::Result<(usize, HeadLengthSource)> {
+    match metadata_length_hint {
+        Some(metadata_length) => {
+            head_content_length_with_metadata_hint(file_path, Ok(metadata_length)).await
+        }
+        None => head_content_length(file_path).await,
+    }
+}
+
 /// Handle a single HTTP request against an already-canonicalized site root.
 async fn handle_request_with_site_root(
     site_root_canonical: &std::path::Path,
@@ -264,16 +276,19 @@ async fn handle_request_with_site_root(
 
     // Check if it's a directory and append index.html if so
     let mut file_to_read = canonical.clone();
-    if let Ok(meta) = tokio::fs::metadata(&canonical).await
-        && meta.is_dir()
-    {
-        file_to_read = canonical.join("index.html");
+    let mut metadata_length_hint = None;
+    if let Ok(meta) = tokio::fs::metadata(&canonical).await {
+        if meta.is_dir() {
+            file_to_read = canonical.join("index.html");
+        } else {
+            metadata_length_hint = Some(meta.len());
+        }
     }
 
     let request_started = Instant::now();
 
     if method == "HEAD" {
-        match head_content_length(&file_to_read).await {
+        match head_content_length_from_hint_or_fs(&file_to_read, metadata_length_hint).await {
             Ok((content_length, length_source)) => {
                 let mime = guess_mime_type(&file_to_read);
                 debug!(
@@ -699,6 +714,16 @@ mod tests {
             body.len()
         );
         assert!(head_str.ends_with("\r\n\r\n"));
+    }
+
+    #[tokio::test]
+    async fn test_head_content_length_from_hint_or_fs_with_hint_skips_fs_lookup() {
+        let missing_path = std::path::Path::new("/tmp/cass-preview-nonexistent-file-for-hint-test");
+        let (length, source) = head_content_length_from_hint_or_fs(missing_path, Some(777))
+            .await
+            .expect("metadata hint should succeed without filesystem access");
+        assert_eq!(length, 777);
+        assert_eq!(source, HeadLengthSource::Metadata);
     }
 
     #[tokio::test]
