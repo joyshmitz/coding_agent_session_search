@@ -249,6 +249,28 @@ impl SourceDefinition {
             validate_ssh_host(host)?;
         }
 
+        for (idx, mapping) in self.path_mappings.iter().enumerate() {
+            if mapping.from.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "path_mappings[{idx}].from cannot be empty"
+                )));
+            }
+
+            if mapping.to.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "path_mappings[{idx}].to cannot be empty"
+                )));
+            }
+
+            if let Some(agents) = mapping.agents.as_ref()
+                && agents.iter().any(|agent| agent.trim().is_empty())
+            {
+                return Err(ConfigError::Validation(format!(
+                    "path_mappings[{idx}].agents cannot contain empty agent names"
+                )));
+            }
+        }
+
         Ok(())
     }
 
@@ -1073,6 +1095,45 @@ mod tests {
         assert!(source.validate().is_err());
 
         let source = SourceDefinition::ssh("test", "user@host withspace");
+        assert!(source.validate().is_err());
+    }
+
+    #[test]
+    fn test_source_validation_path_mapping_empty_from() {
+        let mut source = SourceDefinition::local("test");
+        source.path_mappings.push(PathMapping::new("", "/Users/me"));
+        assert!(source.validate().is_err());
+
+        source.path_mappings.clear();
+        source
+            .path_mappings
+            .push(PathMapping::new("   ", "/Users/me"));
+        assert!(source.validate().is_err());
+    }
+
+    #[test]
+    fn test_source_validation_path_mapping_empty_to() {
+        let mut source = SourceDefinition::local("test");
+        source
+            .path_mappings
+            .push(PathMapping::new("/home/user", ""));
+        assert!(source.validate().is_err());
+
+        source.path_mappings.clear();
+        source
+            .path_mappings
+            .push(PathMapping::new("/home/user", "   "));
+        assert!(source.validate().is_err());
+    }
+
+    #[test]
+    fn test_source_validation_path_mapping_empty_agent_names() {
+        let mut source = SourceDefinition::local("test");
+        source.path_mappings.push(PathMapping::with_agents(
+            "/home/user",
+            "/Users/me",
+            vec!["claude-code".into(), "   ".into()],
+        ));
         assert!(source.validate().is_err());
     }
 
