@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde_json::Value;
-use walkdir::WalkDir;
 
 use crate::connectors::{
     Connector, DetectionResult, NormalizedConversation, NormalizedMessage, ScanContext,
@@ -47,6 +46,24 @@ impl Default for CursorConnector {
 impl CursorConnector {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Compute the exclusive upper bound for prefix range scans.
+    ///
+    /// For prefix `abc:`, this returns `abc;`, so
+    /// `key >= prefix AND key < upper` matches all keys that start with `prefix`.
+    fn prefix_upper_bound(prefix: &str) -> String {
+        let mut upper = prefix.to_string();
+        if let Some(last) = upper.pop() {
+            if let Some(next_char) = std::char::from_u32(last as u32 + 1) {
+                upper.push(next_char);
+            } else {
+                // Fallback for char overflow: keep the last char and append max scalar.
+                upper.push(last);
+                upper.push('\u{10FFFF}');
+            }
+        }
+        upper
     }
 
     /// Get the base Cursor application support directory
@@ -158,22 +175,64 @@ impl CursorConnector {
             dbs.push(global_db);
         }
 
-        // 4. Check standard layout: workspaceStorage subdirectories
+        // 4. Check standard layout: workspaceStorage/{workspace-id}/state.vscdb
+        // We only need this specific file pattern, so avoid recursive walking
+        // over all workspace files (which can be large and noisy).
         let workspace_storage = base.join("workspaceStorage");
         if workspace_storage.exists() {
-            for entry in WalkDir::new(&workspace_storage)
-                .max_depth(2)
-                .into_iter()
-                .flatten()
-            {
-                if entry.file_type().is_file() && entry.file_name().to_str() == Some("state.vscdb")
-                {
-                    dbs.push(entry.path().to_path_buf());
+            // Keep compatibility with odd setups that place state.vscdb directly
+            // under workspaceStorage.
+            let root_db = workspace_storage.join("state.vscdb");
+            if root_db.is_file() {
+                dbs.push(root_db);
+            }
+
+            if let Ok(entries) = std::fs::read_dir(&workspace_storage) {
+                for entry in entries.flatten() {
+                    let db = entry.path().join("state.vscdb");
+                    if db.is_file() {
+                        dbs.push(db);
+                    }
                 }
             }
         }
 
         dbs
+    }
+
+    /// Fast existence probe for detect(): return true on the first matching
+    /// Cursor DB path instead of collecting all DB files.
+    fn has_any_db_file(base: &Path) -> bool {
+        if base.is_file() && base.file_name().is_some_and(|n| n == "state.vscdb") {
+            return true;
+        }
+
+        if base.join("state.vscdb").is_file() {
+            return true;
+        }
+
+        if base.join("globalStorage/state.vscdb").is_file() {
+            return true;
+        }
+
+        let workspace_storage = base.join("workspaceStorage");
+        if !workspace_storage.exists() {
+            return false;
+        }
+
+        if workspace_storage.join("state.vscdb").is_file() {
+            return true;
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&workspace_storage) {
+            for entry in entries.flatten() {
+                if entry.path().join("state.vscdb").is_file() {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     /// Fetch bubble data for a specific composer from the database.
@@ -188,20 +247,7 @@ impl CursorConnector {
         // Prefix: `bubbleId:{composerId}:`
         // Range: >= prefix AND < prefix_next
         let prefix = format!("bubbleId:{}:", composer_id);
-
-        // Calculate the "next" prefix for the upper bound of the range.
-        // This is done by incrementing the last character of the prefix.
-        // e.g. "abc:" -> "abc;"
-        let mut limit = prefix.clone();
-        if let Some(last) = limit.pop() {
-            if let Some(next_char) = std::char::from_u32(last as u32 + 1) {
-                limit.push(next_char);
-            } else {
-                // Fallback for overflow (unlikely for valid keys): append max char
-                limit.push(last);
-                limit.push('\u{10FFFF}');
-            }
-        }
+        let limit = Self::prefix_upper_bound(&prefix);
 
         let prefix_len = prefix.len();
 
@@ -310,10 +356,12 @@ impl CursorConnector {
         let mut seen_ids = HashSet::new();
 
         // Try cursorDiskKV table for composerData entries
+        let composer_prefix = "composerData:";
+        let composer_limit = Self::prefix_upper_bound(composer_prefix);
         if let Ok(mut stmt) =
-            conn.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
+            conn.prepare("SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?")
         {
-            let rows = stmt.query_map([], |row| {
+            let rows = stmt.query_map([composer_prefix, composer_limit.as_str()], |row| {
                 let key: String = row.get(0)?;
                 let value: String = row.get(1)?;
                 Ok((key, value))
@@ -706,18 +754,16 @@ impl Connector for CursorConnector {
     fn detect(&self) -> DetectionResult {
         if let Some(base) = Self::app_support_dir()
             && base.exists()
+            && Self::has_any_db_file(&base)
         {
-            let dbs = Self::find_db_files(&base);
-            if !dbs.is_empty() {
-                return DetectionResult {
-                    detected: true,
-                    evidence: vec![
-                        format!("found Cursor at {}", base.display()),
-                        format!("found {} database file(s)", dbs.len()),
-                    ],
-                    root_paths: vec![base],
-                };
-            }
+            return DetectionResult {
+                detected: true,
+                evidence: vec![
+                    format!("found Cursor at {}", base.display()),
+                    "found Cursor database file(s)".to_string(),
+                ],
+                root_paths: vec![base],
+            };
         }
         DetectionResult::not_found()
     }
@@ -880,6 +926,54 @@ mod tests {
 
         let dbs = CursorConnector::find_db_files(dir.path());
         assert_eq!(dbs.len(), 4); // 1 global + 3 workspace
+    }
+
+    #[test]
+    fn find_db_files_ignores_workspace_noise_files() {
+        let dir = TempDir::new().unwrap();
+        let workspace_dir = dir.path().join("workspaceStorage").join("abc123");
+        fs::create_dir_all(&workspace_dir).unwrap();
+
+        for i in 0..20 {
+            fs::write(workspace_dir.join(format!("noise_{i}.json")), "{}").unwrap();
+        }
+        fs::write(workspace_dir.join("state.vscdb"), "").unwrap();
+
+        let dbs = CursorConnector::find_db_files(dir.path());
+        assert_eq!(dbs.len(), 1);
+        assert!(dbs[0].ends_with("state.vscdb"));
+    }
+
+    #[test]
+    fn find_db_files_supports_workspace_storage_root_db() {
+        let dir = TempDir::new().unwrap();
+        let workspace_storage = dir.path().join("workspaceStorage");
+        fs::create_dir_all(&workspace_storage).unwrap();
+        fs::write(workspace_storage.join("state.vscdb"), "").unwrap();
+
+        let dbs = CursorConnector::find_db_files(dir.path());
+        assert_eq!(dbs.len(), 1);
+        assert!(dbs[0].ends_with("workspaceStorage/state.vscdb"));
+    }
+
+    #[test]
+    fn has_any_db_file_is_true_for_workspace_storage_db() {
+        let dir = TempDir::new().unwrap();
+        let workspace_dir = dir.path().join("workspaceStorage").join("abc123");
+        fs::create_dir_all(&workspace_dir).unwrap();
+        fs::write(workspace_dir.join("state.vscdb"), "").unwrap();
+
+        assert!(CursorConnector::has_any_db_file(dir.path()));
+    }
+
+    #[test]
+    fn has_any_db_file_is_false_for_workspace_noise_only() {
+        let dir = TempDir::new().unwrap();
+        let workspace_dir = dir.path().join("workspaceStorage").join("abc123");
+        fs::create_dir_all(&workspace_dir).unwrap();
+        fs::write(workspace_dir.join("note.txt"), "noise").unwrap();
+
+        assert!(!CursorConnector::has_any_db_file(dir.path()));
     }
 
     // =========================================================================
