@@ -338,6 +338,7 @@ async fn handle_request_with_site_root(
 ///
 /// This wrapper canonicalizes the provided site directory once per call and then
 /// delegates to the canonical-root hot path handler.
+#[cfg(test)]
 async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
     let site_root_canonical = match site_dir.canonicalize() {
         Ok(p) => p,
