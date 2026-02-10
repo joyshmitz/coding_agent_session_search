@@ -10,9 +10,11 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tracing::debug;
 
 /// Error type for preview server operations.
 #[derive(Debug)]
@@ -161,6 +163,41 @@ fn build_response_with_content_length(
     response
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadLengthSource {
+    Metadata,
+    FallbackRead,
+}
+
+/// Resolve representation length for HEAD requests without eagerly reading file bytes.
+///
+/// Falls back to reading the file if metadata is unavailable or does not fit usize.
+async fn head_content_length_with_metadata_hint(
+    file_path: &std::path::Path,
+    metadata_length: std::io::Result<u64>,
+) -> std::io::Result<(usize, HeadLengthSource)> {
+    match metadata_length {
+        Ok(metadata_length) => match usize::try_from(metadata_length) {
+            Ok(length) => Ok((length, HeadLengthSource::Metadata)),
+            Err(_) => {
+                let bytes = tokio::fs::read(file_path).await?;
+                Ok((bytes.len(), HeadLengthSource::FallbackRead))
+            }
+        },
+        Err(_) => {
+            let bytes = tokio::fs::read(file_path).await?;
+            Ok((bytes.len(), HeadLengthSource::FallbackRead))
+        }
+    }
+}
+
+async fn head_content_length(
+    file_path: &std::path::Path,
+) -> std::io::Result<(usize, HeadLengthSource)> {
+    let metadata_length = tokio::fs::metadata(file_path).await.map(|meta| meta.len());
+    head_content_length_with_metadata_hint(file_path, metadata_length).await
+}
+
 /// Handle a single HTTP request.
 async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
     // Parse the request line
@@ -237,18 +274,67 @@ async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
         file_to_read = canonical.join("index.html");
     }
 
-    // Read the file
-    match tokio::fs::read(&file_to_read).await {
-        Ok(contents) => {
-            let mime = guess_mime_type(&file_to_read);
-            if method == "HEAD" {
-                // HEAD responses must advertise the same representation length as GET.
-                build_response_with_content_length(200, mime, Vec::new(), Some(contents.len()))
-            } else {
-                build_response(200, mime, contents)
+    let request_started = Instant::now();
+
+    if method == "HEAD" {
+        match head_content_length(&file_to_read).await {
+            Ok((content_length, length_source)) => {
+                let mime = guess_mime_type(&file_to_read);
+                debug!(
+                    method = method,
+                    request_path = %request_path,
+                    file_path = %file_to_read.display(),
+                    status = 200,
+                    size_source = ?length_source,
+                    content_length = content_length,
+                    elapsed_ms = request_started.elapsed().as_millis(),
+                    "Preview served HEAD request"
+                );
+                build_response_with_content_length(200, mime, Vec::new(), Some(content_length))
+            }
+            Err(err) => {
+                debug!(
+                    method = method,
+                    request_path = %request_path,
+                    file_path = %file_to_read.display(),
+                    status = 404,
+                    error = %err,
+                    elapsed_ms = request_started.elapsed().as_millis(),
+                    "Preview HEAD request failed"
+                );
+                build_response(404, "text/plain", b"Not Found".to_vec())
             }
         }
-        Err(_) => build_response(404, "text/plain", b"Not Found".to_vec()),
+    } else {
+        match tokio::fs::read(&file_to_read).await {
+            Ok(contents) => {
+                let content_length = contents.len();
+                let mime = guess_mime_type(&file_to_read);
+                debug!(
+                    method = method,
+                    request_path = %request_path,
+                    file_path = %file_to_read.display(),
+                    status = 200,
+                    size_source = "body_read",
+                    content_length = content_length,
+                    elapsed_ms = request_started.elapsed().as_millis(),
+                    "Preview served GET request"
+                );
+                build_response(200, mime, contents)
+            }
+            Err(err) => {
+                debug!(
+                    method = method,
+                    request_path = %request_path,
+                    file_path = %file_to_read.display(),
+                    status = 404,
+                    error = %err,
+                    elapsed_ms = request_started.elapsed().as_millis(),
+                    "Preview GET request failed"
+                );
+                build_response(404, "text/plain", b"Not Found".to_vec())
+            }
+        }
     }
 }
 
@@ -420,6 +506,17 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn content_length(resp: &str) -> Option<usize> {
+        resp.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("Content-Length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+    }
+
     #[test]
     fn test_guess_mime_type() {
         assert_eq!(
@@ -532,21 +629,64 @@ mod tests {
         let get_str = String::from_utf8_lossy(&get_response);
         let head_str = String::from_utf8_lossy(&head_response);
 
-        fn content_length(resp: &str) -> Option<usize> {
-            resp.lines().find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                if name.eq_ignore_ascii_case("Content-Length") {
-                    value.trim().parse::<usize>().ok()
-                } else {
-                    None
-                }
-            })
-        }
-
         let get_len = content_length(&get_str).expect("GET content-length");
         let head_len = content_length(&head_str).expect("HEAD content-length");
         assert_eq!(head_len, get_len);
         assert!(head_str.ends_with("\r\n\r\n"));
         assert!(!head_str.contains("head-check"));
+    }
+
+    #[tokio::test]
+    async fn test_head_content_length_prefers_metadata() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("asset.bin");
+        let body = vec![b'x'; 4096];
+        std::fs::write(&file_path, &body).expect("write asset");
+
+        let (length, source) =
+            head_content_length_with_metadata_hint(&file_path, Ok(body.len() as u64))
+                .await
+                .expect("metadata length");
+
+        assert_eq!(length, body.len());
+        assert_eq!(source, HeadLengthSource::Metadata);
+    }
+
+    #[tokio::test]
+    async fn test_head_content_length_falls_back_when_metadata_missing() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("asset.bin");
+        let body = vec![b'y'; 8192];
+        std::fs::write(&file_path, &body).expect("write asset");
+
+        let (length, source) = head_content_length_with_metadata_hint(
+            &file_path,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "metadata unavailable",
+            )),
+        )
+        .await
+        .expect("fallback length");
+
+        assert_eq!(length, body.len());
+        assert_eq!(source, HeadLengthSource::FallbackRead);
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_head_large_file_content_length() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let site_dir = temp_dir.path();
+        let body = vec![b'z'; 512 * 1024];
+        std::fs::write(site_dir.join("index.html"), &body).expect("write index");
+
+        let head_response = handle_request(site_dir, "HEAD / HTTP/1.1\r\n").await;
+        let head_str = String::from_utf8_lossy(&head_response);
+
+        assert_eq!(
+            content_length(&head_str).expect("HEAD content-length"),
+            body.len()
+        );
+        assert!(head_str.ends_with("\r\n\r\n"));
     }
 }
