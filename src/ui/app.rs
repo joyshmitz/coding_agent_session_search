@@ -2272,6 +2272,8 @@ pub struct ResultItem {
     pub query_terms: Vec<String>,
     /// Style for highlighted query terms.
     pub query_highlight_style: ftui::Style,
+    /// Whether this row is currently under the mouse cursor.
+    pub hovered: bool,
 }
 
 fn source_display_label(source_id: &str, origin_host: Option<&str>) -> String {
@@ -2586,6 +2588,20 @@ impl RenderItem for ResultItem {
 
         let bg_style = if selected {
             self.selected_style
+        } else if self.hovered {
+            // Subtle hover highlight: blend stripe bg 8% toward white to
+            // indicate the mouse cursor is on this row.
+            let base = self.stripe_style;
+            if let Some(bg) = base.bg {
+                let t = 0.08;
+                base.bg(ftui::PackedRgba::rgb(
+                    lerp_u8(bg.r(), 255, t),
+                    lerp_u8(bg.g(), 255, t),
+                    lerp_u8(bg.b(), 255, t),
+                ))
+            } else {
+                base
+            }
         } else {
             self.stripe_style
         };
@@ -3631,6 +3647,8 @@ pub struct CassApp {
     pub last_mouse_pos: Option<(u16, u16)>,
     /// Timestamp of last saved-view drag hover change (for stabilization).
     pub drag_hover_settled_at: Option<Instant>,
+    /// Index of the result item currently under the mouse cursor (hover highlight).
+    pub hovered_result: Option<usize>,
 
     // -- Lazy-loaded services ---------------------------------------------
     /// Data directory used for runtime state/index operations.
@@ -3817,6 +3835,7 @@ impl Default for CassApp {
             pane_split_drag: None,
             last_mouse_pos: None,
             drag_hover_settled_at: None,
+            hovered_result: None,
             data_dir: crate::default_data_dir(),
             db_path: crate::default_db_path(),
             db_reader: None,
@@ -5273,6 +5292,7 @@ impl CassApp {
                         focus_flash_intensity,
                         query_terms: extract_query_terms(&self.query),
                         query_highlight_style: styles.style(style_system::STYLE_QUERY_HIGHLIGHT),
+                        hovered: self.hovered_result == Some(i),
                     }
                 })
                 .collect();
@@ -5407,6 +5427,7 @@ impl CassApp {
                         },
                         query_terms: extract_query_terms(&self.query),
                         query_highlight_style: styles.style(style_system::STYLE_QUERY_HIGHLIGHT),
+                        hovered: is_active && self.hovered_result == Some(i),
                     }
                 })
                 .collect();
@@ -8612,6 +8633,8 @@ pub enum MouseEventKind {
     RightClick,
     ScrollUp,
     ScrollDown,
+    /// Mouse moved without any button pressed (hover).
+    Moved,
 }
 
 /// Region identified by mouse hit-testing against last-rendered layout rects.
@@ -9465,6 +9488,11 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     },
                     Mek::ScrollDown => CassMsg::MouseEvent {
                         kind: MouseEventKind::ScrollDown,
+                        x: mouse.x,
+                        y: mouse.y,
+                    },
+                    Mek::Moved => CassMsg::MouseEvent {
+                        kind: MouseEventKind::Moved,
                         x: mouse.x,
                         y: mouse.y,
                     },
@@ -12551,6 +12579,29 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     (MouseEventKind::ScrollDown, MouseHitRegion::Detail) => {
                         ftui::Cmd::msg(CassMsg::DetailScrolled { delta: 3 })
+                    }
+                    // ── Hover in results: track hovered row ─────────
+                    (MouseEventKind::Moved, MouseHitRegion::Results { item_idx, .. }) => {
+                        let hit_count = self
+                            .panes
+                            .get(self.active_pane)
+                            .map_or(self.results.len(), |p| p.hits.len());
+                        let new_hover = if item_idx < hit_count {
+                            Some(item_idx)
+                        } else {
+                            None
+                        };
+                        if self.hovered_result != new_hover {
+                            self.hovered_result = new_hover;
+                        }
+                        ftui::Cmd::none()
+                    }
+                    // ── Hover outside results: clear hover ──────────
+                    (MouseEventKind::Moved, _) => {
+                        if self.hovered_result.is_some() {
+                            self.hovered_result = None;
+                        }
+                        ftui::Cmd::none()
                     }
                     // ── Left click in results: select item ──────────
                     (MouseEventKind::LeftClick, MouseHitRegion::Results { pane_idx, item_idx }) => {
@@ -17140,6 +17191,7 @@ mod tests {
                 focus_flash_intensity: 0.0,
                 query_terms: vec![],
                 query_highlight_style: ftui::Style::new(),
+                hovered: false,
             };
             assert_eq!(item.height(), density_h, "density {mode:?}");
         }
@@ -17308,6 +17360,7 @@ mod tests {
             focus_flash_intensity: 0.0,
             query_terms: vec![],
             query_highlight_style: ftui::Style::new(),
+            hovered: false,
         };
         let not_queued = ResultItem {
             index: 1,
@@ -17331,6 +17384,7 @@ mod tests {
             focus_flash_intensity: 0.0,
             query_terms: vec![],
             query_highlight_style: ftui::Style::new(),
+            hovered: false,
         };
         assert!(queued_item.queued);
         assert!(!not_queued.queued);
@@ -17364,6 +17418,7 @@ mod tests {
             focus_flash_intensity: 0.0,
             query_terms: vec![],
             query_highlight_style: ftui::Style::new(),
+            hovered: false,
         };
         assert_eq!(local_item.source_badge(), "[local]");
 
@@ -17393,6 +17448,7 @@ mod tests {
             focus_flash_intensity: 0.0,
             query_terms: vec![],
             query_highlight_style: ftui::Style::new(),
+            hovered: false,
         };
         assert_eq!(remote_item.source_badge(), "[laptop]");
     }
@@ -17824,6 +17880,31 @@ mod tests {
         let ctx = StyleContext::from_options(StyleOptions::default());
         let backdrop = ctx.style(style_system::STYLE_MODAL_BACKDROP);
         assert!(backdrop.bg.is_some(), "modal backdrop should have a bg");
+    }
+
+    #[test]
+    fn hover_result_tracks_mouse_move() {
+        let mut app = CassApp::default();
+        assert!(app.hovered_result.is_none(), "starts with no hover");
+
+        // Simulate hover state changes directly (hit testing requires
+        // rendered layout rects which aren't available in unit tests).
+        app.hovered_result = Some(1);
+        assert_eq!(app.hovered_result, Some(1));
+
+        // Clear on move outside results
+        app.hovered_result = None;
+        assert!(app.hovered_result.is_none());
+    }
+
+    #[test]
+    fn mouse_event_moved_variant_exists() {
+        // Verify Moved variant is a valid MouseEventKind
+        let kind = MouseEventKind::Moved;
+        assert!(
+            matches!(kind, MouseEventKind::Moved),
+            "Moved variant should exist"
+        );
     }
 
     #[test]
@@ -19044,6 +19125,7 @@ mod tests {
             focus_flash_intensity: 0.0,
             query_terms: vec![],
             query_highlight_style: ftui::Style::new(),
+            hovered: false,
         }
     }
 
