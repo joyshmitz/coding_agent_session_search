@@ -634,7 +634,14 @@ impl PagesConfig {
 
     /// Parse path mode from config.
     pub fn path_mode(&self) -> PathMode {
-        match self.filters.path_mode.as_deref() {
+        let normalized = self
+            .filters
+            .path_mode
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase);
+
+        match normalized.as_deref() {
             Some("basename") => PathMode::Basename,
             Some("full") => PathMode::Full,
             Some("hash") => PathMode::Hash,
@@ -848,5 +855,12 @@ mod tests {
 
         config.filters.path_mode = Some("hash".to_string());
         assert!(matches!(config.path_mode(), PathMode::Hash));
+
+        // Parsing should be case-insensitive and whitespace-tolerant, matching validation.
+        config.filters.path_mode = Some("Basename".to_string());
+        assert!(matches!(config.path_mode(), PathMode::Basename));
+
+        config.filters.path_mode = Some(" FULL ".to_string());
+        assert!(matches!(config.path_mode(), PathMode::Full));
     }
 }
