@@ -99,7 +99,7 @@
 //! - Key regression suites: palette lifecycle, dispatch coverage for all 28 action
 //!   variants, responsive SIZE_MATRIX (16 entries), perf envelope checks
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -3496,6 +3496,10 @@ pub struct CassApp {
     // -- Detail view ------------------------------------------------------
     /// Scroll position in the detail pane.
     pub detail_scroll: u16,
+    /// Total content lines in the detail pane (set during render).
+    pub detail_content_lines: Cell<u16>,
+    /// Visible height of the detail pane viewport (set during render).
+    pub detail_visible_height: Cell<u16>,
     /// Active tab in the detail pane.
     pub detail_tab: DetailTab,
     /// Inline find state within the detail pane.
@@ -3749,6 +3753,8 @@ impl Default for CassApp {
             bulk_action_idx: 0,
             open_confirm_armed: false,
             detail_scroll: 0,
+            detail_content_lines: Cell::new(0),
+            detail_visible_height: Cell::new(0),
             detail_tab: DetailTab::default(),
             detail_find: None,
             detail_find_matches_cache: RefCell::new(Vec::new()),
@@ -6184,6 +6190,10 @@ impl CassApp {
             let scroll = self.detail_scroll as usize;
             let visible_height = content_area.height as usize;
             let total_lines = lines.len();
+
+            // Store content metrics for scroll clamping in update handlers
+            self.detail_content_lines.set(total_lines as u16);
+            self.detail_visible_height.set(content_area.height);
 
             // Clamp scroll
             let effective_scroll = scroll.min(total_lines.saturating_sub(1));
@@ -9971,6 +9981,15 @@ impl super::ftui_adapter::Model for CassApp {
                     CassMsg::SelectionMoved { delta } => {
                         return self.update(CassMsg::DetailScrolled { delta: *delta });
                     }
+                    // Home/End jump to top/bottom of detail
+                    CassMsg::CursorJumped { to_end } => {
+                        self.detail_scroll = if *to_end {
+                            self.detail_content_lines.get().saturating_sub(self.detail_visible_height.get())
+                        } else {
+                            0
+                        };
+                        return ftui::Cmd::none();
+                    }
                     // Esc closes detail modal
                     CassMsg::QuitRequested => {
                         return self.update(CassMsg::DetailClosed);
@@ -10660,14 +10679,16 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::DetailScrolled { delta } => {
-                let new_scroll = self.detail_scroll as i32 + delta;
-                self.detail_scroll = new_scroll.max(0) as u16;
+                let max_scroll = self.detail_content_lines.get().saturating_sub(self.detail_visible_height.get());
+                let new_scroll = (self.detail_scroll as i32 + delta).clamp(0, max_scroll as i32);
+                self.detail_scroll = new_scroll as u16;
                 ftui::Cmd::none()
             }
             CassMsg::PageScrolled { delta } => {
                 if self.focused_region() == FocusRegion::Detail {
-                    let new_scroll = self.detail_scroll as i32 + (delta * 20);
-                    self.detail_scroll = new_scroll.max(0) as u16;
+                    let max_scroll = self.detail_content_lines.get().saturating_sub(self.detail_visible_height.get());
+                    let new_scroll = (self.detail_scroll as i32 + (delta * 20)).clamp(0, max_scroll as i32);
+                    self.detail_scroll = new_scroll as u16;
                 } else if let Some(pane) = self.panes.get_mut(self.active_pane) {
                     let total = pane.hits.len();
                     if total == 0 {
