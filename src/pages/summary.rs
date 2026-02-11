@@ -773,10 +773,6 @@ impl<'a> SummaryGenerator<'a> {
         included_workspaces: &HashSet<String>,
         exclusions: &ExclusionSet,
     ) -> Result<(usize, usize, usize)> {
-        if included_workspaces.is_empty() && exclusions.excluded_conversations.is_empty() {
-            return Ok((0, 0, 0));
-        }
-
         // Build exclusion query
         let mut conv_count = 0usize;
         let mut msg_count = 0usize;
@@ -1282,5 +1278,37 @@ mod tests {
         assert_eq!(KeySlotType::Password.label(), "Password");
         assert_eq!(KeySlotType::QrCode.label(), "QR Code");
         assert_eq!(KeySlotType::Recovery.label(), "Recovery Key");
+    }
+
+    #[test]
+    fn test_exclusion_recount_keeps_workspace_less_conversations() {
+        let (_dir, conn) = create_test_db();
+
+        // Conversation without workspace should still be counted when exclusions
+        // are active but do not match this conversation.
+        conn.execute(
+            "INSERT INTO conversations (id, agent, workspace, title, source_path, started_at, message_count)
+             VALUES (10, 'codex', NULL, 'General session', '/path/no-workspace.jsonl', 1700300000000, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (conversation_id, idx, role, content, created_at)
+             VALUES (10, 0, 'user', 'Workspace-less message', 1700300001000)",
+            [],
+        )
+        .unwrap();
+
+        let mut exclusions = ExclusionSet::new();
+        exclusions.add_pattern("^DOES_NOT_MATCH$").unwrap();
+
+        let generator = SummaryGenerator::new(&conn);
+        let summary = generator
+            .generate_with_exclusions(None, &exclusions)
+            .unwrap();
+
+        assert_eq!(summary.total_conversations, 1);
+        assert_eq!(summary.total_messages, 1);
+        assert!(summary.workspaces.is_empty());
     }
 }
