@@ -219,12 +219,14 @@
     {
       "capability": "filter_pills_state_affordance_click_targets",
       "ratatui_expectation": "active filters are visible and directly actionable",
-      "ftui_status": "at_risk",
+      "ftui_status": "improved",
       "evidence": [
         "src/ui/app.rs:4030",
         "src/ui/app.rs:4077",
         "src/ui/app.rs:17071",
-        "src/ui/app.rs:17093"
+        "src/ui/app.rs:17093",
+        "tests/snapshots/cassapp_search_surface_active_filters.snap",
+        "tests/snapshots/cassapp_baseline_pills_active_inactive.snap"
       ],
       "owner_beads": [
         "coding_agent_session_search-2dccg.8.2",
@@ -235,10 +237,13 @@
     {
       "capability": "results_hierarchy_score_source_snippet",
       "ratatui_expectation": "results stay scanable with clear provenance and snippet hierarchy",
-      "ftui_status": "at_risk",
+      "ftui_status": "improved",
       "evidence": [
         "tests/snapshots/cassapp_results_wide.snap",
         "tests/snapshots/cassapp_results_narrow.snap",
+        "tests/snapshots/cassapp_search_surface_structure_default.snap",
+        "tests/snapshots/cassapp_search_surface_breakpoint_medium.snap",
+        "tests/snapshots/cassapp_search_surface_breakpoint_narrow.snap",
         "src/ui/app.rs:14519"
       ],
       "owner_beads": [
@@ -265,12 +270,15 @@
     {
       "capability": "detail_find_bar_match_counters_key_flows",
       "ratatui_expectation": "find mode is visible and key flows remain predictable",
-      "ftui_status": "at_risk",
+      "ftui_status": "improved",
       "evidence": [
         "src/ui/app.rs:15420",
         "src/ui/app.rs:15438",
         "src/ui/app.rs:15523",
-        "src/ui/app.rs:4947"
+        "src/ui/app.rs:4947",
+        "tests/snapshots/cassapp_baseline_detail_find_current_match.snap",
+        "tests/snapshots/cassapp_baseline_detail_find_empty_query.snap",
+        "tests/snapshots/cassapp_baseline_detail_find_no_matches.snap"
       ],
       "owner_beads": [
         "coding_agent_session_search-2dccg.4.1",
@@ -338,7 +346,7 @@
     {
       "id": "NR-02",
       "guardrail": "filter_pill_interaction_fidelity",
-      "state": "at_risk",
+      "state": "pass",
       "required_for_release_unpin": false,
       "owner_beads": [
         "coding_agent_session_search-2dccg.8.2",
@@ -349,7 +357,7 @@
     {
       "id": "NR-03",
       "guardrail": "results_hierarchy_scanability",
-      "state": "at_risk",
+      "state": "pass",
       "required_for_release_unpin": false,
       "owner_beads": [
         "coding_agent_session_search-2dccg.9.1",
@@ -370,7 +378,7 @@
     {
       "id": "NR-05",
       "guardrail": "detail_find_behavior_and_visibility",
-      "state": "at_risk",
+      "state": "pass",
       "required_for_release_unpin": false,
       "owner_beads": [
         "coding_agent_session_search-2dccg.4.1",
