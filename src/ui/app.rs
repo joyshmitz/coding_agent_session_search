@@ -5559,7 +5559,9 @@ impl CassApp {
         if let Some((_, ref cv)) = self.cached_detail {
             let md_renderer = MarkdownRenderer::new(styles.markdown_theme());
 
-            for msg in &cv.messages {
+            let msg_count = cv.messages.len();
+            let subtle_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
+            for (msg_idx, msg) in cv.messages.iter().enumerate() {
                 let role_s = Self::role_style(&msg.role, styles);
                 let gutter_s = Self::role_gutter_style(&msg.role, styles);
                 let prefix = Self::role_prefix(&msg.role);
@@ -5575,13 +5577,25 @@ impl CassApp {
                     .map(|dt| format!(" {}", dt.format("%H:%M:%S")))
                     .unwrap_or_default();
 
-                // Role header line with gutter
+                // Thin separator between messages (not before the first)
+                if msg_idx > 0 {
+                    let thin_sep =
+                        "\u{2500}".repeat((inner_width.saturating_sub(4) as usize).min(60));
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  ", subtle_style),
+                        ftui::text::Span::styled(thin_sep, subtle_style),
+                    ]));
+                }
+
+                // Role header line with gutter + message counter
+                let counter = format!(" [{}/{}]", msg_idx + 1, msg_count);
                 lines.push(ftui::text::Line::from_spans(vec![
                     ftui::text::Span::styled("\u{258c} ", gutter_s),
                     ftui::text::Span::styled(
                         format!("{role_label}{author_suffix}{ts_label}"),
                         role_s.bold(),
                     ),
+                    ftui::text::Span::styled(counter, subtle_style),
                 ]));
 
                 // Message content: auto-detect markdown
@@ -7027,11 +7041,13 @@ impl CassApp {
     /// Build the help content lines using ftui text types.
     fn build_help_lines(&self, styles: &StyleContext) -> Vec<ftui::text::Line> {
         let title_style = styles.style(style_system::STYLE_STATUS_INFO).bold();
+        let key_style = styles.style(style_system::STYLE_KBD_KEY);
+        let desc_style = styles.style(style_system::STYLE_KBD_DESC);
         let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
 
         let mut lines: Vec<ftui::text::Line> = Vec::new();
 
-        // Helper closure: push a section title + items + blank line
+        // Helper closure: push a section title + plain items + blank line
         let add_section = |out: &mut Vec<ftui::text::Line>, title: &str, items: &[String]| {
             out.push(ftui::text::Line::from_spans(vec![
                 ftui::text::Span::styled(title.to_string(), title_style),
@@ -7042,6 +7058,26 @@ impl CassApp {
             out.push(ftui::text::Line::from(""));
         };
 
+        // Helper closure: push a section with styled key-description pairs
+        let add_section_kv =
+            |out: &mut Vec<ftui::text::Line>, title: &str, items: &[(&str, &str)]| {
+                out.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled(title.to_string(), title_style),
+                ]));
+                // Find the longest key for alignment
+                let max_key_w = items.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+                for (key, desc) in items {
+                    out.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            format!("  {key:>width$}  ", width = max_key_w),
+                            key_style,
+                        ),
+                        ftui::text::Span::styled(desc.to_string(), desc_style),
+                    ]));
+                }
+                out.push(ftui::text::Line::from(""));
+            };
+
         // Welcome
         lines.push(ftui::text::Line::from_spans(vec![
             ftui::text::Span::styled(
@@ -7051,6 +7087,7 @@ impl CassApp {
         ]));
         lines.push(ftui::text::Line::from(""));
         lines.push(ftui::text::Line::from("  Layout:"));
+        let border_s = styles.style(style_system::STYLE_SPLIT_HANDLE);
         for row in [
             "  ┌─────────────────────────────────────────────────┐",
             "  │ [Search Bar]         [Filter Chips]    [Status] │",
@@ -7063,7 +7100,9 @@ impl CassApp {
             "  │ [Help Strip]                                    │",
             "  └─────────────────────────────────────────────────┘",
         ] {
-            lines.push(ftui::text::Line::from(row));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(row.to_string(), border_s),
+            ]));
         }
         lines.push(ftui::text::Line::from(""));
 
@@ -7181,24 +7220,19 @@ impl CassApp {
             ],
         );
 
-        add_section(
+        add_section_kv(
             &mut lines,
             "Navigation",
             &[
-                "Arrows move; Left/Right pane; PgUp/PgDn page".into(),
-                format!(
-                    "{} vim-style nav (when results showing)",
-                    shortcuts::VIM_NAV
-                ),
-                format!("{} or Alt+g/G jump to first/last item", shortcuts::JUMP_TOP),
-                format!(
-                    "{} toggle select; {} bulk actions; Esc clears selection",
-                    shortcuts::TOGGLE_SELECT,
-                    shortcuts::BULK_MENU
-                ),
-                "Ctrl+Enter queue item; Ctrl+O open all queued".into(),
-                format!("{} toggles focus (Results ⇄ Detail)", shortcuts::TAB_FOCUS),
-                "[ / ] cycle detail tabs (when results showing)".into(),
+                ("Tab", "Focus results/detail"),
+                ("Alt+h/j/k/l", "Directional navigation"),
+                ("\u{2191}/\u{2193}", "Move selection"),
+                ("Home/End", "Move query caret to start/end"),
+                ("Alt+1..9", "Jump to pane index"),
+                ("Enter", "Open detail"),
+                ("Esc", "Close/back"),
+                ("[ / ]", "Cycle detail tabs"),
+                ("Ctrl+Enter", "Queue item; Ctrl+O open all queued"),
             ],
         );
 
@@ -7224,6 +7258,17 @@ impl CassApp {
                     shortcuts::HELP,
                     shortcuts::QUIT
                 ),
+            ],
+        );
+
+        add_section_kv(
+            &mut lines,
+            "Density & Display",
+            &[
+                ("Shift+= / Alt+-", "Increase/decrease pane items"),
+                ("Ctrl+D", "Cycle density mode (compact/cozy/spacious)"),
+                ("F2", "Toggle dark/light theme"),
+                ("Ctrl+B", "Toggle border style"),
             ],
         );
 
