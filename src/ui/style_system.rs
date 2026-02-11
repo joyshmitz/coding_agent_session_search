@@ -1624,11 +1624,12 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
         Style::new().fg(to_packed(resolved.text_subtle)),
     );
 
+    let pill_active_bg = blend(resolved.surface, resolved.info, 0.35);
     sheet.define(
         STYLE_PILL_ACTIVE,
         Style::new()
             .fg(to_packed(resolved.accent))
-            .bg(to_packed(blend(resolved.surface, resolved.info, 0.35)))
+            .bg(to_packed(pill_active_bg))
             .bold(),
     );
     sheet.define(
@@ -1639,7 +1640,10 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
     );
     sheet.define(
         STYLE_PILL_LABEL,
-        Style::new().fg(to_packed(resolved.text_muted)).bold(),
+        Style::new()
+            .fg(to_packed(blend(resolved.text_muted, resolved.text, 0.35)))
+            .bg(to_packed(pill_active_bg))
+            .bold(),
     );
 
     sheet.define(
@@ -1665,17 +1669,20 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
     );
     sheet.define(
         STYLE_TAB_INACTIVE,
-        Style::new().fg(to_packed(resolved.text_muted)),
+        Style::new().fg(to_packed(resolved.text_muted)).underline(),
     );
     sheet.define(
         STYLE_DETAIL_FIND_CONTAINER,
         Style::new()
             .fg(to_packed(resolved.text))
-            .bg(to_packed(blend(resolved.overlay, resolved.surface, 0.40))),
+            .bg(to_packed(blend(resolved.overlay, resolved.border, 0.30))),
     );
     sheet.define(
         STYLE_DETAIL_FIND_QUERY,
-        Style::new().fg(to_packed(resolved.accent)).bold(),
+        Style::new()
+            .fg(to_packed(resolved.accent))
+            .bold()
+            .underline(),
     );
     sheet.define(
         STYLE_DETAIL_FIND_MATCH_ACTIVE,
@@ -1687,8 +1694,12 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
     sheet.define(
         STYLE_DETAIL_FIND_MATCH_INACTIVE,
         Style::new()
-            .fg(to_packed(resolved.text))
-            .bg(to_packed(blend(resolved.surface, resolved.warning, 0.15))),
+            .fg(to_packed(resolved.text_muted))
+            .bg(to_packed(blend(
+                resolved.surface,
+                resolved.border_focused,
+                0.28,
+            ))),
     );
 
     sheet

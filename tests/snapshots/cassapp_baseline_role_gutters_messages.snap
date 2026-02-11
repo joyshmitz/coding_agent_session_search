@@ -1,5 +1,5 @@
 ╭Detail [Messages] ↩───────────────────────────────────────────────────────────────────────────╮
-│  ● Messages  │ Snippets │ Raw │ Json                                                         │
+│  ● Messages  │  Snippets  │  Raw  │  Json                                                    │
 │Large-snippet rendering edge case                                                             │
 │agent=aider │ ws=/workspace/cass │ source=ci-linux (remote) │ score=0.640 (6.4/10) │ ws_orig=/│
 │────────────────────────────────────────────────────────────────────────────────────────────  │
