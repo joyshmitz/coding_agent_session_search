@@ -27538,9 +27538,20 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             &messages_buf,
         );
 
+        app.detail_tab = DetailTab::Snippets;
+        let snippets_buf = render_detail_snapshot_buffer(&app, 88, 18);
+        assert_affordance_snapshot(
+            "cassapp_baseline_detail_tabs_snippets_active",
+            &snippets_buf,
+        );
+
         app.detail_tab = DetailTab::Raw;
         let raw_buf = render_detail_snapshot_buffer(&app, 88, 18);
         assert_affordance_snapshot("cassapp_baseline_detail_tabs_raw_active", &raw_buf);
+
+        app.detail_tab = DetailTab::Json;
+        let json_buf = render_detail_snapshot_buffer(&app, 88, 18);
+        assert_affordance_snapshot("cassapp_baseline_detail_tabs_json_active", &json_buf);
     }
 
     #[test]
