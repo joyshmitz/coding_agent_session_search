@@ -9984,7 +9984,9 @@ impl super::ftui_adapter::Model for CassApp {
                     // Home/End jump to top/bottom of detail
                     CassMsg::CursorJumped { to_end } => {
                         self.detail_scroll = if *to_end {
-                            self.detail_content_lines.get().saturating_sub(self.detail_visible_height.get())
+                            self.detail_content_lines
+                                .get()
+                                .saturating_sub(self.detail_visible_height.get())
                         } else {
                             0
                         };
@@ -10679,15 +10681,22 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::DetailScrolled { delta } => {
-                let max_scroll = self.detail_content_lines.get().saturating_sub(self.detail_visible_height.get());
+                let max_scroll = self
+                    .detail_content_lines
+                    .get()
+                    .saturating_sub(self.detail_visible_height.get());
                 let new_scroll = (self.detail_scroll as i32 + delta).clamp(0, max_scroll as i32);
                 self.detail_scroll = new_scroll as u16;
                 ftui::Cmd::none()
             }
             CassMsg::PageScrolled { delta } => {
                 if self.focused_region() == FocusRegion::Detail {
-                    let max_scroll = self.detail_content_lines.get().saturating_sub(self.detail_visible_height.get());
-                    let new_scroll = (self.detail_scroll as i32 + (delta * 20)).clamp(0, max_scroll as i32);
+                    let max_scroll = self
+                        .detail_content_lines
+                        .get()
+                        .saturating_sub(self.detail_visible_height.get());
+                    let new_scroll =
+                        (self.detail_scroll as i32 + (delta * 20)).clamp(0, max_scroll as i32);
                     self.detail_scroll = new_scroll as u16;
                 } else if let Some(pane) = self.panes.get_mut(self.active_pane) {
                     let total = pane.hits.len();
