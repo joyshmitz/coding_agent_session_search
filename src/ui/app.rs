@@ -5003,18 +5003,27 @@ impl CassApp {
             }
 
             let raw = format!("[{}:{}]", pill.label, pill.value);
-            let max_chars = usize::from(end_x.saturating_sub(x));
+            // Reserve 1 char for the edit-cue glyph on editable inactive pills
+            // so the pill text + glyph never overflows the available area.
+            let cue_reserve: usize = if pill.editable && !pill.active { 1 } else { 0 };
+            let max_chars = usize::from(end_x.saturating_sub(x)).saturating_sub(cue_reserve);
             let rendered = elide_text(&raw, max_chars);
             if rendered.is_empty() {
                 break;
             }
-            let width = rendered.chars().count() as u16;
+            let base_width = rendered.chars().count() as u16;
+            // Editable inactive pills get a 1-char pencil glyph; account for
+            // it in both hit-rect width and x-advance so click targets stay
+            // accurate and subsequent pills don't overlap.
+            let cue_extra: u16 = if pill.editable && !pill.active { 1 } else { 0 };
+            let width = base_width.saturating_add(cue_extra);
 
             // Per-pill styling:
-            // - active/inactive state is reflected in value color
-            // - inactive labels also use inactive style for monochrome affordance clarity
-            // - editable pills underline the label as a direct "click-to-edit" cue
-            let value_style = if pill.active {
+            // - active pills: bold accent fg + tinted bg (via active_style)
+            // - inactive pills: dim muted fg + faint bg (via inactive_style)
+            // - editable pills: underlined label + italic value as "click-to-edit" cue
+            // - editable + inactive: pencil glyph prefix on value to reinforce editability
+            let mut value_style = if pill.active {
                 active_style
             } else {
                 inactive_style
@@ -5030,6 +5039,7 @@ impl CassApp {
             };
             if pill.editable {
                 label_part_style = label_part_style.underline();
+                value_style = value_style.italic();
             }
 
             // Split rendered text into label and value parts at the ':'
@@ -5040,6 +5050,14 @@ impl CassApp {
                     label_part.to_string(),
                     label_part_style,
                 ));
+                // Editable inactive pills show a pencil glyph to reinforce
+                // that clicking will open an editor, even in the inactive state.
+                if pill.editable && !pill.active {
+                    spans.push(ftui::text::Span::styled(
+                        "\u{270E}",
+                        label_part_style,
+                    ));
+                }
                 spans.push(ftui::text::Span::styled(
                     value_part.to_string(),
                     value_style,
@@ -21501,8 +21519,8 @@ mod tests {
             .expect("active value span should be present");
         assert_eq!(
             active_value.style.as_ref().cloned(),
-            Some(active),
-            "active value should use active style"
+            Some(active.italic()),
+            "active editable value should use active style + italic"
         );
         let inactive_value = spans
             .iter()
@@ -21510,8 +21528,8 @@ mod tests {
             .expect("inactive value span should be present");
         assert_eq!(
             inactive_value.style.as_ref().cloned(),
-            Some(inactive),
-            "inactive value should use inactive style"
+            Some(inactive.italic()),
+            "inactive editable value should use inactive style + italic"
         );
     }
 
@@ -21557,6 +21575,194 @@ mod tests {
             fixed_label.style.as_ref().cloned(),
             Some(label),
             "readonly label should not be underlined"
+        );
+    }
+
+    #[test]
+    fn editable_pill_values_are_italic() {
+        let app = app_with_hits(5);
+        let active = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(255, 0, 0, 255));
+        let inactive =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(128, 128, 128, 255));
+        let label = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(200, 200, 200, 255));
+        let sep = ftui::Style::new();
+        let pills = vec![
+            Pill {
+                label: "agent".into(),
+                value: "codex".into(),
+                active: true,
+                editable: true,
+            },
+            Pill {
+                label: "ws".into(),
+                value: "any".into(),
+                active: false,
+                editable: true,
+            },
+            Pill {
+                label: "fixed".into(),
+                value: "frozen".into(),
+                active: true,
+                editable: false,
+            },
+        ];
+        let area = Rect::new(0, 0, 120, 1);
+        let (line, _) = app.build_pills_row(area, &pills, active, inactive, label, sep);
+        let spans = line.spans();
+
+        // Active + editable value should be italic
+        let active_val = spans
+            .iter()
+            .find(|sp| sp.content.contains("codex]"))
+            .expect("active editable value span should be present");
+        assert_eq!(
+            active_val.style.as_ref().cloned(),
+            Some(active.italic()),
+            "editable active value should have italic modifier"
+        );
+
+        // Inactive + editable value should be italic
+        let inactive_val = spans
+            .iter()
+            .find(|sp| sp.content.contains("any]"))
+            .expect("inactive editable value span should be present");
+        assert_eq!(
+            inactive_val.style.as_ref().cloned(),
+            Some(inactive.italic()),
+            "editable inactive value should have italic modifier"
+        );
+
+        // Non-editable value should NOT be italic
+        let fixed_val = spans
+            .iter()
+            .find(|sp| sp.content.contains("frozen]"))
+            .expect("non-editable value span should be present");
+        assert_eq!(
+            fixed_val.style.as_ref().cloned(),
+            Some(active),
+            "non-editable active value should not have italic modifier"
+        );
+    }
+
+    #[test]
+    fn editable_inactive_pill_shows_pencil_glyph() {
+        let app = app_with_hits(5);
+        let active = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(255, 0, 0, 255));
+        let inactive =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(128, 128, 128, 255));
+        let label = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(200, 200, 200, 255));
+        let sep = ftui::Style::new();
+        let pills = vec![
+            Pill {
+                label: "ws".into(),
+                value: "any".into(),
+                active: false,
+                editable: true,
+            },
+            Pill {
+                label: "agent".into(),
+                value: "codex".into(),
+                active: true,
+                editable: true,
+            },
+        ];
+        let area = Rect::new(0, 0, 120, 1);
+        let (line, _) = app.build_pills_row(area, &pills, active, inactive, label, sep);
+        let spans = line.spans();
+
+        // Inactive editable pill should include the pencil glyph span
+        let pencil = spans.iter().find(|sp| sp.content.contains('\u{270E}'));
+        assert!(
+            pencil.is_some(),
+            "editable inactive pill should include pencil glyph cue"
+        );
+
+        // Active editable pill should NOT include pencil glyph (only inactive gets it)
+        let all_pencils: Vec<_> = spans
+            .iter()
+            .filter(|sp| sp.content.contains('\u{270E}'))
+            .collect();
+        assert_eq!(
+            all_pencils.len(),
+            1,
+            "only the inactive editable pill should have a pencil glyph, not the active one"
+        );
+    }
+
+    #[test]
+    fn non_editable_pill_has_no_pencil_glyph() {
+        let app = app_with_hits(5);
+        let active = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(255, 0, 0, 255));
+        let inactive =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(128, 128, 128, 255));
+        let label = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(200, 200, 200, 255));
+        let sep = ftui::Style::new();
+        let pills = vec![
+            Pill {
+                label: "static".into(),
+                value: "on".into(),
+                active: false,
+                editable: false,
+            },
+        ];
+        let area = Rect::new(0, 0, 120, 1);
+        let (line, _) = app.build_pills_row(area, &pills, active, inactive, label, sep);
+        let spans = line.spans();
+        let pencil = spans.iter().find(|sp| sp.content.contains('\u{270E}'));
+        assert!(
+            pencil.is_none(),
+            "non-editable pill should not have a pencil glyph"
+        );
+    }
+
+    #[test]
+    fn pill_hit_rects_account_for_pencil_glyph_width() {
+        let app = app_with_hits(5);
+        let active = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(255, 0, 0, 255));
+        let inactive =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(128, 128, 128, 255));
+        let label = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(200, 200, 200, 255));
+        let sep = ftui::Style::new();
+        let pills = vec![
+            Pill {
+                label: "ws".into(),
+                value: "any".into(),
+                active: false,
+                editable: true,
+            },
+            Pill {
+                label: "agent".into(),
+                value: "codex".into(),
+                active: true,
+                editable: true,
+            },
+        ];
+        let area = Rect::new(0, 0, 120, 1);
+        let (_, rects) = app.build_pills_row(area, &pills, active, inactive, label, sep);
+        assert_eq!(rects.len(), 2);
+
+        // The inactive editable pill (ws) should have rect width = "[ws:any]".len() + 1 for pencil
+        let ws_rect = &rects[0].0;
+        let base_len = "[ws:any]".len() as u16;
+        assert_eq!(
+            ws_rect.width,
+            base_len + 1,
+            "inactive editable pill rect should include 1 extra char for pencil glyph"
+        );
+
+        // The active editable pill (agent) should NOT have the extra width
+        let agent_rect = &rects[1].0;
+        let agent_base_len = "[agent:codex]".len() as u16;
+        assert_eq!(
+            agent_rect.width, agent_base_len,
+            "active editable pill rect should not include pencil glyph width"
+        );
+
+        // Second pill starts after first pill + separator
+        assert_eq!(
+            agent_rect.x,
+            ws_rect.x + ws_rect.width + 1,
+            "second pill x should follow first pill + 1 separator char"
         );
     }
 
