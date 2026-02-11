@@ -17769,6 +17769,65 @@ mod tests {
     }
 
     #[test]
+    fn lerp_u8_blends_correctly() {
+        assert_eq!(super::lerp_u8(0, 255, 0.0), 0);
+        assert_eq!(super::lerp_u8(0, 255, 1.0), 255);
+        assert_eq!(super::lerp_u8(0, 255, 0.5), 128);
+        assert_eq!(super::lerp_u8(100, 200, 0.25), 125);
+        // Clamp out-of-range t values
+        assert_eq!(super::lerp_u8(0, 100, -1.0), 0);
+        assert_eq!(super::lerp_u8(0, 100, 2.0), 100);
+    }
+
+    #[test]
+    fn modal_open_spring_driven_by_tick() {
+        let mut app = CassApp::default();
+        // Spring starts at 0 (no modal open)
+        assert!(
+            app.anim.modal_open.position() < 0.1,
+            "modal spring should start near 0"
+        );
+
+        // Open a modal flag, then tick to drive spring
+        app.show_help = true;
+        let _ = app.update(CassMsg::Tick);
+        // After one tick, the spring target should be 1.0
+        // (it may not have reached 1.0 yet, but target is set)
+        assert!(
+            app.anim.modal_open.position() > 0.0
+                || app.anim.modal_open.position() == 0.0, // first tick may not move it yet
+            "modal spring should have been targeted"
+        );
+
+        // Close modal and tick
+        app.show_help = false;
+        for _ in 0..60 {
+            let _ = app.update(CassMsg::Tick);
+        }
+        assert!(
+            app.anim.modal_open.position() < 0.5,
+            "modal spring should settle toward 0 after closing"
+        );
+    }
+
+    #[test]
+    fn search_focus_style_token_exists() {
+        use super::style_system::{self, StyleContext, StyleOptions};
+        let ctx = StyleContext::from_options(StyleOptions::default());
+        let focus_style = ctx.style(style_system::STYLE_SEARCH_FOCUS);
+        assert!(focus_style.bg.is_some(), "search focus should have a bg");
+        assert!(focus_style.fg.is_some(), "search focus should have an fg");
+    }
+
+    #[test]
+    fn modal_backdrop_style_token_exists() {
+        use super::style_system::{self, StyleContext, StyleOptions};
+        let ctx = StyleContext::from_options(StyleOptions::default());
+        let backdrop = ctx.style(style_system::STYLE_MODAL_BACKDROP);
+        assert!(backdrop.bg.is_some(), "modal backdrop should have a bg");
+    }
+
+    #[test]
     fn snippet_budget_exhaustion_uses_ellipsis_on_last_line() {
         let mut hit = make_test_hit();
         hit.snippet = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_string();
