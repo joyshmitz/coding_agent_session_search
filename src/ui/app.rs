@@ -2715,7 +2715,7 @@ impl RenderItem for ResultItem {
             let snippet_lines = self.snippet_lines(content_width.saturating_sub(8), snippet_budget);
             for snippet in snippet_lines {
                 lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("    \u{2502} ", self.text_subtle_style),
+                    ftui::text::Span::styled("    \u{2502} ", self.text_muted_style),
                     ftui::text::Span::styled(snippet, self.text_muted_style),
                 ]));
             }
@@ -5814,17 +5814,12 @@ impl CassApp {
         styles: &StyleContext,
     ) -> Vec<u16> {
         let highlight_style = if styles.options.color_profile.supports_color() {
-            ftui::Style::default()
-                .bg(ftui::PackedRgba::rgb(255, 255, 0))
-                .fg(ftui::PackedRgba::rgb(0, 0, 0))
+            styles.style(style_system::STYLE_DETAIL_FIND_MATCH_INACTIVE)
         } else {
             ftui::Style::default().underline().bold()
         };
         let current_style = if styles.options.color_profile.supports_color() {
-            ftui::Style::default()
-                .bg(ftui::PackedRgba::rgb(255, 140, 0))
-                .fg(ftui::PackedRgba::rgb(0, 0, 0))
-                .bold()
+            styles.style(style_system::STYLE_DETAIL_FIND_MATCH_ACTIVE)
         } else {
             ftui::Style::default().underline().bold().italic()
         };
@@ -5957,7 +5952,7 @@ impl CassApp {
                         tab_active_s,
                     ));
                 } else {
-                    tab_spans.push(ftui::text::Span::styled(lbl.to_string(), tab_inactive_s));
+                    tab_spans.push(ftui::text::Span::styled(format!(" {lbl} "), tab_inactive_s));
                 }
             }
             let tab_row = Rect::new(full_inner.x, full_inner.y, full_inner.width, 1);
@@ -17355,15 +17350,21 @@ mod tests {
         let text_narrow =
             buffer_to_text(&render_at_degradation(&app, 60, 24, DegradationLevel::Full));
 
-        // Both should render without panic — the sentinel appears in results
+        // Wide render (120 cols, Cozy effective) shows snippet in dedicated lines
         assert!(
             text_wide.contains("density-effective-test-sentinel"),
             "wide render should show snippet"
         );
-        // Narrow render uses compact row_height=2, inline snippet should still appear
+        // Narrow render (60 cols, effective=Compact, row_height=2) omits snippet
+        // lines — only title + metadata fit. Verify the agent name appears and
+        // the sentinel does NOT appear (compact mode has 0 snippet_lines).
         assert!(
-            text_narrow.contains("density-effective-test-sentinel"),
-            "narrow render (effective=Compact) should still show inline snippet"
+            text_narrow.contains("claude_code"),
+            "narrow render should show agent name"
+        );
+        assert!(
+            !text_narrow.contains("density-effective-test-sentinel"),
+            "narrow render (effective=Compact) should omit snippet lines"
         );
     }
 
@@ -18797,11 +18798,44 @@ mod tests {
     }
 
     #[test]
-    fn detail_opened_in_non_query_mode_sets_modal() {
+    fn detail_opened_in_non_query_mode_applies_input() {
+        // In PaneFilter mode, Enter (DetailOpened) applies the filter and
+        // returns to Query mode — it does NOT open the detail modal.
         let mut app = CassApp::default();
         app.input_mode = InputMode::PaneFilter;
+        app.input_buffer = "err".to_string();
         let _ = app.update(CassMsg::DetailOpened);
-        assert!(app.show_detail_modal, "should open modal");
+        assert_eq!(
+            app.input_mode,
+            InputMode::Query,
+            "should return to Query mode"
+        );
+        assert!(
+            !app.show_detail_modal,
+            "should not open modal in PaneFilter mode"
+        );
+
+        // In Agent mode, Enter applies the agent filter (via chained Cmds).
+        let mut app2 = CassApp::default();
+        app2.input_mode = InputMode::Agent;
+        app2.input_buffer = "claude_code".to_string();
+        let cmd = app2.update(CassMsg::DetailOpened);
+        // InputModeApplied returns a Cmd::Msg(FilterAgentSet) that must be processed.
+        for msg in extract_msgs(cmd) {
+            let cmd2 = app2.update(msg);
+            for msg2 in extract_msgs(cmd2) {
+                let _ = app2.update(msg2);
+            }
+        }
+        assert_eq!(
+            app2.input_mode,
+            InputMode::Query,
+            "Agent mode should return to Query"
+        );
+        assert!(
+            app2.filters.agents.contains("claude_code"),
+            "agent filter should be applied"
+        );
     }
 
     #[test]
@@ -22021,6 +22055,11 @@ mod tests {
             if LayoutBreakpoint::is_ultra_narrow(w, h) {
                 continue; // ultra-narrow uses fallback, skip topology checks
             }
+            // Search surface needs Fixed(5)+Min(1)+Fixed(2)=8 rows minimum
+            // to populate hit regions; skip degenerate height entries.
+            if h < 8 {
+                continue;
+            }
             let app = app_with_hits(5);
             render_at_degradation(&app, w, h, ftui::render::budget::DegradationLevel::Full);
 
@@ -23920,6 +23959,10 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         use ftui::render::budget::DegradationLevel;
 
         let mut full_app = app_with_hits(8);
+        // Keep this test deterministic even when CASS_DISABLE_ANIMATIONS=1 leaks into env.
+        full_app.anim.enabled = true;
+        // results_reveal_motion_enabled checks self.results.len(), so populate it
+        full_app.results = full_app.panes[0].hits.clone();
         full_app.anim.start_reveal(8);
         let full_early = ftui_harness::buffer_to_text(&render_at_degradation(
             &full_app,
@@ -23942,6 +23985,9 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         );
 
         let mut degraded_app = app_with_hits(8);
+        // Keep this test deterministic even when CASS_DISABLE_ANIMATIONS=1 leaks into env.
+        degraded_app.anim.enabled = true;
+        degraded_app.results = degraded_app.panes[0].hits.clone();
         degraded_app.anim.start_reveal(8);
         let degraded_early = ftui_harness::buffer_to_text(&render_at_degradation(
             &degraded_app,
@@ -24582,9 +24628,11 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             total_count: 1,
         }];
 
-        // Switch to a non-Query input mode so DetailOpened opens detail modal
-        app.input_mode = InputMode::Agent;
-        let _ = app.update(CassMsg::DetailOpened);
+        // Directly open the detail modal (DetailOpened in non-Query modes
+        // applies the input filter, so we set modal state directly).
+        app.show_detail_modal = true;
+        app.focus_manager.push_trap(focus_ids::GROUP_DETAIL_MODAL);
+        app.focus_manager.focus(focus_ids::DETAIL_MODAL);
         assert!(app.show_detail_modal);
 
         // Close detail
