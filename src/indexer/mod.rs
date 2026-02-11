@@ -14,7 +14,7 @@ use notify::{RecursiveMode, Watcher, recommended_watcher};
 
 use crate::connectors::NormalizedConversation;
 use crate::connectors::{
-    Connector, ScanRoot, aider::AiderConnector, amp::AmpConnector, chatgpt::ChatGptConnector,
+    Connector, ScanRoot, aider::AiderConnector, amp::AmpConnector, chatgpt::ChatGptConnector, copilot::CopilotConnector,
     claude_code::ClaudeCodeConnector, clawdbot::ClawdbotConnector, cline::ClineConnector,
     codex::CodexConnector, cursor::CursorConnector, factory::FactoryConnector,
     gemini::GeminiConnector, openclaw::OpenClawConnector, opencode::OpenCodeConnector,
@@ -1263,6 +1263,7 @@ pub fn get_connector_factories() -> Vec<(&'static str, fn() -> Box<dyn Connector
         ("pi_agent", || Box::new(PiAgentConnector::new())),
         ("factory", || Box::new(FactoryConnector::new())),
         ("openclaw", || Box::new(OpenClawConnector::new())),
+        ("copilot", || Box::new(CopilotConnector::new())),
     ]
 }
 
@@ -1316,6 +1317,7 @@ impl ConnectorKind {
             "pi_agent" => Some(Self::PiAgent),
             "factory" => Some(Self::Factory),
             "openclaw" => Some(Self::OpenClaw),
+            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -1338,6 +1340,7 @@ impl ConnectorKind {
             Self::PiAgent => Box::new(PiAgentConnector::new()),
             Self::Factory => Box::new(FactoryConnector::new()),
             Self::OpenClaw => Box::new(OpenClawConnector::new()),
+            Self::Copilot => Box::new(CopilotConnector::new()),
         }
     }
 }
@@ -1643,6 +1646,8 @@ enum ConnectorKind {
     Factory,
     #[serde(rename = "ow", alias = "OpenClaw")]
     OpenClaw,
+    #[serde(rename = "cp", alias = "Copilot")]
+    Copilot,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]

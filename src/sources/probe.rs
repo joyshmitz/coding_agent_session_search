@@ -308,7 +308,10 @@ for dir in ~/.claude/projects ~/.codex/sessions ~/.cursor \
            ~/Library/Application\ Support/Code/User/globalStorage/saoudrizwan.claude-dev \
            ~/Library/Application\ Support/Cursor/User/globalStorage/saoudrizwan.claude-dev \
            ~/.gemini/tmp ~/.pi/agent/sessions ~/.aider.chat.history.md \
-           ~/.local/share/opencode ~/.goose/sessions ~/.continue/sessions; do
+           ~/.local/share/opencode ~/.goose/sessions ~/.continue/sessions \
+           ~/.config/Code/User/globalStorage/github.copilot-chat \
+           ~/Library/Application\ Support/Code/User/globalStorage/github.copilot-chat \
+           ~/.config/gh-copilot; do
     # Expand the path
     expanded_dir=$(eval echo "$dir" 2>/dev/null)
     if [ -e "$expanded_dir" ]; then
@@ -568,6 +571,8 @@ fn infer_agent_type(path: &str) -> String {
         "opencode".to_string()
     } else if path.contains(".goose") {
         "goose".to_string()
+    } else if path.contains("copilot-chat") || path.contains("gh-copilot") || path.contains("gh/copilot") {
+        "copilot".to_string()
     } else if path.contains(".continue") {
         "continue".to_string()
     } else {
@@ -817,6 +822,11 @@ mod tests {
             infer_agent_type("~/.config/Code/User/globalStorage/saoudrizwan.claude-dev"),
             "cline"
         );
+        assert_eq!(
+            infer_agent_type("~/.config/Code/User/globalStorage/github.copilot-chat"),
+            "copilot"
+        );
+        assert_eq!(infer_agent_type("~/.config/gh-copilot"), "copilot");
         assert_eq!(infer_agent_type("/some/random/path"), "unknown");
     }
 
