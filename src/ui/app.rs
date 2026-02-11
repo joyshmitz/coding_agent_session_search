@@ -10777,14 +10777,14 @@ impl super::ftui_adapter::Model for CassApp {
 
             // -- Detail view --------------------------------------------------
             CassMsg::DetailOpened => {
-                // Enter is context-dependent:
-                // - Search bar focus (or no active hit): submit query
-                // - Results/detail focus with active hit: open detail modal
-                let focus_id = self.focus_manager.current();
-                if !self.show_detail_modal
-                    && (focus_id == Some(focus_ids::SEARCH_BAR) || self.selected_hit().is_none())
-                {
+                // Enter should prioritize opening the selected hit in context.
+                // If there is no active hit, fall back to query submit behavior.
+                if !self.show_detail_modal && self.selected_hit().is_none() {
                     return self.update(CassMsg::QuerySubmitted);
+                }
+                // Ensure Enter lands on the contextual conversation view.
+                if !self.show_detail_modal {
+                    self.detail_tab = DetailTab::Messages;
                 }
                 self.show_detail_modal = true;
                 self.detail_scroll = 0;
@@ -16824,6 +16824,33 @@ mod tests {
         assert!(
             app.show_detail_modal,
             "Enter on a selected result should open modal"
+        );
+    }
+
+    #[test]
+    fn enter_on_selected_result_opens_modal_even_when_search_bar_focused() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Query;
+        app.panes.push(AgentPane {
+            agent: "codex".into(),
+            total_count: 1,
+            hits: vec![make_test_hit()],
+            selected: 0,
+        });
+        app.active_pane = 0;
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+        app.detail_tab = DetailTab::Raw;
+
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert!(
+            app.show_detail_modal,
+            "Enter with selected hit should open modal even if search bar still has focus"
+        );
+        assert_eq!(
+            app.detail_tab,
+            DetailTab::Messages,
+            "Enter-open should land on contextual messages tab for markdown rendering"
         );
     }
 
@@ -28368,6 +28395,25 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         );
         assert_affordance_snapshot("cassapp_search_surface_theme_dark", &dark_buf);
         assert_affordance_snapshot("cassapp_search_surface_theme_light", &light_buf);
+    }
+
+    #[test]
+    fn snapshot_search_surface_theme_high_contrast() {
+        use ftui::render::budget::DegradationLevel;
+
+        let mut app = search_surface_fixture_app();
+        app.theme_preset = UiThemePreset::HighContrast;
+        app.theme_dark = true;
+        app.style_options.preset = UiThemePreset::HighContrast;
+        app.style_options.dark_mode = true;
+
+        let buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(
+            text.contains("cass"),
+            "test_id=8.6.hierarchy.theme_hc component=search-surface action=render expected=title actual=missing"
+        );
+        assert_affordance_snapshot("cassapp_search_surface_theme_high_contrast", &buf);
     }
 
     #[test]
