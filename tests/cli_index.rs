@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use clap::Parser;
+use coding_agent_search::storage::sqlite::SqliteStorage;
 use coding_agent_search::{Cli, Commands};
 use predicates::str::contains;
 use std::fs;
@@ -139,6 +140,45 @@ fn index_force_rebuild_flag() {
 
     cmd.assert().success();
     assert!(data_dir.join("agent_search.db").exists());
+}
+
+#[test]
+fn index_handles_existing_schema_13_db() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let db_path = data_dir.join("agent_search.db");
+
+    // Seed an existing DB and force schema_version=13 to guard against
+    // regressions where v13 is treated as unsupported.
+    let storage = SqliteStorage::open(&db_path).expect("seed sqlite db");
+    storage
+        .raw()
+        .execute(
+            "UPDATE meta SET value = '13' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("set schema_version to 13");
+    drop(storage);
+
+    let mut cmd = base_cmd(tmp.path());
+    cmd.args(["index", "--data-dir", data_dir.to_str().unwrap(), "--json"]);
+
+    let output = cmd.output().expect("run index");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "index should succeed for existing schema v13 db. stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unsupported schema version 13"),
+        "stderr should not contain schema-v13 rejection. stderr: {stderr}"
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("index --json should emit valid JSON");
+    assert_eq!(payload.get("success").and_then(|v| v.as_bool()), Some(true));
 }
 
 /// Creates a Codex session file with the modern envelope format.

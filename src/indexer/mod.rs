@@ -26,7 +26,7 @@ use crate::search::vector_index::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_U
 use crate::sources::config::{Platform, SourcesConfig};
 use crate::sources::provenance::{Origin, Source};
 use crate::sources::sync::path_to_safe_dirname;
-use crate::storage::sqlite::SqliteStorage;
+use crate::storage::sqlite::{MigrationError, SqliteStorage};
 use semantic::{EmbeddingInput, SemanticIndexer};
 
 /// Type alias for batch classification map: (ConnectorKind, Path) -> (ScanRoot, MinTS, MaxTS)
@@ -930,7 +930,7 @@ pub fn run_index(
     opts: IndexOptions,
     event_channel: Option<(Sender<IndexerEvent>, Receiver<IndexerEvent>)>,
 ) -> Result<()> {
-    let mut storage = SqliteStorage::open(&opts.db_path)?;
+    let (mut storage, storage_rebuilt) = open_storage_for_index(&opts.db_path)?;
     let index_path = index_dir(&opts.data_dir)?;
 
     // Detect if we are rebuilding due to missing meta/schema mismatch/index corruption.
@@ -948,8 +948,10 @@ pub fn run_index(
             .unwrap_or(false);
 
     // Treat missing schema hash as rebuild (open_or_create will wipe/recreate).
-    let mut needs_rebuild =
-        opts.force_rebuild || !index_path.join("meta.json").exists() || !schema_matches;
+    let mut needs_rebuild = storage_rebuilt
+        || opts.force_rebuild
+        || !index_path.join("meta.json").exists()
+        || !schema_matches;
 
     // Preflight open: if Tantivy can't open, force a rebuild so we do a full scan and
     // reindex messages into the new Tantivy index (SQLite is incremental-only by default).
@@ -1199,6 +1201,30 @@ pub fn run_index(
     }
 
     Ok(())
+}
+
+/// Open SQLite storage for indexing with forward-compatibility recovery.
+///
+/// Returns `(storage, rebuilt)` where `rebuilt=true` means we detected an
+/// incompatible/future schema, backed up + recreated the DB, and reopened it.
+fn open_storage_for_index(db_path: &Path) -> Result<(SqliteStorage, bool)> {
+    match SqliteStorage::open_or_rebuild(db_path) {
+        Ok(storage) => Ok((storage, false)),
+        Err(MigrationError::RebuildRequired {
+            reason,
+            backup_path,
+        }) => {
+            tracing::warn!(
+                db_path = %db_path.display(),
+                reason = %reason,
+                backup_path = ?backup_path.as_ref().map(|p| p.display().to_string()),
+                "sqlite schema incompatible; rebuilt database before indexing"
+            );
+            let storage = SqliteStorage::open(db_path)?;
+            Ok((storage, true))
+        }
+        Err(err) => Err(anyhow::anyhow!("failed to open sqlite storage: {err}")),
+    }
 }
 
 fn ingest_batch(
@@ -2313,6 +2339,52 @@ mod tests {
             metadata: serde_json::json!({}),
             messages: msgs,
         }
+    }
+
+    #[test]
+    fn open_storage_for_index_recovers_from_newer_schema() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("future-schema.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
+                [format!(
+                    "{}",
+                    crate::storage::sqlite::CURRENT_SCHEMA_VERSION + 1
+                )],
+            )
+            .unwrap();
+        }
+
+        let (storage, rebuilt) = open_storage_for_index(&db_path).unwrap();
+        assert!(rebuilt, "newer schema should trigger rebuild recovery");
+        assert_eq!(
+            storage.schema_version().unwrap(),
+            crate::storage::sqlite::CURRENT_SCHEMA_VERSION
+        );
+
+        // Rebuild path should preserve an on-disk backup.
+        let backup_count = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.starts_with("future-schema.db.backup."))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert!(
+            backup_count >= 1,
+            "expected backup artifact for rebuilt schema"
+        );
     }
 
     #[test]
