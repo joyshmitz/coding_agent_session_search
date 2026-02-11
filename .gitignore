@@ -92,3 +92,8 @@ session_export.html
 .tmp_write_probe
 .tmp_*
 .tmp/
+
+# Profiling artifacts
+flamegraph.svg
+perf.data
+perf.data.old
