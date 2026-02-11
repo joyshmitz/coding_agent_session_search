@@ -23,16 +23,16 @@ if (-not $Version) {
     exit 1
   }
 }
-$os = "windows"
-$arch = if ([Environment]::Is64BitProcess) { "x86_64" } else { "x86" }
-$zip = "coding-agent-search-$Version-$arch-$os-msvc.zip"
+
+# Map architecture to the naming convention used by release.yml
+$arch = if ([Environment]::Is64BitProcess) { "amd64" } else { "x86" }
+$zip = "cass-windows-${arch}.zip"
+
 if ($ArtifactUrl) {
   $url = $ArtifactUrl
 } else {
-  # cargo-dist usually names windows zips like package-vX.Y.Z-x86_64-pc-windows-msvc.zip
-  # But we'll use a simpler guess matching install.sh logic or common dist patterns
-  $target = "x86_64-pc-windows-msvc"
-  $zip = "coding-agent-search-$target.zip"
+  # Release asset names follow the pattern: cass-windows-amd64.zip
+  # (produced by the release.yml workflow matrix `asset_name` field)
   $url = "https://github.com/$Owner/$Repo/releases/download/$Version/$zip"
 }
 
@@ -57,11 +57,6 @@ $extractDir = Join-Path $tmp "extract"
 [System.IO.Compression.ZipFile]::ExtractToDirectory($zipFile, $extractDir)
 
 $bin = Get-ChildItem -Path $extractDir -Recurse -Filter "cass.exe" | Select-Object -First 1
-if (-not $bin) {
-  $bin = Get-ChildItem -Path $extractDir -Recurse -Filter "coding-agent-search.exe" | Select-Object -First 1
-  if ($bin) { Write-Warning "Found coding-agent-search.exe instead of cass.exe; installing as cass.exe" }
-}
-
 if (-not $bin) { Write-Error "Binary not found in zip"; exit 1 }
 
 if (-not (Test-Path $Dest)) { New-Item -ItemType Directory -Force -Path $Dest | Out-Null }

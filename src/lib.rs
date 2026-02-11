@@ -11244,8 +11244,10 @@ async fn latest_release_version(client: &Client) -> Option<(String, Version)> {
 
 #[cfg(windows)]
 fn run_self_update(tag: &str) -> Result<bool> {
+    // Download the install script to a temp file and invoke it with parameters.
+    // Piping irm to iex doesn't support Param() arguments, so we save first.
     let ps_cmd = format!(
-        "irm https://raw.githubusercontent.com/{OWNER}/{REPO}/{tag}/install.ps1 | iex; install.ps1 -EasyMode -Verify -Version {tag}"
+        "$s = Join-Path $env:TEMP 'cass-install.ps1';          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/{OWNER}/{REPO}/{tag}/install.ps1' -OutFile $s;          & $s -EasyMode -Verify -Version '{tag}';          Remove-Item -Force $s"
     );
     let status = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", &ps_cmd])
