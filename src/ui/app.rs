@@ -218,6 +218,8 @@ pub const SAVED_VIEWS_MODAL_TITLE: &str = " Saved Views ";
 
 /// Number of selected items before requiring double-press confirmation.
 pub const OPEN_CONFIRM_THRESHOLD: usize = 12;
+/// Maximum number of panes shown simultaneously in the results strip.
+const MAX_VISIBLE_PANES: usize = 6;
 const PANEL_RATIO_MIN: f64 = 0.25;
 const PANEL_RATIO_MAX: f64 = 0.75;
 const FOOTER_HINT_ROOT_ID: HelpId = HelpId(1_000_000);
@@ -2301,6 +2303,74 @@ fn workspace_original_from_metadata(metadata: &serde_json::Value) -> Option<Stri
         .map(ToOwned::to_owned)
 }
 
+fn display_group_name(key: &str) -> String {
+    key.replace(['_', '-'], " ")
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            if let Some(first) = chars.next() {
+                format!("{}{}", first.to_uppercase(), chars.as_str())
+            } else {
+                String::new()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn legacy_agent_color(agent: &str) -> ftui::PackedRgba {
+    match agent.to_ascii_lowercase().as_str() {
+        "codex" => ftui::PackedRgba::rgb(0, 200, 150), // teal
+        "claude" | "claude_code" => ftui::PackedRgba::rgb(204, 119, 34), // amber
+        "gemini" | "gemini_cli" => ftui::PackedRgba::rgb(66, 133, 244), // blue
+        "cline" => ftui::PackedRgba::rgb(138, 43, 226), // violet
+        "opencode" => ftui::PackedRgba::rgb(50, 205, 50), // lime
+        "amp" => ftui::PackedRgba::rgb(255, 99, 71),   // tomato
+        "cursor" => ftui::PackedRgba::rgb(147, 112, 219), // purple
+        "chatgpt" => ftui::PackedRgba::rgb(16, 163, 127), // chatgpt green
+        "aider" => ftui::PackedRgba::rgb(255, 165, 0), // orange
+        "pi_agent" => ftui::PackedRgba::rgb(255, 140, 0), // dark orange
+        _ => ftui::PackedRgba::rgb(169, 169, 169),     // gray fallback
+    }
+}
+
+fn dim_packed_color(color: ftui::PackedRgba, factor: f32) -> ftui::PackedRgba {
+    let f = factor.clamp(0.0, 1.0);
+    ftui::PackedRgba::rgb(
+        (f32::from(color.r()) * f).round() as u8,
+        (f32::from(color.g()) * f).round() as u8,
+        (f32::from(color.b()) * f).round() as u8,
+    )
+}
+
+fn max_visible_panes_for_width(width: u16) -> usize {
+    match width {
+        0..=69 => 1,
+        70..=109 => 2,
+        110..=149 => 3,
+        150..=199 => 4,
+        200..=239 => 5,
+        _ => MAX_VISIBLE_PANES,
+    }
+}
+
+fn pane_filter_matches_hit(hit: &SearchHit, filter: &str) -> bool {
+    if filter.trim().is_empty() {
+        return true;
+    }
+    let needle = filter.to_ascii_lowercase();
+    [
+        hit.title.as_str(),
+        hit.snippet.as_str(),
+        hit.content.as_str(),
+        hit.source_path.as_str(),
+        hit.workspace.as_str(),
+        hit.agent.as_str(),
+    ]
+    .iter()
+    .any(|field| field.to_ascii_lowercase().contains(&needle))
+}
+
 fn elide_text(text: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -3316,6 +3386,8 @@ pub struct CassApp {
     pub last_detail_area: RefCell<Option<Rect>>,
     /// Last rendered pane rectangles.
     pub last_pane_rects: RefCell<Vec<Rect>>,
+    /// First pane index represented by `last_pane_rects`.
+    pub last_pane_first_index: RefCell<usize>,
     /// Last rendered pill hit-test rectangles.
     pub last_pill_rects: RefCell<Vec<(Rect, Pill)>>,
     /// Last rendered status footer area.
@@ -3510,6 +3582,7 @@ impl Default for CassApp {
             last_results_inner: RefCell::new(None),
             last_detail_area: RefCell::new(None),
             last_pane_rects: RefCell::new(Vec::new()),
+            last_pane_first_index: RefCell::new(0),
             last_pill_rects: RefCell::new(Vec::new()),
             last_status_area: RefCell::new(None),
             last_content_area: RefCell::new(None),
@@ -3773,7 +3846,42 @@ impl CassApp {
             return MouseHitRegion::SplitHandle;
         }
 
-        // Check results inner area first (most common click target).
+        // Pane-aware hit testing: when multi-pane is active, each pane gets its own
+        // row index mapping and scroll context.
+        {
+            let pane_rects = self.last_pane_rects.borrow();
+            if !pane_rects.is_empty() {
+                let first_idx = *self.last_pane_first_index.borrow();
+                let term_w = self.last_content_area.borrow().map_or(120, |r| r.width);
+                let row_h = self.density_mode.effective(term_w).row_height().max(1);
+                for (vis_idx, rect) in pane_rects.iter().copied().enumerate() {
+                    if !rect.contains(x, y) {
+                        continue;
+                    }
+                    let pane_idx = first_idx + vis_idx;
+                    let inner = Rect::new(
+                        rect.x.saturating_add(1),
+                        rect.y.saturating_add(1),
+                        rect.width.saturating_sub(2),
+                        rect.height.saturating_sub(2),
+                    );
+                    let row_in_viewport = if inner.height == 0 || y < inner.y {
+                        0
+                    } else {
+                        ((y - inner.y) / row_h) as usize
+                    };
+                    let scroll = if pane_idx == self.active_pane {
+                        self.results_list_state.borrow().scroll_offset()
+                    } else {
+                        0
+                    };
+                    let item_idx = scroll + row_in_viewport;
+                    return MouseHitRegion::Results { pane_idx, item_idx };
+                }
+            }
+        }
+
+        // Single-pane fallback.
         if let Some(rect) = *self.last_results_inner.borrow()
             && rect.contains(x, y)
         {
@@ -3783,7 +3891,10 @@ impl CassApp {
             let scroll = state.scroll_offset();
             let row_in_viewport = ((y - rect.y) / row_h.max(1)) as usize;
             let item_idx = scroll + row_in_viewport;
-            return MouseHitRegion::Results { item_idx };
+            return MouseHitRegion::Results {
+                pane_idx: self.active_pane,
+                item_idx,
+            };
         }
         if let Some(rect) = *self.last_detail_area.borrow()
             && rect.contains(x, y)
@@ -4305,9 +4416,20 @@ impl CassApp {
 
     /// Re-group results into panes using the current `grouping_mode`.
     fn regroup_panes(&mut self) {
+        let prev_active_key = self
+            .panes
+            .get(self.active_pane)
+            .map(|pane| pane.agent.clone());
+        let prev_active_hit = self.selected_hit().map(SelectedHitKey::from_hit);
+
         let mut pane_map: std::collections::BTreeMap<String, Vec<SearchHit>> =
             std::collections::BTreeMap::new();
         for hit in &self.results {
+            if let Some(filter) = self.pane_filter.as_deref().filter(|s| !s.trim().is_empty())
+                && !pane_filter_matches_hit(hit, filter)
+            {
+                continue;
+            }
             let key = match self.grouping_mode {
                 ResultsGrouping::Agent => hit.agent.clone(),
                 ResultsGrouping::Conversation => {
@@ -4332,8 +4454,11 @@ impl CassApp {
         }
         self.panes = pane_map
             .into_iter()
-            .map(|(key, hits)| {
+            .map(|(key, mut hits)| {
                 let total = hits.len();
+                if hits.len() > self.per_pane_limit {
+                    hits.truncate(self.per_pane_limit);
+                }
                 AgentPane {
                     agent: key,
                     hits,
@@ -4342,8 +4467,67 @@ impl CassApp {
                 }
             })
             .collect();
+
+        if let Some(active_key) = prev_active_key
+            && let Some(idx) = self.panes.iter().position(|pane| pane.agent == active_key)
+        {
+            self.active_pane = idx;
+        }
         if self.active_pane >= self.panes.len() {
-            self.active_pane = 0;
+            self.active_pane = self.panes.len().saturating_sub(1);
+        }
+
+        if let Some(key) = prev_active_hit
+            && let Some(pane) = self.panes.get_mut(self.active_pane)
+            && let Some(idx) = pane
+                .hits
+                .iter()
+                .position(|hit| SelectedHitKey::from_hit(hit) == key)
+        {
+            pane.selected = idx;
+        }
+
+        for pane in &mut self.panes {
+            if pane.hits.is_empty() {
+                pane.selected = 0;
+            } else if pane.selected >= pane.hits.len() {
+                pane.selected = pane.hits.len() - 1;
+            }
+        }
+
+        if let Some(pane) = self.panes.get(self.active_pane) {
+            let mut state = self.results_list_state.borrow_mut();
+            state.select(Some(pane.selected));
+        }
+
+        self.adjust_pane_scroll_offset();
+    }
+
+    fn visible_pane_capacity(&self) -> usize {
+        self.last_content_area
+            .borrow()
+            .map_or(MAX_VISIBLE_PANES, |rect| {
+                max_visible_panes_for_width(rect.width)
+            })
+            .max(1)
+    }
+
+    fn adjust_pane_scroll_offset(&mut self) {
+        if self.panes.is_empty() {
+            self.pane_scroll_offset = 0;
+            return;
+        }
+
+        let visible = self.visible_pane_capacity().min(self.panes.len()).max(1);
+        let max_start = self.panes.len().saturating_sub(visible);
+        if self.pane_scroll_offset > max_start {
+            self.pane_scroll_offset = max_start;
+        }
+
+        if self.active_pane < self.pane_scroll_offset {
+            self.pane_scroll_offset = self.active_pane;
+        } else if self.active_pane >= self.pane_scroll_offset + visible {
+            self.pane_scroll_offset = self.active_pane.saturating_sub(visible - 1);
         }
     }
 
@@ -4718,8 +4902,6 @@ impl CassApp {
         &self,
         frame: &mut super::ftui_adapter::Frame,
         area: Rect,
-        hits: &[SearchHit],
-        selected_idx: usize,
         row_h: u16,
         border_type: BorderType,
         borders: Borders,
@@ -4739,12 +4921,13 @@ impl CassApp {
             ResultsGrouping::Agent => String::new(),
             other => format!(" [{}]", other.label()),
         };
+        let total_hits: usize = self.panes.iter().map(|pane| pane.total_count).sum();
+        let pane_count = self.panes.len();
         let results_title = if self.selected.is_empty() {
-            format!("Results ({}){grouping_suffix}", hits.len())
+            format!("Results ({total_hits} hits · {pane_count} panes){grouping_suffix}")
         } else {
             format!(
-                "Results ({}) \u{2022} {} selected{grouping_suffix}",
-                hits.len(),
+                "Results ({total_hits} hits · {pane_count} panes) \u{2022} {} selected{grouping_suffix}",
                 self.selected.len()
             )
         };
@@ -4767,66 +4950,174 @@ impl CassApp {
         let inner = results_block.inner(area);
         results_block.render(area, frame);
 
-        // Record hit region for mouse click-to-select.
-        *self.last_results_inner.borrow_mut() = Some(inner);
+        *self.last_results_inner.borrow_mut() = None;
+        self.last_pane_rects.borrow_mut().clear();
+        *self.last_pane_first_index.borrow_mut() = 0;
 
         if inner.is_empty() {
             return;
         }
 
-        if hits.is_empty() {
+        if self.panes.is_empty() {
             Paragraph::new("No results yet. Type a query and press Enter.")
                 .style(text_muted_style)
                 .render(inner, frame);
             return;
         }
 
-        // Build ResultItem wrappers for VirtualizedList rendering.
-        let items: Vec<ResultItem> = hits
-            .iter()
-            .enumerate()
-            .map(|(i, hit)| {
-                let even = i % 2 == 0;
-                let queued = self.selected.contains(&SelectedHitKey::from_hit(hit));
-                ResultItem {
-                    index: i + 1,
-                    hit: hit.clone(),
-                    row_height: row_h,
-                    even,
-                    max_width: inner.width,
-                    queued,
-                    stripe_style: styles.result_row_style_for_agent(
-                        if even { row_style } else { row_alt_style },
-                        &hit.agent,
-                    ),
-                    selected_style: row_selected_style,
-                    agent_accent_style: styles.agent_accent_style(&hit.agent),
-                    score_style: styles.score_style(normalize_score_for_visuals(hit.score)),
-                    text_primary_style: styles.style(style_system::STYLE_TEXT_PRIMARY),
-                    text_muted_style: styles.style(style_system::STYLE_TEXT_MUTED),
-                    text_subtle_style: styles.style(style_system::STYLE_TEXT_SUBTLE),
-                    success_style: styles.style(style_system::STYLE_STATUS_SUCCESS),
-                    source_local_style: styles.style(style_system::STYLE_SOURCE_LOCAL),
-                    source_remote_style: styles.style(style_system::STYLE_SOURCE_REMOTE),
-                    location_style: styles.style(style_system::STYLE_LOCATION),
-                    reveal_progress: if reveal_motion_enabled {
-                        self.anim.reveal_progress(i) as f32
-                    } else {
-                        1.0
-                    },
-                    focus_flash_intensity,
-                }
-            })
-            .collect();
+        let max_visible = max_visible_panes_for_width(inner.width)
+            .min(self.panes.len())
+            .max(1);
+        let safe_scroll_offset = self
+            .pane_scroll_offset
+            .min(self.panes.len().saturating_sub(max_visible));
+        let visible_end = (safe_scroll_offset + max_visible).min(self.panes.len());
+        let visible_count = visible_end.saturating_sub(safe_scroll_offset).max(1);
+        let pane_chunks = Flex::horizontal()
+            .constraints(
+                (0..visible_count)
+                    .map(|_| Constraint::Percentage(100.0 / visible_count as f32))
+                    .collect::<Vec<_>>(),
+            )
+            .split(inner);
+        *self.last_pane_rects.borrow_mut() = pane_chunks.to_vec();
+        *self.last_pane_first_index.borrow_mut() = safe_scroll_offset;
 
-        let list = VirtualizedList::new(&items)
-            .fixed_height(row_h)
-            .highlight_style(row_selected_style)
-            .show_scrollbar(true);
+        for (vis_idx, pane_idx) in (safe_scroll_offset..visible_end).enumerate() {
+            let Some(pane) = self.panes.get(pane_idx) else {
+                continue;
+            };
+            let Some(pane_rect) = pane_chunks.get(vis_idx).copied() else {
+                continue;
+            };
 
-        let mut state = self.results_list_state.borrow_mut();
-        state.select(Some(selected_idx));
-        list.render(inner, frame, &mut state);
+            let pane_color = legacy_agent_color(&pane.agent);
+            let dimmed_pane_color = dim_packed_color(pane_color, 0.52);
+            let is_active = pane_idx == self.active_pane;
+            let is_focused = focused && is_active;
+            let accent_color = if is_focused {
+                pane_color
+            } else {
+                dimmed_pane_color
+            };
+            let pane_bg = if is_focused {
+                dim_packed_color(pane_color, 0.12)
+            } else {
+                dim_packed_color(pane_color, 0.06)
+            };
+            let pane_border_style = if is_focused {
+                title_focused_style.fg(accent_color)
+            } else {
+                title_unfocused_style.fg(accent_color)
+            };
+            let count_display = if pane.total_count > pane.hits.len() {
+                format!("{}/{}", pane.hits.len(), pane.total_count)
+            } else {
+                pane.hits.len().to_string()
+            };
+            let pane_title = format!("{} ({count_display})", display_group_name(&pane.agent));
+
+            let pane_block = Block::new()
+                .borders(borders)
+                .border_type(border_type)
+                .title(&pane_title)
+                .title_alignment(Alignment::Left)
+                .border_style(pane_border_style.bold())
+                .style(if is_focused {
+                    pane_focused_style.bg(pane_bg)
+                } else {
+                    pane_style.bg(pane_bg)
+                });
+            let pane_inner = pane_block.inner(pane_rect);
+            pane_block.render(pane_rect, frame);
+
+            if is_active {
+                *self.last_results_inner.borrow_mut() = Some(pane_inner);
+            }
+
+            if pane_inner.is_empty() || pane.hits.is_empty() {
+                continue;
+            }
+
+            let selected_row_style = row_selected_style
+                .bg(accent_color)
+                .fg(ftui::PackedRgba::rgb(14, 16, 24))
+                .bold();
+            let items: Vec<ResultItem> = pane
+                .hits
+                .iter()
+                .enumerate()
+                .map(|(i, hit)| {
+                    let even = i % 2 == 0;
+                    let queued = self.selected.contains(&SelectedHitKey::from_hit(hit));
+                    ResultItem {
+                        index: i + 1,
+                        hit: hit.clone(),
+                        row_height: row_h,
+                        even,
+                        max_width: pane_inner.width,
+                        queued,
+                        stripe_style: styles.result_row_style_for_agent(
+                            if even { row_style } else { row_alt_style },
+                            &hit.agent,
+                        ),
+                        selected_style: selected_row_style,
+                        agent_accent_style: ftui::Style::new()
+                            .fg(legacy_agent_color(&hit.agent))
+                            .bold(),
+                        score_style: styles.score_style(normalize_score_for_visuals(hit.score)),
+                        text_primary_style: styles.style(style_system::STYLE_TEXT_PRIMARY),
+                        text_muted_style: styles.style(style_system::STYLE_TEXT_MUTED),
+                        text_subtle_style: styles.style(style_system::STYLE_TEXT_SUBTLE),
+                        success_style: styles.style(style_system::STYLE_STATUS_SUCCESS),
+                        source_local_style: styles.style(style_system::STYLE_SOURCE_LOCAL),
+                        source_remote_style: styles.style(style_system::STYLE_SOURCE_REMOTE),
+                        location_style: styles.style(style_system::STYLE_LOCATION),
+                        reveal_progress: if reveal_motion_enabled {
+                            self.anim.reveal_progress(i) as f32
+                        } else {
+                            1.0
+                        },
+                        focus_flash_intensity: if is_active {
+                            focus_flash_intensity
+                        } else {
+                            0.0
+                        },
+                    }
+                })
+                .collect();
+
+            let list = VirtualizedList::new(&items)
+                .fixed_height(row_h)
+                .highlight_style(selected_row_style)
+                .show_scrollbar(is_active);
+            if is_active {
+                let mut state = self.results_list_state.borrow_mut();
+                state.select(Some(pane.selected.min(items.len().saturating_sub(1))));
+                list.render(pane_inner, frame, &mut state);
+            } else {
+                let mut state = VirtualizedListState::default();
+                state.select(Some(pane.selected.min(items.len().saturating_sub(1))));
+                list.render(pane_inner, frame, &mut state);
+            }
+        }
+
+        if safe_scroll_offset > 0 {
+            let hidden_left = safe_scroll_offset;
+            Paragraph::new(format!("\u{25c0} +{hidden_left}"))
+                .style(title_focused_style)
+                .render(Rect::new(inner.x, inner.y, 8.min(inner.width), 1), frame);
+        }
+        if visible_end < self.panes.len() {
+            let hidden_right = self.panes.len() - visible_end;
+            let text = format!("+{hidden_right} \u{25b6}");
+            let width = text.chars().count() as u16;
+            let start_x = inner.x + inner.width.saturating_sub(width);
+            Paragraph::new(text).style(title_focused_style).render(
+                Rect::new(start_x, inner.y, width.min(inner.width), 1),
+                frame,
+            );
+        }
 
         // Render role gutter markers if a11y mode is on
         if styles.options.a11y {
@@ -7964,8 +8255,9 @@ enum MouseHitRegion {
     SavedViewRow { row_idx: usize },
     /// Active filter pill in the search header.
     Pill { index: usize },
-    /// Click/scroll landed in the results list. `item_idx` is the absolute item index.
-    Results { item_idx: usize },
+    /// Click/scroll landed in a results pane row.
+    /// `pane_idx` is the absolute pane index, `item_idx` is row index inside that pane.
+    Results { pane_idx: usize, item_idx: usize },
     /// Click/scroll landed in the detail pane.
     Detail,
     /// Click/scroll landed in the search bar.
@@ -9887,6 +10179,12 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::ActivePaneChanged { index } => {
                 if index < self.panes.len() {
                     self.active_pane = index;
+                    if let Some(pane) = self.panes.get(self.active_pane) {
+                        self.results_list_state
+                            .borrow_mut()
+                            .select(Some(pane.selected));
+                    }
+                    self.adjust_pane_scroll_offset();
                 }
                 ftui::Cmd::none()
             }
@@ -10432,11 +10730,13 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::PaneFilterChanged(text) => {
                 self.input_buffer = text.clone();
                 self.pane_filter = Some(text);
+                self.regroup_panes();
                 ftui::Cmd::none()
             }
             CassMsg::PaneFilterClosed { apply } => {
                 if !apply {
                     self.pane_filter = None;
+                    self.regroup_panes();
                 }
                 self.input_mode = InputMode::Query;
                 self.input_buffer.clear();
@@ -11108,11 +11408,13 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::PaneGrew => {
                 self.per_pane_limit = (self.per_pane_limit + 2).min(50);
+                self.regroup_panes();
                 self.dirty_since = Some(Instant::now());
                 ftui::Cmd::none()
             }
             CassMsg::PaneShrunk => {
                 self.per_pane_limit = self.per_pane_limit.saturating_sub(2).max(4);
+                self.regroup_panes();
                 self.dirty_since = Some(Instant::now());
                 ftui::Cmd::none()
             }
@@ -11786,10 +12088,28 @@ impl super::ftui_adapter::Model for CassApp {
                         ftui::Cmd::none()
                     }
                     // ── Scroll in results ────────────────────────────
-                    (MouseEventKind::ScrollUp, MouseHitRegion::Results { .. }) => {
+                    (MouseEventKind::ScrollUp, MouseHitRegion::Results { pane_idx, .. }) => {
+                        if pane_idx < self.panes.len() && pane_idx != self.active_pane {
+                            self.active_pane = pane_idx;
+                            if let Some(pane) = self.panes.get(self.active_pane) {
+                                self.results_list_state
+                                    .borrow_mut()
+                                    .select(Some(pane.selected));
+                            }
+                            self.adjust_pane_scroll_offset();
+                        }
                         ftui::Cmd::msg(CassMsg::SelectionMoved { delta: -3 })
                     }
-                    (MouseEventKind::ScrollDown, MouseHitRegion::Results { .. }) => {
+                    (MouseEventKind::ScrollDown, MouseHitRegion::Results { pane_idx, .. }) => {
+                        if pane_idx < self.panes.len() && pane_idx != self.active_pane {
+                            self.active_pane = pane_idx;
+                            if let Some(pane) = self.panes.get(self.active_pane) {
+                                self.results_list_state
+                                    .borrow_mut()
+                                    .select(Some(pane.selected));
+                            }
+                            self.adjust_pane_scroll_offset();
+                        }
                         ftui::Cmd::msg(CassMsg::SelectionMoved { delta: 3 })
                     }
                     // ── Scroll in detail ─────────────────────────────
@@ -11800,10 +12120,19 @@ impl super::ftui_adapter::Model for CassApp {
                         ftui::Cmd::msg(CassMsg::DetailScrolled { delta: 3 })
                     }
                     // ── Left click in results: select item ──────────
-                    (MouseEventKind::LeftClick, MouseHitRegion::Results { item_idx }) => {
+                    (MouseEventKind::LeftClick, MouseHitRegion::Results { pane_idx, item_idx }) => {
+                        if pane_idx < self.panes.len() && pane_idx != self.active_pane {
+                            self.active_pane = pane_idx;
+                            if let Some(pane) = self.panes.get(self.active_pane) {
+                                self.results_list_state
+                                    .borrow_mut()
+                                    .select(Some(pane.selected));
+                            }
+                            self.adjust_pane_scroll_offset();
+                        }
                         let hit_count = self
                             .panes
-                            .get(self.active_pane)
+                            .get(pane_idx)
                             .map_or(self.results.len(), |p| p.hits.len());
                         if item_idx < hit_count {
                             // Compute delta from current selection to clicked row.
@@ -11821,10 +12150,22 @@ impl super::ftui_adapter::Model for CassApp {
                         }
                     }
                     // ── Right click in results: toggle select ───────
-                    (MouseEventKind::RightClick, MouseHitRegion::Results { item_idx }) => {
+                    (
+                        MouseEventKind::RightClick,
+                        MouseHitRegion::Results { pane_idx, item_idx },
+                    ) => {
+                        if pane_idx < self.panes.len() && pane_idx != self.active_pane {
+                            self.active_pane = pane_idx;
+                            if let Some(pane) = self.panes.get(self.active_pane) {
+                                self.results_list_state
+                                    .borrow_mut()
+                                    .select(Some(pane.selected));
+                            }
+                            self.adjust_pane_scroll_offset();
+                        }
                         let hit_count = self
                             .panes
-                            .get(self.active_pane)
+                            .get(pane_idx)
                             .map_or(self.results.len(), |p| p.hits.len());
                         if item_idx < hit_count {
                             // Move to the row first, then toggle selection.
@@ -12756,14 +13097,11 @@ impl super::ftui_adapter::Model for CassApp {
                 *self.last_detail_area.borrow_mut() = None;
                 *self.last_split_handle_area.borrow_mut() = None;
 
-                let (hits, selected_idx) = if let Some(pane) = self.panes.get(self.active_pane) {
-                    (&pane.hits[..], pane.selected)
-                } else {
-                    (&self.results[..], 0)
-                };
+                self.last_pane_rects.borrow_mut().clear();
+                *self.last_pane_first_index.borrow_mut() = 0;
                 let results_focused = self.focused_region() == FocusRegion::Results;
                 let reveal_motion_enabled =
-                    self.results_reveal_motion_enabled(degradation, hits.len());
+                    self.results_reveal_motion_enabled(degradation, self.results.len());
                 let focus_flash_intensity =
                     self.results_focus_flash_intensity(degradation, results_focused);
 
@@ -12776,8 +13114,6 @@ impl super::ftui_adapter::Model for CassApp {
                     self.render_results_pane(
                         frame,
                         results_area,
-                        hits,
-                        selected_idx,
                         row_h,
                         border_type,
                         adaptive_borders,
@@ -12819,8 +13155,6 @@ impl super::ftui_adapter::Model for CassApp {
                             self.render_results_pane(
                                 frame,
                                 content_area,
-                                hits,
-                                selected_idx,
                                 row_h,
                                 border_type,
                                 adaptive_borders,
@@ -12861,10 +13195,10 @@ impl super::ftui_adapter::Model for CassApp {
                     DensityMode::Cozy => "cozy",
                     DensityMode::Spacious => "spacious",
                 };
-                let hits_for_status = if let Some(pane) = self.panes.get(self.active_pane) {
-                    pane.hits.len()
-                } else {
+                let hits_for_status = if self.panes.is_empty() {
                     self.results.len()
+                } else {
+                    self.panes.iter().map(|pane| pane.total_count).sum()
                 };
                 let kbd_key_s = if apply_style {
                     styles.style(style_system::STYLE_KBD_KEY)
@@ -13036,6 +13370,8 @@ impl super::ftui_adapter::Model for CassApp {
                 *self.last_content_area.borrow_mut() = None;
                 *self.last_split_handle_area.borrow_mut() = None;
                 self.last_pill_rects.borrow_mut().clear();
+                self.last_pane_rects.borrow_mut().clear();
+                *self.last_pane_first_index.borrow_mut() = 0;
                 self.last_saved_view_row_areas.borrow_mut().clear();
 
                 // ── Analytics surface layout ─────────────────────────────
@@ -13153,6 +13489,8 @@ impl super::ftui_adapter::Model for CassApp {
                 *self.last_content_area.borrow_mut() = None;
                 *self.last_split_handle_area.borrow_mut() = None;
                 self.last_pill_rects.borrow_mut().clear();
+                self.last_pane_rects.borrow_mut().clear();
+                *self.last_pane_first_index.borrow_mut() = 0;
                 self.last_saved_view_row_areas.borrow_mut().clear();
 
                 // ── Sources surface layout ─────────────────────────────
@@ -19954,8 +20292,53 @@ mod tests {
         let inner = app.last_results_inner.borrow().unwrap();
         let region = app.hit_test(inner.x, inner.y);
         assert!(
-            matches!(region, MouseHitRegion::Results { item_idx: 0 }),
-            "click at results origin should return Results(0), got {region:?}"
+            matches!(
+                region,
+                MouseHitRegion::Results {
+                    pane_idx: 0,
+                    item_idx: 0
+                }
+            ),
+            "click at results origin should return Results(pane=0,row=0), got {region:?}"
+        );
+    }
+
+    #[test]
+    fn wide_layout_records_multiple_visible_pane_rects() {
+        let app = app_with_rich_visual_fixture();
+        render_at_degradation(&app, 180, 32, ftui::render::budget::DegradationLevel::Full);
+
+        let pane_rects = app.last_pane_rects.borrow();
+        assert!(
+            pane_rects.len() >= 3,
+            "wide layout should show multiple side-by-side panes, got {}",
+            pane_rects.len()
+        );
+    }
+
+    #[test]
+    fn mouse_click_in_non_active_pane_switches_active_pane() {
+        use ftui::Model;
+        let mut app = app_with_rich_visual_fixture();
+        app.active_pane = 0;
+        render_at_degradation(&app, 180, 32, ftui::render::budget::DegradationLevel::Full);
+
+        let first_idx = *app.last_pane_first_index.borrow();
+        let pane_rects = app.last_pane_rects.borrow().clone();
+        assert!(
+            pane_rects.len() >= 2,
+            "test fixture should render at least two panes"
+        );
+        let target = pane_rects[1];
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: target.x.saturating_add(2),
+            y: target.y.saturating_add(2),
+        });
+        assert_eq!(
+            app.active_pane,
+            first_idx + 1,
+            "clicking a non-active pane should switch active pane"
         );
     }
 
@@ -20551,8 +20934,14 @@ mod tests {
         let row_h = app.density_mode.row_height();
         let region = app.hit_test(inner.x, inner.y + row_h + 1);
         assert!(
-            matches!(region, MouseHitRegion::Results { item_idx: 1 }),
-            "2nd row in spacious density should be item_idx=1, got {region:?}"
+            matches!(
+                region,
+                MouseHitRegion::Results {
+                    pane_idx: 0,
+                    item_idx: 1
+                }
+            ),
+            "2nd row in spacious density should be item_idx=1 in pane 0, got {region:?}"
         );
     }
 
