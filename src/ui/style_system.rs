@@ -67,6 +67,7 @@ pub const STYLE_DETAIL_FIND_CONTAINER: &str = "detail.find.container";
 pub const STYLE_DETAIL_FIND_QUERY: &str = "detail.find.query";
 pub const STYLE_DETAIL_FIND_MATCH_ACTIVE: &str = "detail.find.match.active";
 pub const STYLE_DETAIL_FIND_MATCH_INACTIVE: &str = "detail.find.match.inactive";
+pub const STYLE_QUERY_HIGHLIGHT: &str = "query.highlight";
 pub const STYLE_KBD_KEY: &str = "kbd.key";
 pub const STYLE_KBD_DESC: &str = "kbd.desc";
 pub const THEME_CONFIG_VERSION: u32 = 1;
@@ -1701,6 +1702,13 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
                 0.28,
             ))),
     );
+    sheet.define(
+        STYLE_QUERY_HIGHLIGHT,
+        Style::new()
+            .fg(to_packed(resolved.accent))
+            .bold()
+            .underline(),
+    );
 
     sheet
 }
@@ -2308,6 +2316,7 @@ mod tests {
             STYLE_DETAIL_FIND_QUERY,
             STYLE_DETAIL_FIND_MATCH_ACTIVE,
             STYLE_DETAIL_FIND_MATCH_INACTIVE,
+            STYLE_QUERY_HIGHLIGHT,
         ] {
             assert!(context.sheet.contains(key), "missing style token: {key}");
         }
@@ -4292,6 +4301,7 @@ mod tests {
             "STYLE_DETAIL_FIND_MATCH_INACTIVE",
             STYLE_DETAIL_FIND_MATCH_INACTIVE,
         ),
+        ("STYLE_QUERY_HIGHLIGHT", STYLE_QUERY_HIGHLIGHT),
         ("STYLE_KBD_KEY", STYLE_KBD_KEY),
         ("STYLE_KBD_DESC", STYLE_KBD_DESC),
     ];
@@ -4311,6 +4321,7 @@ mod tests {
         "STYLE_DETAIL_FIND_QUERY",
         "STYLE_DETAIL_FIND_MATCH_ACTIVE",
         "STYLE_DETAIL_FIND_MATCH_INACTIVE",
+        "STYLE_QUERY_HIGHLIGHT",
         // build_pills_row() applies label style per-span within pill construction
         "STYLE_PILL_LABEL",
     ];

@@ -2268,6 +2268,10 @@ pub struct ResultItem {
     pub reveal_progress: f32,
     /// Focus-flash intensity injected from app animation state (0.0-1.0).
     pub focus_flash_intensity: f32,
+    /// Query terms for highlighting matches in title/snippet.
+    pub query_terms: Vec<String>,
+    /// Style for highlighted query terms.
+    pub query_highlight_style: ftui::Style,
 }
 
 fn source_display_label(source_id: &str, origin_host: Option<&str>) -> String {
@@ -2623,14 +2627,21 @@ impl RenderItem for ResultItem {
             format!("{agent_name} "),
             self.agent_accent_style,
         ));
-        title_spans.push(ftui::text::Span::styled(
-            elide_text(title, content_width.saturating_sub(agent_name.len() + 10)),
-            if reveal_progress >= 0.8 {
-                self.text_primary_style.bold()
-            } else {
-                self.text_primary_style
-            },
-        ));
+        let title_base = if reveal_progress >= 0.8 {
+            self.text_primary_style.bold()
+        } else {
+            self.text_primary_style
+        };
+        let elided_title = elide_text(title, content_width.saturating_sub(agent_name.len() + 10));
+        let hl_spans = highlight_query_spans(
+            &elided_title,
+            &self.query_terms,
+            title_base,
+            self.query_highlight_style,
+        );
+        for span in hl_spans {
+            title_spans.push(span);
+        }
         let title_line = ftui::text::Line::from_spans(title_spans);
 
         // Line 2: score bar + source badge + metadata
@@ -2714,10 +2725,20 @@ impl RenderItem for ResultItem {
             let snippet_budget = self.snippet_line_budget(content_width.saturating_sub(8));
             let snippet_lines = self.snippet_lines(content_width.saturating_sub(8), snippet_budget);
             for snippet in snippet_lines {
-                lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("    \u{2502} ", self.text_muted_style),
-                    ftui::text::Span::styled(snippet, self.text_muted_style),
-                ]));
+                let mut snippet_spans = vec![ftui::text::Span::styled(
+                    "    \u{2502} ",
+                    self.text_muted_style,
+                )];
+                let hl = highlight_query_spans(
+                    &snippet,
+                    &self.query_terms,
+                    self.text_muted_style,
+                    self.query_highlight_style,
+                );
+                for s in hl {
+                    snippet_spans.push(s);
+                }
+                lines.push(ftui::text::Line::from_spans(snippet_spans));
             }
         }
 
@@ -2736,6 +2757,87 @@ impl RenderItem for ResultItem {
     fn height(&self) -> u16 {
         self.row_height
     }
+}
+
+/// Split `text` into owned spans, highlighting case-insensitive matches of `terms`.
+///
+/// Returns a `Vec<Span<'static>>` where matched substrings use `highlight_style`
+/// and non-matched portions use `base_style`. Terms are matched greedily from
+/// left to right with no overlapping. Empty or whitespace-only terms are skipped.
+fn highlight_query_spans(
+    text: &str,
+    terms: &[String],
+    base_style: ftui::Style,
+    highlight_style: ftui::Style,
+) -> Vec<ftui::text::Span<'static>> {
+    if terms.is_empty() || text.is_empty() {
+        return vec![ftui::text::Span::styled(text.to_string(), base_style)];
+    }
+    let lower = text.to_ascii_lowercase();
+    // Collect (start, end) of all non-overlapping matches, earliest-first
+    let mut matches: Vec<(usize, usize)> = Vec::new();
+    for term in terms {
+        if term.is_empty() {
+            continue;
+        }
+        let term_lower = term.to_ascii_lowercase();
+        let mut search_from = 0;
+        while let Some(pos) = lower[search_from..].find(&term_lower) {
+            let abs_start = search_from + pos;
+            let abs_end = abs_start + term_lower.len();
+            matches.push((abs_start, abs_end));
+            search_from = abs_end;
+        }
+    }
+    if matches.is_empty() {
+        return vec![ftui::text::Span::styled(text.to_string(), base_style)];
+    }
+    matches.sort_by_key(|m| m.0);
+    // Merge overlapping ranges
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(matches.len());
+    for (s, e) in matches {
+        if let Some(last) = merged.last_mut()
+            && s <= last.1
+        {
+            last.1 = last.1.max(e);
+            continue;
+        }
+        merged.push((s, e));
+    }
+    let mut spans = Vec::with_capacity(merged.len() * 2 + 1);
+    let mut cursor = 0;
+    for (s, e) in merged {
+        if cursor < s {
+            spans.push(ftui::text::Span::styled(
+                text[cursor..s].to_string(),
+                base_style,
+            ));
+        }
+        spans.push(ftui::text::Span::styled(
+            text[s..e].to_string(),
+            highlight_style,
+        ));
+        cursor = e;
+    }
+    if cursor < text.len() {
+        spans.push(ftui::text::Span::styled(
+            text[cursor..].to_string(),
+            base_style,
+        ));
+    }
+    spans
+}
+
+/// Extract non-trivial search terms from a query string for highlighting.
+///
+/// Splits on whitespace and filters out terms shorter than 2 characters to
+/// avoid noise from single-character highlights.
+fn extract_query_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .filter(|w| w.len() >= 2)
+        .map(|w| w.to_string())
+        .collect()
 }
 
 /// Normalize search scores for UI cues.
@@ -3467,6 +3569,10 @@ pub struct CassApp {
     /// History stack for query/filter state undo/redo (Ctrl+Z / Ctrl+Y).
     pub undo_history: UndoHistory,
 
+    // -- Terminal focus tracking -------------------------------------------
+    /// Whether the terminal window has focus (for dim-on-blur).
+    pub terminal_focused: bool,
+
     // -- Animation & timing -----------------------------------------------
     /// Spring-based animation state (focus flash, reveal, modal, panel).
     pub anim: AnimationState,
@@ -3682,6 +3788,7 @@ impl Default for CassApp {
             },
             toast_manager: ToastManager::default(),
             undo_history: UndoHistory::default(),
+            terminal_focused: true,
             anim: AnimationState::from_env(),
             reveal_anim_start: None,
             focus_flash_until: None,
@@ -5158,6 +5265,8 @@ impl CassApp {
                             1.0
                         },
                         focus_flash_intensity,
+                        query_terms: extract_query_terms(&self.query),
+                        query_highlight_style: styles.style(style_system::STYLE_QUERY_HIGHLIGHT),
                     }
                 })
                 .collect();
@@ -5290,6 +5399,8 @@ impl CassApp {
                         } else {
                             0.0
                         },
+                        query_terms: extract_query_terms(&self.query),
+                        query_highlight_style: styles.style(style_system::STYLE_QUERY_HIGHLIGHT),
                     }
                 })
                 .collect();
@@ -8328,6 +8439,8 @@ pub enum CassMsg {
     // -- Window & terminal ------------------------------------------------
     /// Terminal resized.
     Resized { width: u16, height: u16 },
+    /// Terminal focus gained or lost.
+    TerminalFocusChanged(bool),
     /// Periodic tick for animations and debounce.
     Tick,
     /// Mouse event with coordinates.
@@ -9317,6 +9430,7 @@ impl From<super::ftui_adapter::Event> for CassMsg {
             }
 
             Event::Resize { width, height } => CassMsg::Resized { width, height },
+            Event::Focus(gained) => CassMsg::TerminalFocusChanged(gained),
             Event::Tick => CassMsg::Tick,
             _ => CassMsg::Tick,
         }
@@ -12020,6 +12134,10 @@ impl super::ftui_adapter::Model for CassApp {
                 self.evidence.refresh();
                 ftui::Cmd::none()
             }
+            CassMsg::TerminalFocusChanged(gained) => {
+                self.terminal_focused = gained;
+                ftui::Cmd::none()
+            }
             CassMsg::Tick => {
                 self.spinner_frame = self.spinner_frame.wrapping_add(1);
                 let now = Instant::now();
@@ -13579,6 +13697,13 @@ impl super::ftui_adapter::Model for CassApp {
                     value: scope_lane,
                     value_style: status_info_s,
                 });
+                if !self.terminal_focused {
+                    hud_lanes.push(FooterHudLane {
+                        key: "focus",
+                        value: "unfocused".to_string(),
+                        value_style: status_warning_s,
+                    });
+                }
                 let footer_area = vertical[2];
                 if footer_area.height >= 2 {
                     // Row 1: Status info
@@ -15180,6 +15305,20 @@ mod tests {
         assert!(matches!(
             CassMsg::from(event),
             CassMsg::QueryChanged(q) if q == "auth error"
+        ));
+    }
+
+    #[test]
+    fn event_mapping_focus_maps_to_terminal_focus_changed() {
+        use crate::ui::ftui_adapter::Event;
+
+        assert!(matches!(
+            CassMsg::from(Event::Focus(true)),
+            CassMsg::TerminalFocusChanged(true)
+        ));
+        assert!(matches!(
+            CassMsg::from(Event::Focus(false)),
+            CassMsg::TerminalFocusChanged(false)
         ));
     }
 
@@ -16903,6 +17042,8 @@ mod tests {
                 location_style: ftui::Style::default(),
                 reveal_progress: 1.0,
                 focus_flash_intensity: 0.0,
+                query_terms: vec![],
+                query_highlight_style: ftui::Style::new(),
             };
             assert_eq!(item.height(), density_h, "density {mode:?}");
         }
@@ -17069,6 +17210,8 @@ mod tests {
             location_style: ftui::Style::default(),
             reveal_progress: 1.0,
             focus_flash_intensity: 0.0,
+            query_terms: vec![],
+            query_highlight_style: ftui::Style::new(),
         };
         let not_queued = ResultItem {
             index: 1,
@@ -17090,6 +17233,8 @@ mod tests {
             location_style: ftui::Style::default(),
             reveal_progress: 1.0,
             focus_flash_intensity: 0.0,
+            query_terms: vec![],
+            query_highlight_style: ftui::Style::new(),
         };
         assert!(queued_item.queued);
         assert!(!not_queued.queued);
@@ -17121,6 +17266,8 @@ mod tests {
             location_style: ftui::Style::default(),
             reveal_progress: 1.0,
             focus_flash_intensity: 0.0,
+            query_terms: vec![],
+            query_highlight_style: ftui::Style::new(),
         };
         assert_eq!(local_item.source_badge(), "[local]");
 
@@ -17148,8 +17295,73 @@ mod tests {
             location_style: ftui::Style::default(),
             reveal_progress: 1.0,
             focus_flash_intensity: 0.0,
+            query_terms: vec![],
+            query_highlight_style: ftui::Style::new(),
         };
         assert_eq!(remote_item.source_badge(), "[laptop]");
+    }
+
+    #[test]
+    fn highlight_query_spans_marks_matching_terms() {
+        let base = ftui::Style::new();
+        let hl = ftui::Style::new().bold();
+        let spans = highlight_query_spans("Fix the login bug quickly", &["login".into()], base, hl);
+        assert_eq!(spans.len(), 3, "expect before/match/after");
+        assert_eq!(spans[0].content, "Fix the ");
+        assert_eq!(spans[1].content, "login");
+        assert_eq!(spans[2].content, " bug quickly");
+    }
+
+    #[test]
+    fn highlight_query_spans_case_insensitive() {
+        let base = ftui::Style::new();
+        let hl = ftui::Style::new().bold();
+        let spans = highlight_query_spans("Hello WORLD hello", &["hello".into()], base, hl);
+        assert_eq!(spans.len(), 3, "two matches + one gap between them");
+        assert_eq!(spans[0].content, "Hello");
+        assert_eq!(spans[1].content, " WORLD ");
+        assert_eq!(spans[2].content, "hello");
+    }
+
+    #[test]
+    fn highlight_query_spans_no_match_returns_single_span() {
+        let base = ftui::Style::new();
+        let hl = ftui::Style::new().bold();
+        let spans = highlight_query_spans("no matches here", &["xyz".into()], base, hl);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "no matches here");
+    }
+
+    #[test]
+    fn highlight_query_spans_empty_terms_returns_single_span() {
+        let base = ftui::Style::new();
+        let hl = ftui::Style::new().bold();
+        let spans = highlight_query_spans("some text", &[], base, hl);
+        assert_eq!(spans.len(), 1);
+    }
+
+    #[test]
+    fn highlight_query_spans_overlapping_terms_merge() {
+        let base = ftui::Style::new();
+        let hl = ftui::Style::new().bold();
+        // "log" and "login" overlap — should merge into single highlight for "login"
+        let spans = highlight_query_spans("fix login", &["log".into(), "login".into()], base, hl);
+        // "fix " + "login" = 2 spans
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "fix ");
+        assert_eq!(spans[1].content, "login");
+    }
+
+    #[test]
+    fn extract_query_terms_filters_short_words() {
+        let terms = extract_query_terms("a the login fix");
+        assert_eq!(terms, vec!["the", "login", "fix"]);
+    }
+
+    #[test]
+    fn extract_query_terms_empty_query() {
+        let terms = extract_query_terms("");
+        assert!(terms.is_empty());
     }
 
     #[test]
@@ -17446,6 +17658,18 @@ mod tests {
             "test_id=9.5.interaction.density_cycle component=scroll expected=preserved actual_before={} actual_after={}",
             before_scroll, after_scroll
         );
+    }
+
+    #[test]
+    fn terminal_focus_changed_tracks_state() {
+        let mut app = CassApp::default();
+        assert!(app.terminal_focused, "should start focused");
+
+        let _ = app.update(CassMsg::TerminalFocusChanged(false));
+        assert!(!app.terminal_focused, "should be unfocused after FocusLost");
+
+        let _ = app.update(CassMsg::TerminalFocusChanged(true));
+        assert!(app.terminal_focused, "should be focused after FocusGained");
     }
 
     #[test]
@@ -18664,6 +18888,8 @@ mod tests {
             location_style: ftui::Style::default(),
             reveal_progress: 1.0,
             focus_flash_intensity: 0.0,
+            query_terms: vec![],
+            query_highlight_style: ftui::Style::new(),
         }
     }
 
