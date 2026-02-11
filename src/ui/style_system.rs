@@ -1639,7 +1639,8 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
         STYLE_PILL_INACTIVE,
         Style::new()
             .fg(to_packed(resolved.text_muted))
-            .bg(to_packed(blend(resolved.surface, resolved.border, 0.20))),
+            .bg(to_packed(blend(resolved.surface, resolved.border, 0.12)))
+            .dim(),
     );
     sheet.define(
         STYLE_PILL_LABEL,
@@ -4087,6 +4088,22 @@ mod tests {
             assert!(
                 inactive.bg.is_some(),
                 "STYLE_PILL_INACTIVE must have bg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn pill_inactive_is_dim() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let inactive = ctx.style(STYLE_PILL_INACTIVE);
+            let is_dim = inactive
+                .attrs
+                .is_some_and(|a| a.contains(ftui::StyleFlags::DIM));
+            assert!(
+                is_dim,
+                "STYLE_PILL_INACTIVE should be dim for preset {}",
                 preset.name()
             );
         }

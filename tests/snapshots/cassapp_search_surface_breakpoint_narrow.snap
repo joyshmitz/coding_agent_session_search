@@ -1,6 +1,6 @@
 ┌cass | mode:hybrid | match:prefix────────────────────────────────────────────┐
 │authenticatio│n regression                                                   │
-│[agent:any] [ws:any] [time:all] [source:all]                                 │
+│[agent:✎any] [ws:✎any] [time:✎all] [source:✎all]                             │
 │All agents › All workspaces › Any time › Balanced › all sources              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ┌Results (1)──────────────────────────────────────────────────────────────────┐
