@@ -5235,9 +5235,20 @@ impl CassApp {
         }
 
         if self.panes.is_empty() {
-            Paragraph::new("No results yet. Type a query and press Enter.")
-                .style(text_muted_style)
-                .render(inner, frame);
+            // Centered empty-state message with magnifying glass icon.
+            let msg = "\u{1f50d} No results yet \u{2014} type a query and press Enter";
+            let msg_line = ftui::text::Line::from_spans(vec![ftui::text::Span::styled(
+                msg.to_string(),
+                text_muted_style,
+            )]);
+            let y_offset = inner.height / 3;
+            if y_offset < inner.height {
+                let row = Rect::new(inner.x, inner.y + y_offset, inner.width, 1);
+                Paragraph::new(ftui::text::Text::from_lines(vec![msg_line]))
+                    .style(text_muted_style)
+                    .alignment(Alignment::Center)
+                    .render(row, frame);
+            }
             return;
         }
 
@@ -5248,8 +5259,10 @@ impl CassApp {
             *self.last_results_inner.borrow_mut() = Some(inner);
 
             if pane.hits.is_empty() {
-                Paragraph::new("No results for current filters.")
+                let msg = "\u{2205} No results match the current filters";
+                Paragraph::new(msg)
                     .style(text_muted_style)
+                    .alignment(Alignment::Center)
                     .render(inner, frame);
                 return;
             }
@@ -10565,6 +10578,7 @@ impl super::ftui_adapter::Model for CassApp {
                     DensityMode::Cozy => DensityMode::Spacious,
                     DensityMode::Spacious => DensityMode::Compact,
                 };
+                self.status = format!("Density: {:?}", self.density_mode);
                 self.dirty_since = Some(Instant::now());
                 ftui::Cmd::none()
             }
@@ -10577,6 +10591,7 @@ impl super::ftui_adapter::Model for CassApp {
                 };
                 self.style_options.dark_mode = self.theme_dark;
                 self.style_options.preset = self.theme_preset;
+                self.status = format!("Theme: {}", if self.theme_dark { "Dark" } else { "Light" });
                 self.dirty_since = Some(Instant::now());
                 ftui::Cmd::none()
             }
@@ -17904,6 +17919,32 @@ mod tests {
         assert!(
             matches!(kind, MouseEventKind::Moved),
             "Moved variant should exist"
+        );
+    }
+
+    #[test]
+    fn density_cycle_sets_status_message() {
+        let mut app = CassApp::default();
+        assert_eq!(app.density_mode, DensityMode::Cozy);
+        let _ = app.update(CassMsg::DensityModeCycled);
+        assert_eq!(app.density_mode, DensityMode::Spacious);
+        assert!(
+            app.status.contains("Spacious"),
+            "status should report new density mode, got: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn theme_toggle_sets_status_message() {
+        let mut app = CassApp::default();
+        assert!(app.theme_dark, "should start dark");
+        let _ = app.update(CassMsg::ThemeToggled);
+        assert!(!app.theme_dark, "should be light after toggle");
+        assert!(
+            app.status.contains("Light"),
+            "status should report Light theme, got: {}",
+            app.status
         );
     }
 
