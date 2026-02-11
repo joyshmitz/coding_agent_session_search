@@ -26,7 +26,6 @@ Metric-specific thresholds (T5.3 spec):
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
