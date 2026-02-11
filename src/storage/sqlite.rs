@@ -4020,6 +4020,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V12)?;
         }
         12 => {}
+        13 => {}
         v => return Err(anyhow!("unsupported schema version {v}")),
     }
 
@@ -5103,6 +5104,43 @@ mod tests {
         // Now open readonly
         let storage = SqliteStorage::open_readonly(&db_path).unwrap();
         assert!(storage.schema_version().is_ok());
+    }
+
+    #[test]
+    fn reopen_existing_current_schema_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("existing.db");
+
+        // First open creates and migrates to current schema.
+        {
+            let storage = SqliteStorage::open(&db_path).unwrap();
+            assert_eq!(storage.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        }
+
+        // Re-open should not fail on current schema.
+        let reopened = SqliteStorage::open(&db_path).unwrap();
+        assert_eq!(
+            reopened.schema_version().unwrap(),
+            CURRENT_SCHEMA_VERSION,
+            "reopening current schema DB should be idempotent"
+        );
+    }
+
+    #[test]
+    fn open_or_rebuild_current_schema_does_not_trigger_rebuild() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("existing.db");
+
+        // Create DB at current schema.
+        {
+            let storage = SqliteStorage::open(&db_path).unwrap();
+            assert_eq!(storage.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+        }
+
+        // Should open normally, not require rebuild.
+        let reopened = SqliteStorage::open_or_rebuild(&db_path)
+            .expect("current schema DB should open without rebuild");
+        assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
     }
 
     // =========================================================================
