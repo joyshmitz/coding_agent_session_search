@@ -2347,6 +2347,12 @@ fn dim_packed_color(color: ftui::PackedRgba, factor: f32) -> ftui::PackedRgba {
     )
 }
 
+/// Linear interpolation between two u8 values by `t` (0.0–1.0).
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    let t = t.clamp(0.0, 1.0);
+    ((f32::from(a) * (1.0 - t)) + (f32::from(b) * t)).round() as u8
+}
+
 fn max_visible_panes_for_width(width: u16) -> usize {
     match width {
         0..=69 => 1,
@@ -12200,6 +12206,20 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 // Tick spring-based animations.
                 self.anim.tick(dt);
+                // Drive modal_open spring target from current modal state.
+                let any_modal = self.show_export_modal
+                    || self.show_bulk_modal
+                    || self.show_saved_views_modal
+                    || self.show_help
+                    || self.show_theme_editor
+                    || self.show_inspector
+                    || self.source_filter_menu_open
+                    || self.command_palette.is_visible();
+                if any_modal {
+                    self.anim.open_modal();
+                } else {
+                    self.anim.close_modal();
+                }
                 // Clear expired legacy flash indicators.
                 if self.focus_flash_until.is_some_and(|t| now > t) {
                     self.focus_flash_until = None;
@@ -13387,7 +13407,7 @@ impl super::ftui_adapter::Model for CassApp {
                     };
                     let query_inset_style = if apply_style && degradation.render_decorative() {
                         if query_is_active {
-                            styles.style(style_system::STYLE_TAB_ACTIVE)
+                            styles.style(style_system::STYLE_SEARCH_FOCUS)
                         } else {
                             styles.style(style_system::STYLE_TAB_INACTIVE)
                         }
@@ -14022,6 +14042,37 @@ impl super::ftui_adapter::Model for CassApp {
                 Paragraph::new(&*sources_status)
                     .style(text_muted_style)
                     .render(vertical[2], frame);
+            }
+        }
+
+        // ── Modal backdrop dim ────────────────────────────────────────
+        // When any modal is open, render a dimmed backdrop over the full
+        // screen before drawing modal content.  Opacity follows the
+        // modal_open spring for a smooth fade-in / fade-out.
+        let modal_visible = self.show_export_modal
+            || self.show_bulk_modal
+            || self.show_saved_views_modal
+            || self.show_help
+            || self.show_theme_editor
+            || self.show_inspector
+            || self.source_filter_menu_open
+            || self.command_palette.is_visible();
+        if modal_visible && apply_style {
+            let spring_t = self.anim.modal_open.position().clamp(0.0, 1.0) as f32;
+            if spring_t > 0.01 {
+                let backdrop_style = styles.style(style_system::STYLE_MODAL_BACKDROP);
+                // Blend the backdrop toward the themed dim color proportional
+                // to the spring position so it fades in smoothly.
+                let dim_bg = backdrop_style.bg.unwrap_or(ftui::PackedRgba::rgb(0, 0, 0));
+                let root_bg_color = root_style.bg.unwrap_or(ftui::PackedRgba::rgb(0, 0, 0));
+                let blended = ftui::PackedRgba::rgb(
+                    lerp_u8(root_bg_color.r(), dim_bg.r(), spring_t),
+                    lerp_u8(root_bg_color.g(), dim_bg.g(), spring_t),
+                    lerp_u8(root_bg_color.b(), dim_bg.b(), spring_t),
+                );
+                Block::new()
+                    .style(ftui::Style::new().bg(blended))
+                    .render(area, frame);
             }
         }
 

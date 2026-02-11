@@ -68,6 +68,8 @@ pub const STYLE_DETAIL_FIND_QUERY: &str = "detail.find.query";
 pub const STYLE_DETAIL_FIND_MATCH_ACTIVE: &str = "detail.find.match.active";
 pub const STYLE_DETAIL_FIND_MATCH_INACTIVE: &str = "detail.find.match.inactive";
 pub const STYLE_QUERY_HIGHLIGHT: &str = "query.highlight";
+pub const STYLE_SEARCH_FOCUS: &str = "search.focus";
+pub const STYLE_MODAL_BACKDROP: &str = "modal.backdrop";
 pub const STYLE_KBD_KEY: &str = "kbd.key";
 pub const STYLE_KBD_DESC: &str = "kbd.desc";
 pub const THEME_CONFIG_VERSION: u32 = 1;
@@ -1710,6 +1712,25 @@ fn build_stylesheet(resolved: ResolvedTheme, options: StyleOptions) -> StyleShee
             .underline(),
     );
 
+    // Search bar active: stronger accent background for "glow" effect
+    sheet.define(
+        STYLE_SEARCH_FOCUS,
+        Style::new()
+            .fg(to_packed(resolved.accent))
+            .bg(to_packed(blend(resolved.surface, resolved.accent, 0.18)))
+            .bold(),
+    );
+
+    // Modal backdrop: dimmed background for overlay modals
+    sheet.define(
+        STYLE_MODAL_BACKDROP,
+        Style::new().bg(to_packed(blend(
+            resolved.background,
+            Color::rgb(0, 0, 0),
+            0.45,
+        ))),
+    );
+
     sheet
 }
 
@@ -2317,6 +2338,8 @@ mod tests {
             STYLE_DETAIL_FIND_MATCH_ACTIVE,
             STYLE_DETAIL_FIND_MATCH_INACTIVE,
             STYLE_QUERY_HIGHLIGHT,
+            STYLE_SEARCH_FOCUS,
+            STYLE_MODAL_BACKDROP,
         ] {
             assert!(context.sheet.contains(key), "missing style token: {key}");
         }
@@ -4304,6 +4327,8 @@ mod tests {
         ("STYLE_QUERY_HIGHLIGHT", STYLE_QUERY_HIGHLIGHT),
         ("STYLE_KBD_KEY", STYLE_KBD_KEY),
         ("STYLE_KBD_DESC", STYLE_KBD_DESC),
+        ("STYLE_SEARCH_FOCUS", STYLE_SEARCH_FOCUS),
+        ("STYLE_MODAL_BACKDROP", STYLE_MODAL_BACKDROP),
     ];
 
     /// Tokens that are consumed indirectly (e.g. via helper methods like
