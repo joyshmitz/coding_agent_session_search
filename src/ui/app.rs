@@ -2385,6 +2385,35 @@ fn elide_text(text: &str, max_chars: usize) -> String {
     format!("{kept}...")
 }
 
+/// Elide long paths while preserving their tail for faster row-level scanning.
+fn elide_path_for_metadata(path: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if path.chars().count() <= max_chars {
+        return path.to_string();
+    }
+    if max_chars <= 6 {
+        return elide_text(path, max_chars);
+    }
+
+    let trimmed = path.trim();
+    let tail = trimmed
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(trimmed);
+    let compact = format!(".../{tail}");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+
+    let tail_budget = max_chars.saturating_sub(4);
+    if tail_budget == 0 {
+        return elide_text(path, max_chars);
+    }
+    format!(".../{}", elide_text(tail, tail_budget))
+}
+
 impl ResultItem {
     fn source_badge(&self) -> String {
         format!(
@@ -2538,7 +2567,7 @@ impl ResultItem {
 impl RenderItem for ResultItem {
     fn render(&self, area: Rect, frame: &mut super::ftui_adapter::Frame, selected: bool) {
         let hit = &self.hit;
-        let location = self.location_label();
+        let location_full = self.location_label();
         let title = if hit.title.trim().is_empty() {
             "<untitled>"
         } else {
@@ -2630,6 +2659,11 @@ impl RenderItem for ResultItem {
             None
         };
         if let Some(snippet_preview) = compact_preview {
+            meta_spans.push(ftui::text::Span::styled(" ", bg_style));
+            meta_spans.push(ftui::text::Span::styled(
+                format!("mt {}", self.match_type_label()),
+                self.text_subtle_style,
+            ));
             meta_spans.push(ftui::text::Span::styled(" · ", self.text_muted_style));
             meta_spans.push(ftui::text::Span::styled(
                 snippet_preview,
@@ -2638,7 +2672,7 @@ impl RenderItem for ResultItem {
         } else {
             // Structured metadata with per-field styling for visual hierarchy
             let hit = &self.hit;
-            let ws_label = elide_text(&hit.workspace, 32);
+            let ws_label = elide_path_for_metadata(&hit.workspace, 32);
             meta_spans.push(ftui::text::Span::styled(" ", bg_style));
             meta_spans.push(ftui::text::Span::styled(
                 format!("mt {}", self.match_type_label()),
@@ -2669,12 +2703,10 @@ impl RenderItem for ResultItem {
         let mut lines = vec![title_line, meta_line];
 
         if self.row_height >= 3 {
+            let location = elide_path_for_metadata(&location_full, content_width.saturating_sub(6));
             lines.push(ftui::text::Line::from_spans(vec![
                 ftui::text::Span::styled("      ", bg_style),
-                ftui::text::Span::styled(
-                    elide_text(&location, content_width.saturating_sub(6)),
-                    self.location_style,
-                ),
+                ftui::text::Span::styled(location, self.location_style),
             ]));
         }
 
@@ -2913,7 +2945,9 @@ fn build_detail_find_bar_line(
 
     if find.query.is_empty() {
         let base_hint = "/ type to find";
-        if !push_segment(&mut spans, &mut used, base_hint, match_inactive_style) {
+        if !push_segment(&mut spans, &mut used, "/", query_style)
+            || !push_segment(&mut spans, &mut used, " type to find", match_inactive_style)
+        {
             return ftui::text::Line::raw(elide_text(base_hint, max_width));
         }
 
@@ -2956,7 +2990,7 @@ fn build_detail_find_bar_line(
     }
 
     let query_text = elide_text(&find.query, query_budget);
-    let _ = push_segment(&mut spans, &mut used, "/", match_inactive_style);
+    let _ = push_segment(&mut spans, &mut used, "/", query_style);
     let _ = push_segment(&mut spans, &mut used, &query_text, query_style);
     for (text, style) in match_segments {
         let _ = push_segment(&mut spans, &mut used, &text, style);
@@ -3725,9 +3759,10 @@ impl CassApp {
                 return;
             }
             match style_system::ThemeConfig::load_from_path(&theme_path) {
-                Ok(config) => {
+                Ok(mut config) => {
                     if let Some(preset) = config.base_preset {
                         let preset = startup_preset(preset);
+                        config.base_preset = Some(preset);
                         self.theme_preset = preset;
                         self.style_options.preset = preset;
                         self.theme_dark = true;
@@ -3873,7 +3908,12 @@ impl CassApp {
         options.preset = self.theme_preset;
         options.dark_mode = self.theme_dark;
         if let Some(config) = &self.theme_config {
-            StyleContext::from_options_with_theme_config(options, config)
+            let mut effective_config = config.clone();
+            if self.theme_dark && matches!(effective_config.base_preset, Some(UiThemePreset::Light))
+            {
+                effective_config.base_preset = Some(UiThemePreset::Dark);
+            }
+            StyleContext::from_options_with_theme_config(options, &effective_config)
                 .unwrap_or_else(|_| StyleContext::from_options(options))
         } else {
             StyleContext::from_options(options)
@@ -4842,7 +4882,11 @@ impl CassApp {
                 inactive_style
             };
             let mut label_part_style = if pill.active {
-                label_style
+                if let Some(bg) = active_style.bg {
+                    label_style.bg(bg)
+                } else {
+                    label_style
+                }
             } else {
                 inactive_style
             };
@@ -4851,17 +4895,17 @@ impl CassApp {
             }
 
             // Split rendered text into label and value parts at the ':'
-                if let Some(colon_pos) = rendered.find(':') {
-                    let label_part = &rendered[..=colon_pos];
-                    let value_part = &rendered[colon_pos + 1..];
-                    spans.push(ftui::text::Span::styled(
-                        label_part.to_string(),
-                        label_part_style,
-                    ));
-                    spans.push(ftui::text::Span::styled(
-                        value_part.to_string(),
-                        value_style,
-                    ));
+            if let Some(colon_pos) = rendered.find(':') {
+                let label_part = &rendered[..=colon_pos];
+                let value_part = &rendered[colon_pos + 1..];
+                spans.push(ftui::text::Span::styled(
+                    label_part.to_string(),
+                    label_part_style,
+                ));
+                spans.push(ftui::text::Span::styled(
+                    value_part.to_string(),
+                    value_style,
+                ));
             } else {
                 spans.push(ftui::text::Span::styled(rendered, value_style));
             }
@@ -6034,6 +6078,8 @@ impl CassApp {
                     } else {
                         title_unfocused_style
                     })
+                    .title(if detail_focused { " Find / " } else { " Find " })
+                    .title_alignment(Alignment::Left)
                     .style(container_style);
                 let find_inner = find_block.inner(find_rect);
                 find_block.render(find_rect, frame);
@@ -10029,6 +10075,48 @@ impl super::ftui_adapter::Model for CassApp {
             }
         }
 
+        // Legacy ratatui parity: in the main search surface, Left/Right should
+        // navigate result panes (sessions) while results are focused.
+        if self.surface == AppSurface::Search
+            && self.input_mode == InputMode::Query
+            && !self.show_detail_modal
+            && let CassMsg::CursorMoved { delta } = msg
+        {
+            match self.focus_manager.current() {
+                Some(id) if id == focus_ids::RESULTS_LIST && !self.panes.is_empty() => {
+                    let target = if delta > 0 {
+                        self.active_pane
+                            .saturating_add(delta as usize)
+                            .min(self.panes.len().saturating_sub(1))
+                    } else {
+                        self.active_pane
+                            .saturating_sub(delta.unsigned_abs() as usize)
+                    };
+
+                    if target != self.active_pane {
+                        return self.update(CassMsg::ActivePaneChanged { index: target });
+                    }
+
+                    // At the rightmost pane, Right arrow moves focus to detail.
+                    if delta > 0 {
+                        return self.update(CassMsg::FocusDirectional {
+                            direction: FocusDirection::Right,
+                        });
+                    }
+                    return ftui::Cmd::none();
+                }
+                Some(id) if id == focus_ids::DETAIL_PANE => {
+                    if delta < 0 {
+                        return self.update(CassMsg::FocusDirectional {
+                            direction: FocusDirection::Left,
+                        });
+                    }
+                    return ftui::Cmd::none();
+                }
+                _ => {}
+            }
+        }
+
         match msg {
             // -- Terminal event passthrough (unused, events come as CassMsg) ---
             CassMsg::TerminalEvent(_) => ftui::Cmd::none(),
@@ -10456,9 +10544,13 @@ impl super::ftui_adapter::Model for CassApp {
 
             // -- Detail view --------------------------------------------------
             CassMsg::DetailOpened => {
-                // Enter is context-dependent: in Query mode, submit the query;
-                // in Results/Detail mode, open the detail modal.
-                if self.input_mode == InputMode::Query && !self.show_detail_modal {
+                // Enter is context-dependent:
+                // - Search bar focus (or no active hit): submit query
+                // - Results/detail focus with active hit: open detail modal
+                let focus_id = self.focus_manager.current();
+                if !self.show_detail_modal
+                    && (focus_id == Some(focus_ids::SEARCH_BAR) || self.selected_hit().is_none())
+                {
                     return self.update(CassMsg::QuerySubmitted);
                 }
                 self.show_detail_modal = true;
@@ -15242,6 +15334,23 @@ mod tests {
     }
 
     #[test]
+    fn resolved_style_context_forces_dark_when_theme_config_requests_light() {
+        let mut app = CassApp::default();
+        app.theme_dark = true;
+        app.theme_preset = UiThemePreset::Dark;
+        app.style_options.dark_mode = true;
+        app.style_options.preset = UiThemePreset::Dark;
+        app.theme_config = Some(style_system::ThemeConfig {
+            base_preset: Some(UiThemePreset::Light),
+            ..style_system::ThemeConfig::default()
+        });
+
+        let styles = app.resolved_style_context();
+        assert_eq!(styles.options.preset, UiThemePreset::Dark);
+        assert!(styles.options.dark_mode);
+    }
+
+    #[test]
     fn state_load_requested_dispatches_background_task() {
         let mut app = CassApp::default();
         let cmd = app.update(CassMsg::StateLoadRequested);
@@ -16362,12 +16471,34 @@ mod tests {
         let mut app = CassApp::default();
         app.query = "test query".to_string();
         app.input_mode = InputMode::Query;
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
         // DetailOpened (Enter key) in query mode should route to QuerySubmitted
         let cmd = app.update(CassMsg::DetailOpened);
         // Should have pushed to history via QuerySubmitted
         assert_eq!(app.query_history.front().unwrap(), "test query");
         // Returns SearchRequested
         assert!(matches!(extract_msg(cmd), Some(CassMsg::SearchRequested)));
+    }
+
+    #[test]
+    fn enter_on_selected_result_opens_detail_modal() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Query;
+        app.panes.push(AgentPane {
+            agent: "codex".into(),
+            total_count: 1,
+            hits: vec![make_test_hit()],
+            selected: 0,
+        });
+        app.active_pane = 0;
+        app.focus_manager.focus(focus_ids::RESULTS_LIST);
+
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert!(
+            app.show_detail_modal,
+            "Enter on a selected result should open modal"
+        );
     }
 
     #[test]
@@ -16469,6 +16600,7 @@ mod tests {
         let mut app = CassApp::default();
         app.query = "abc".to_string();
         app.cursor_pos = 1;
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
         let _ = app.update(CassMsg::CursorMoved { delta: -1 });
         assert_eq!(app.cursor_pos, 0);
         let _ = app.update(CassMsg::CursorMoved { delta: -1 });
@@ -16477,6 +16609,60 @@ mod tests {
         assert_eq!(app.cursor_pos, 1);
         let _ = app.update(CassMsg::CursorMoved { delta: 10 });
         assert_eq!(app.cursor_pos, 3, "should clamp at query length");
+    }
+
+    #[test]
+    fn cursor_moved_in_results_focus_switches_active_pane() {
+        let mut app = CassApp::default();
+        app.panes = vec![
+            AgentPane {
+                agent: "claude_code".into(),
+                total_count: 1,
+                hits: vec![make_test_hit()],
+                selected: 0,
+            },
+            AgentPane {
+                agent: "codex".into(),
+                total_count: 1,
+                hits: vec![make_test_hit()],
+                selected: 0,
+            },
+        ];
+        app.active_pane = 0;
+        app.focus_manager.focus(focus_ids::RESULTS_LIST);
+
+        let _ = app.update(CassMsg::CursorMoved { delta: 1 });
+        assert_eq!(app.active_pane, 1, "Right arrow should advance pane");
+
+        let _ = app.update(CassMsg::CursorMoved { delta: -1 });
+        assert_eq!(app.active_pane, 0, "Left arrow should move back one pane");
+    }
+
+    #[test]
+    fn cursor_moved_right_at_last_pane_focuses_detail() {
+        let mut app = CassApp::default();
+        app.panes = vec![AgentPane {
+            agent: "codex".into(),
+            total_count: 1,
+            hits: vec![make_test_hit()],
+            selected: 0,
+        }];
+        app.active_pane = 0;
+        app.focus_manager.focus(focus_ids::RESULTS_LIST);
+
+        let _ = app.update(CassMsg::CursorMoved { delta: 1 });
+        assert_eq!(
+            app.focus_manager.current(),
+            Some(focus_ids::DETAIL_PANE),
+            "Right arrow at last pane should focus detail pane"
+        );
+
+        let _ = app.update(CassMsg::CursorMoved { delta: -1 });
+        assert_eq!(
+            app.focus_manager.current(),
+            Some(focus_ids::RESULTS_LIST),
+            "Left arrow from detail should return focus to results"
+        );
     }
 
     #[test]
