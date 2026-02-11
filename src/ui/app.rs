@@ -17794,8 +17794,7 @@ mod tests {
         // After one tick, the spring target should be 1.0
         // (it may not have reached 1.0 yet, but target is set)
         assert!(
-            app.anim.modal_open.position() > 0.0
-                || app.anim.modal_open.position() == 0.0, // first tick may not move it yet
+            app.anim.modal_open.position() > 0.0 || app.anim.modal_open.position() == 0.0, // first tick may not move it yet
             "modal spring should have been targeted"
         );
 
