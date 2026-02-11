@@ -33,18 +33,189 @@ impl OpenClawConnector {
         Self
     }
 
-    fn sessions_root() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| {
-            home.join(".openclaw")
-                .join("agents")
-                .join("openclaw")
-                .join("sessions")
-        })
+    fn openclaw_home() -> Option<PathBuf> {
+        dirs::home_dir().map(|home| home.join(".openclaw"))
+    }
+
+    fn agents_root() -> Option<PathBuf> {
+        Self::openclaw_home().map(|home| home.join("agents"))
+    }
+
+    fn find_agent_session_dirs() -> Vec<PathBuf> {
+        match Self::agents_root() {
+            Some(agents_root) => Self::find_agent_session_dirs_at(&agents_root),
+            None => Vec::new(),
+        }
+    }
+
+    fn find_agent_session_dirs_at(agents_root: &Path) -> Vec<PathBuf> {
+        tracing::debug!(
+            agents_root = %agents_root.display(),
+            "openclaw: scanning agents root for sessions directories"
+        );
+
+        if !agents_root.exists() || !agents_root.is_dir() {
+            return Vec::new();
+        }
+
+        let mut session_dirs: Vec<PathBuf> = Vec::new();
+        let walker = WalkDir::new(agents_root)
+            .follow_links(false)
+            .min_depth(1)
+            .max_depth(2);
+
+        for entry_res in walker {
+            let entry = match entry_res {
+                Ok(entry) => entry,
+                Err(err) => {
+                    tracing::debug!(
+                        agents_root = %agents_root.display(),
+                        error = %err,
+                        "openclaw: cannot read directory entry, continuing"
+                    );
+                    continue;
+                }
+            };
+
+            if !entry.file_type().is_dir() || entry.depth() != 1 {
+                continue;
+            }
+
+            let agent_name = entry.file_name().to_string_lossy().to_string();
+            let sessions_dir = entry.path().join("sessions");
+            let has_sessions = sessions_dir.is_dir();
+            tracing::debug!(
+                agent = %agent_name,
+                has_sessions,
+                "openclaw: found agent directory"
+            );
+
+            if has_sessions {
+                session_dirs.push(sessions_dir);
+            } else {
+                tracing::debug!(
+                    agent = %agent_name,
+                    "openclaw: skipping agent directory without sessions/ subdirectory"
+                );
+            }
+        }
+
+        session_dirs.sort();
+        session_dirs.dedup();
+
+        let mut agent_names: Vec<String> = session_dirs
+            .iter()
+            .filter_map(|dir| {
+                dir.parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .map(String::from)
+            })
+            .collect();
+        agent_names.sort();
+
+        tracing::debug!(
+            count = session_dirs.len(),
+            agents = ?agent_names,
+            "openclaw: discovered agent session directories"
+        );
+
+        session_dirs
+    }
+
+    fn detect_from_agents_root(agents_root: &Path) -> DetectionResult {
+        let roots = Self::find_agent_session_dirs_at(agents_root);
+        let mut evidence = vec![
+            format!("found {}", agents_root.display()),
+            format!("discovered {} agent session dirs", roots.len()),
+        ];
+
+        if !roots.is_empty() {
+            let mut names: Vec<String> = roots
+                .iter()
+                .filter_map(|path| {
+                    path.parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .map(String::from)
+                })
+                .collect();
+            names.sort();
+            evidence.push(format!("agents: {}", names.join(", ")));
+        }
+
+        DetectionResult {
+            detected: true,
+            evidence,
+            root_paths: roots,
+        }
     }
 
     fn looks_like_openclaw_storage(path: &Path) -> bool {
         let path_str = path.to_string_lossy().to_lowercase();
         path_str.contains("openclaw") && path_str.contains("sessions")
+    }
+
+    fn session_root_from_candidate(path: &Path) -> Option<PathBuf> {
+        let dir = if path.is_file() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+
+        if dir.file_name().and_then(|n| n.to_str()) == Some("sessions") && dir.is_dir() {
+            return Some(dir.to_path_buf());
+        }
+
+        let sessions = dir.join("sessions");
+        if sessions.is_dir() {
+            Some(sessions)
+        } else {
+            None
+        }
+    }
+
+    fn roots_from_scan_path(path: &Path) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+
+        if let Some(explicit) = Self::session_root_from_candidate(path)
+            && Self::looks_like_openclaw_storage(&explicit)
+        {
+            roots.push(explicit);
+        }
+
+        let embedded_agents = path.join(".openclaw").join("agents");
+        if embedded_agents.exists() {
+            roots.extend(Self::find_agent_session_dirs_at(&embedded_agents));
+        }
+
+        if path.file_name().and_then(|n| n.to_str()) == Some(".openclaw") {
+            roots.extend(Self::find_agent_session_dirs_at(&path.join("agents")));
+        }
+
+        if path.file_name().and_then(|n| n.to_str()) == Some("agents") {
+            roots.extend(Self::find_agent_session_dirs_at(path));
+        }
+
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
+    fn agent_directory_from_sessions_root(path: &Path) -> String {
+        path.parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("openclaw")
+            .to_string()
+    }
+
+    fn agent_slug_for_directory(agent_dir: &str) -> String {
+        if agent_dir == "openclaw" {
+            "openclaw".to_string()
+        } else {
+            format!("openclaw/{agent_dir}")
+        }
     }
 
     fn session_files(root: &Path) -> Vec<PathBuf> {
@@ -100,73 +271,75 @@ impl OpenClawConnector {
 
 impl Connector for OpenClawConnector {
     fn detect(&self) -> DetectionResult {
-        let Some(root) = Self::sessions_root() else {
-            return DetectionResult::not_found();
-        };
-        if root.exists() && root.is_dir() {
+        if let Some(agents_root) = Self::agents_root()
+            && agents_root.exists()
+            && agents_root.is_dir()
+        {
+            return Self::detect_from_agents_root(&agents_root);
+        }
+
+        if let Some(parent) = Self::openclaw_home()
+            && parent.exists()
+        {
             return DetectionResult {
                 detected: true,
-                evidence: vec![format!("found {}", root.display())],
-                root_paths: vec![root],
+                evidence: vec![
+                    format!("found {}", parent.display()),
+                    "discovered 0 agent session dirs".to_string(),
+                ],
+                root_paths: Vec::new(),
             };
         }
 
-        // Also check parent dir in case sessions dir hasn't been created yet.
-        let Some(home) = dirs::home_dir() else {
-            return DetectionResult::not_found();
-        };
-        let parent = home.join(".openclaw");
-        if parent.exists() {
-            DetectionResult {
-                detected: true,
-                evidence: vec![format!("found {}", parent.display())],
-                root_paths: vec![root],
-            }
-        } else {
-            DetectionResult::not_found()
-        }
+        DetectionResult::not_found()
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
         let mut roots: Vec<PathBuf> = Vec::new();
 
         if ctx.use_default_detection() {
-            if Self::looks_like_openclaw_storage(&ctx.data_dir) && ctx.data_dir.exists() {
-                roots.push(ctx.data_dir.clone());
-            } else if let Some(root) = Self::sessions_root()
-                && root.exists()
+            if let Some(explicit) = Self::session_root_from_candidate(&ctx.data_dir)
+                && Self::looks_like_openclaw_storage(&explicit)
+                && explicit.exists()
             {
-                roots.push(root);
+                roots.push(explicit);
+            } else {
+                roots.extend(Self::find_agent_session_dirs());
             }
         } else {
             for root in &ctx.scan_roots {
-                let candidate = root
-                    .path
-                    .join(".openclaw")
-                    .join("agents")
-                    .join("openclaw")
-                    .join("sessions");
-                if candidate.exists() {
-                    roots.push(candidate);
-                } else if Self::looks_like_openclaw_storage(&root.path) && root.path.exists() {
-                    roots.push(root.path.clone());
-                }
+                roots.extend(Self::roots_from_scan_path(&root.path));
             }
         }
+
+        roots.sort();
+        roots.dedup();
 
         if roots.is_empty() {
             return Ok(Vec::new());
         }
 
         let mut convs = Vec::new();
+        let mut scanned_agents = 0usize;
 
         for mut root in roots {
             if root.is_file() {
                 root = root.parent().unwrap_or(&root).to_path_buf();
             }
 
+            let agent_directory = Self::agent_directory_from_sessions_root(&root);
+            let agent_slug = Self::agent_slug_for_directory(&agent_directory);
             let files = Self::session_files(&root);
+            let mut agent_file_count = 0usize;
+            let mut agent_session_count = 0usize;
+            let mut agent_error_count = 0usize;
+            tracing::debug!(
+                agent = %agent_directory,
+                file_count = files.len(),
+                "openclaw: scanning agent directory"
+            );
             for file in files {
+                agent_file_count += 1;
                 if !file_modified_since(&file, ctx.since_ts) {
                     continue;
                 }
@@ -187,10 +360,17 @@ impl Connector for OpenClawConnector {
                             .map(std::string::ToString::to_string)
                     });
 
+                let external_id = if agent_directory == "openclaw" {
+                    external_id
+                } else {
+                    external_id.map(|id| format!("{agent_directory}/{id}"))
+                };
+
                 let file_handle = match fs::File::open(&file) {
                     Ok(f) => f,
                     Err(e) => {
                         tracing::debug!(path = %file.display(), error = %e, "openclaw: skipping unreadable session");
+                        agent_error_count += 1;
                         continue;
                     }
                 };
@@ -298,10 +478,11 @@ impl Connector for OpenClawConnector {
                 let metadata = serde_json::json!({
                     "source": "openclaw",
                     "cwd": session_cwd,
+                    "agent_directory": agent_directory.clone(),
                 });
 
                 convs.push(NormalizedConversation {
-                    agent_slug: "openclaw".to_string(),
+                    agent_slug: agent_slug.clone(),
                     external_id,
                     title,
                     workspace,
@@ -311,8 +492,24 @@ impl Connector for OpenClawConnector {
                     metadata,
                     messages,
                 });
+                agent_session_count += 1;
             }
+
+            scanned_agents += 1;
+            tracing::debug!(
+                agent = %agent_directory,
+                files = agent_file_count,
+                sessions = agent_session_count,
+                errors = agent_error_count,
+                "openclaw: completed agent scan"
+            );
         }
+
+        tracing::debug!(
+            agents = scanned_agents,
+            sessions = convs.len(),
+            "openclaw: completed multi-agent scan"
+        );
 
         Ok(convs)
     }
@@ -328,6 +525,34 @@ mod tests {
         let content = lines.join("\n");
         fs::write(&path, content).unwrap();
         path
+    }
+
+    fn write_minimal_openclaw_session(
+        sessions_root: &Path,
+        file_name: &str,
+        cwd: &str,
+        user_text: &str,
+    ) -> PathBuf {
+        write_session(
+            sessions_root,
+            file_name,
+            &[
+                &format!(
+                    r#"{{"type":"session","id":"s1","timestamp":"2026-02-01T16:00:00.000Z","cwd":"{cwd}"}}"#
+                ),
+                &format!(
+                    r#"{{"type":"message","id":"m1","timestamp":"2026-02-01T16:00:01.000Z","message":{{"role":"user","content":[{{"type":"text","text":"{user_text}"}}]}}}}"#
+                ),
+            ],
+        )
+    }
+
+    fn ctx_with_root(root: &Path) -> ScanContext {
+        ScanContext::with_roots(
+            root.to_path_buf(),
+            vec![crate::connectors::ScanRoot::local(root.to_path_buf())],
+            None,
+        )
     }
 
     #[test]
@@ -418,5 +643,272 @@ mod tests {
         // Only the valid non-empty message should appear
         assert_eq!(convs[0].messages.len(), 1);
         assert_eq!(convs[0].messages[0].content, "Valid");
+    }
+
+    #[test]
+    fn agents_root_path_construction() {
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(
+                OpenClawConnector::agents_root().unwrap(),
+                home.join(".openclaw").join("agents")
+            );
+        }
+    }
+
+    #[test]
+    fn find_dirs_empty_root() {
+        let tmp = TempDir::new().unwrap();
+        let agents_root = tmp.path().join("agents");
+        fs::create_dir_all(&agents_root).unwrap();
+        tracing::debug!("Scanning agents root: {}", agents_root.display());
+        let dirs = OpenClawConnector::find_agent_session_dirs_at(&agents_root);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn find_dirs_no_sessions_subdir() {
+        let tmp = TempDir::new().unwrap();
+        let agents_root = tmp.path().join("agents");
+        fs::create_dir_all(agents_root.join("alice")).unwrap();
+        let dirs = OpenClawConnector::find_agent_session_dirs_at(&agents_root);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn find_dirs_one_agent() {
+        let tmp = TempDir::new().unwrap();
+        let agents_root = tmp.path().join("agents");
+        let alice = agents_root.join("alice").join("sessions");
+        fs::create_dir_all(&alice).unwrap();
+
+        let dirs = OpenClawConnector::find_agent_session_dirs_at(&agents_root);
+        assert_eq!(dirs, vec![alice]);
+    }
+
+    #[test]
+    fn find_dirs_multiple_agents_sorted() {
+        let tmp = TempDir::new().unwrap();
+        let agents_root = tmp.path().join("agents");
+        fs::create_dir_all(agents_root.join("charlie").join("sessions")).unwrap();
+        fs::create_dir_all(agents_root.join("alice").join("sessions")).unwrap();
+        fs::create_dir_all(agents_root.join("bob").join("sessions")).unwrap();
+
+        let dirs = OpenClawConnector::find_agent_session_dirs_at(&agents_root);
+        let discovered: Vec<String> = dirs
+            .iter()
+            .filter_map(|p| {
+                p.parent()
+                    .and_then(|pp| pp.file_name())
+                    .and_then(|n| n.to_str())
+                    .map(String::from)
+            })
+            .collect();
+        assert_eq!(
+            discovered,
+            vec![
+                "alice".to_string(),
+                "bob".to_string(),
+                "charlie".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn find_dirs_max_depth_ignores_deep_nesting() {
+        let tmp = TempDir::new().unwrap();
+        let agents_root = tmp.path().join("agents");
+        fs::create_dir_all(agents_root.join("alice").join("sessions")).unwrap();
+        fs::create_dir_all(
+            agents_root
+                .join("nested")
+                .join("too")
+                .join("deep")
+                .join("sessions"),
+        )
+        .unwrap();
+
+        let dirs = OpenClawConnector::find_agent_session_dirs_at(&agents_root);
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs[0].to_string_lossy().contains(&format!(
+            "{}alice{}",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_dirs_symlink_skipped() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let agents_root = tmp.path().join("agents");
+        let real_agent = tmp.path().join("real_alice");
+        fs::create_dir_all(real_agent.join("sessions")).unwrap();
+        fs::create_dir_all(&agents_root).unwrap();
+        symlink(&real_agent, agents_root.join("alice_link")).unwrap();
+
+        let dirs = OpenClawConnector::find_agent_session_dirs_at(&agents_root);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn detect_reports_agent_names() {
+        let tmp = TempDir::new().unwrap();
+        let agents_root = tmp.path().join("agents");
+        fs::create_dir_all(agents_root.join("alice").join("sessions")).unwrap();
+        fs::create_dir_all(agents_root.join("bob").join("sessions")).unwrap();
+
+        let detection = OpenClawConnector::detect_from_agents_root(&agents_root);
+        assert!(detection.detected);
+        assert_eq!(detection.root_paths.len(), 2);
+        let joined = detection.evidence.join(" | ");
+        assert!(joined.contains("discovered 2 agent session dirs"));
+        assert!(joined.contains("alice"));
+        assert!(joined.contains("bob"));
+    }
+
+    #[test]
+    fn detect_zero_agents() {
+        let tmp = TempDir::new().unwrap();
+        let agents_root = tmp.path().join("agents");
+        fs::create_dir_all(&agents_root).unwrap();
+
+        let detection = OpenClawConnector::detect_from_agents_root(&agents_root);
+        assert!(detection.detected);
+        assert!(detection.root_paths.is_empty());
+        assert!(
+            detection
+                .evidence
+                .iter()
+                .any(|line| line.contains("discovered 0 agent session dirs"))
+        );
+    }
+
+    #[test]
+    fn scan_multiple_agents() {
+        let tmp = TempDir::new().unwrap();
+        let alice_sessions = tmp.path().join(".openclaw/agents/alice/sessions");
+        let bob_sessions = tmp.path().join(".openclaw/agents/bob/sessions");
+        fs::create_dir_all(&alice_sessions).unwrap();
+        fs::create_dir_all(&bob_sessions).unwrap();
+        write_minimal_openclaw_session(&alice_sessions, "alice.jsonl", "/tmp/alice", "hello alice");
+        write_minimal_openclaw_session(&bob_sessions, "bob.jsonl", "/tmp/bob", "hello bob");
+
+        let connector = OpenClawConnector::new();
+        let ctx = ctx_with_root(tmp.path());
+        let mut convs = connector.scan(&ctx).unwrap();
+        convs.sort_by(|a, b| a.agent_slug.cmp(&b.agent_slug));
+
+        assert_eq!(convs.len(), 2);
+        assert_eq!(convs[0].agent_slug, "openclaw/alice");
+        assert_eq!(convs[1].agent_slug, "openclaw/bob");
+    }
+
+    #[test]
+    fn scan_agent_identity_preserved() {
+        let tmp = TempDir::new().unwrap();
+        let alice_sessions = tmp.path().join(".openclaw/agents/alice/sessions");
+        fs::create_dir_all(&alice_sessions).unwrap();
+        write_minimal_openclaw_session(&alice_sessions, "s1.jsonl", "/tmp/alice", "from alice");
+
+        let connector = OpenClawConnector::new();
+        let ctx = ctx_with_root(tmp.path());
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].agent_slug, "openclaw/alice");
+        assert_eq!(convs[0].external_id.as_deref(), Some("alice/s1"));
+    }
+
+    #[test]
+    fn scan_agent_metadata_present() {
+        let tmp = TempDir::new().unwrap();
+        let alice_sessions = tmp.path().join(".openclaw/agents/alice/sessions");
+        fs::create_dir_all(&alice_sessions).unwrap();
+        write_minimal_openclaw_session(
+            &alice_sessions,
+            "meta.jsonl",
+            "/tmp/alice",
+            "metadata check",
+        );
+
+        let connector = OpenClawConnector::new();
+        let ctx = ctx_with_root(tmp.path());
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(
+            convs[0]
+                .metadata
+                .get("agent_directory")
+                .and_then(|v| v.as_str()),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn scan_mixed_valid_invalid_across_agents() {
+        let tmp = TempDir::new().unwrap();
+        let alice_sessions = tmp.path().join(".openclaw/agents/alice/sessions");
+        let bob_sessions = tmp.path().join(".openclaw/agents/bob/sessions");
+        fs::create_dir_all(&alice_sessions).unwrap();
+        fs::create_dir_all(&bob_sessions).unwrap();
+        write_session(
+            &alice_sessions,
+            "bad.jsonl",
+            &["not-json", "still-not-json"],
+        );
+        write_minimal_openclaw_session(&bob_sessions, "good.jsonl", "/tmp/bob", "valid from bob");
+
+        let connector = OpenClawConnector::new();
+        let ctx = ctx_with_root(tmp.path());
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].agent_slug, "openclaw/bob");
+    }
+
+    #[test]
+    fn scan_single_agent_unchanged_slug() {
+        let tmp = TempDir::new().unwrap();
+        let sessions = tmp.path().join(".openclaw/agents/openclaw/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_minimal_openclaw_session(&sessions, "single.jsonl", "/tmp/openclaw", "legacy mode");
+
+        let connector = OpenClawConnector::new();
+        let ctx = ScanContext::local_default(sessions.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].agent_slug, "openclaw");
+        assert_eq!(convs[0].external_id.as_deref(), Some("single"));
+        assert_eq!(
+            convs[0]
+                .metadata
+                .get("agent_directory")
+                .and_then(|v| v.as_str()),
+            Some("openclaw")
+        );
+    }
+
+    #[test]
+    fn scan_with_explicit_agent_root_path() {
+        let tmp = TempDir::new().unwrap();
+        let agent_root = tmp.path().join(".openclaw/agents/alice");
+        let sessions = agent_root.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_minimal_openclaw_session(&sessions, "root.jsonl", "/tmp/alice", "explicit root");
+
+        let connector = OpenClawConnector::new();
+        let ctx = ScanContext::with_roots(
+            tmp.path().to_path_buf(),
+            vec![crate::connectors::ScanRoot::local(agent_root)],
+            None,
+        );
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].agent_slug, "openclaw/alice");
     }
 }
