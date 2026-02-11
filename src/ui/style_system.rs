@@ -2666,6 +2666,10 @@ mod tests {
 
     #[test]
     fn override_applies_color_to_resolved_theme() {
+        let options = StyleOptions {
+            color_profile: ColorProfile::TrueColor,
+            ..StyleOptions::default()
+        };
         let config = ThemeConfig {
             version: THEME_CONFIG_VERSION,
             base_preset: Some(UiThemePreset::Dark),
@@ -2674,7 +2678,7 @@ mod tests {
                 ..ThemeColorOverrides::default()
             },
         };
-        let ctx = StyleContext::from_options_with_theme_config(StyleOptions::default(), &config)
+        let ctx = StyleContext::from_options_with_theme_config(options, &config)
             .expect("valid config should apply");
 
         // The resolved text color should reflect the override.
@@ -4847,7 +4851,10 @@ mod tests {
         use ftui::render::budget::DegradationLevel;
 
         let log = TestLogger::new("11.1.degradation_affordance");
-        let opts = StyleOptions::default();
+        let opts = StyleOptions {
+            color_profile: ColorProfile::TrueColor,
+            ..StyleOptions::default()
+        };
 
         // At Full degradation, DecorativePolicy should allow all decorations
         let full_policy = DecorativePolicy::resolve(opts, DegradationLevel::Full, LB::Wide, true);
