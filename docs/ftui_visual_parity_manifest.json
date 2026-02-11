@@ -75,6 +75,27 @@
       "mtime": "2026-02-06T21:33:23Z"
     },
     {
+      "path": "tests/snapshots/cassapp_baseline_detail_tabs_snippets_active.snap",
+      "role": "candidate",
+      "sha256": "93be14bdd2be71f9ea466f63f02d93534d6d797fd53eb3807fb94e8300bee1e5",
+      "size_bytes": 1989,
+      "mtime": "2026-02-11T06:03:01Z"
+    },
+    {
+      "path": "tests/snapshots/cassapp_baseline_detail_tabs_json_active.snap",
+      "role": "candidate",
+      "sha256": "081539759c408e04368105b3256a3de5055ea534df05700085e15d94bd4a0f30",
+      "size_bytes": 1997,
+      "mtime": "2026-02-11T06:03:01Z"
+    },
+    {
+      "path": "tests/snapshots/cassapp_baseline_detail_find_current_match.snap",
+      "role": "candidate",
+      "sha256": "9f2133077cd709a50c6dc116f82c9f6a2f364077a0504bf165e945c34053be57",
+      "size_bytes": 2734,
+      "mtime": "2026-02-11T04:50:45Z"
+    },
+    {
       "path": "test-results/e2e/tui/tui-19c3f31b889_pty_search_detail_output.raw",
       "role": "candidate",
       "sha256": "5329ac28e33719d5e5cc29a9e1d55bf07c54cde54c80b4d1f8de858e3c9f1975",
@@ -138,12 +159,8 @@
         "detail_tab": "Snippets"
       },
       "baseline_artifact": "screenshots/screenshot_02.webp",
-      "candidate_artifact": null,
-      "status": "pending_capture",
-      "owner_beads": [
-        "coding_agent_session_search-2dccg.6.2",
-        "coding_agent_session_search-2dccg.8.6"
-      ]
+      "candidate_artifact": "tests/snapshots/cassapp_baseline_detail_tabs_snippets_active.snap",
+      "status": "captured"
     },
     {
       "scenario_id": "S4-detail-json-tab",
@@ -151,12 +168,8 @@
         "detail_tab": "Json"
       },
       "baseline_artifact": "screenshots/screenshot_02.webp",
-      "candidate_artifact": null,
-      "status": "pending_capture",
-      "owner_beads": [
-        "coding_agent_session_search-2dccg.6.2",
-        "coding_agent_session_search-2dccg.8.6"
-      ]
+      "candidate_artifact": "tests/snapshots/cassapp_baseline_detail_tabs_json_active.snap",
+      "status": "captured"
     },
     {
       "scenario_id": "S5-detail-find-bar-open",
@@ -165,13 +178,8 @@
         "find_bar": "open"
       },
       "baseline_artifact": "screenshots/screenshot_02.webp",
-      "candidate_artifact": null,
-      "status": "pending_capture",
-      "owner_beads": [
-        "coding_agent_session_search-2dccg.4.2",
-        "coding_agent_session_search-2dccg.4.3",
-        "coding_agent_session_search-2dccg.6.2"
-      ]
+      "candidate_artifact": "tests/snapshots/cassapp_baseline_detail_find_current_match.snap",
+      "status": "captured"
     },
     {
       "scenario_id": "S6-search-results-narrow",
@@ -469,6 +477,6 @@
   ],
   "ownership_assertion": {
     "major_unowned_failures": 0,
-    "note": "All major parity deficits are mapped to explicit open beads; pending captures are assigned."
+    "note": "All major parity deficits are mapped to explicit workstreams; scenario captures are materialized in deterministic artifacts."
   }
 }

@@ -180,9 +180,9 @@ Use it as the source of truth for parity evidence and root-cause ownership.
 |---|---|---|---|---|---|
 | `S1-search-results-wide` | Query submitted, wide dual-pane layout, selected hit visible | `screenshots/screenshot_01.webp` | `tests/snapshots/cassapp_search_surface_breakpoint_medium.snap` | captured | n/a |
 | `S2-detail-messages-tab` | Detail modal open on Messages tab | `screenshots/screenshot_02.webp` | `test-results/e2e/tui/tui-19c3f31b889_pty_search_detail_output.raw` | captured | n/a |
-| `S3-detail-snippets-tab` | Detail modal open on Snippets tab | `screenshots/screenshot_02.webp` | pending capture | pending | `coding_agent_session_search-2dccg.6.2`, `coding_agent_session_search-2dccg.8.6` |
-| `S4-detail-json-tab` | Detail modal open on Json tab | `screenshots/screenshot_02.webp` | pending capture | pending | `coding_agent_session_search-2dccg.6.2`, `coding_agent_session_search-2dccg.8.6` |
-| `S5-detail-find-bar-open` | Detail modal with find bar active + match counter | `screenshots/screenshot_02.webp` | pending capture | pending | `coding_agent_session_search-2dccg.4.2`, `coding_agent_session_search-2dccg.4.3`, `coding_agent_session_search-2dccg.6.2` |
+| `S3-detail-snippets-tab` | Detail modal open on Snippets tab | `screenshots/screenshot_02.webp` | `tests/snapshots/cassapp_baseline_detail_tabs_snippets_active.snap` | captured | n/a |
+| `S4-detail-json-tab` | Detail modal open on Json tab | `screenshots/screenshot_02.webp` | `tests/snapshots/cassapp_baseline_detail_tabs_json_active.snap` | captured | n/a |
+| `S5-detail-find-bar-open` | Detail modal with find bar active + match counter | `screenshots/screenshot_02.webp` | `tests/snapshots/cassapp_baseline_detail_find_current_match.snap` | captured | n/a |
 | `S6-search-results-narrow` | Query submitted, narrow single-pane layout | `screenshots/screenshot_01.webp` | `tests/snapshots/cassapp_search_surface_breakpoint_narrow.snap` | captured | n/a |
 | `S7-command-palette-open` | Palette open over search/detail surfaces | `screenshots/screenshot_03.webp` | `tests/snapshots/cassapp_command_palette.snap` | captured | n/a |
 
@@ -217,7 +217,7 @@ Current validated traces in this bundle:
 | Fixture realism too thin for parity-grade snapshot confidence | Snapshot diffs miss real-world complexity | `tests/ftui_harness_snapshots.rs:21`, `tests/ftui_harness_snapshots.rs:32` | Track F + K: `coding_agent_session_search-2dccg.6.1`, `coding_agent_session_search-2dccg.6.2`, `coding_agent_session_search-2dccg.11.3` | owned |
 | README/install path still pinned to ratatui release while parity gate remains open | Install defaults and screenshots lag behind ftui state | `README.md:16`, `README.md:22`, `README.md:25` | Track G: `coding_agent_session_search-2dccg.7.1`, `coding_agent_session_search-2dccg.7.3`, `coding_agent_session_search-2dccg.7.5` | owned |
 
-No major baseline failure is left unowned. Pending capture states (`S3`/`S4`/`S5`) are explicitly assigned to open beads above.
+No major baseline failure is left unowned. Scenario captures `S1`-`S7` are now materialized with deterministic baseline/candidate artifact mapping.
 
 ## Cross-Track Coupling Risks
 | Coupling | Why it matters | Coordinated owners |
@@ -231,13 +231,12 @@ No major baseline failure is left unowned. Pending capture states (`S3`/`S4`/`S5
 - Keep legacy `screenshots/*.webp` as ratatui baseline anchors until dedicated ratatui replay capture is added.
 - Use deterministic snapshot + PTY raw artifacts for current ftui evidence to avoid subjective comparisons.
 - Keep scenario IDs stable so future evidence bundles and release reports can diff by scenario key.
-- Treat pending scenario captures as explicit backlog work, never implicit TODOs.
+- Treat any newly introduced scenario captures as explicit backlog work, never implicit TODOs.
 
 ## Prioritized Handoff (Post-1.2)
-1. Capture missing `S3`/`S4`/`S5` artifacts via `coding_agent_session_search-2dccg.4.2`, `coding_agent_session_search-2dccg.4.3`, `coding_agent_session_search-2dccg.6.2`, `coding_agent_session_search-2dccg.8.6`.
-2. Complete markdown theme parity hardening in Track C (`coding_agent_session_search-2dccg.3.1` to `coding_agent_session_search-2dccg.3.3`).
-3. Execute capability/degradation hardening in Track E/J to prevent environment-specific regressions.
-4. Feed all new captures into Track K evidence bundle (`coding_agent_session_search-2dccg.11.8`) before release unpin decisions.
+1. Complete markdown theme parity hardening in Track C (`coding_agent_session_search-2dccg.3.1` to `coding_agent_session_search-2dccg.3.3`).
+2. Execute capability/degradation hardening in Track E/J to prevent environment-specific regressions.
+3. Feed captured artifacts into Track K evidence bundle (`coding_agent_session_search-2dccg.11.8`) before release unpin decisions.
 
 ## 2dccg.1.5 Ratatui -> FTUI Capability Crosswalk
 Status legend:
