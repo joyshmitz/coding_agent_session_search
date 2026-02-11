@@ -2874,15 +2874,61 @@ fn build_detail_find_bar_line(
     match_active_style: ftui::Style,
     match_inactive_style: ftui::Style,
 ) -> ftui::text::Line {
-    if width == 0 {
+    let max_width = width as usize;
+    if max_width == 0 {
         return ftui::text::Line::raw(String::new());
     }
 
+    let mut spans: Vec<ftui::text::Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    let push_segment = |spans: &mut Vec<ftui::text::Span<'static>>,
+                        used: &mut usize,
+                        text: &str,
+                        style: ftui::Style|
+     -> bool {
+        if text.is_empty() || *used >= max_width {
+            return false;
+        }
+        let chars = text.chars().count();
+        if *used + chars > max_width {
+            return false;
+        }
+        spans.push(ftui::text::Span::styled(text.to_string(), style));
+        *used += chars;
+        true
+    };
+    let push_segments_if_fit = |spans: &mut Vec<ftui::text::Span<'static>>,
+                                used: &mut usize,
+                                segments: &[(&str, ftui::Style)]|
+     -> bool {
+        let chars: usize = segments.iter().map(|(text, _)| text.chars().count()).sum();
+        if *used + chars > max_width {
+            return false;
+        }
+        for (text, style) in segments {
+            let _ = push_segment(spans, used, text, *style);
+        }
+        true
+    };
+
     if find.query.is_empty() {
-        return ftui::text::Line::from_spans(vec![ftui::text::Span::styled(
-            elide_text("/ type to find", width as usize),
-            match_inactive_style,
-        )]);
+        let base_hint = "/ type to find";
+        if !push_segment(&mut spans, &mut used, base_hint, match_inactive_style) {
+            return ftui::text::Line::raw(elide_text(base_hint, max_width));
+        }
+
+        // Keep close/discoverability affordance visible with compact fallbacks.
+        let close_full = [
+            (" · ", match_inactive_style),
+            ("Esc", match_active_style),
+            (" close", match_inactive_style),
+        ];
+        let close_compact = [(" · ", match_inactive_style), ("Esc", match_active_style)];
+        if !push_segments_if_fit(&mut spans, &mut used, &close_full) {
+            let _ = push_segments_if_fit(&mut spans, &mut used, &close_compact);
+        }
+
+        return ftui::text::Line::from_spans(spans);
     }
 
     let match_segments: Vec<(String, ftui::Style)> = if find.matches.is_empty() {
@@ -2904,19 +2950,52 @@ fn build_detail_find_bar_line(
         .iter()
         .map(|(text, _)| text.chars().count())
         .sum();
-    let query_budget = (width as usize).saturating_sub(1 + suffix_chars);
+    let query_budget = max_width.saturating_sub(1 + suffix_chars);
     if query_budget == 0 {
-        return ftui::text::Line::raw(elide_text(&format!("/{}", find.query), width as usize));
+        return ftui::text::Line::raw(elide_text(&format!("/{}", find.query), max_width));
     }
 
     let query_text = elide_text(&find.query, query_budget);
-    let mut spans: Vec<ftui::text::Span<'static>> = vec![
-        ftui::text::Span::styled("/".to_string(), match_inactive_style),
-        ftui::text::Span::styled(query_text, query_style),
-    ];
+    let _ = push_segment(&mut spans, &mut used, "/", match_inactive_style);
+    let _ = push_segment(&mut spans, &mut used, &query_text, query_style);
     for (text, style) in match_segments {
-        spans.push(ftui::text::Span::styled(text, style));
+        let _ = push_segment(&mut spans, &mut used, &text, style);
     }
+
+    // Add key hints with compact fallbacks; under tight widths prefer match state.
+    let hint_full = [
+        (" · ", match_inactive_style),
+        ("Enter", match_active_style),
+        (" next", match_inactive_style),
+        (" · ", match_inactive_style),
+        ("n/N", match_active_style),
+        (" prev", match_inactive_style),
+        (" · ", match_inactive_style),
+        ("Esc", match_active_style),
+        (" close", match_inactive_style),
+    ];
+    let hint_compact = [
+        (" · ", match_inactive_style),
+        ("Enter", match_active_style),
+        (" · ", match_inactive_style),
+        ("n/N", match_active_style),
+        (" · ", match_inactive_style),
+        ("Esc", match_active_style),
+    ];
+    let hint_minimal = [
+        (" · ", match_inactive_style),
+        ("n/N", match_active_style),
+        (" · ", match_inactive_style),
+        ("Esc", match_active_style),
+    ];
+    let hint_esc_only = [(" · ", match_inactive_style), ("Esc", match_active_style)];
+    if !push_segments_if_fit(&mut spans, &mut used, &hint_full)
+        && !push_segments_if_fit(&mut spans, &mut used, &hint_compact)
+        && !push_segments_if_fit(&mut spans, &mut used, &hint_minimal)
+    {
+        let _ = push_segments_if_fit(&mut spans, &mut used, &hint_esc_only);
+    }
+
     let line = ftui::text::Line::from_spans(spans);
 
     let rendered_len: usize = line
@@ -2924,13 +3003,13 @@ fn build_detail_find_bar_line(
         .iter()
         .map(|span| span.content.chars().count())
         .sum();
-    if rendered_len > width as usize {
+    if rendered_len > max_width {
         let plain: String = line
             .spans()
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
-        ftui::text::Line::raw(elide_text(&plain, width as usize))
+        ftui::text::Line::raw(elide_text(&plain, max_width))
     } else {
         line
     }
@@ -4753,25 +4832,36 @@ impl CassApp {
             }
             let width = rendered.chars().count() as u16;
 
-            // Per-pill styling: label portion gets label_style, value gets active/inactive
+            // Per-pill styling:
+            // - active/inactive state is reflected in value color
+            // - inactive labels also use inactive style for monochrome affordance clarity
+            // - editable pills underline the label as a direct "click-to-edit" cue
             let value_style = if pill.active {
                 active_style
             } else {
                 inactive_style
             };
+            let mut label_part_style = if pill.active {
+                label_style
+            } else {
+                inactive_style
+            };
+            if pill.editable {
+                label_part_style = label_part_style.underline();
+            }
 
             // Split rendered text into label and value parts at the ':'
-            if let Some(colon_pos) = rendered.find(':') {
-                let label_part = &rendered[..=colon_pos];
-                let value_part = &rendered[colon_pos + 1..];
-                spans.push(ftui::text::Span::styled(
-                    label_part.to_string(),
-                    label_style,
-                ));
-                spans.push(ftui::text::Span::styled(
-                    value_part.to_string(),
-                    value_style,
-                ));
+                if let Some(colon_pos) = rendered.find(':') {
+                    let label_part = &rendered[..=colon_pos];
+                    let value_part = &rendered[colon_pos + 1..];
+                    spans.push(ftui::text::Span::styled(
+                        label_part.to_string(),
+                        label_part_style,
+                    ));
+                    spans.push(ftui::text::Span::styled(
+                        value_part.to_string(),
+                        value_style,
+                    ));
             } else {
                 spans.push(ftui::text::Span::styled(rendered, value_style));
             }
@@ -4918,12 +5008,22 @@ impl CassApp {
         focus_flash_intensity: f32,
     ) {
         let grouping_suffix = match self.grouping_mode {
-            ResultsGrouping::Agent => String::new(),
+            ResultsGrouping::Agent | ResultsGrouping::Flat => String::new(),
             other => format!(" [{}]", other.label()),
         };
         let total_hits: usize = self.panes.iter().map(|pane| pane.total_count).sum();
         let pane_count = self.panes.len();
-        let results_title = if self.selected.is_empty() {
+        let single_pane = pane_count <= 1;
+        let results_title = if single_pane {
+            if self.selected.is_empty() {
+                format!("Results ({total_hits}){grouping_suffix}")
+            } else {
+                format!(
+                    "Results ({total_hits}) \u{2022} {} selected{grouping_suffix}",
+                    self.selected.len()
+                )
+            }
+        } else if self.selected.is_empty() {
             format!("Results ({total_hits} hits · {pane_count} panes){grouping_suffix}")
         } else {
             format!(
@@ -4962,6 +5062,69 @@ impl CassApp {
             Paragraph::new("No results yet. Type a query and press Enter.")
                 .style(text_muted_style)
                 .render(inner, frame);
+            return;
+        }
+
+        // Legacy-parity rendering path: when there's only one pane, render a single
+        // unified list without per-pane chrome.
+        if self.panes.len() == 1 {
+            let pane = &self.panes[0];
+            *self.last_results_inner.borrow_mut() = Some(inner);
+
+            if pane.hits.is_empty() {
+                Paragraph::new("No results for current filters.")
+                    .style(text_muted_style)
+                    .render(inner, frame);
+                return;
+            }
+
+            let items: Vec<ResultItem> = pane
+                .hits
+                .iter()
+                .enumerate()
+                .map(|(i, hit)| {
+                    let even = i % 2 == 0;
+                    let queued = self.selected.contains(&SelectedHitKey::from_hit(hit));
+                    ResultItem {
+                        index: i + 1,
+                        hit: hit.clone(),
+                        row_height: row_h,
+                        even,
+                        max_width: inner.width,
+                        queued,
+                        stripe_style: styles.result_row_style_for_agent(
+                            if even { row_style } else { row_alt_style },
+                            &hit.agent,
+                        ),
+                        selected_style: row_selected_style,
+                        agent_accent_style: ftui::Style::new()
+                            .fg(legacy_agent_color(&hit.agent))
+                            .bold(),
+                        score_style: styles.score_style(normalize_score_for_visuals(hit.score)),
+                        text_primary_style: styles.style(style_system::STYLE_TEXT_PRIMARY),
+                        text_muted_style: styles.style(style_system::STYLE_TEXT_MUTED),
+                        text_subtle_style: styles.style(style_system::STYLE_TEXT_SUBTLE),
+                        success_style: styles.style(style_system::STYLE_STATUS_SUCCESS),
+                        source_local_style: styles.style(style_system::STYLE_SOURCE_LOCAL),
+                        source_remote_style: styles.style(style_system::STYLE_SOURCE_REMOTE),
+                        location_style: styles.style(style_system::STYLE_LOCATION),
+                        reveal_progress: if reveal_motion_enabled {
+                            self.anim.reveal_progress(i) as f32
+                        } else {
+                            1.0
+                        },
+                        focus_flash_intensity,
+                    }
+                })
+                .collect();
+
+            let list = VirtualizedList::new(&items)
+                .fixed_height(row_h)
+                .highlight_style(row_selected_style)
+                .show_scrollbar(true);
+            let mut state = self.results_list_state.borrow_mut();
+            state.select(Some(pane.selected.min(items.len().saturating_sub(1))));
+            list.render(inner, frame, &mut state);
             return;
         }
 
@@ -17691,7 +17854,18 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
-        assert_eq!(plain, "/needle (2/3)");
+        assert!(
+            plain.contains("/needle (2/3)"),
+            "find bar should include query and match counter, got '{plain}'"
+        );
+        assert!(
+            plain.contains("Enter next"),
+            "find bar should include next-match hint when width permits, got '{plain}'"
+        );
+        assert!(
+            plain.contains("Esc close"),
+            "find bar should include close hint when width permits, got '{plain}'"
+        );
     }
 
     #[test]
@@ -17741,6 +17915,68 @@ mod tests {
         assert!(
             plain.contains("(1/3)"),
             "match context should remain visible after truncation"
+        );
+    }
+
+    #[test]
+    fn detail_find_bar_line_uses_compact_hints_when_full_phrase_does_not_fit() {
+        let find = DetailFindState {
+            query: "needle".to_string(),
+            matches: vec![2, 4, 7],
+            current: 1,
+        };
+        let line = build_detail_find_bar_line(
+            &find,
+            34,
+            ftui::Style::default(),
+            ftui::Style::default(),
+            ftui::Style::default(),
+        );
+        let plain: String = line
+            .spans()
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            plain.contains("/needle (2/3)"),
+            "query and match counter should remain intact in compact mode"
+        );
+        assert!(
+            plain.contains("Enter") && plain.contains("n/N") && plain.contains("Esc"),
+            "compact hint set should retain key discoverability, got '{plain}'"
+        );
+        assert!(
+            !plain.contains("Enter next"),
+            "compact mode should drop verbose hint text when space is constrained"
+        );
+    }
+
+    #[test]
+    fn detail_find_bar_line_preserves_match_counter_when_hints_are_elided() {
+        let find = DetailFindState {
+            query: "needle".to_string(),
+            matches: vec![2, 4, 7],
+            current: 1,
+        };
+        let line = build_detail_find_bar_line(
+            &find,
+            18,
+            ftui::Style::default(),
+            ftui::Style::default(),
+            ftui::Style::default(),
+        );
+        let plain: String = line
+            .spans()
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            plain.contains("(2/3)"),
+            "tight widths must preserve match state, got '{plain}'"
+        );
+        assert!(
+            !plain.contains("Esc"),
+            "hints should be elided before match context under tight width"
         );
     }
 
@@ -19495,25 +19731,8 @@ mod tests {
     /// Helper: create a CassApp with a richer, deterministic result corpus.
     fn app_with_rich_visual_fixture() -> CassApp {
         let mut app = CassApp::default();
-        let hits = rich_visual_fixture_hits();
-        let mut pane_map: std::collections::BTreeMap<String, Vec<SearchHit>> =
-            std::collections::BTreeMap::new();
-        for hit in &hits {
-            pane_map
-                .entry(hit.agent.clone())
-                .or_default()
-                .push(hit.clone());
-        }
-        app.results = hits;
-        app.panes = pane_map
-            .into_iter()
-            .map(|(agent, hits)| AgentPane {
-                agent,
-                total_count: hits.len(),
-                hits,
-                selected: 0,
-            })
-            .collect();
+        app.results = rich_visual_fixture_hits();
+        app.regroup_panes();
         app.active_pane = 0;
         app
     }
@@ -20476,6 +20695,88 @@ mod tests {
             spans.len() >= 4,
             "should have at least 4 spans (label+value per pill), got {}",
             spans.len()
+        );
+        let agent_label = spans
+            .iter()
+            .find(|sp| sp.content.contains("[agent:"))
+            .expect("agent label span should be present");
+        assert_eq!(
+            agent_label.style.as_ref().cloned(),
+            Some(label.underline()),
+            "active editable label should use label style with underline"
+        );
+        let ws_label = spans
+            .iter()
+            .find(|sp| sp.content.contains("[ws:"))
+            .expect("ws label span should be present");
+        assert_eq!(
+            ws_label.style.as_ref().cloned(),
+            Some(inactive.underline()),
+            "inactive editable label should use inactive style with underline"
+        );
+
+        let active_value = spans
+            .iter()
+            .find(|sp| sp.content.contains("codex]"))
+            .expect("active value span should be present");
+        assert_eq!(
+            active_value.style.as_ref().cloned(),
+            Some(active),
+            "active value should use active style"
+        );
+        let inactive_value = spans
+            .iter()
+            .find(|sp| sp.content.contains("any]"))
+            .expect("inactive value span should be present");
+        assert_eq!(
+            inactive_value.style.as_ref().cloned(),
+            Some(inactive),
+            "inactive value should use inactive style"
+        );
+    }
+
+    #[test]
+    fn build_pills_row_underlines_only_editable_labels() {
+        let app = app_with_hits(5);
+        let active = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(255, 0, 0, 255));
+        let inactive =
+            ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(128, 128, 128, 255));
+        let label = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(200, 200, 200, 255));
+        let sep = ftui::Style::new();
+        let pills = vec![
+            Pill {
+                label: "edit".into(),
+                value: "yes".into(),
+                active: true,
+                editable: true,
+            },
+            Pill {
+                label: "fixed".into(),
+                value: "no".into(),
+                active: true,
+                editable: false,
+            },
+        ];
+        let area = Rect::new(0, 0, 80, 1);
+        let (line, _rects) = app.build_pills_row(area, &pills, active, inactive, label, sep);
+        let spans = line.spans();
+        let editable_label = spans
+            .iter()
+            .find(|sp| sp.content.contains("[edit:"))
+            .expect("editable label span should be present");
+        assert_eq!(
+            editable_label.style.as_ref().cloned(),
+            Some(label.underline()),
+            "editable label should be underlined"
+        );
+        let fixed_label = spans
+            .iter()
+            .find(|sp| sp.content.contains("[fixed:"))
+            .expect("readonly label span should be present");
+        assert_eq!(
+            fixed_label.style.as_ref().cloned(),
+            Some(label),
+            "readonly label should not be underlined"
         );
     }
 
@@ -27183,7 +27484,19 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     // ── Search-surface regression snapshots (2dccg.8.6) ─────────────────
 
     fn search_surface_fixture_app() -> CassApp {
-        let mut app = app_with_rich_visual_fixture();
+        let mut app = CassApp::default();
+        app.results = rich_visual_fixture_hits()
+            .into_iter()
+            .filter(|hit| hit.title == "Large-snippet rendering edge case")
+            .collect();
+        assert_eq!(
+            app.results.len(),
+            1,
+            "search-surface snapshots require a single canonical fixture row"
+        );
+        app.grouping_mode = ResultsGrouping::Flat;
+        app.regroup_panes();
+        app.active_pane = 0;
         app.query = "authentication regression".to_string();
         app.cursor_pos = 13;
         app.search_mode = SearchMode::Hybrid;
