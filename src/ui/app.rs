@@ -7207,6 +7207,7 @@ impl CassApp {
                     shortcuts::FOCUS_QUERY,
                     shortcuts::HISTORY_CYCLE
                 ),
+                "Enter in query bar submits immediately; Enter on selected result opens detail modal (Messages tab)".into(),
                 "Wildcards: foo* (prefix), *foo (suffix), *foo* (contains)".into(),
                 "Auto-fuzzy: searches with few results try *term* fallback".into(),
                 format!("{} refresh search (re-query index)", shortcuts::REFRESH),
@@ -7294,7 +7295,10 @@ impl CassApp {
                 ("\u{2191}/\u{2193}", "Move selection"),
                 ("Home/End", "Move query caret to start/end"),
                 ("Alt+1..9", "Jump to pane index"),
-                ("Enter", "Open detail"),
+                (
+                    "Enter",
+                    "Open detail (Messages tab default; if no selected hit, submit query)",
+                ),
                 ("Esc", "Close/back"),
                 ("[ / ]", "Cycle detail tabs"),
                 ("Ctrl+Enter", "Queue item; Ctrl+O open all queued"),
