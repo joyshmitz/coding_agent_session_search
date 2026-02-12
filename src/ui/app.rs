@@ -5053,10 +5053,7 @@ impl CassApp {
                 // Editable inactive pills show a pencil glyph to reinforce
                 // that clicking will open an editor, even in the inactive state.
                 if pill.editable && !pill.active {
-                    spans.push(ftui::text::Span::styled(
-                        "\u{270E}",
-                        label_part_style,
-                    ));
+                    spans.push(ftui::text::Span::styled("\u{270E}", label_part_style));
                 }
                 spans.push(ftui::text::Span::styled(
                     value_part.to_string(),
@@ -15377,6 +15374,42 @@ mod tests {
     use crate::model::types::Message;
     use crate::search::query::MatchType;
     use crate::ui::components::palette::PaletteAction;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct TraceBufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for TraceBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if let Ok(mut bytes) = self.0.lock() {
+                bytes.extend_from_slice(buf);
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_trace_output<F>(f: F) -> String
+    where
+        F: FnOnce(),
+    {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let writer = TraceBufferWriter(sink.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_level(false)
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(sink.lock().map(|b| b.clone()).unwrap_or_default()).unwrap_or_default()
+    }
 
     #[test]
     fn cass_app_default_initializes_with_sane_defaults() {
@@ -16890,6 +16923,53 @@ mod tests {
             app.detail_tab,
             DetailTab::Messages,
             "Enter-open should land on contextual messages tab for markdown rendering"
+        );
+    }
+
+    #[test]
+    fn enter_routing_diagnostics_emit_query_submit_fallback_marker() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Query;
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        let logs = capture_trace_output(|| {
+            let _ = app.update(CassMsg::DetailOpened);
+        });
+
+        assert!(
+            logs.contains("route=\"query_submit_fallback\""),
+            "expected query-submit fallback diagnostic marker, logs={logs}"
+        );
+        assert!(
+            logs.contains("reason=\"no_selected_hit\""),
+            "expected fallback reason marker, logs={logs}"
+        );
+    }
+
+    #[test]
+    fn enter_routing_diagnostics_emit_detail_modal_open_marker() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Query;
+        app.panes.push(AgentPane {
+            agent: "codex".into(),
+            total_count: 1,
+            hits: vec![make_test_hit()],
+            selected: 0,
+        });
+        app.active_pane = 0;
+        app.focus_manager.focus(focus_ids::RESULTS_LIST);
+
+        let logs = capture_trace_output(|| {
+            let _ = app.update(CassMsg::DetailOpened);
+        });
+
+        assert!(
+            logs.contains("route=\"detail_modal_open\""),
+            "expected modal-open diagnostic marker, logs={logs}"
+        );
+        assert!(
+            logs.contains("reason=\"selected_hit\""),
+            "expected selected-hit reason marker, logs={logs}"
         );
     }
 
@@ -21718,14 +21798,12 @@ mod tests {
             ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(128, 128, 128, 255));
         let label = ftui::Style::new().fg(ftui::render::cell::PackedRgba::rgba(200, 200, 200, 255));
         let sep = ftui::Style::new();
-        let pills = vec![
-            Pill {
-                label: "static".into(),
-                value: "on".into(),
-                active: false,
-                editable: false,
-            },
-        ];
+        let pills = vec![Pill {
+            label: "static".into(),
+            value: "on".into(),
+            active: false,
+            editable: false,
+        }];
         let area = Rect::new(0, 0, 120, 1);
         let (line, _) = app.build_pills_row(area, &pills, active, inactive, label, sep);
         let spans = line.spans();
