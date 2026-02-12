@@ -1128,7 +1128,7 @@ When an exact query returns fewer than 3 results, `cass` automatically retries w
 | Key | Action |
 |-----|--------|
 | Type | Live search as you type |
-| `Enter` | Open selected result in `$EDITOR` |
+| `Enter` | Submit query immediately (if query is empty, edits last filter chip) |
 | `Esc` | Clear query / exit search |
 | `Up`/`Down` | Navigate query history |
 | `Ctrl+R` | Cycle through query history |
@@ -1139,6 +1139,7 @@ When an exact query returns fewer than 3 results, `cass` automatically retries w
 | Key | Action |
 |-----|--------|
 | `Up`/`Down` | Move selection in results list |
+| `Enter` | Open selected result in detail modal (Messages tab by default) |
 | `Left`/`Right` | Switch focus between results and detail pane |
 | `Tab`/`Shift+Tab` | Cycle focus: search → results → detail |
 | `PageUp`/`PageDown` | Scroll by page |
@@ -2107,13 +2108,15 @@ cass
     - `F12`: Cycle ranking mode (recent → balanced → relevance → quality → newest → oldest).
     - `Ctrl+B`: Toggle rounded/plain borders.
 - **Actions**:
-    - `Enter`: Open original log file in `$EDITOR`.
+    - `Enter`: Open selected result in contextual detail modal (defaults to Messages tab).
+    - `Enter` with no selected hit: submit query behavior (no-op if empty).
+    - `F8`: Open selected hit in `$EDITOR`.
     - `Ctrl+Enter`: Add current result to queue (multi-open).
     - `Ctrl+O`: Open all queued results in editor.
     - `Ctrl+M` / `Ctrl+X`: Toggle selection on current item.
     - `A`: Bulk actions menu (when items selected).
     - `y`: Copy file path or snippet to clipboard.
-    - `/`: Find text within detail pane.
+    - `/`: Find text within detail pane; `n`/`N` cycle matches; `Esc` exits find before closing modal.
     - `Ctrl+Shift+R`: Trigger manual re-index (refresh search results).
     - `Ctrl+Shift+Del`: Reset TUI state (clear history, filters, layout).
 
