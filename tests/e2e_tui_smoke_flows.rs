@@ -290,14 +290,16 @@ fn make_codex_fixture(root: &Path) {
     fs::create_dir_all(&sessions).unwrap();
     let file = sessions.join("rollout-1.jsonl");
     // Modern Codex envelope format expected by src/connectors/codex.rs.
-    let sample = r#"{"type":"session_meta","timestamp":1700000000000,"payload":{"cwd":"/tmp/cass-test"}}
+    let sample = r###"{"type":"session_meta","timestamp":1700000000000,"payload":{"cwd":"/tmp/cass-test"}}
 {"type":"event_msg","timestamp":1700000000100,"payload":{"type":"user_message","message":"hello world"}}
 {"type":"response_item","timestamp":1700000000200,"payload":{"role":"assistant","content":"hi there, how can I help?"}}
 {"type":"event_msg","timestamp":1700000000300,"payload":{"type":"user_message","message":"search for authentication bugs"}}
 {"type":"response_item","timestamp":1700000000400,"payload":{"role":"assistant","content":"I found several authentication issues in the codebase."}}
 {"type":"event_msg","timestamp":1700000000500,"payload":{"type":"user_message","message":"fix the session timeout"}}
 {"type":"response_item","timestamp":1700000000600,"payload":{"role":"assistant","content":"The session timeout has been updated to 30 minutes."}}
-"#;
+{"type":"event_msg","timestamp":1700000000700,"payload":{"type":"user_message","message":"show markdown sentinel sample"}}
+{"type":"response_item","timestamp":1700000000800,"payload":{"role":"assistant","content":"## Markdown Sentinel Alpha\n- list item bravo\n\n```rust\nlet sentinel = 42;\n```"}}
+"###;
     fs::write(file, sample).unwrap();
 }
 
@@ -711,6 +713,118 @@ fn tui_pty_enter_selected_hit_opens_detail_modal() {
     assert!(
         !raw.is_empty(),
         "Expected non-empty PTY capture for Enter detail flow"
+    );
+
+    tracker.complete();
+}
+
+#[test]
+fn tui_pty_detail_modal_shows_markdown_content() {
+    let _guard_lock = tui_flow_guard();
+    let trace = trace_id();
+    let tracker = tracker_for("tui_pty_detail_modal_shows_markdown_content");
+    let _trace_guard = tracker.trace_env_guard();
+    let env = prepare_ftui_pty_env(&trace, &tracker);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 45,
+            cols: 145,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open PTY");
+    let reader = pair.master.try_clone_reader().expect("clone PTY reader");
+    let (captured, reader_handle) = spawn_reader(reader);
+    let mut writer = pair.master.take_writer().expect("take PTY writer");
+
+    let mut tui_cmd = CommandBuilder::new(cass_bin_path());
+    tui_cmd.arg("tui");
+    apply_ftui_env(&mut tui_cmd, &env);
+    let mut child = pair
+        .slave
+        .spawn_command(tui_cmd)
+        .expect("spawn ftui TUI in PTY");
+
+    assert!(
+        wait_for_output_growth(&captured, 0, 32, PTY_STARTUP_TIMEOUT),
+        "Did not observe startup output before markdown detail flow interaction"
+    );
+
+    send_key_sequence(&mut *writer, b"sentinel");
+    thread::sleep(Duration::from_millis(120));
+    let before_submit_len = captured.lock().expect("capture lock").len();
+    send_key_sequence(&mut *writer, b"\r");
+    assert!(
+        wait_for_output_growth(&captured, before_submit_len, 24, Duration::from_secs(6)),
+        "Did not observe output growth after markdown query submission in PTY flow"
+    );
+    thread::sleep(Duration::from_millis(200));
+
+    let before_open_len = captured.lock().expect("capture lock").len();
+    send_key_sequence(&mut *writer, b"\r");
+    let saw_detail = wait_for_output_growth(&captured, before_open_len, 8, Duration::from_secs(6));
+    assert!(
+        saw_detail,
+        "Did not observe output growth after Enter detail-open attempt in markdown PTY flow"
+    );
+    thread::sleep(Duration::from_millis(220));
+
+    send_key_sequence(&mut *writer, b"\x1b");
+    thread::sleep(Duration::from_millis(220));
+    let first_esc_exited = child
+        .try_wait()
+        .expect("poll child after first ESC in markdown flow")
+        .is_some();
+    assert!(
+        !first_esc_exited,
+        "First ESC exited app; expected modal-close-only after markdown detail-open"
+    );
+
+    send_key_sequence(&mut *writer, b"\x1b");
+    let status = wait_for_child_exit(&mut *child, PTY_EXIT_TIMEOUT);
+    assert!(
+        status.success(),
+        "ftui process exited unsuccessfully after markdown detail flow: {status}"
+    );
+
+    drop(writer);
+    drop(pair);
+    let _ = reader_handle.join();
+    let raw = captured.lock().expect("capture lock").clone();
+    let rendered = String::from_utf8_lossy(&raw);
+    let rendered_lower = rendered.to_ascii_lowercase();
+    let saw_heading = rendered_lower.contains("markdown sentinel alpha");
+    let saw_list_item = rendered_lower.contains("list item bravo");
+    let saw_code = rendered_lower.contains("let sentinel = 42;");
+
+    save_artifact("pty_markdown_detail_output.raw", &trace, &raw);
+    let summary = serde_json::json!({
+        "trace_id": trace,
+        "test": "tui_pty_detail_modal_shows_markdown_content",
+        "saw_detail_growth": saw_detail,
+        "first_esc_exited": first_esc_exited,
+        "saw_heading": saw_heading,
+        "saw_list_item": saw_list_item,
+        "saw_code": saw_code,
+        "captured_bytes": raw.len(),
+    });
+    save_artifact(
+        "pty_markdown_detail_summary.json",
+        &trace,
+        serde_json::to_string_pretty(&summary)
+            .expect("serialize markdown-detail summary")
+            .as_bytes(),
+    );
+
+    assert!(
+        saw_heading && saw_list_item && saw_code,
+        "Expected PTY detail capture to include markdown heading/list/code markers"
+    );
+    assert!(
+        !raw.is_empty(),
+        "Expected non-empty PTY capture for markdown detail flow"
     );
 
     tracker.complete();
