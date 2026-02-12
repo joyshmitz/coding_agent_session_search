@@ -10795,15 +10795,36 @@ impl super::ftui_adapter::Model for CassApp {
 
             // -- Detail view --------------------------------------------------
             CassMsg::DetailOpened => {
+                let focus_id = self.focus_manager.current();
+                let has_selected_hit = self.selected_hit().is_some();
                 // Enter should prioritize opening the selected hit in context.
                 // If there is no active hit, fall back to query submit behavior.
-                if !self.show_detail_modal && self.selected_hit().is_none() {
+                if !self.show_detail_modal && !has_selected_hit {
+                    tracing::debug!(
+                        route = "query_submit_fallback",
+                        reason = "no_selected_hit",
+                        focus_id = ?focus_id,
+                        show_detail_modal = self.show_detail_modal,
+                        "enter routing decision"
+                    );
                     return self.update(CassMsg::QuerySubmitted);
                 }
                 // Ensure Enter lands on the contextual conversation view.
                 if !self.show_detail_modal {
                     self.detail_tab = DetailTab::Messages;
                 }
+                tracing::debug!(
+                    route = "detail_modal_open",
+                    reason = if self.show_detail_modal {
+                        "modal_already_open"
+                    } else {
+                        "selected_hit"
+                    },
+                    focus_id = ?focus_id,
+                    show_detail_modal = self.show_detail_modal,
+                    detail_tab = ?self.detail_tab,
+                    "enter routing decision"
+                );
                 self.show_detail_modal = true;
                 self.detail_scroll = 0;
                 self.modal_scroll = 0;
