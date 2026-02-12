@@ -15847,6 +15847,82 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct EnterRoutingFixture {
+        input_mode: InputMode,
+        focus_id: FocusId,
+        selected_hit: bool,
+        show_detail_modal: bool,
+        detail_tab: DetailTab,
+    }
+
+    #[derive(Debug)]
+    struct EnterRoutingOutcome {
+        cmd_msg: Option<CassMsg>,
+        show_detail_modal: bool,
+        detail_tab: DetailTab,
+        query_history_front: Option<String>,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ExpectedEnterRoute {
+        QuerySubmit,
+        DetailModalOpen,
+    }
+
+    fn app_for_enter_routing(fixture: EnterRoutingFixture) -> CassApp {
+        let mut app = CassApp::default();
+        app.input_mode = fixture.input_mode;
+        app.query = "test query".to_string();
+        app.show_detail_modal = fixture.show_detail_modal;
+        app.detail_tab = fixture.detail_tab;
+        if fixture.selected_hit {
+            app.panes.push(AgentPane {
+                agent: "codex".into(),
+                total_count: 1,
+                hits: vec![make_test_hit()],
+                selected: 0,
+            });
+            app.active_pane = 0;
+        }
+        app.focus_manager.focus(fixture.focus_id);
+        app
+    }
+
+    fn run_enter_routing(fixture: EnterRoutingFixture) -> EnterRoutingOutcome {
+        let mut app = app_for_enter_routing(fixture);
+        let cmd = app.update(CassMsg::DetailOpened);
+        EnterRoutingOutcome {
+            cmd_msg: extract_msg(cmd),
+            show_detail_modal: app.show_detail_modal,
+            detail_tab: app.detail_tab,
+            query_history_front: app.query_history.front().cloned(),
+        }
+    }
+
+    fn assert_enter_route(case: &str, fixture: EnterRoutingFixture, expected: ExpectedEnterRoute) {
+        let outcome = run_enter_routing(fixture);
+        match expected {
+            ExpectedEnterRoute::QuerySubmit => {
+                assert!(
+                    matches!(outcome.cmd_msg, Some(CassMsg::SearchRequested)),
+                    "{case}: expected query-submit route to dispatch SearchRequested; got {:?}",
+                    outcome.cmd_msg
+                );
+            }
+            ExpectedEnterRoute::DetailModalOpen => {
+                assert!(
+                    outcome.show_detail_modal,
+                    "{case}: expected detail modal to open"
+                );
+                assert!(
+                    !matches!(outcome.cmd_msg, Some(CassMsg::SearchRequested)),
+                    "{case}: expected detail-open route, not query-submit fallback"
+                );
+            }
+        }
+    }
+
     fn sample_update_info() -> UpdateInfo {
         UpdateInfo {
             latest_version: "9.9.9".to_string(),
@@ -16870,61 +16946,60 @@ mod tests {
 
     #[test]
     fn enter_in_query_mode_submits_search() {
-        let mut app = CassApp::default();
-        app.query = "test query".to_string();
-        app.input_mode = InputMode::Query;
-        app.focus_manager.focus(focus_ids::SEARCH_BAR);
-        // DetailOpened (Enter key) in query mode should route to QuerySubmitted
-        let cmd = app.update(CassMsg::DetailOpened);
-        // Should have pushed to history via QuerySubmitted
-        assert_eq!(app.query_history.front().unwrap(), "test query");
-        // Returns SearchRequested
-        assert!(matches!(extract_msg(cmd), Some(CassMsg::SearchRequested)));
+        let fixture = EnterRoutingFixture {
+            input_mode: InputMode::Query,
+            focus_id: focus_ids::SEARCH_BAR,
+            selected_hit: false,
+            show_detail_modal: false,
+            detail_tab: DetailTab::Raw,
+        };
+        let outcome = run_enter_routing(fixture);
+        assert_eq!(
+            outcome.query_history_front.as_deref(),
+            Some("test query"),
+            "query-submit fallback should record query in history"
+        );
+        assert!(
+            matches!(outcome.cmd_msg, Some(CassMsg::SearchRequested)),
+            "fallback should dispatch SearchRequested; got {:?}",
+            outcome.cmd_msg
+        );
     }
 
     #[test]
     fn enter_on_selected_result_opens_detail_modal() {
-        let mut app = CassApp::default();
-        app.input_mode = InputMode::Query;
-        app.panes.push(AgentPane {
-            agent: "codex".into(),
-            total_count: 1,
-            hits: vec![make_test_hit()],
-            selected: 0,
-        });
-        app.active_pane = 0;
-        app.focus_manager.focus(focus_ids::RESULTS_LIST);
-
-        let _ = app.update(CassMsg::DetailOpened);
+        let fixture = EnterRoutingFixture {
+            input_mode: InputMode::Query,
+            focus_id: focus_ids::RESULTS_LIST,
+            selected_hit: true,
+            show_detail_modal: false,
+            detail_tab: DetailTab::Raw,
+        };
+        let outcome = run_enter_routing(fixture);
 
         assert!(
-            app.show_detail_modal,
+            outcome.show_detail_modal,
             "Enter on a selected result should open modal"
         );
     }
 
     #[test]
     fn enter_on_selected_result_opens_modal_even_when_search_bar_focused() {
-        let mut app = CassApp::default();
-        app.input_mode = InputMode::Query;
-        app.panes.push(AgentPane {
-            agent: "codex".into(),
-            total_count: 1,
-            hits: vec![make_test_hit()],
-            selected: 0,
-        });
-        app.active_pane = 0;
-        app.focus_manager.focus(focus_ids::SEARCH_BAR);
-        app.detail_tab = DetailTab::Raw;
-
-        let _ = app.update(CassMsg::DetailOpened);
+        let fixture = EnterRoutingFixture {
+            input_mode: InputMode::Query,
+            focus_id: focus_ids::SEARCH_BAR,
+            selected_hit: true,
+            show_detail_modal: false,
+            detail_tab: DetailTab::Raw,
+        };
+        let outcome = run_enter_routing(fixture);
 
         assert!(
-            app.show_detail_modal,
+            outcome.show_detail_modal,
             "Enter with selected hit should open modal even if search bar still has focus"
         );
         assert_eq!(
-            app.detail_tab,
+            outcome.detail_tab,
             DetailTab::Messages,
             "Enter-open should land on contextual messages tab for markdown rendering"
         );
@@ -16979,12 +17054,55 @@ mod tests {
 
     #[test]
     fn enter_with_detail_modal_opens_detail() {
-        let mut app = CassApp::default();
-        app.input_mode = InputMode::Query;
-        app.show_detail_modal = true; // already in detail
-        let _ = app.update(CassMsg::DetailOpened);
-        // Should still be in detail modal (didn't redirect to search)
-        assert!(app.show_detail_modal);
+        let fixture = EnterRoutingFixture {
+            input_mode: InputMode::Query,
+            focus_id: focus_ids::SEARCH_BAR,
+            selected_hit: false,
+            show_detail_modal: true,
+            detail_tab: DetailTab::Messages,
+        };
+        let outcome = run_enter_routing(fixture);
+        assert!(
+            outcome.show_detail_modal,
+            "should remain in detail modal (no query-submit fallback)"
+        );
+    }
+
+    #[test]
+    fn enter_routing_helper_matrix_smoke() {
+        assert_enter_route(
+            "query-focus no selection",
+            EnterRoutingFixture {
+                input_mode: InputMode::Query,
+                focus_id: focus_ids::SEARCH_BAR,
+                selected_hit: false,
+                show_detail_modal: false,
+                detail_tab: DetailTab::Raw,
+            },
+            ExpectedEnterRoute::QuerySubmit,
+        );
+        assert_enter_route(
+            "results-focus selected hit",
+            EnterRoutingFixture {
+                input_mode: InputMode::Query,
+                focus_id: focus_ids::RESULTS_LIST,
+                selected_hit: true,
+                show_detail_modal: false,
+                detail_tab: DetailTab::Raw,
+            },
+            ExpectedEnterRoute::DetailModalOpen,
+        );
+        assert_enter_route(
+            "search-focus selected hit",
+            EnterRoutingFixture {
+                input_mode: InputMode::Query,
+                focus_id: focus_ids::SEARCH_BAR,
+                selected_hit: true,
+                show_detail_modal: false,
+                detail_tab: DetailTab::Raw,
+            },
+            ExpectedEnterRoute::DetailModalOpen,
+        );
     }
 
     #[test]
