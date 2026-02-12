@@ -15847,6 +15847,15 @@ mod tests {
         }
     }
 
+    /// Drive immediate follow-up messages returned by Cmd::Msg/Batch.
+    fn drain_cmd_messages(app: &mut CassApp, cmd: ftui::Cmd<CassMsg>) {
+        let mut pending = extract_msgs(cmd);
+        while let Some(msg) = pending.pop() {
+            let next = app.update(msg);
+            pending.extend(extract_msgs(next));
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct EnterRoutingFixture {
         input_mode: InputMode,
@@ -17070,39 +17079,127 @@ mod tests {
 
     #[test]
     fn enter_routing_helper_matrix_smoke() {
-        assert_enter_route(
-            "query-focus no selection",
-            EnterRoutingFixture {
-                input_mode: InputMode::Query,
-                focus_id: focus_ids::SEARCH_BAR,
-                selected_hit: false,
-                show_detail_modal: false,
-                detail_tab: DetailTab::Raw,
-            },
-            ExpectedEnterRoute::QuerySubmit,
-        );
-        assert_enter_route(
-            "results-focus selected hit",
-            EnterRoutingFixture {
-                input_mode: InputMode::Query,
-                focus_id: focus_ids::RESULTS_LIST,
-                selected_hit: true,
-                show_detail_modal: false,
-                detail_tab: DetailTab::Raw,
-            },
-            ExpectedEnterRoute::DetailModalOpen,
-        );
-        assert_enter_route(
-            "search-focus selected hit",
-            EnterRoutingFixture {
-                input_mode: InputMode::Query,
-                focus_id: focus_ids::SEARCH_BAR,
-                selected_hit: true,
-                show_detail_modal: false,
-                detail_tab: DetailTab::Raw,
-            },
-            ExpectedEnterRoute::DetailModalOpen,
-        );
+        let cases = [
+            (
+                "query-focus no selection",
+                EnterRoutingFixture {
+                    input_mode: InputMode::Query,
+                    focus_id: focus_ids::SEARCH_BAR,
+                    selected_hit: false,
+                    show_detail_modal: false,
+                    detail_tab: DetailTab::Raw,
+                },
+                ExpectedEnterRoute::QuerySubmit,
+                None,
+            ),
+            (
+                "results-focus no selection",
+                EnterRoutingFixture {
+                    input_mode: InputMode::Query,
+                    focus_id: focus_ids::RESULTS_LIST,
+                    selected_hit: false,
+                    show_detail_modal: false,
+                    detail_tab: DetailTab::Raw,
+                },
+                ExpectedEnterRoute::QuerySubmit,
+                None,
+            ),
+            (
+                "results-focus selected hit",
+                EnterRoutingFixture {
+                    input_mode: InputMode::Query,
+                    focus_id: focus_ids::RESULTS_LIST,
+                    selected_hit: true,
+                    show_detail_modal: false,
+                    detail_tab: DetailTab::Raw,
+                },
+                ExpectedEnterRoute::DetailModalOpen,
+                Some(DetailTab::Messages),
+            ),
+            (
+                "search-focus selected hit",
+                EnterRoutingFixture {
+                    input_mode: InputMode::Query,
+                    focus_id: focus_ids::SEARCH_BAR,
+                    selected_hit: true,
+                    show_detail_modal: false,
+                    detail_tab: DetailTab::Raw,
+                },
+                ExpectedEnterRoute::DetailModalOpen,
+                Some(DetailTab::Messages),
+            ),
+            (
+                "modal already open with selected hit",
+                EnterRoutingFixture {
+                    input_mode: InputMode::Query,
+                    focus_id: focus_ids::DETAIL_MODAL,
+                    selected_hit: true,
+                    show_detail_modal: true,
+                    detail_tab: DetailTab::Raw,
+                },
+                ExpectedEnterRoute::DetailModalOpen,
+                Some(DetailTab::Raw),
+            ),
+        ];
+
+        for (label, fixture, expected, expected_tab) in cases {
+            assert_enter_route(label, fixture, expected);
+            if let Some(tab) = expected_tab {
+                let outcome = run_enter_routing(fixture);
+                assert_eq!(
+                    outcome.detail_tab, tab,
+                    "{label}: unexpected tab after enter-routing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enter_matrix_non_query_modes_apply_input_without_opening_modal() {
+        let cases = [
+            (InputMode::PaneFilter, "auth"),
+            (InputMode::Agent, "claude_code"),
+            (InputMode::Workspace, "/projects/test"),
+        ];
+
+        for (mode, seed) in cases {
+            let mut app = CassApp::default();
+            app.input_mode = mode;
+            app.input_buffer = seed.to_string();
+            if mode == InputMode::PaneFilter {
+                app.pane_filter = Some(seed.to_string());
+            }
+            app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+            let cmd = app.update(CassMsg::DetailOpened);
+            drain_cmd_messages(&mut app, cmd);
+
+            assert!(
+                !app.show_detail_modal,
+                "{mode:?}: Enter should apply input mode, not open detail"
+            );
+            assert_eq!(
+                app.input_mode,
+                InputMode::Query,
+                "{mode:?}: input mode should return to Query after apply"
+            );
+            match mode {
+                InputMode::PaneFilter => assert_eq!(
+                    app.pane_filter.as_deref(),
+                    Some(seed),
+                    "pane filter should be applied"
+                ),
+                InputMode::Agent => assert!(
+                    app.filters.agents.contains(seed),
+                    "agent filter should include applied value"
+                ),
+                InputMode::Workspace => assert!(
+                    app.filters.workspaces.contains(seed),
+                    "workspace filter should include applied value"
+                ),
+                _ => unreachable!("only non-query filter modes are covered"),
+            }
+        }
     }
 
     #[test]
