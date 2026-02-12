@@ -38,10 +38,9 @@ fn aider_parses_chat_history() {
     let conv = &convs[0];
     assert_eq!(conv.agent_slug, "aider");
     assert!(
-        conv.title
-            .as_ref()
-            .unwrap()
-            .contains(".aider.chat.history.md")
+        conv.title.as_ref().unwrap().starts_with("Aider Chat:"),
+        "title should use 'Aider Chat:' prefix, got: {}",
+        conv.title.as_ref().unwrap()
     );
 
     // Check message parsing
@@ -138,7 +137,18 @@ fn aider_title_includes_path() {
     assert_eq!(convs.len(), 1);
     let title = convs[0].title.as_ref().unwrap();
     assert!(title.starts_with("Aider Chat:"));
-    assert!(title.contains(&path.display().to_string()));
+    // Title uses parent directory name, not the full file path
+    let parent_name = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap();
+    assert!(
+        title.contains(parent_name),
+        "title should contain parent dir name '{}', got: {}",
+        parent_name,
+        title
+    );
 }
 
 /// Test workspace is set to parent directory
