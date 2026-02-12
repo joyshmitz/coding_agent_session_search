@@ -19779,6 +19779,60 @@ mod tests {
         assert_eq!(autocomplete_csv_suffix("  ", &candidates), None);
     }
 
+    #[test]
+    fn input_autocomplete_candidates_agent_mode_includes_hints() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Agent;
+        let candidates = app.input_autocomplete_candidates();
+        assert!(candidates.contains("claude_code"));
+        assert!(candidates.contains("cursor"));
+        assert!(candidates.contains("aider"));
+    }
+
+    #[test]
+    fn input_autocomplete_candidates_agent_mode_merges_filters() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Agent;
+        app.filters.agents.insert("custom_agent".to_string());
+        let candidates = app.input_autocomplete_candidates();
+        assert!(
+            candidates.contains("custom_agent"),
+            "should include agents from filters"
+        );
+        assert!(
+            candidates.contains("claude_code"),
+            "should still include baseline hints"
+        );
+    }
+
+    #[test]
+    fn input_autocomplete_candidates_workspace_mode() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Workspace;
+        app.filters.workspaces.insert("/home/user/project".to_string());
+        let candidates = app.input_autocomplete_candidates();
+        assert!(candidates.contains("/home/user/project"));
+        // Should NOT contain agent hints
+        assert!(!candidates.contains("claude_code"));
+    }
+
+    #[test]
+    fn input_autocomplete_candidates_query_mode_empty() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Query;
+        let candidates = app.input_autocomplete_candidates();
+        assert!(candidates.is_empty(), "query mode has no autocomplete");
+    }
+
+    #[test]
+    fn autocomplete_input_buffer_integration() {
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Agent;
+        app.input_buffer = "cl".to_string();
+        let result = app.autocomplete_input_buffer();
+        assert_eq!(result, Some("claude_code".to_string()));
+    }
+
     fn make_test_hit() -> SearchHit {
         SearchHit {
             title: "Test Conversation".into(),
