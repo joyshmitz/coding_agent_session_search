@@ -3,6 +3,7 @@
 //! GitHub Copilot Chat stores conversation history in VS Code's globalStorage:
 //! - Linux: ~/.config/Code/User/globalStorage/github.copilot-chat/
 //! - macOS: ~/Library/Application Support/Code/User/globalStorage/github.copilot-chat/
+//! - Windows: %APPDATA%/Code/User/globalStorage/github.copilot-chat/
 //!
 //! The conversations directory contains JSON files with chat sessions.
 //! Each file typically represents a conversation panel session with an array
@@ -95,12 +96,31 @@ impl CopilotConnector {
         ]
     }
 
+    /// Known VS Code globalStorage paths for Copilot Chat on Windows.
+    ///
+    /// Uses `%APPDATA%` (typically `C:\Users\<name>\AppData\Roaming`).
+    fn vscode_windows_paths() -> Vec<PathBuf> {
+        let appdata = match dirs::config_dir() {
+            Some(dir) => dir,
+            None => return Vec::new(),
+        };
+
+        vec![
+            appdata.join("Code/User/globalStorage/github.copilot-chat"),
+            appdata.join("Code - Insiders/User/globalStorage/github.copilot-chat"),
+            appdata.join("VSCodium/User/globalStorage/github.copilot-chat"),
+        ]
+    }
+
     /// All candidate paths for this platform.
     fn all_candidate_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
         paths.extend(Self::vscode_linux_paths());
         paths.extend(Self::vscode_macos_paths());
+        paths.extend(Self::vscode_windows_paths());
         paths.extend(Self::gh_copilot_paths());
+        paths.sort();
+        paths.dedup();
         paths
     }
 
@@ -456,6 +476,15 @@ impl Connector for CopilotConnector {
                     scan_root
                         .path
                         .join("Library/Application Support/Code/User/globalStorage/github.copilot-chat"),
+                    scan_root
+                        .path
+                        .join("AppData/Roaming/Code/User/globalStorage/github.copilot-chat"),
+                    scan_root
+                        .path
+                        .join("AppData/Roaming/Code - Insiders/User/globalStorage/github.copilot-chat"),
+                    scan_root
+                        .path
+                        .join("AppData/Roaming/VSCodium/User/globalStorage/github.copilot-chat"),
                     scan_root.path.join(".config/gh-copilot"),
                     scan_root.path.join(".config/gh/copilot"),
                 ];
@@ -773,6 +802,36 @@ mod tests {
     }
 
     #[test]
+    fn scan_with_windows_style_scan_root() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("fakehome");
+        let copilot_dir = home.join("AppData/Roaming/Code/User/globalStorage/github.copilot-chat");
+        fs::create_dir_all(&copilot_dir).unwrap();
+
+        let json = r#"[{
+            "id": "win-001",
+            "messages": [
+                {"role": "user", "content": "from windows root"},
+                {"role": "assistant", "content": "ack"}
+            ]
+        }]"#;
+
+        write_json(&copilot_dir, "conversations.json", json);
+
+        let connector = CopilotConnector::new();
+        let scan_root = crate::connectors::ScanRoot::local(home);
+        let ctx = ScanContext::with_roots(
+            tmp.path().to_path_buf(),
+            vec![scan_root],
+            None,
+        );
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].external_id.as_deref(), Some("win-001"));
+    }
+
+    #[test]
     fn scan_skips_invalid_json() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("copilot-chat");
@@ -804,6 +863,15 @@ mod tests {
 
     #[test]
     fn default_impl() {
-        let _connector = CopilotConnector::default();
+        let _connector = CopilotConnector;
+    }
+
+    #[test]
+    fn all_candidate_paths_are_deduplicated() {
+        let paths = CopilotConnector::all_candidate_paths();
+        let mut deduped = paths.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(paths, deduped);
     }
 }
