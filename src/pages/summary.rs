@@ -548,6 +548,20 @@ impl<'a> SummaryGenerator<'a> {
         (where_clause, params)
     }
 
+    /// Build SQL params for queries that prepend one local value before filter params.
+    fn prepend_param<'p>(
+        first: &'p dyn rusqlite::ToSql,
+        params: &'p [Box<dyn rusqlite::ToSql>],
+    ) -> Vec<&'p dyn rusqlite::ToSql> {
+        std::iter::once(first)
+            .chain(
+                params
+                    .iter()
+                    .map(|param| param.as_ref() as &dyn rusqlite::ToSql),
+            )
+            .collect()
+    }
+
     /// Get basic counts.
     fn get_counts(
         &self,
@@ -676,22 +690,31 @@ impl<'a> SummaryGenerator<'a> {
             let (workspace, conv_count, min_ts, max_ts) = row?;
 
             // Get message count for this workspace
-            let msg_count: i64 = self.db.query_row(
+            let msg_query = format!(
                 "SELECT COUNT(*) FROM messages m
                  JOIN conversations c ON m.conversation_id = c.id
-                 WHERE c.workspace = ?",
-                [&workspace],
+                 WHERE c.workspace = ?{}",
+                where_clause
+            );
+            let msg_count: i64 = self.db.query_row(
+                &msg_query,
+                rusqlite::params_from_iter(Self::prepend_param(&workspace, params)),
                 |row| row.get(0),
             )?;
 
             // Get sample titles
             let titles: Vec<String> = {
-                let mut title_stmt = self.db.prepare(
-                    "SELECT title FROM conversations
-                     WHERE workspace = ? AND title IS NOT NULL
-                     ORDER BY started_at DESC LIMIT 5",
+                let title_query = format!(
+                    "SELECT c.title FROM conversations c
+                     WHERE c.workspace = ? AND c.title IS NOT NULL{}
+                     ORDER BY c.started_at DESC LIMIT 5",
+                    where_clause
+                );
+                let mut title_stmt = self.db.prepare(&title_query)?;
+                let title_rows = title_stmt.query_map(
+                    rusqlite::params_from_iter(Self::prepend_param(&workspace, params)),
+                    |row| row.get(0),
                 )?;
-                let title_rows = title_stmt.query_map([&workspace], |row| row.get(0))?;
                 title_rows.filter_map(|r| r.ok()).collect()
             };
 
@@ -741,11 +764,15 @@ impl<'a> SummaryGenerator<'a> {
             let (agent, conv_count) = row?;
 
             // Get message count
-            let msg_count: i64 = self.db.query_row(
+            let msg_query = format!(
                 "SELECT COUNT(*) FROM messages m
                  JOIN conversations c ON m.conversation_id = c.id
-                 WHERE c.agent = ?",
-                [&agent],
+                 WHERE c.agent = ?{}",
+                where_clause
+            );
+            let msg_count: i64 = self.db.query_row(
+                &msg_query,
+                rusqlite::params_from_iter(Self::prepend_param(&agent, params)),
                 |row| row.get(0),
             )?;
 
@@ -1069,6 +1096,56 @@ mod tests {
 
         assert_eq!(summary.total_conversations, 2);
         assert_eq!(summary.total_messages, 8); // 5 + 3
+    }
+
+    #[test]
+    fn test_workspace_summary_message_counts_respect_time_filter() {
+        let (_dir, conn) = create_test_db();
+        insert_test_data(&conn);
+
+        let filters = SummaryFilters {
+            since_ts: Some(1_700_050_000_000),
+            ..Default::default()
+        };
+
+        let generator = SummaryGenerator::new(&conn);
+        let summary = generator.generate(Some(&filters)).unwrap();
+
+        let project_a = summary
+            .workspaces
+            .iter()
+            .find(|w| w.path == "/home/user/project-a")
+            .unwrap();
+        assert_eq!(project_a.conversation_count, 1);
+        assert_eq!(project_a.message_count, 3);
+        assert!(
+            project_a
+                .sample_titles
+                .iter()
+                .all(|t| t != "Fix authentication bug")
+        );
+    }
+
+    #[test]
+    fn test_agent_summary_message_counts_respect_time_filter() {
+        let (_dir, conn) = create_test_db();
+        insert_test_data(&conn);
+
+        let filters = SummaryFilters {
+            since_ts: Some(1_700_050_000_000),
+            ..Default::default()
+        };
+
+        let generator = SummaryGenerator::new(&conn);
+        let summary = generator.generate(Some(&filters)).unwrap();
+
+        let claude = summary
+            .agents
+            .iter()
+            .find(|a| a.name == "claude-code")
+            .unwrap();
+        assert_eq!(claude.conversation_count, 1);
+        assert_eq!(claude.message_count, 3);
     }
 
     #[test]
