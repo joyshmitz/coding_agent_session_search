@@ -40,7 +40,8 @@
         "chatgpt",
         "pi_agent",
         "factory",
-        "openclaw"
+        "openclaw",
+        "copilot"
     ],
     "limits": {
         "max_limit": 10000,
