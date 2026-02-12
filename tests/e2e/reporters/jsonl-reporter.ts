@@ -155,12 +155,10 @@ class JsonlReporter implements Reporter {
     this.runId = `${ts}_${randomSuffix()}`;
     this.env = captureEnvironment();
 
-    // Determine output directory
+    // Determine output path (directory created in onBegin to survive Playwright's
+    // outputDir cleanup which runs between constructor and onBegin)
     const projectRoot = process.cwd();
-    const outputDir = path.join(projectRoot, 'test-results', 'e2e');
-    fs.mkdirSync(outputDir, { recursive: true });
-
-    this.outputPath = path.join(outputDir, `playwright_${ts}.jsonl`);
+    this.outputPath = path.join(projectRoot, 'test-results', 'e2e', `playwright_${ts}.jsonl`);
   }
 
   private writeEvent(eventData: E2eEvent): void {
@@ -202,6 +200,9 @@ class JsonlReporter implements Reporter {
 
   onBegin(config: FullConfig, _suite: Suite): void {
     this.startTime = Date.now();
+    // Create output directory here (not in constructor) because Playwright cleans
+    // its default outputDir (test-results/) between reporter construction and onBegin
+    fs.mkdirSync(path.dirname(this.outputPath), { recursive: true });
     this.stream = fs.createWriteStream(this.outputPath, { flags: 'a' });
 
     this.writeEvent({
