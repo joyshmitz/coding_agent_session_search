@@ -220,6 +220,22 @@ pub const SAVED_VIEWS_MODAL_TITLE: &str = " Saved Views ";
 pub const OPEN_CONFIRM_THRESHOLD: usize = 12;
 /// Maximum number of panes shown simultaneously in the results strip.
 const MAX_VISIBLE_PANES: usize = 6;
+/// Baseline agent slugs used for filter input autocompletion when no
+/// search-backed candidates are currently available.
+const INPUT_AUTOCOMPLETE_AGENT_HINTS: &[&str] = &[
+    "aider",
+    "amp",
+    "chatgpt",
+    "claude_code",
+    "cline",
+    "codex",
+    "copilot",
+    "cursor",
+    "factory",
+    "gemini",
+    "opencode",
+    "pi_agent",
+];
 const PANEL_RATIO_MIN: f64 = 0.25;
 const PANEL_RATIO_MAX: f64 = 0.75;
 const FOOTER_HINT_ROOT_ID: HelpId = HelpId(1_000_000);
@@ -2381,6 +2397,33 @@ fn pane_filter_matches_hit(hit: &SearchHit, filter: &str) -> bool {
     ]
     .iter()
     .any(|field| field.to_ascii_lowercase().contains(&needle))
+}
+
+fn autocomplete_csv_suffix(input: &str, candidates: &BTreeSet<String>) -> Option<String> {
+    let (prefix, suffix) = if let Some(idx) = input.rfind(',') {
+        (&input[..=idx], &input[idx + 1..])
+    } else {
+        ("", input)
+    };
+
+    let trimmed_start = suffix.trim_start();
+    let leading_ws_len = suffix.len().saturating_sub(trimmed_start.len());
+    let leading_ws = &suffix[..leading_ws_len];
+    let token = trimmed_start.trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    let token_lower = token.to_ascii_lowercase();
+    let candidate = candidates
+        .iter()
+        .find(|value| value.to_ascii_lowercase().starts_with(&token_lower))?;
+
+    if candidate.eq_ignore_ascii_case(token) {
+        return None;
+    }
+
+    Some(format!("{prefix}{leading_ws}{candidate}"))
 }
 
 fn elide_text(text: &str, max_chars: usize) -> String {
@@ -4832,6 +4875,70 @@ impl CassApp {
             }
         }
         None
+    }
+
+    fn input_autocomplete_candidates(&self) -> BTreeSet<String> {
+        let mut candidates = BTreeSet::new();
+        match self.input_mode {
+            InputMode::Agent => {
+                for slug in INPUT_AUTOCOMPLETE_AGENT_HINTS {
+                    candidates.insert((*slug).to_string());
+                }
+                for agent in &self.filters.agents {
+                    let trimmed = agent.trim();
+                    if !trimmed.is_empty() {
+                        candidates.insert(trimmed.to_string());
+                    }
+                }
+                for pane in &self.panes {
+                    let trimmed = pane.agent.trim();
+                    if !trimmed.is_empty() {
+                        candidates.insert(trimmed.to_string());
+                    }
+                }
+                for hit in &self.results {
+                    let trimmed = hit.agent.trim();
+                    if !trimmed.is_empty() {
+                        candidates.insert(trimmed.to_string());
+                    }
+                }
+            }
+            InputMode::Workspace => {
+                for workspace in &self.filters.workspaces {
+                    let trimmed = workspace.trim();
+                    if !trimmed.is_empty() {
+                        candidates.insert(trimmed.to_string());
+                    }
+                }
+                if let Some(known_workspaces) = &self.known_workspaces {
+                    for workspace in known_workspaces {
+                        let trimmed = workspace.trim();
+                        if !trimmed.is_empty() {
+                            candidates.insert(trimmed.to_string());
+                        }
+                    }
+                }
+                for hit in &self.results {
+                    let trimmed = hit.workspace.trim();
+                    if !trimmed.is_empty() {
+                        candidates.insert(trimmed.to_string());
+                    }
+                    if let Some(workspace_original) = &hit.workspace_original {
+                        let trimmed = workspace_original.trim();
+                        if !trimmed.is_empty() {
+                            candidates.insert(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        candidates
+    }
+
+    fn autocomplete_input_buffer(&self) -> Option<String> {
+        let candidates = self.input_autocomplete_candidates();
+        autocomplete_csv_suffix(&self.input_buffer, &candidates)
     }
 
     fn refresh_available_source_ids(&mut self) {
@@ -10322,6 +10429,9 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     return self.update(CassMsg::InputModeApplied);
                 }
+                CassMsg::FocusToggled => {
+                    return self.update(CassMsg::InputAutoCompleted);
+                }
                 CassMsg::QuitRequested => {
                     if self.input_mode == InputMode::PaneFilter {
                         return self.update(CassMsg::PaneFilterClosed { apply: false });
@@ -11367,7 +11477,9 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::InputAutoCompleted => {
-                // TODO: auto-complete from suggestions
+                if let Some(completed) = self.autocomplete_input_buffer() {
+                    self.input_buffer = completed;
+                }
                 ftui::Cmd::none()
             }
 
@@ -16805,6 +16917,49 @@ mod tests {
     }
 
     #[test]
+    fn input_auto_completed_fills_agent_from_candidates() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::InputModeEntered(InputMode::Agent));
+        app.input_buffer = "co".to_string();
+
+        let mut codex_hit = make_hit(1, "/a");
+        codex_hit.agent = "codex".to_string();
+        let mut cursor_hit = make_hit(2, "/b");
+        cursor_hit.agent = "cursor".to_string();
+        app.results = vec![cursor_hit, codex_hit];
+
+        let _ = app.update(CassMsg::InputAutoCompleted);
+        assert_eq!(app.input_buffer, "codex");
+    }
+
+    #[test]
+    fn input_auto_completed_uses_workspace_suffix_for_csv_input() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::InputModeEntered(InputMode::Workspace));
+        app.known_workspaces = Some(vec![
+            "/work/project-alpha".to_string(),
+            "/workspace-beta".to_string(),
+        ]);
+        app.input_buffer = "foo, /wo".to_string();
+
+        let _ = app.update(CassMsg::InputAutoCompleted);
+        assert_eq!(app.input_buffer, "foo, /work/project-alpha");
+    }
+
+    #[test]
+    fn focus_toggled_in_input_mode_autocompletes_without_changing_focus() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::InputModeEntered(InputMode::Agent));
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+        app.input_buffer = "ge".to_string();
+        let focus_before = app.focus_manager.current();
+
+        let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(app.input_buffer, "gemini");
+        assert_eq!(app.focus_manager.current(), focus_before);
+    }
+
+    #[test]
     fn pane_filter_mode_typing_updates_pane_filter_and_esc_cancels() {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::PaneFilterOpened);
@@ -18481,6 +18636,9 @@ mod tests {
         );
 
         let selected_before = app.panes[0].selected;
+        // Provide enough content lines so scroll is not clamped to 0
+        app.detail_content_lines.set(200);
+        app.detail_visible_height.set(20);
         app.detail_scroll = 10;
         let _ = app.update(CassMsg::PageScrolled { delta: 1 });
         assert_eq!(
@@ -19277,6 +19435,9 @@ mod tests {
         let mut app = CassApp::default();
         app.show_detail_modal = true;
         app.detail_scroll = 0;
+        // Provide enough content lines so scroll is not clamped to 0
+        app.detail_content_lines.set(100);
+        app.detail_visible_height.set(20);
         let _ = app.update(CassMsg::QueryChanged("j".to_string()));
         assert_eq!(app.detail_scroll, 3, "j should scroll down 3");
         let _ = app.update(CassMsg::QueryChanged("k".to_string()));
@@ -19549,6 +19710,9 @@ mod tests {
     #[test]
     fn detail_scrolled_increments() {
         let mut app = CassApp::default();
+        // Provide enough content lines so scroll is not clamped to 0
+        app.detail_content_lines.set(100);
+        app.detail_visible_height.set(20);
         let _ = app.update(CassMsg::DetailScrolled { delta: 3 });
         assert_eq!(app.detail_scroll, 3);
         let _ = app.update(CassMsg::DetailScrolled { delta: 5 });
