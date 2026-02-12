@@ -22,10 +22,15 @@ use util::EnvGuard;
 static TUI_SMOKE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn tui_smoke_guard() -> std::sync::MutexGuard<'static, ()> {
-    TUI_SMOKE_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("tui smoke mutex poisoned")
+    match TUI_SMOKE_LOCK.get_or_init(|| Mutex::new(())).lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            eprintln!(
+                "[SMOKE] warning: tui smoke mutex poisoned after earlier failure; recovering guard"
+            );
+            poisoned.into_inner()
+        }
+    }
 }
 
 // =============================================================================
