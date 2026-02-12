@@ -485,9 +485,7 @@ fn test_tampering_fails_authentication() {
 // =============================================================================
 
 /// Test CLI verify command works correctly.
-/// NOTE: Requires the cass binary to be built first (`cargo build`)
 #[test]
-#[ignore = "Requires cass binary - run with --ignored or after cargo build"]
 fn test_cli_verify_command() {
     use assert_cmd::cargo::cargo_bin_cmd;
 
