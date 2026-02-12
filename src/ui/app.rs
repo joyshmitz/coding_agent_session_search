@@ -19704,6 +19704,82 @@ mod tests {
     }
 
     #[test]
+    fn detail_messages_tab_renders_mixed_markdown_and_plain_stream() {
+        let mut app = CassApp::default();
+        let mut cv = make_test_conversation_view();
+        cv.messages = vec![
+            Message {
+                id: Some(1),
+                idx: 0,
+                role: MessageRole::Agent,
+                author: Some("cass".to_string()),
+                created_at: Some(1_700_000_100),
+                content: [
+                    "# Feature Overview",
+                    "",
+                    "- list item alpha",
+                    "- list item beta",
+                    "",
+                    "```rust",
+                    "fn markdown_contract() -> bool { true }",
+                    "```",
+                    "",
+                    "[Reference Link](https://example.com/docs)",
+                ]
+                .join("\n"),
+                extra_json: serde_json::json!({}),
+                snippets: vec![],
+            },
+            Message {
+                id: Some(2),
+                idx: 1,
+                role: MessageRole::User,
+                author: Some("user".to_string()),
+                created_at: Some(1_700_000_200),
+                content: "Plain text follow-up without markdown markers.".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: vec![],
+            },
+        ];
+        app.cached_detail = Some(("/test/session.jsonl".to_string(), cv));
+
+        let hit = make_test_hit();
+        let styles = app.resolved_style_context();
+        let lines = app.build_messages_lines(&hit, 100, &styles);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans()
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("Feature Overview"),
+            "expected heading content in rendered messages tab"
+        );
+        assert!(
+            rendered.contains("list item alpha"),
+            "expected markdown list content in rendered messages tab"
+        );
+        assert!(
+            rendered.contains("markdown_contract"),
+            "expected fenced code block content in rendered messages tab"
+        );
+        assert!(
+            rendered.contains("Reference Link"),
+            "expected markdown link label in rendered messages tab"
+        );
+        assert!(
+            rendered.contains("Plain text follow-up without markdown markers."),
+            "expected plain-text message content alongside markdown content"
+        );
+    }
+
+    #[test]
     fn detail_markdown_renderer_setup_cost_stays_below_render_work() {
         use std::hint::black_box;
         use std::time::Instant;
