@@ -48,7 +48,7 @@ async function globalSetup() {
   // Build the Rust CLI if needed (with timeout to avoid blocking)
   console.log('Building cass CLI...');
   try {
-    execSync('cargo build --release', { cwd: projectRoot, stdio: 'inherit', timeout: 60000 });
+    execSync('cargo build --release', { cwd: projectRoot, stdio: 'inherit', timeout: 600000 });
   } catch {
     console.warn('Cargo build failed or timed out, trying with existing binary...');
   }

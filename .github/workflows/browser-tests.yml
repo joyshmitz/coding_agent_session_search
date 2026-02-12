@@ -28,10 +28,10 @@ permissions:
   contents: read
 
 jobs:
-  # Install dependencies and cache
+  # Install dependencies, build cass binary, and cache
   setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -55,6 +55,22 @@ jobs:
       - name: Install Playwright browsers
         working-directory: tests
         run: npx playwright install --with-deps
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@881ba7bf39a41cda34ac9e123fb41b44ed08232f # nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+
+      - name: Build cass binary
+        run: cargo build --release
+
+      - name: Upload cass binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cass-binary
+          path: target/release/cass
+          retention-days: 1
 
   # Run tests on Chromium
   test-chromium:
@@ -84,6 +100,15 @@ jobs:
       - name: Install Playwright browsers
         working-directory: tests
         run: npx playwright install chromium --with-deps
+
+      - name: Download cass binary
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: cass-binary
+          path: target/release
+
+      - name: Make cass binary executable
+        run: chmod +x target/release/cass
 
       - name: Run Chromium tests
         working-directory: tests
@@ -138,6 +163,15 @@ jobs:
         working-directory: tests
         run: npx playwright install firefox --with-deps
 
+      - name: Download cass binary
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: cass-binary
+          path: target/release
+
+      - name: Make cass binary executable
+        run: chmod +x target/release/cass
+
       - name: Run Firefox tests
         working-directory: tests
         run: npm run test:e2e:firefox
@@ -191,6 +225,15 @@ jobs:
         working-directory: tests
         run: npx playwright install webkit --with-deps
 
+      - name: Download cass binary
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: cass-binary
+          path: target/release
+
+      - name: Make cass binary executable
+        run: chmod +x target/release/cass
+
       - name: Run WebKit tests
         working-directory: tests
         run: npm run test:e2e:webkit
@@ -243,6 +286,15 @@ jobs:
       - name: Install Playwright browsers
         working-directory: tests
         run: npx playwright install chromium webkit --with-deps
+
+      - name: Download cass binary
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: cass-binary
+          path: target/release
+
+      - name: Make cass binary executable
+        run: chmod +x target/release/cass
 
       - name: Run mobile tests
         working-directory: tests
