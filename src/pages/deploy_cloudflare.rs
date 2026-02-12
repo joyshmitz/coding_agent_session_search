@@ -44,26 +44,24 @@ pub struct Prerequisites {
 }
 
 impl Prerequisites {
-    /// Check if all prerequisites are met
+    /// Check if all prerequisites are met.
+    ///
+    /// Wrangler CLI must be installed, and at least one auth method
+    /// (interactive login or API credentials) must be available.
     pub fn is_ready(&self) -> bool {
-        self.api_credentials_present
-            || (self.wrangler_version.is_some() && self.wrangler_authenticated)
+        self.wrangler_version.is_some()
+            && (self.api_credentials_present || self.wrangler_authenticated)
     }
 
     /// Get a list of missing prerequisites
     pub fn missing(&self) -> Vec<&'static str> {
         let mut missing = Vec::new();
-        if self.wrangler_version.is_none() && !self.api_credentials_present {
-            missing.push(
-                "wrangler CLI not installed and no API token provided (install wrangler or pass --account-id/--api-token)",
-            );
+        if self.wrangler_version.is_none() {
+            missing.push("wrangler CLI not installed — run `npm install -g wrangler` to install");
         }
-        if self.wrangler_version.is_some()
-            && !self.wrangler_authenticated
-            && !self.api_credentials_present
-        {
+        if !self.wrangler_authenticated && !self.api_credentials_present {
             missing.push(
-                "wrangler CLI not authenticated and no API token provided (use --account-id/--api-token or set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN)",
+                "not authenticated — set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN or run `wrangler login`",
             );
         }
         missing
