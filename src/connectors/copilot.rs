@@ -126,10 +126,21 @@ impl CopilotConnector {
 
     /// Check if a path looks like Copilot Chat storage.
     fn looks_like_copilot_storage(path: &Path) -> bool {
-        let path_str = path.to_string_lossy().to_lowercase();
-        path_str.contains("copilot-chat")
-            || path_str.contains("copilot")
-            || path_str.contains("gh-copilot")
+        let segments: Vec<String> = path
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+            .collect();
+
+        if segments.iter().any(|segment| {
+            segment == "github.copilot-chat" || segment == "copilot-chat" || segment == "gh-copilot"
+        }) {
+            return true;
+        }
+
+        // Support nested CLI config path: ~/.config/gh/copilot
+        segments
+            .windows(2)
+            .any(|pair| pair[0] == "gh" && pair[1] == "copilot")
     }
 
     /// Find JSON files that may contain conversation data.
@@ -173,10 +184,7 @@ impl CopilotConnector {
     /// 1. Array of conversation objects at top level
     /// 2. Single conversation object
     /// 3. Object with a "conversations" key containing an array
-    fn parse_conversation_file(
-        &self,
-        path: &Path,
-    ) -> Result<Vec<NormalizedConversation>> {
+    fn parse_conversation_file(&self, path: &Path) -> Result<Vec<NormalizedConversation>> {
         let content = fs::read_to_string(path)?;
         let val: Value = serde_json::from_str(&content)?;
         let mut conversations = Vec::new();
@@ -185,7 +193,11 @@ impl CopilotConnector {
         let conv_array = if let Some(arr) = val.as_array() {
             // Top-level array of conversations
             arr.clone()
-        } else if val.get("conversations").and_then(|v| v.as_array()).is_some() {
+        } else if val
+            .get("conversations")
+            .and_then(|v| v.as_array())
+            .is_some()
+        {
             // Object with "conversations" key
             val["conversations"].as_array().unwrap().clone()
         } else if val.get("id").is_some() || val.get("turns").is_some() {
@@ -340,18 +352,15 @@ impl CopilotConnector {
 
         // Derive title from first user message if not explicitly set.
         let title = title.or_else(|| {
-            messages
-                .iter()
-                .find(|m| m.role == "user")
-                .map(|m| {
-                    m.content
-                        .lines()
-                        .next()
-                        .unwrap_or(&m.content)
-                        .chars()
-                        .take(120)
-                        .collect::<String>()
-                })
+            messages.iter().find(|m| m.role == "user").map(|m| {
+                m.content
+                    .lines()
+                    .next()
+                    .unwrap_or(&m.content)
+                    .chars()
+                    .take(120)
+                    .collect::<String>()
+            })
         });
 
         let metadata = serde_json::json!({
@@ -410,14 +419,7 @@ impl CopilotConnector {
 
     /// Extract timestamp from a turn/message object.
     fn extract_turn_timestamp(val: &Value) -> Option<i64> {
-        let candidates = [
-            "timestamp",
-            "createdAt",
-            "created_at",
-            "time",
-            "ts",
-            "date",
-        ];
+        let candidates = ["timestamp", "createdAt", "created_at", "time", "ts", "date"];
         for key in candidates {
             if let Some(ts) = val.get(key).and_then(parse_timestamp) {
                 return Some(ts);
@@ -473,15 +475,15 @@ impl Connector for CopilotConnector {
                     scan_root
                         .path
                         .join(".config/Code/User/globalStorage/github.copilot-chat"),
-                    scan_root
-                        .path
-                        .join("Library/Application Support/Code/User/globalStorage/github.copilot-chat"),
+                    scan_root.path.join(
+                        "Library/Application Support/Code/User/globalStorage/github.copilot-chat",
+                    ),
                     scan_root
                         .path
                         .join("AppData/Roaming/Code/User/globalStorage/github.copilot-chat"),
-                    scan_root
-                        .path
-                        .join("AppData/Roaming/Code - Insiders/User/globalStorage/github.copilot-chat"),
+                    scan_root.path.join(
+                        "AppData/Roaming/Code - Insiders/User/globalStorage/github.copilot-chat",
+                    ),
                     scan_root
                         .path
                         .join("AppData/Roaming/VSCodium/User/globalStorage/github.copilot-chat"),
@@ -625,10 +627,7 @@ mod tests {
 
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].agent_slug, "copilot");
-        assert_eq!(
-            convs[0].external_id.as_deref(),
-            Some("conv-001")
-        );
+        assert_eq!(convs[0].external_id.as_deref(), Some("conv-001"));
         assert_eq!(
             convs[0].workspace,
             Some(PathBuf::from("/home/user/project"))
@@ -790,11 +789,7 @@ mod tests {
 
         let connector = CopilotConnector::new();
         let scan_root = crate::connectors::ScanRoot::local(home);
-        let ctx = ScanContext::with_roots(
-            tmp.path().to_path_buf(),
-            vec![scan_root],
-            None,
-        );
+        let ctx = ScanContext::with_roots(tmp.path().to_path_buf(), vec![scan_root], None);
         let convs = connector.scan(&ctx).unwrap();
 
         assert_eq!(convs.len(), 1);
@@ -820,11 +815,7 @@ mod tests {
 
         let connector = CopilotConnector::new();
         let scan_root = crate::connectors::ScanRoot::local(home);
-        let ctx = ScanContext::with_roots(
-            tmp.path().to_path_buf(),
-            vec![scan_root],
-            None,
-        );
+        let ctx = ScanContext::with_roots(tmp.path().to_path_buf(), vec![scan_root], None);
         let convs = connector.scan(&ctx).unwrap();
 
         assert_eq!(convs.len(), 1);
@@ -858,6 +849,9 @@ mod tests {
         )));
         assert!(!CopilotConnector::looks_like_copilot_storage(Path::new(
             "/home/user/.config/Code"
+        )));
+        assert!(!CopilotConnector::looks_like_copilot_storage(Path::new(
+            "/home/user/projects/copilot-research"
         )));
     }
 

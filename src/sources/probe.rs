@@ -571,7 +571,10 @@ fn infer_agent_type(path: &str) -> String {
         "opencode".to_string()
     } else if path.contains(".goose") {
         "goose".to_string()
-    } else if path.contains("copilot-chat") || path.contains("gh-copilot") || path.contains("gh/copilot") {
+    } else if path.contains("copilot-chat")
+        || path.contains("gh-copilot")
+        || path.contains("gh/copilot")
+    {
         "copilot".to_string()
     } else if path.contains(".continue") {
         "continue".to_string()

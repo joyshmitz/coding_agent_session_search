@@ -14,11 +14,11 @@ use notify::{RecursiveMode, Watcher, recommended_watcher};
 
 use crate::connectors::NormalizedConversation;
 use crate::connectors::{
-    Connector, ScanRoot, aider::AiderConnector, amp::AmpConnector, chatgpt::ChatGptConnector, copilot::CopilotConnector,
+    Connector, ScanRoot, aider::AiderConnector, amp::AmpConnector, chatgpt::ChatGptConnector,
     claude_code::ClaudeCodeConnector, clawdbot::ClawdbotConnector, cline::ClineConnector,
-    codex::CodexConnector, cursor::CursorConnector, factory::FactoryConnector,
-    gemini::GeminiConnector, openclaw::OpenClawConnector, opencode::OpenCodeConnector,
-    pi_agent::PiAgentConnector, vibe::VibeConnector,
+    codex::CodexConnector, copilot::CopilotConnector, cursor::CursorConnector,
+    factory::FactoryConnector, gemini::GeminiConnector, openclaw::OpenClawConnector,
+    opencode::OpenCodeConnector, pi_agent::PiAgentConnector, vibe::VibeConnector,
 };
 use crate::search::tantivy::{TantivyIndex, index_dir, schema_hash_matches};
 use crate::search::vector_index::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_USER};
