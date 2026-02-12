@@ -716,6 +716,17 @@ pub fn query_cost_timeseries(
 // query_breakdown
 // ---------------------------------------------------------------------------
 
+fn breakdown_route(dim: Dim, metric: Metric) -> (&'static str, &'static str, bool) {
+    match (dim, metric) {
+        (Dim::Model, _) => ("token_daily_stats", "model_family", true),
+        (Dim::Agent, Metric::EstimatedCostUsd) => ("token_daily_stats", "agent_slug", true),
+        (Dim::Source, Metric::EstimatedCostUsd) => ("token_daily_stats", "source_id", true),
+        (Dim::Agent, _) => ("usage_daily", "agent_slug", false),
+        (Dim::Workspace, _) => ("usage_daily", "workspace_id", false),
+        (Dim::Source, _) => ("usage_daily", "source_id", false),
+    }
+}
+
 /// Run a breakdown query: aggregate one metric by a chosen dimension.
 ///
 /// Returns rows ordered by the metric value descending, capped at `limit`.
@@ -730,29 +741,9 @@ pub fn query_breakdown(
 ) -> AnalyticsResult<BreakdownResult> {
     let query_start = std::time::Instant::now();
 
-    // For the Model dimension, use token_daily_stats (Track B) which has model_family.
-    // For Agent/Workspace/Source, use usage_daily (Track A) — EXCEPT when the
-    // metric is EstimatedCostUsd, which only exists in Track B.  Track B has
-    // agent_slug and source_id but NOT workspace_id, so Workspace always uses
-    // Track A (cost will be 0.0 — acceptable limitation).
-    let use_track_b = dim == Dim::Model
-        || (metric == Metric::EstimatedCostUsd && matches!(dim, Dim::Agent | Dim::Source));
-
-    let (table, dim_col) = if use_track_b {
-        match dim {
-            Dim::Agent => ("token_daily_stats", "agent_slug"),
-            Dim::Source => ("token_daily_stats", "source_id"),
-            Dim::Model => ("token_daily_stats", "model_family"),
-            Dim::Workspace => unreachable!(), // guarded by use_track_b logic
-        }
-    } else {
-        match dim {
-            Dim::Agent => ("usage_daily", "agent_slug"),
-            Dim::Workspace => ("usage_daily", "workspace_id"),
-            Dim::Source => ("usage_daily", "source_id"),
-            Dim::Model => unreachable!(), // Model always routes to Track B
-        }
-    };
+    // Track B has model_family and estimated_cost_usd.
+    // Workspace is Track A-only (usage_daily) because Track B has no workspace_id.
+    let (table, dim_col, use_track_b) = breakdown_route(dim, metric);
 
     if !table_exists(conn, table) {
         return Ok(BreakdownResult {
@@ -961,13 +952,18 @@ fn read_breakdown_rows_track_a(
     for row in rows_result {
         let (key, bucket, sort_value) =
             row.map_err(|e| AnalyticsError::Db(format!("Row read error: {e}")))?;
-        // For CoveragePct, compute derived value instead of using raw column.
-        let value = if *metric == Metric::CoveragePct {
-            let pct =
-                super::derive::safe_pct(bucket.api_coverage_message_count, bucket.message_count);
-            pct as i64
-        } else {
-            sort_value
+        // Some metrics are derived when reading Track A rows.
+        let value = match metric {
+            Metric::CoveragePct => {
+                let pct = super::derive::safe_pct(
+                    bucket.api_coverage_message_count,
+                    bucket.message_count,
+                );
+                pct as i64
+            }
+            // Track A has no cost column; expose stable zero values.
+            Metric::EstimatedCostUsd => 0,
+            _ => sort_value,
         };
         result.push(BreakdownRow {
             message_count: bucket.message_count,
@@ -1797,6 +1793,24 @@ mod tests {
         assert_eq!(result.rows[0].key, "claude_code");
         assert!((result.rows[0].bucket.estimated_cost_usd - 1.90).abs() < 0.01);
         assert!((result.rows[1].bucket.estimated_cost_usd - 0.80).abs() < 0.01);
+    }
+
+    #[test]
+    fn query_breakdown_workspace_with_cost_metric_uses_track_a_zero_values() {
+        let conn = setup_usage_daily_db();
+        let filter = AnalyticsFilter::default();
+        let result =
+            query_breakdown(&conn, &filter, Dim::Workspace, Metric::EstimatedCostUsd, 10).unwrap();
+
+        assert_eq!(result.source_table, "usage_daily");
+        assert!(!result.rows.is_empty());
+        assert!(result.rows.iter().all(|r| r.value == 0));
+        assert!(
+            result
+                .rows
+                .iter()
+                .all(|r| r.bucket.estimated_cost_usd == 0.0)
+        );
     }
 
     #[test]
