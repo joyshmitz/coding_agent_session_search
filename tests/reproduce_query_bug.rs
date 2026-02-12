@@ -4,12 +4,10 @@ use coding_agent_search::search::tantivy::TantivyIndex;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-/// Test to reproduce a query parsing bug with "NOT ... OR ..." queries.
-/// This test currently fails, demonstrating the bug exists.
-/// TODO: Fix the query parser to handle NOT correctly, then remove #[ignore].
+/// Regression test for "NOT ... OR ..." boolean query semantics.
+/// Ensures a query like `NOT apple OR orange` does not regress to `apple OR orange`.
 #[tokio::test]
-#[ignore = "Bug reproduction test - query parser NOT handling needs fix"]
-async fn test_reproduce_not_or_bug() -> anyhow::Result<()> {
+async fn test_not_or_semantics_regression() -> anyhow::Result<()> {
     let dir = TempDir::new()?;
     let mut index = TantivyIndex::open_or_create(dir.path())?;
 
@@ -89,17 +87,14 @@ async fn test_reproduce_not_or_bug() -> anyhow::Result<()> {
     println!("Found doc1 (apple): {}", found_doc1);
     println!("Found doc2 (banana): {}", found_doc2);
 
-    if found_doc1 && !found_doc2 {
-        panic!("BUG REPRODUCED: 'NOT apple OR orange' behaved like 'apple OR orange'");
-    }
-
-    if found_doc1 {
-        panic!("'NOT apple OR orange' matched 'apple' (should be excluded)");
-    }
-
-    if !found_doc2 {
-        panic!("'NOT apple OR orange' did not match 'banana' (should match via NOT apple)");
-    }
+    assert!(
+        !found_doc1,
+        "'NOT apple OR orange' matched 'apple' (should be excluded)"
+    );
+    assert!(
+        found_doc2,
+        "'NOT apple OR orange' did not match 'banana' (should match via NOT apple)"
+    );
 
     Ok(())
 }
