@@ -1522,6 +1522,7 @@ mod tests {
     // --- Symlink traversal tests ---
 
     #[test]
+    #[cfg(unix)]
     fn test_integrity_symlink_traversal_blocked() {
         use std::os::unix::fs::symlink;
 
@@ -1574,6 +1575,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_integrity_symlink_within_site_dir_allowed() {
         use std::os::unix::fs::symlink;
 
