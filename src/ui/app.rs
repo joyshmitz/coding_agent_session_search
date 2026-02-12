@@ -19721,8 +19721,10 @@ mod tests {
 
     #[test]
     fn autocomplete_csv_suffix_single_token() {
-        let candidates: BTreeSet<String> =
-            ["claude_code", "cursor", "codex"].iter().map(|s| s.to_string()).collect();
+        let candidates: BTreeSet<String> = ["claude_code", "cursor", "codex"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(
             autocomplete_csv_suffix("cl", &candidates),
             Some("claude_code".to_string()),
@@ -19739,8 +19741,10 @@ mod tests {
 
     #[test]
     fn autocomplete_csv_suffix_after_comma() {
-        let candidates: BTreeSet<String> =
-            ["aider", "claude_code", "cursor"].iter().map(|s| s.to_string()).collect();
+        let candidates: BTreeSet<String> = ["aider", "claude_code", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(
             autocomplete_csv_suffix("aider, cl", &candidates),
             Some("aider, claude_code".to_string()),
@@ -19749,15 +19753,13 @@ mod tests {
 
     #[test]
     fn autocomplete_csv_suffix_exact_match_returns_none() {
-        let candidates: BTreeSet<String> =
-            ["cursor"].iter().map(|s| s.to_string()).collect();
+        let candidates: BTreeSet<String> = ["cursor"].iter().map(|s| s.to_string()).collect();
         assert_eq!(autocomplete_csv_suffix("cursor", &candidates), None);
     }
 
     #[test]
     fn autocomplete_csv_suffix_case_insensitive() {
-        let candidates: BTreeSet<String> =
-            ["claude_code"].iter().map(|s| s.to_string()).collect();
+        let candidates: BTreeSet<String> = ["claude_code"].iter().map(|s| s.to_string()).collect();
         assert_eq!(
             autocomplete_csv_suffix("CL", &candidates),
             Some("claude_code".to_string()),
@@ -19766,15 +19768,13 @@ mod tests {
 
     #[test]
     fn autocomplete_csv_suffix_no_match() {
-        let candidates: BTreeSet<String> =
-            ["cursor"].iter().map(|s| s.to_string()).collect();
+        let candidates: BTreeSet<String> = ["cursor"].iter().map(|s| s.to_string()).collect();
         assert_eq!(autocomplete_csv_suffix("zz", &candidates), None);
     }
 
     #[test]
     fn autocomplete_csv_suffix_empty_input() {
-        let candidates: BTreeSet<String> =
-            ["cursor"].iter().map(|s| s.to_string()).collect();
+        let candidates: BTreeSet<String> = ["cursor"].iter().map(|s| s.to_string()).collect();
         assert_eq!(autocomplete_csv_suffix("", &candidates), None);
         assert_eq!(autocomplete_csv_suffix("  ", &candidates), None);
     }
@@ -19809,7 +19809,9 @@ mod tests {
     fn input_autocomplete_candidates_workspace_mode() {
         let mut app = CassApp::default();
         app.input_mode = InputMode::Workspace;
-        app.filters.workspaces.insert("/home/user/project".to_string());
+        app.filters
+            .workspaces
+            .insert("/home/user/project".to_string());
         let candidates = app.input_autocomplete_candidates();
         assert!(candidates.contains("/home/user/project"));
         // Should NOT contain agent hints
