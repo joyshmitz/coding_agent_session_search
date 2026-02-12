@@ -17702,10 +17702,10 @@ mod tests {
     fn search_requested_dispatches_with_service() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        struct MockSearch {
+        struct FixtureSearch {
             called: AtomicBool,
         }
-        impl SearchService for MockSearch {
+        impl SearchService for FixtureSearch {
             fn execute(&self, _params: &SearchParams) -> Result<SearchResult, String> {
                 self.called.store(true, Ordering::SeqCst);
                 Ok(SearchResult {
@@ -17717,12 +17717,12 @@ mod tests {
             }
         }
 
-        let mock = Arc::new(MockSearch {
+        let fixture = Arc::new(FixtureSearch {
             called: AtomicBool::new(false),
         });
         let mut app = CassApp::default();
         app.query = "test query".to_string();
-        app.search_service = Some(mock.clone());
+        app.search_service = Some(fixture.clone());
         let cmd = app.update(CassMsg::SearchRequested);
         assert!(app.status.contains("Searching"));
         // Cmd should be a Task variant (non-none).

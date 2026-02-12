@@ -20,13 +20,13 @@ mod util;
 // Test Infrastructure
 // =============================================================================
 
-/// Mock daemon client that uses a hash embedder for quality embeddings.
+/// Fixture daemon client that uses a hash embedder for quality embeddings.
 /// This allows us to compute expected scores without a real daemon.
-struct MockQualityDaemon {
+struct FixtureQualityDaemon {
     embedder: coding_agent_search::search::hash_embedder::HashEmbedder,
 }
 
-impl MockQualityDaemon {
+impl FixtureQualityDaemon {
     fn new(dimension: usize) -> Self {
         Self {
             embedder: coding_agent_search::search::hash_embedder::HashEmbedder::new(dimension),
@@ -34,9 +34,9 @@ impl MockQualityDaemon {
     }
 }
 
-impl coding_agent_search::search::daemon_client::DaemonClient for MockQualityDaemon {
+impl coding_agent_search::search::daemon_client::DaemonClient for FixtureQualityDaemon {
     fn id(&self) -> &str {
-        "mock-quality-daemon"
+        "fixture-quality-daemon"
     }
 
     fn is_available(&self) -> bool {
@@ -320,7 +320,7 @@ fn two_tier_progressive_search_correctness() {
     let index = build_test_index(&documents, &fast_embedder, &quality_embedder, &config);
 
     // Create mock daemon for quality tier
-    let daemon = Arc::new(MockQualityDaemon::new(config.quality_dimension));
+    let daemon = Arc::new(FixtureQualityDaemon::new(config.quality_dimension));
 
     // Create searcher
     let searcher =
@@ -409,7 +409,7 @@ fn fast_only_mode_skips_refinement() {
     let index = build_test_index(&documents, &fast_embedder, &quality_embedder, &config);
 
     // Create mock daemon (should not be called in fast-only mode)
-    let daemon = Arc::new(MockQualityDaemon::new(config.quality_dimension));
+    let daemon = Arc::new(FixtureQualityDaemon::new(config.quality_dimension));
 
     let searcher = TwoTierSearcher::new(&index, fast_embedder.clone(), Some(daemon), config);
 
@@ -443,7 +443,7 @@ fn refinement_degrades_gracefully_without_daemon() {
     let index = build_test_index(&documents, &fast_embedder, &quality_embedder, &config);
 
     // No daemon - pass None
-    let searcher: TwoTierSearcher<MockQualityDaemon> =
+    let searcher: TwoTierSearcher<FixtureQualityDaemon> =
         TwoTierSearcher::new(&index, fast_embedder.clone(), None, config);
 
     let phases: Vec<SearchPhase> = searcher.search("test query", 5).collect();
@@ -575,7 +575,7 @@ fn progressive_search_timing() {
     let documents = create_test_documents();
     let index = build_test_index(&documents, &fast_embedder, &quality_embedder, &config);
 
-    let daemon = Arc::new(MockQualityDaemon::new(config.quality_dimension));
+    let daemon = Arc::new(FixtureQualityDaemon::new(config.quality_dimension));
 
     let searcher = TwoTierSearcher::new(&index, fast_embedder.clone(), Some(daemon), config);
 
