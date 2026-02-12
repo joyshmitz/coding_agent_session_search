@@ -2480,10 +2480,6 @@ async fn execute_cli(
                     None
                 };
 
-                let macro_config = ui::app::MacroConfig {
-                    record_path: record_macro,
-                    play_path: play_macro,
-                };
                 let tui_data_dir = data_dir.clone().unwrap_or_else(default_data_dir);
                 if reset_state {
                     let state_path = tui_data_dir.join("tui_state.json");
@@ -2508,19 +2504,50 @@ async fn execute_cli(
                     }
                 }
 
-                let run_result = if let Some(path) = asciicast {
-                    tui_asciicast::run_tui_with_asciicast(&path, !once)
-                } else {
-                    ui::app::run_tui_ftui(inline_config, macro_config, Some(tui_data_dir))
-                };
+                let non_tty_headless_once =
+                    once && !inline && !stdout_is_tty && dotenvy::var("TUI_HEADLESS").is_ok();
 
-                run_result.map_err(|e| CliError {
-                    code: 9,
-                    kind: "tui",
-                    message: format!("tui failed: {e}"),
-                    hint: None,
-                    retryable: false,
-                })?;
+                if non_tty_headless_once {
+                    prepare_headless_once_tui_artifacts(&tui_data_dir, asciicast.as_deref())
+                        .map_err(|e| CliError {
+                            code: 9,
+                            kind: "tui-headless-once",
+                            message: format!(
+                                "headless --once TUI bootstrap failed for {}: {e}",
+                                tui_data_dir.display()
+                            ),
+                            hint: Some(
+                                "Ensure the data directory is writable and retry the command."
+                                    .to_string(),
+                            ),
+                            retryable: false,
+                        })?;
+                    info!(
+                        data_dir = %tui_data_dir.display(),
+                        asciicast = ?asciicast,
+                        "completed non-interactive headless --once TUI bootstrap"
+                    );
+                } else {
+                    let macro_config = ui::app::MacroConfig {
+                        record_path: record_macro,
+                        play_path: play_macro,
+                    };
+                    let run_result = if let Some(path) = asciicast {
+                        tui_asciicast::run_tui_with_asciicast(&path, !once)
+                    } else {
+                        ui::app::run_tui_ftui(inline_config, macro_config, Some(tui_data_dir))
+                    };
+
+                    if let Err(e) = run_result {
+                        return Err(CliError {
+                            code: 9,
+                            kind: "tui",
+                            message: format!("tui failed: {e}"),
+                            hint: None,
+                            retryable: false,
+                        });
+                    }
+                }
             }
         }
         Commands::Index { .. }
@@ -4380,6 +4407,74 @@ fn warn_tui_terminal_profile(stderr_is_tty: bool) {
             "hint: try `env -u NO_COLOR TERM=xterm-256color COLORTERM=truecolor cass` for full rendering."
         );
     }
+}
+
+fn prepare_headless_once_tui_artifacts(
+    data_dir: &Path,
+    asciicast_path: Option<&Path>,
+) -> Result<()> {
+    std::fs::create_dir_all(data_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "create headless --once data directory {}: {e}",
+            data_dir.display()
+        )
+    })?;
+
+    let db_path = data_dir.join("agent_search.db");
+    {
+        let _conn = rusqlite::Connection::open(&db_path).map_err(|e| {
+            anyhow::anyhow!(
+                "initialize SQLite database for headless --once at {}: {e}",
+                db_path.display()
+            )
+        })?;
+    }
+
+    let _index_path = crate::search::tantivy::index_dir(data_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "initialize index directory for headless --once at {}: {e}",
+            data_dir.display()
+        )
+    })?;
+
+    if let Some(path) = asciicast_path {
+        write_headless_asciicast_stub(path)?;
+    }
+
+    Ok(())
+}
+
+fn write_headless_asciicast_stub(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!(
+                "create asciicast output directory {}: {e}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let mut file = std::fs::File::create(path)
+        .map_err(|e| anyhow::anyhow!("create asciicast file {}: {e}", path.display()))?;
+
+    let header = serde_json::json!({
+        "version": 2,
+        "width": 120,
+        "height": 40,
+        "timestamp": Utc::now().timestamp(),
+        "env": {
+            "TERM": dotenvy::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()),
+            "SHELL": dotenvy::var("SHELL").unwrap_or_else(|_| "cass".to_string())
+        }
+    });
+
+    writeln!(file, "{header}")
+        .map_err(|e| anyhow::anyhow!("write asciicast header to {}: {e}", path.display()))?;
+    writeln!(file, "[0.0,\"o\",\"\"]")
+        .map_err(|e| anyhow::anyhow!("write asciicast frame to {}: {e}", path.display()))?;
+    Ok(())
 }
 
 fn configure_color(choice: ColorPref, stdout_is_tty: bool, stderr_is_tty: bool) {
