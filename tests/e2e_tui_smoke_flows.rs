@@ -609,6 +609,114 @@ fn tui_pty_search_detail_and_quit_flow() {
 }
 
 #[test]
+fn tui_pty_enter_selected_hit_opens_detail_modal() {
+    let _guard_lock = tui_flow_guard();
+    let trace = trace_id();
+    let tracker = tracker_for("tui_pty_enter_selected_hit_opens_detail_modal");
+    let _trace_guard = tracker.trace_env_guard();
+    let env = prepare_ftui_pty_env(&trace, &tracker);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 45,
+            cols: 145,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open PTY");
+    let reader = pair.master.try_clone_reader().expect("clone PTY reader");
+    let (captured, reader_handle) = spawn_reader(reader);
+    let mut writer = pair.master.take_writer().expect("take PTY writer");
+
+    let mut tui_cmd = CommandBuilder::new(cass_bin_path());
+    tui_cmd.arg("tui");
+    apply_ftui_env(&mut tui_cmd, &env);
+    let mut child = pair
+        .slave
+        .spawn_command(tui_cmd)
+        .expect("spawn ftui TUI in PTY");
+
+    assert!(
+        wait_for_output_growth(&captured, 0, 32, PTY_STARTUP_TIMEOUT),
+        "Did not observe startup output before Enter detail flow interaction"
+    );
+
+    send_key_sequence(&mut *writer, b"hello");
+    thread::sleep(Duration::from_millis(120));
+    let before_submit_len = captured.lock().expect("capture lock").len();
+    send_key_sequence(&mut *writer, b"\r"); // submit query to populate result list
+    assert!(
+        wait_for_output_growth(&captured, before_submit_len, 24, Duration::from_secs(6)),
+        "Did not observe output growth after query submission in PTY Enter flow"
+    );
+    thread::sleep(Duration::from_millis(180));
+
+    // Contract under test: with selected hit present, Enter opens detail modal
+    // even when query input focus is stale.
+    let before_open_len = captured.lock().expect("capture lock").len();
+    send_key_sequence(&mut *writer, b"\r");
+    let saw_detail = wait_for_output_growth(&captured, before_open_len, 8, Duration::from_secs(6));
+    assert!(
+        saw_detail,
+        "Did not observe output growth after Enter detail-open attempt in PTY flow"
+    );
+
+    // First ESC should close detail modal (not quit app).
+    send_key_sequence(&mut *writer, b"\x1b");
+    thread::sleep(Duration::from_millis(220));
+    let first_esc_exited = child
+        .try_wait()
+        .expect("poll child after first ESC in Enter flow")
+        .is_some();
+    assert!(
+        !first_esc_exited,
+        "First ESC exited app; expected modal-close-only after Enter detail-open"
+    );
+
+    // Second ESC should now quit.
+    send_key_sequence(&mut *writer, b"\x1b");
+    let status = wait_for_child_exit(&mut *child, PTY_EXIT_TIMEOUT);
+    assert!(
+        status.success(),
+        "ftui process exited unsuccessfully after Enter detail flow: {status}"
+    );
+
+    drop(writer);
+    drop(pair);
+    let _ = reader_handle.join();
+    let raw = captured.lock().expect("capture lock").clone();
+    let rendered = String::from_utf8_lossy(&raw);
+    let saw_messages_detail = rendered.contains("Detail [Messages]");
+    save_artifact("pty_enter_detail_output.raw", &trace, &raw);
+    let summary = serde_json::json!({
+        "trace_id": trace,
+        "test": "tui_pty_enter_selected_hit_opens_detail_modal",
+        "saw_detail_growth": saw_detail,
+        "first_esc_exited": first_esc_exited,
+        "saw_messages_detail": saw_messages_detail,
+        "captured_bytes": raw.len(),
+    });
+    save_artifact(
+        "pty_enter_detail_summary.json",
+        &trace,
+        serde_json::to_string_pretty(&summary)
+            .expect("serialize enter-detail summary")
+            .as_bytes(),
+    );
+    assert!(
+        saw_messages_detail,
+        "Expected PTY capture to include Detail [Messages] marker after Enter drill-in"
+    );
+    assert!(
+        !raw.is_empty(),
+        "Expected non-empty PTY capture for Enter detail flow"
+    );
+
+    tracker.complete();
+}
+
+#[test]
 fn tui_pty_performance_guardrails_smoke() {
     let _guard_lock = tui_flow_guard();
     let trace = trace_id();
