@@ -1,6 +1,6 @@
 //! Integration tests for the bakeoff evaluation harness.
 //!
-//! These tests verify the harness works correctly with mock embedders.
+//! These tests verify the harness works correctly with fixture embedders.
 
 use coding_agent_search::bakeoff::{
     EvaluationConfig, EvaluationCorpus, EvaluationHarness, ModelMetadata, format_comparison_table,
@@ -8,15 +8,15 @@ use coding_agent_search::bakeoff::{
 use coding_agent_search::search::embedder::{Embedder, EmbedderError, EmbedderResult};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// A mock embedder for testing the harness.
+/// A fixture embedder for testing the harness.
 /// Returns deterministic embeddings based on text hash.
-struct MockEmbedder {
+struct FixtureEmbedder {
     id: String,
     dimension: usize,
     call_count: AtomicUsize,
 }
 
-impl MockEmbedder {
+impl FixtureEmbedder {
     fn new(id: &str, dimension: usize) -> Self {
         Self {
             id: id.to_string(),
@@ -30,7 +30,7 @@ impl MockEmbedder {
     }
 }
 
-impl Embedder for MockEmbedder {
+impl Embedder for FixtureEmbedder {
     fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
         if text.is_empty() {
             return Err(EmbedderError::InvalidInput("empty text".to_string()));
@@ -73,14 +73,14 @@ impl Embedder for MockEmbedder {
     }
 }
 
-/// A mock embedder that produces quality-aware embeddings.
+/// A fixture embedder that produces quality-aware embeddings.
 /// Similar texts produce similar embeddings.
-struct QualityMockEmbedder {
+struct QualityFixtureEmbedder {
     id: String,
     dimension: usize,
 }
 
-impl QualityMockEmbedder {
+impl QualityFixtureEmbedder {
     fn new(id: &str, dimension: usize) -> Self {
         Self {
             id: id.to_string(),
@@ -138,7 +138,7 @@ impl QualityMockEmbedder {
     }
 }
 
-impl Embedder for QualityMockEmbedder {
+impl Embedder for QualityFixtureEmbedder {
     fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
         if text.is_empty() {
             return Err(EmbedderError::InvalidInput("empty text".to_string()));
@@ -160,14 +160,14 @@ impl Embedder for QualityMockEmbedder {
 }
 
 #[test]
-fn test_harness_with_mock_embedder() {
+fn test_harness_with_fixture_embedder() {
     let harness = EvaluationHarness::new();
     let corpus = EvaluationCorpus::code_search_sample();
-    let embedder = MockEmbedder::new("mock-384", 384);
+    let embedder = FixtureEmbedder::new("fixture-384", 384);
 
     let metadata = ModelMetadata {
-        id: "mock-384".to_string(),
-        name: "Mock Embedder".to_string(),
+        id: "fixture-384".to_string(),
+        name: "Fixture Embedder".to_string(),
         source: "test".to_string(),
         release_date: "2025-12-01".to_string(),
         dimension: Some(384),
@@ -180,10 +180,10 @@ fn test_harness_with_mock_embedder() {
         .expect("evaluation should succeed");
 
     // Verify report structure
-    assert_eq!(report.model_id, "mock-384");
+    assert_eq!(report.model_id, "fixture-384");
     assert!(!report.corpus_hash.is_empty());
     assert!(report.ndcg_at_10 >= 0.0 && report.ndcg_at_10 <= 1.0);
-    // cold_start_ms can be 0 for very fast mock embedders (sub-millisecond)
+    // cold_start_ms can be 0 for very fast fixture embedders (sub-millisecond)
     assert!(report.eligible); // Released 2025-12-01, after cutoff
 
     // Verify embedder was called
@@ -194,11 +194,11 @@ fn test_harness_with_mock_embedder() {
 fn test_harness_with_quality_embedder() {
     let harness = EvaluationHarness::new();
     let corpus = EvaluationCorpus::code_search_sample();
-    let embedder = QualityMockEmbedder::new("quality-384", 384);
+    let embedder = QualityFixtureEmbedder::new("quality-384", 384);
 
     let metadata = ModelMetadata {
         id: "quality-384".to_string(),
-        name: "Quality Mock".to_string(),
+        name: "Quality Fixture".to_string(),
         source: "test".to_string(),
         release_date: "2025-12-01".to_string(),
         dimension: Some(384),
@@ -223,7 +223,7 @@ fn test_harness_comparison() {
     let corpus = EvaluationCorpus::code_search_sample();
 
     // Baseline
-    let baseline_embedder = MockEmbedder::new("baseline-384", 384);
+    let baseline_embedder = FixtureEmbedder::new("baseline-384", 384);
     let baseline_metadata = ModelMetadata {
         id: "baseline-384".to_string(),
         name: "Baseline".to_string(),
@@ -235,7 +235,7 @@ fn test_harness_comparison() {
     };
 
     // Candidate (using same type as baseline for type compatibility)
-    let candidate_embedder = MockEmbedder::new("candidate-384", 384);
+    let candidate_embedder = FixtureEmbedder::new("candidate-384", 384);
     let candidate_metadata = ModelMetadata {
         id: "candidate-384".to_string(),
         name: "Candidate".to_string(),
@@ -269,7 +269,7 @@ fn test_format_comparison_table() {
     let harness = EvaluationHarness::new();
     let corpus = EvaluationCorpus::code_search_sample();
 
-    let baseline_embedder = MockEmbedder::new("baseline", 384);
+    let baseline_embedder = FixtureEmbedder::new("baseline", 384);
     let baseline_metadata = ModelMetadata {
         id: "baseline".to_string(),
         name: "Baseline".to_string(),
@@ -280,7 +280,7 @@ fn test_format_comparison_table() {
         is_baseline: true,
     };
 
-    let candidate_embedder = MockEmbedder::new("candidate", 384);
+    let candidate_embedder = FixtureEmbedder::new("candidate", 384);
     let candidate_metadata = ModelMetadata {
         id: "candidate".to_string(),
         name: "Candidate".to_string(),
@@ -320,7 +320,7 @@ fn test_custom_evaluation_config() {
     };
     let harness = EvaluationHarness::with_config(config);
     let corpus = EvaluationCorpus::code_search_sample();
-    let embedder = MockEmbedder::new("test", 256);
+    let embedder = FixtureEmbedder::new("test", 256);
 
     let metadata = ModelMetadata {
         id: "test".to_string(),
@@ -353,7 +353,7 @@ fn test_corpus_hash_stability() {
 fn test_empty_corpus_error() {
     let harness = EvaluationHarness::new();
     let corpus = EvaluationCorpus::new("empty");
-    let embedder = MockEmbedder::new("test", 256);
+    let embedder = FixtureEmbedder::new("test", 256);
 
     let metadata = ModelMetadata {
         id: "test".to_string(),
@@ -374,7 +374,7 @@ fn test_empty_corpus_error() {
 fn test_ineligible_by_date() {
     let harness = EvaluationHarness::new();
     let corpus = EvaluationCorpus::code_search_sample();
-    let embedder = MockEmbedder::new("old", 384);
+    let embedder = FixtureEmbedder::new("old", 384);
 
     let metadata = ModelMetadata {
         id: "old".to_string(),
