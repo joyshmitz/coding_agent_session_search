@@ -85,7 +85,7 @@ jobs:
       - name: Generate coverage summary (JSON)
         run: |
           # Generate JSON coverage report (reuses instrumented data from previous step)
-          cargo llvm-cov report --workspace \
+          cargo llvm-cov report \
             --ignore-filename-regex "(tests/|benches/)" \
             --json \
             --output-path coverage.json
