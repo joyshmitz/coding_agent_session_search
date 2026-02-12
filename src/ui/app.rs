@@ -19577,6 +19577,57 @@ mod tests {
     }
 
     #[test]
+    fn enter_does_not_override_explicit_json_tab_when_modal_open() {
+        let mut app = CassApp::default();
+        app.panes.push(AgentPane {
+            agent: "claude_code".into(),
+            total_count: 1,
+            hits: vec![make_test_hit()],
+            selected: 0,
+        });
+        app.active_pane = 0;
+
+        // Explicit Json pathway.
+        let _ = app.update(CassMsg::ToggleJsonView);
+        assert_eq!(app.detail_tab, DetailTab::Json);
+        assert!(app.show_detail_modal);
+
+        // Enter while modal is open should not force Messages tab.
+        let _ = app.update(CassMsg::DetailOpened);
+        assert_eq!(
+            app.detail_tab,
+            DetailTab::Json,
+            "Enter should preserve explicit Json tab while modal is already open"
+        );
+    }
+
+    #[test]
+    fn enter_does_not_override_explicit_raw_tab_when_modal_open() {
+        let mut app = CassApp::default();
+        app.panes.push(AgentPane {
+            agent: "claude_code".into(),
+            total_count: 1,
+            hits: vec![make_test_hit()],
+            selected: 0,
+        });
+        app.active_pane = 0;
+
+        // Open modal through explicit Json pathway, then explicitly switch to Raw.
+        let _ = app.update(CassMsg::ToggleJsonView);
+        assert_eq!(app.detail_tab, DetailTab::Json);
+        let _ = app.update(CassMsg::DetailTabChanged(DetailTab::Raw));
+        assert_eq!(app.detail_tab, DetailTab::Raw);
+
+        // Enter while modal is open should keep explicit Raw selection.
+        let _ = app.update(CassMsg::DetailOpened);
+        assert_eq!(
+            app.detail_tab,
+            DetailTab::Raw,
+            "Enter should preserve explicit Raw tab while modal is already open"
+        );
+    }
+
+    #[test]
     fn build_json_lines_produces_syntax_colored_output() {
         let app = CassApp::default();
         let hit = make_test_hit();
