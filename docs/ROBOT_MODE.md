@@ -55,6 +55,12 @@ Updated: 2025-12-02
 - Clamp limits to published caps (see `cass capabilities --json`).
 - Prefer `--max-tokens` to keep outputs small in LLM loops.
 
+## TUI drill-in contract (operator reference)
+- `Enter` with a selected hit opens the contextual detail modal on the Messages tab.
+- `Enter` with no selected hit follows query-submit behavior (safe no-op when query is empty).
+- In detail modal: `/` opens find, `n`/`N` navigate matches, `Esc` exits find before closing the modal.
+- Use `F8` to open the selected hit in `$EDITOR` when you need raw file navigation.
+
 ## Integration snippets
 
 ### Python
