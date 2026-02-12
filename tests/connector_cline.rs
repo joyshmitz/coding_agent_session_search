@@ -43,20 +43,10 @@ fn cline_parses_fixture_task() {
 }
 
 #[test]
-#[ignore = "flaky in CI: HOME env override doesn't propagate to all storage_root checks"]
 fn cline_respects_since_ts_and_resequences_indices() {
     let dir = tempfile::TempDir::new().unwrap();
-
-    // Point HOME to temp so storage_root resolves inside the sandbox.
-    // Note: This can be flaky in CI environments where the connector may
-    // resolve paths before the environment variable is set.
-    unsafe {
-        std::env::set_var("HOME", dir.path());
-    }
-
-    let root = dir
-        .path()
-        .join(".config/Code/User/globalStorage/saoudrizwan.claude-dev/task-123");
+    let storage_root = dir.path().join("saoudrizwan.claude-dev");
+    let root = storage_root.join("task-123");
     std::fs::create_dir_all(&root).unwrap();
 
     let ui_messages_path = root.join("ui_messages.json");
@@ -78,7 +68,7 @@ fn cline_respects_since_ts_and_resequences_indices() {
 
     let connector = ClineConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().to_path_buf(),
+        data_dir: storage_root,
         scan_roots: Vec::new(),
         since_ts: Some(1_500),
     };
@@ -91,21 +81,70 @@ fn cline_respects_since_ts_and_resequences_indices() {
     );
     let c = &convs[0];
 
-    // Should keep only the newer message
+    // Incremental filtering for Cline is file-level, not per-message.
+    // Since the file is newer than since_ts, we ingest all messages and resequence.
     assert_eq!(
         c.messages.len(),
-        1,
-        "expected since_ts to drop older messages"
+        2,
+        "expected file-level since_ts filtering to keep full conversation payload"
     );
-    let msg = &c.messages[0];
-    assert_eq!(msg.idx, 0, "idx should be re-sequenced after filtering");
     assert_eq!(
-        msg.role, "assistant",
-        "filtered message should be assistant role"
+        c.messages[0].idx, 0,
+        "first message idx should be 0 after re-sequencing"
     );
     assert!(
-        msg.content.contains("new msg"),
-        "filtered message should contain 'new msg'"
+        c.messages[0].content.contains("old msg"),
+        "first message should contain 'old msg'"
+    );
+    assert_eq!(
+        c.messages[1].idx, 1,
+        "second message idx should be 1 after re-sequencing"
+    );
+    assert_eq!(
+        c.messages[1].role, "assistant",
+        "second message should be assistant role"
+    );
+    assert!(
+        c.messages[1].content.contains("new msg"),
+        "second message should contain 'new msg'"
+    );
+}
+
+#[test]
+fn cline_skips_unmodified_files_for_since_ts() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let storage_root = dir.path().join("saoudrizwan.claude-dev");
+    let root = storage_root.join("task-older");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let ui_messages_path = root.join("ui_messages.json");
+    let msgs = serde_json::json!([
+        {
+            "timestamp": 1_000,
+            "role": "user",
+            "content": "persisted msg"
+        }
+    ]);
+    std::fs::write(&ui_messages_path, serde_json::to_string(&msgs).unwrap()).unwrap();
+
+    let modified_ms = std::fs::metadata(&ui_messages_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+
+    let connector = ClineConnector::new();
+    let ctx = ScanContext {
+        data_dir: storage_root,
+        scan_roots: Vec::new(),
+        since_ts: Some(modified_ms.saturating_add(2_000)),
+    };
+
+    let convs = connector.scan(&ctx).unwrap();
+    assert!(
+        convs.is_empty(),
+        "expected conversation to be skipped when file mtime is older than since_ts threshold"
     );
 }
 
