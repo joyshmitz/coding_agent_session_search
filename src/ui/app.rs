@@ -19719,6 +19719,66 @@ mod tests {
         assert_eq!(app.detail_scroll, 8);
     }
 
+    #[test]
+    fn autocomplete_csv_suffix_single_token() {
+        let candidates: BTreeSet<String> =
+            ["claude_code", "cursor", "codex"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            autocomplete_csv_suffix("cl", &candidates),
+            Some("claude_code".to_string()),
+        );
+        assert_eq!(
+            autocomplete_csv_suffix("cu", &candidates),
+            Some("cursor".to_string()),
+        );
+        assert_eq!(
+            autocomplete_csv_suffix("co", &candidates),
+            Some("codex".to_string()),
+        );
+    }
+
+    #[test]
+    fn autocomplete_csv_suffix_after_comma() {
+        let candidates: BTreeSet<String> =
+            ["aider", "claude_code", "cursor"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            autocomplete_csv_suffix("aider, cl", &candidates),
+            Some("aider, claude_code".to_string()),
+        );
+    }
+
+    #[test]
+    fn autocomplete_csv_suffix_exact_match_returns_none() {
+        let candidates: BTreeSet<String> =
+            ["cursor"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(autocomplete_csv_suffix("cursor", &candidates), None);
+    }
+
+    #[test]
+    fn autocomplete_csv_suffix_case_insensitive() {
+        let candidates: BTreeSet<String> =
+            ["claude_code"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            autocomplete_csv_suffix("CL", &candidates),
+            Some("claude_code".to_string()),
+        );
+    }
+
+    #[test]
+    fn autocomplete_csv_suffix_no_match() {
+        let candidates: BTreeSet<String> =
+            ["cursor"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(autocomplete_csv_suffix("zz", &candidates), None);
+    }
+
+    #[test]
+    fn autocomplete_csv_suffix_empty_input() {
+        let candidates: BTreeSet<String> =
+            ["cursor"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(autocomplete_csv_suffix("", &candidates), None);
+        assert_eq!(autocomplete_csv_suffix("  ", &candidates), None);
+    }
+
     fn make_test_hit() -> SearchHit {
         SearchHit {
             title: "Test Conversation".into(),
