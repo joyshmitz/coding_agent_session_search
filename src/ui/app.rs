@@ -4591,6 +4591,19 @@ impl CassApp {
         true
     }
 
+    /// Transition interaction back to result navigation semantics.
+    ///
+    /// Used by mouse result-row interactions so Enter behavior stays
+    /// deterministic (open selected detail) instead of being captured by an
+    /// unrelated non-query input mode.
+    fn enter_results_navigation_context(&mut self) {
+        self.focus_manager.focus(focus_ids::RESULTS_LIST);
+        if self.input_mode != InputMode::Query {
+            self.input_mode = InputMode::Query;
+            self.input_buffer.clear();
+        }
+    }
+
     fn split_content_area(
         &self,
         area: Rect,
@@ -10268,7 +10281,10 @@ impl super::ftui_adapter::Model for CassApp {
         // Non-query input modes (agent/workspace/date/pane) own keyboard
         // editing. Route printable/backspace/enter/esc here so those modes
         // are actually interactive.
-        if self.surface == AppSurface::Search && self.input_mode != InputMode::Query {
+        if self.surface == AppSurface::Search
+            && self.input_mode != InputMode::Query
+            && self.focus_manager.current() == Some(focus_ids::SEARCH_BAR)
+        {
             match &msg {
                 CassMsg::QueryChanged(text) => {
                     if text.is_empty() {
@@ -10653,6 +10669,13 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     pane.selected = state.selected.unwrap_or(0);
                 }
+                // In default query mode, establish focus on the results list
+                // so subsequent Enter presses consistently open the detail
+                // modal. Skip when the user is editing a filter (agent,
+                // workspace, pane filter, etc.) to avoid stealing focus.
+                if self.input_mode == InputMode::Query {
+                    self.focus_manager.focus(focus_ids::RESULTS_LIST);
+                }
                 ftui::Cmd::none()
             }
             CassMsg::SelectionJumped { to_end } => {
@@ -10668,6 +10691,9 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     state.select(Some(pane.selected));
                 }
+                if self.input_mode == InputMode::Query {
+                    self.focus_manager.focus(focus_ids::RESULTS_LIST);
+                }
                 ftui::Cmd::none()
             }
             CassMsg::ActivePaneChanged { index } => {
@@ -10679,6 +10705,8 @@ impl super::ftui_adapter::Model for CassApp {
                             .select(Some(pane.selected));
                     }
                     self.adjust_pane_scroll_offset();
+                    // Pane switches always indicate results navigation intent.
+                    self.focus_manager.focus(focus_ids::RESULTS_LIST);
                 }
                 ftui::Cmd::none()
             }
@@ -11253,6 +11281,7 @@ impl super::ftui_adapter::Model for CassApp {
                 self.pane_filter = Some(seed.clone());
                 self.input_mode = InputMode::PaneFilter;
                 self.input_buffer = seed;
+                self.focus_manager.focus(focus_ids::SEARCH_BAR);
                 ftui::Cmd::none()
             }
             CassMsg::PaneFilterChanged(text) => {
@@ -11275,6 +11304,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::InputModeEntered(mode) => {
                 self.input_mode = mode;
                 self.input_buffer.clear();
+                self.focus_manager.focus(focus_ids::SEARCH_BAR);
                 ftui::Cmd::none()
             }
             CassMsg::InputBufferChanged(text) => {
@@ -12570,6 +12600,9 @@ impl super::ftui_adapter::Model for CassApp {
                                 }
                                 _ => {}
                             }
+                            if matches!(pill.label.as_str(), "agent" | "ws" | "pane" | "time") {
+                                self.focus_manager.focus(focus_ids::SEARCH_BAR);
+                            }
                         }
                         ftui::Cmd::none()
                     }
@@ -12644,6 +12677,7 @@ impl super::ftui_adapter::Model for CassApp {
                             }
                             self.adjust_pane_scroll_offset();
                         }
+                        self.enter_results_navigation_context();
                         ftui::Cmd::msg(CassMsg::SelectionMoved { delta: -3 })
                     }
                     (MouseEventKind::ScrollDown, MouseHitRegion::Results { pane_idx, .. }) => {
@@ -12656,6 +12690,7 @@ impl super::ftui_adapter::Model for CassApp {
                             }
                             self.adjust_pane_scroll_offset();
                         }
+                        self.enter_results_navigation_context();
                         ftui::Cmd::msg(CassMsg::SelectionMoved { delta: 3 })
                     }
                     // ── Scroll in detail ─────────────────────────────
@@ -12699,6 +12734,7 @@ impl super::ftui_adapter::Model for CassApp {
                             }
                             self.adjust_pane_scroll_offset();
                         }
+                        self.enter_results_navigation_context();
                         let hit_count = self
                             .panes
                             .get(pane_idx)
@@ -12732,6 +12768,7 @@ impl super::ftui_adapter::Model for CassApp {
                             }
                             self.adjust_pane_scroll_offset();
                         }
+                        self.enter_results_navigation_context();
                         let hit_count = self
                             .panes
                             .get(pane_idx)
@@ -19698,9 +19735,10 @@ mod tests {
     #[test]
     fn detail_opened_in_non_query_mode_applies_input() {
         // In PaneFilter mode, Enter (DetailOpened) applies the filter and
-        // returns to Query mode — it does NOT open the detail modal.
+        // returns to Query mode when the search bar owns input focus.
         let mut app = CassApp::default();
         app.input_mode = InputMode::PaneFilter;
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
         app.input_buffer = "err".to_string();
         let _ = app.update(CassMsg::DetailOpened);
         assert_eq!(
@@ -19716,6 +19754,7 @@ mod tests {
         // In Agent mode, Enter applies the agent filter (via chained Cmds).
         let mut app2 = CassApp::default();
         app2.input_mode = InputMode::Agent;
+        app2.focus_manager.focus(focus_ids::SEARCH_BAR);
         app2.input_buffer = "claude_code".to_string();
         let cmd = app2.update(CassMsg::DetailOpened);
         // InputModeApplied returns a Cmd::Msg(FilterAgentSet) that must be processed.
@@ -22278,6 +22317,73 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_in_results_restores_results_navigation_context() {
+        use ftui::Model;
+        let mut app = app_with_hits(10);
+        app.input_mode = InputMode::Agent;
+        app.input_buffer = "codex".to_string();
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+        render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+
+        let inner = app.last_results_inner.borrow().unwrap();
+        let row_h = app.density_mode.row_height();
+        let target_y = inner.y + row_h * 2;
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: inner.x + 1,
+            y: target_y,
+        });
+
+        assert_eq!(
+            app.focus_manager.current(),
+            Some(focus_ids::RESULTS_LIST),
+            "clicking a result row should leave focus in results context"
+        );
+        assert_eq!(
+            app.input_mode,
+            InputMode::Query,
+            "result-row interaction should exit stale non-query input mode"
+        );
+        assert!(
+            app.input_buffer.is_empty(),
+            "stale input-mode buffer should be cleared when returning to results context"
+        );
+    }
+
+    #[test]
+    fn enter_after_mouse_result_click_opens_detail_from_stale_input_mode() {
+        use ftui::Model;
+        let mut app = app_with_hits(10);
+        app.input_mode = InputMode::Agent;
+        app.input_buffer = "codex".to_string();
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+        render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+
+        let inner = app.last_results_inner.borrow().unwrap();
+        let row_h = app.density_mode.row_height();
+        let target_y = inner.y + row_h * 2;
+        let click_cmd = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: inner.x + 1,
+            y: target_y,
+        });
+        for msg in extract_msgs(click_cmd) {
+            let _ = app.update(msg);
+        }
+
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(
+            app.show_detail_modal,
+            "Enter should open detail modal after result-row click even when starting from stale input mode"
+        );
+        assert_eq!(
+            app.detail_tab,
+            DetailTab::Messages,
+            "Enter-open should land on contextual Messages tab"
+        );
+    }
+
+    #[test]
     fn mouse_click_on_selected_row_opens_detail() {
         use ftui::Model;
         let mut app = app_with_hits(5);
@@ -23013,6 +23119,249 @@ mod tests {
             "after focus toggle, narrow mode should show detail"
         );
     }
+
+    // -- Focus ownership hardening (dcor9.2) ---------------------------------
+
+    #[test]
+    fn selection_moved_transfers_focus_to_results_list() {
+        let mut app = app_with_hits(5);
+        // Start with focus on search bar (simulates typing then arrowing down).
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+        assert_eq!(app.focus_manager.current(), Some(focus_ids::SEARCH_BAR));
+
+        let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+
+        assert_eq!(
+            app.focus_manager.current(),
+            Some(focus_ids::RESULTS_LIST),
+            "SelectionMoved in Query mode should transfer focus to results list"
+        );
+    }
+
+    #[test]
+    fn selection_moved_preserves_focus_in_filter_input_modes() {
+        // When the user is editing a filter (Agent/Workspace/PaneFilter),
+        // navigation should NOT steal focus from the search bar.
+        for mode in [
+            InputMode::Agent,
+            InputMode::Workspace,
+            InputMode::PaneFilter,
+        ] {
+            let mut app = app_with_hits(5);
+            app.input_mode = mode;
+            app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+            let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+
+            assert_eq!(
+                app.focus_manager.current(),
+                Some(focus_ids::SEARCH_BAR),
+                "SelectionMoved in {mode:?} should preserve search bar focus"
+            );
+        }
+    }
+
+    #[test]
+    fn selection_jumped_transfers_focus_to_results_list() {
+        let mut app = app_with_hits(5);
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        let _ = app.update(CassMsg::SelectionJumped { to_end: true });
+
+        assert_eq!(
+            app.focus_manager.current(),
+            Some(focus_ids::RESULTS_LIST),
+            "SelectionJumped should transfer focus to results list"
+        );
+    }
+
+    #[test]
+    fn active_pane_changed_transfers_focus_to_results_list() {
+        let mut app = app_with_hits(5);
+        // Add a second pane so we can switch.
+        app.panes.push(AgentPane {
+            agent: "claude-code".into(),
+            total_count: 2,
+            hits: vec![make_hit(100, "/other"), make_hit(101, "/other2")],
+            selected: 0,
+        });
+        app.focus_manager.focus(focus_ids::DETAIL_PANE);
+
+        let _ = app.update(CassMsg::ActivePaneChanged { index: 1 });
+
+        assert_eq!(
+            app.focus_manager.current(),
+            Some(focus_ids::RESULTS_LIST),
+            "ActivePaneChanged should transfer focus to results list"
+        );
+        assert_eq!(app.active_pane, 1);
+    }
+
+    #[test]
+    fn keyboard_navigation_then_enter_opens_detail() {
+        let mut app = app_with_hits(3);
+        // Simulate: user types query, focus on search bar, then arrows down.
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        // Arrow down moves selection and transfers focus.
+        let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+        assert_eq!(app.focus_manager.current(), Some(focus_ids::RESULTS_LIST));
+
+        // Enter should open detail modal.
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(
+            app.show_detail_modal,
+            "Enter after keyboard navigation should open detail modal"
+        );
+    }
+
+    #[test]
+    fn detail_close_restores_focus_to_results_list() {
+        let mut app = app_with_hits(3);
+        // Open detail modal.
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(app.show_detail_modal);
+
+        // Close detail modal.
+        let _ = app.update(CassMsg::DetailClosed);
+        assert!(!app.show_detail_modal);
+        assert_eq!(
+            app.focus_manager.current(),
+            Some(focus_ids::RESULTS_LIST),
+            "Closing detail modal should restore focus to results list"
+        );
+    }
+
+    // -- Enter-routing interaction matrix (dcor9.4) ---------------------------
+    //
+    // Covers all known ambiguous routing states for Enter/DetailOpened.
+    // Matrix axes: focus state × input mode × modal state × hit presence.
+
+    #[test]
+    fn enter_matrix_query_mode_with_hit_opens_detail() {
+        // Focus on SEARCH_BAR, Query mode, no modal, hit present → detail
+        let mut app = app_with_hits(3);
+        app.input_mode = InputMode::Query;
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert!(
+            app.show_detail_modal,
+            "should open detail with selected hit"
+        );
+        assert_eq!(app.detail_tab, DetailTab::Messages);
+    }
+
+    #[test]
+    fn enter_matrix_query_mode_without_hit_submits_query() {
+        // Focus on SEARCH_BAR, Query mode, no modal, no hit → query submit
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Query;
+        app.input_buffer = "test".into();
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert!(
+            !app.show_detail_modal,
+            "no hit: should NOT open detail modal"
+        );
+    }
+
+    #[test]
+    fn enter_matrix_results_focus_with_hit_opens_detail() {
+        // Focus on RESULTS_LIST, Query mode, no modal, hit present → detail
+        let mut app = app_with_hits(3);
+        app.input_mode = InputMode::Query;
+        app.focus_manager.focus(focus_ids::RESULTS_LIST);
+
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert!(app.show_detail_modal);
+        assert_eq!(app.detail_tab, DetailTab::Messages);
+    }
+
+    #[test]
+    fn enter_matrix_detail_modal_already_open_stays_open() {
+        // Detail modal already open → stays open (re-entrant)
+        let mut app = app_with_hits(3);
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(app.show_detail_modal);
+        let prev_tab = app.detail_tab;
+
+        // Enter again while modal is open.
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert!(
+            app.show_detail_modal,
+            "detail modal should remain open on re-entry"
+        );
+        assert_eq!(
+            app.detail_tab, prev_tab,
+            "tab should not change on re-entry"
+        );
+    }
+
+    #[test]
+    fn enter_matrix_pane_filter_mode_applies_filter() {
+        // PaneFilter mode with focus on SEARCH_BAR → applies pane filter
+        let mut app = app_with_hits(3);
+        app.input_mode = InputMode::PaneFilter;
+        app.input_buffer = "test filter".into();
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert!(
+            !app.show_detail_modal,
+            "PaneFilter mode should apply filter, not open detail"
+        );
+        // After PaneFilterClosed, mode returns to Query.
+        assert_eq!(app.input_mode, InputMode::Query);
+    }
+
+    #[test]
+    fn enter_matrix_agent_filter_mode_applies_filter() {
+        // Agent input mode → applies agent filter, not detail open
+        let mut app = app_with_hits(3);
+        app.input_mode = InputMode::Agent;
+        app.input_buffer = "codex".into();
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert!(
+            !app.show_detail_modal,
+            "Agent filter mode should apply filter, not open detail"
+        );
+        assert_eq!(app.input_mode, InputMode::Query);
+    }
+
+    #[test]
+    fn enter_matrix_navigation_flow_search_to_detail_roundtrip() {
+        // Full workflow: type → navigate → Enter → close → back to results
+        let mut app = app_with_hits(5);
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        // 1. Arrow down to browse results.
+        let _ = app.update(CassMsg::SelectionMoved { delta: 2 });
+        assert_eq!(app.focus_manager.current(), Some(focus_ids::RESULTS_LIST));
+
+        // 2. Enter opens detail.
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(app.show_detail_modal);
+
+        // 3. Escape closes detail, focus returns to results.
+        let _ = app.update(CassMsg::DetailClosed);
+        assert!(!app.show_detail_modal);
+        assert_eq!(app.focus_manager.current(), Some(focus_ids::RESULTS_LIST));
+
+        // 4. Selection should still be on the row we navigated to.
+        assert_eq!(app.panes[0].selected, 2);
+    }
+
+    // -- End focus ownership & Enter-routing matrix ---------------------------
 
     #[test]
     fn analytics_surface_clears_search_regions() {
