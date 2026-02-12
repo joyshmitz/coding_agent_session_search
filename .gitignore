@@ -97,3 +97,6 @@ session_export.html
 flamegraph.svg
 perf.data
 perf.data.old
+
+# Beads daemon rotated logs
+.beads/daemon-*.log.gz
