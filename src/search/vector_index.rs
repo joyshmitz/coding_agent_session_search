@@ -1536,8 +1536,14 @@ fn dot_product_f16(a: &[f16], b: &[f32]) -> f32 {
 }
 
 fn sync_dir(path: &Path) -> Result<()> {
-    let dir = File::open(path)?;
-    dir.sync_all()?;
+    // Directory fsync is only supported on Unix; on Windows it's a no-op
+    // because file-level sync_all() already ensures durability.
+    #[cfg(unix)]
+    {
+        let dir = File::open(path)?;
+        dir.sync_all()?;
+    }
+    let _ = path; // suppress unused warning on non-unix
     Ok(())
 }
 
