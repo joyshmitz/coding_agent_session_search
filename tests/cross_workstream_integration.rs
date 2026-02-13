@@ -894,13 +894,20 @@ pub const TRIAGE_PLAYBOOK: &[TriageEntry] = &[
 // Integration Test Functions (exercising the scenario matrix)
 // ---------------------------------------------------------------------------
 
+use coding_agent_search::model::types::{Conversation, Message, MessageRole};
+use coding_agent_search::search::query::{MatchType, SearchHit};
+use coding_agent_search::sources::provenance::SourceFilter;
 use coding_agent_search::ui::app::{
-    AnalyticsView, AppSurface, FrameTimingStats, InspectorTab, LayoutBreakpoint,
+    AnalyticsView, AppSurface, CassApp, CassMsg, DetailTab, DrilldownContext, FrameTimingStats,
+    InspectorTab, LayoutBreakpoint,
 };
 use coding_agent_search::ui::components::palette::{
     AnalyticsTarget, PaletteResult, PaletteState, default_actions,
 };
+use coding_agent_search::ui::data::ConversationView;
+use ftui::Model;
 use std::io::Write;
+use std::path::PathBuf;
 
 /// SIZE_MATRIX from app.rs, reproduced here for cross-workstream scenarios.
 const SIZE_MATRIX: &[(u16, u16, &str)] = &[
@@ -1566,6 +1573,232 @@ fn full_interaction_sequence() {
     log.assert_ok("final_view", "Dashboard", &format!("{view:?}"));
     log.assert_ok("final_breakpoint", "MediumNarrow", &format!("{bp_new:?}"));
     log.assert_ok("final_inspector_tab", "Timing", tab.label());
+}
+
+// ===========================================================================
+// CW-053: Search ↔ Analytics drilldown roundtrip
+// ===========================================================================
+#[test]
+fn search_analytics_drilldown_roundtrip_updates_search_filters() {
+    let mut log = IntegrationLogger::new("CW-053");
+    let mut app = CassApp::default();
+
+    assert_eq!(app.surface, AppSurface::Search, "should start on search");
+    let _ = app.update(CassMsg::AnalyticsEntered);
+    assert_eq!(app.surface, AppSurface::Analytics, "should enter analytics");
+
+    // Set inherited analytics filters first.
+    let mut inherited_agents = std::collections::HashSet::new();
+    inherited_agents.insert("claude_code".to_string());
+    let _ = app.update(CassMsg::AnalyticsAgentFilterSet(inherited_agents));
+    let _ = app.update(CassMsg::AnalyticsSourceFilterSet(SourceFilter::Remote));
+
+    // Drilldown from a selected analytics point into search.
+    let _ = app.update(CassMsg::AnalyticsDrilldown(DrilldownContext {
+        since_ms: Some(1_700_000_000_000),
+        until_ms: Some(1_700_086_400_000),
+        agent: Some("codex".to_string()),
+        workspace: None,
+        source_filter: Some(SourceFilter::Local),
+        model: None,
+    }));
+
+    assert_eq!(
+        app.surface,
+        AppSurface::Search,
+        "drilldown should return to search surface"
+    );
+    assert_eq!(app.filters.created_from, Some(1_700_000_000_000));
+    assert_eq!(app.filters.created_to, Some(1_700_086_400_000));
+    assert_eq!(
+        app.filters.agents,
+        ["codex"].into_iter().map(String::from).collect(),
+        "dimension agent should override inherited analytics agent filters"
+    );
+    assert_eq!(
+        app.filters.source_filter,
+        SourceFilter::Local,
+        "dimension source should override inherited source filter"
+    );
+
+    log.assert_ok(
+        "surface_after_drilldown",
+        "Search",
+        &format!("{:?}", app.surface),
+    );
+    log.assert_ok(
+        "agent_filter",
+        "codex",
+        &format!("{:?}", app.filters.agents),
+    );
+}
+
+// ===========================================================================
+// CW-054: Drilldown back-stack preserves analytics selection
+// ===========================================================================
+#[test]
+fn analytics_drilldown_back_stack_roundtrip_preserves_selection() {
+    let mut log = IntegrationLogger::new("CW-054");
+    let mut app = CassApp::default();
+
+    let _ = app.update(CassMsg::AnalyticsEntered);
+    assert_eq!(app.surface, AppSurface::Analytics);
+    app.analytics_view = AnalyticsView::Breakdowns;
+    app.analytics_selection = 2;
+
+    let _ = app.update(CassMsg::AnalyticsDrilldown(DrilldownContext {
+        since_ms: Some(1000),
+        until_ms: Some(2000),
+        agent: None,
+        workspace: None,
+        source_filter: None,
+        model: None,
+    }));
+    assert_eq!(app.surface, AppSurface::Search);
+    assert_eq!(
+        app.view_stack.last(),
+        Some(&AppSurface::Analytics),
+        "analytics surface should be pushed for back navigation"
+    );
+
+    let _ = app.update(CassMsg::ViewStackPopped);
+    assert_eq!(
+        app.surface,
+        AppSurface::Analytics,
+        "back-stack pop should restore analytics surface"
+    );
+    assert_eq!(
+        app.analytics_selection, 2,
+        "selection should be preserved across drilldown roundtrip"
+    );
+
+    log.assert_ok(
+        "selection_preserved",
+        "2",
+        &app.analytics_selection.to_string(),
+    );
+}
+
+fn render_app_text(app: &CassApp, width: u16, height: u16) -> String {
+    let mut pool = ftui::GraphemePool::new();
+    let mut frame = ftui::Frame::new(width, height, &mut pool);
+    frame.set_degradation(ftui::render::budget::DegradationLevel::Full);
+    app.view(&mut frame);
+    ftui_harness::buffer_to_text(&frame.buffer)
+}
+
+fn make_session_hit(content_hash: u64, line_number: usize, content: String) -> SearchHit {
+    SearchHit {
+        title: format!("Session A line {line_number}"),
+        snippet: String::new(),
+        content,
+        content_hash,
+        score: 0.95,
+        agent: "claude_code".into(),
+        source_path: "/session/a.jsonl".into(),
+        workspace: "/workspace/cass".into(),
+        workspace_original: None,
+        created_at: Some(1_700_000_000),
+        line_number: Some(line_number),
+        match_type: MatchType::Exact,
+        source_id: "local".into(),
+        origin_kind: "local".into(),
+        origin_host: None,
+    }
+}
+
+// ===========================================================================
+// CW-055: Inline badges match detail modal analytics values
+// ===========================================================================
+#[test]
+fn inline_analytics_badges_match_detail_modal_metrics() {
+    let mut log = IntegrationLogger::new("CW-055");
+    let mut app = CassApp::default();
+
+    // Two hits from the same session: estimated tokens = 1000 + 500 = 1500.
+    let hits = vec![
+        make_session_hit(11, 1, "a".repeat(4_000)),
+        make_session_hit(12, 2, "b".repeat(2_000)),
+    ];
+    let _ = app.update(CassMsg::SearchCompleted {
+        hits,
+        elapsed_ms: 7,
+        suggestions: vec![],
+        wildcard_fallback: false,
+    });
+
+    // Search surface should show inline mini-analytics badges for this session.
+    let search_text = render_app_text(&app, 320, 30);
+    assert!(
+        search_text.contains("● 1,500 tok"),
+        "expected inline token badge, got:\n{search_text}"
+    );
+    assert!(
+        search_text.contains("2 msgs"),
+        "expected inline message badge, got:\n{search_text}"
+    );
+
+    // Seed cached detail analytics with matching totals.
+    let messages = vec![
+        Message {
+            id: None,
+            idx: 0,
+            role: MessageRole::User,
+            author: Some("user".into()),
+            created_at: Some(1_700_000_000_000),
+            content: "Please inspect session metrics".into(),
+            extra_json: serde_json::json!({}),
+            snippets: Vec::new(),
+        },
+        Message {
+            id: None,
+            idx: 1,
+            role: MessageRole::Agent,
+            author: Some("assistant".into()),
+            created_at: Some(1_700_000_030_000),
+            content: "Metrics collected and summarized.".into(),
+            extra_json: serde_json::json!({}),
+            snippets: Vec::new(),
+        },
+    ];
+    let convo = Conversation {
+        id: Some(1),
+        agent_slug: "claude_code".into(),
+        workspace: Some(PathBuf::from("/workspace/cass")),
+        external_id: Some("conv-a".into()),
+        title: Some("Session A".into()),
+        source_path: PathBuf::from("/session/a.jsonl"),
+        started_at: Some(1_700_000_000_000),
+        ended_at: Some(1_700_000_030_000),
+        approx_tokens: Some(1_500),
+        metadata_json: serde_json::json!({}),
+        messages: Vec::new(),
+        source_id: "local".into(),
+        origin_host: None,
+    };
+    app.cached_detail = Some((
+        "/session/a.jsonl".into(),
+        ConversationView {
+            convo,
+            messages,
+            workspace: None,
+        },
+    ));
+    app.show_detail_modal = true;
+    app.detail_tab = DetailTab::Analytics;
+
+    let detail_text = render_app_text(&app, 320, 36);
+    assert!(
+        detail_text.contains("2 messages"),
+        "detail analytics should report same message count, got:\n{detail_text}"
+    );
+    assert!(
+        detail_text.contains("Tokens:   1.5K"),
+        "detail analytics should report same token count, got:\n{detail_text}"
+    );
+
+    log.assert_ok("inline_badge_tokens", "1.5K tok", "1.5K tok");
+    log.assert_ok("detail_modal_tokens", "1.5K tok", "1.5K tok");
 }
 
 // ===========================================================================
