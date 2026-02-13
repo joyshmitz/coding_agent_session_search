@@ -361,8 +361,10 @@ fn copy_payload_chunks(src_dir: &Path, dest_dir: &Path) -> Result<usize> {
     for entry in fs::read_dir(src_dir)? {
         let entry = entry?;
         let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        let file_type = metadata.file_type();
 
-        if path.is_file() && path.extension().map(|e| e == "bin").unwrap_or(false) {
+        if file_type.is_file() && path.extension().map(|e| e == "bin").unwrap_or(false) {
             let Some(filename) = path.file_name() else {
                 continue; // Skip entries without valid filenames
             };
@@ -418,8 +420,10 @@ fn copy_blobs_directory(src_dir: &Path, dest_dir: &Path) -> Result<usize> {
     for entry in fs::read_dir(src_dir)? {
         let entry = entry?;
         let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        let file_type = metadata.file_type();
 
-        if path.is_file() {
+        if file_type.is_file() {
             let Some(filename) = path.file_name() else {
                 continue; // Skip entries without valid filenames
             };
@@ -454,10 +458,16 @@ fn collect_file_hashes(
     for entry in fs::read_dir(current_dir)? {
         let entry = entry?;
         let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        let file_type = metadata.file_type();
 
-        if path.is_dir() {
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() {
             collect_file_hashes(base_dir, &path, files)?;
-        } else {
+        } else if file_type.is_file() {
             // Compute relative path
             let rel_path = path.strip_prefix(base_dir)?;
             let rel_str = rel_path.to_string_lossy().replace('\\', "/");
@@ -806,5 +816,79 @@ mod tests {
         for entry in files.values() {
             assert_eq!(entry.sha256.len(), 64);
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_file_hashes_skips_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let temp_path = temp.path();
+        let outside = TempDir::new().unwrap();
+
+        fs::write(temp_path.join("root.txt"), "root").unwrap();
+        fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        fs::create_dir_all(outside.path().join("nested")).unwrap();
+        fs::write(outside.path().join("nested/hidden.txt"), "hidden").unwrap();
+        symlink(
+            outside.path().join("secret.txt"),
+            temp_path.join("linked-file.txt"),
+        )
+        .unwrap();
+        symlink(outside.path().join("nested"), temp_path.join("linked-dir")).unwrap();
+
+        let mut files = BTreeMap::new();
+        collect_file_hashes(temp_path, temp_path, &mut files).unwrap();
+
+        assert!(files.contains_key("root.txt"));
+        assert!(!files.contains_key("linked-file.txt"));
+        assert!(!files.keys().any(|p| p.starts_with("linked-dir/")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_copy_payload_chunks_skips_symlinked_bin_files() {
+        use std::os::unix::fs::symlink;
+
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        fs::write(src.path().join("chunk-0.bin"), "chunk").unwrap();
+        fs::write(outside.path().join("secret.bin"), "secret").unwrap();
+        symlink(
+            outside.path().join("secret.bin"),
+            src.path().join("chunk-linked.bin"),
+        )
+        .unwrap();
+
+        let copied = copy_payload_chunks(src.path(), dst.path()).unwrap();
+        assert_eq!(copied, 1);
+        assert!(dst.path().join("chunk-0.bin").exists());
+        assert!(!dst.path().join("chunk-linked.bin").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_copy_blobs_directory_skips_symlinked_files() {
+        use std::os::unix::fs::symlink;
+
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        fs::write(src.path().join("blob.bin"), "blob").unwrap();
+        fs::write(outside.path().join("secret.bin"), "secret").unwrap();
+        symlink(
+            outside.path().join("secret.bin"),
+            src.path().join("linked-blob.bin"),
+        )
+        .unwrap();
+
+        let copied = copy_blobs_directory(src.path(), dst.path()).unwrap();
+        assert_eq!(copied, 1);
+        assert!(dst.path().join("blob.bin").exists());
+        assert!(!dst.path().join("linked-blob.bin").exists());
     }
 }
