@@ -490,7 +490,7 @@ impl<'a> SummaryGenerator<'a> {
         if exclusions.has_exclusions() {
             // Recalculate counts excluding excluded items
             let (conv_count, msg_count, char_count) =
-                self.recalculate_with_exclusions(&included_workspaces, exclusions)?;
+                self.recalculate_with_exclusions(filters, &included_workspaces, exclusions)?;
 
             summary.total_conversations = conv_count;
             summary.total_messages = msg_count;
@@ -797,6 +797,7 @@ impl<'a> SummaryGenerator<'a> {
     /// Recalculate counts with exclusions.
     fn recalculate_with_exclusions(
         &self,
+        filters: Option<&SummaryFilters>,
         included_workspaces: &HashSet<String>,
         exclusions: &ExclusionSet,
     ) -> Result<(usize, usize, usize)> {
@@ -805,23 +806,37 @@ impl<'a> SummaryGenerator<'a> {
         let mut msg_count = 0usize;
         let mut char_count = 0usize;
 
+        let (where_clause, params) = filters
+            .map(|active_filters| self.build_filter_clause(active_filters))
+            .unwrap_or_default();
+
         // Query conversations and filter
-        let mut stmt = self.db.prepare(
+        let query = format!(
             "SELECT c.id, c.workspace, c.title,
                     (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id),
                     (SELECT COALESCE(SUM(LENGTH(content)), 0) FROM messages WHERE conversation_id = c.id)
-             FROM conversations c",
-        )?;
+             FROM conversations c
+             WHERE 1=1{}",
+            where_clause
+        );
+        let mut stmt = self.db.prepare(&query)?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(
+                params
+                    .iter()
+                    .map(|param| param.as_ref() as &dyn rusqlite::ToSql),
+            ),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
 
         for row in rows {
             let (id, workspace, title, msgs, chars) = row?;
@@ -1387,5 +1402,33 @@ mod tests {
         assert_eq!(summary.total_conversations, 1);
         assert_eq!(summary.total_messages, 1);
         assert!(summary.workspaces.is_empty());
+    }
+
+    #[test]
+    fn test_exclusion_recount_respects_active_filters() {
+        let (_dir, conn) = create_test_db();
+        insert_test_data(&conn);
+
+        // Restrict to a single claude-code conversation in project-a.
+        let filters = SummaryFilters {
+            agents: Some(vec!["claude-code".to_string()]),
+            since_ts: Some(1_700_050_000_000),
+            ..Default::default()
+        };
+
+        let generator = SummaryGenerator::new(&conn);
+        let baseline = generator.generate(Some(&filters)).unwrap();
+        assert_eq!(baseline.total_conversations, 1);
+        assert_eq!(baseline.total_messages, 3);
+
+        // Trigger recount path without excluding any actual rows.
+        let mut exclusions = ExclusionSet::new();
+        exclusions.add_pattern("^DOES_NOT_MATCH$").unwrap();
+        let summary = generator
+            .generate_with_exclusions(Some(&filters), &exclusions)
+            .unwrap();
+
+        assert_eq!(summary.total_conversations, 1);
+        assert_eq!(summary.total_messages, 3);
     }
 }
