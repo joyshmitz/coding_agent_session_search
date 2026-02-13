@@ -151,7 +151,7 @@ impl Toast {
 }
 
 /// Manages a collection of toast notifications
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ToastManager {
     /// Active toasts (newest first for top-down rendering)
     toasts: VecDeque<Toast>,
@@ -161,6 +161,12 @@ pub struct ToastManager {
     position: ToastPosition,
     /// Whether to coalesce similar toasts
     coalesce: bool,
+}
+
+impl Default for ToastManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToastManager {

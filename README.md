@@ -64,6 +64,52 @@ cass robot-docs schemas
 - stderr = diagnostics
 - exit 0 = success
 
+## 📬 Agent Mail Fallback (When MCP Tools Are Not Exposed)
+
+If your runtime does not expose built-in `mcp-agent-mail` tools (for example, `list_mcp_resources` is empty), you can still coordinate via direct MCP HTTP calls.
+
+### 1) Start the local Agent Mail server
+
+```bash
+~/.local/pipx/venvs/mcp-agent-mail/bin/python -m mcp_agent_mail.cli serve-http --host 127.0.0.1 --port 8765
+```
+
+### 2) Use the Streamable HTTP MCP endpoint (`/mcp`)
+
+```bash
+curl -sS -X POST http://127.0.0.1:8765/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":"health","method":"tools/call","params":{"name":"health_check","arguments":{}}}'
+```
+
+### 3) Minimal coordination flow (project -> agent -> message -> inbox -> ack)
+
+```bash
+# Ensure project
+curl -sS -X POST http://127.0.0.1:8765/mcp -H 'Content-Type: application/json' -d \
+'{"jsonrpc":"2.0","id":"ensure","method":"tools/call","params":{"name":"ensure_project","arguments":{"human_key":"/data/projects/coding_agent_session_search"}}}'
+
+# Register agent
+curl -sS -X POST http://127.0.0.1:8765/mcp -H 'Content-Type: application/json' -d \
+'{"jsonrpc":"2.0","id":"register","method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/data/projects/coding_agent_session_search","program":"codex","model":"gpt-5"}}}'
+
+# Send message
+curl -sS -X POST http://127.0.0.1:8765/mcp -H 'Content-Type: application/json' -d \
+'{"jsonrpc":"2.0","id":"send","method":"tools/call","params":{"name":"send_message","arguments":{"project_key":"/data/projects/coding_agent_session_search","sender_name":"YourAgentName","to":["PeerAgent"],"subject":"[coord] hello","thread_id":"coord-2026-02-13","ack_required":true,"body_md":"Online and starting work."}}}'
+
+# Fetch inbox
+curl -sS -X POST http://127.0.0.1:8765/mcp -H 'Content-Type: application/json' -d \
+'{"jsonrpc":"2.0","id":"inbox","method":"tools/call","params":{"name":"fetch_inbox","arguments":{"project_key":"/data/projects/coding_agent_session_search","agent_name":"YourAgentName","limit":50,"include_bodies":true}}}'
+
+# Acknowledge message id 42
+curl -sS -X POST http://127.0.0.1:8765/mcp -H 'Content-Type: application/json' -d \
+'{"jsonrpc":"2.0","id":"ack","method":"tools/call","params":{"name":"call_extended_tool","arguments":{"tool_name":"acknowledge_message","arguments":{"project_key":"/data/projects/coding_agent_session_search","agent_name":"YourAgentName","message_id":42}}}}'
+```
+
+### Important caveat
+
+`mcp_agent_mail` defaults to `sqlite+aiosqlite:///./storage.sqlite3`. That means the server working directory determines which mailbox database you are using. To avoid "project not found" confusion, start the server from the same directory your team expects for mailbox state.
+
 ## 📸 Screenshots
 
 <div align="center">
