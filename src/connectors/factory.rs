@@ -141,6 +141,13 @@ fn looks_like_factory_storage(path: &Path) -> bool {
     path_str.contains("factory") && path_str.contains("sessions")
 }
 
+fn update_time_bounds(started_at: &mut Option<i64>, ended_at: &mut Option<i64>, ts: Option<i64>) {
+    if let Some(ts) = ts {
+        *started_at = Some(started_at.map_or(ts, |curr| curr.min(ts)));
+        *ended_at = Some(ended_at.map_or(ts, |curr| curr.max(ts)));
+    }
+}
+
 /// Parse a Factory session JSONL file into a NormalizedConversation.
 fn parse_factory_session(path: &Path) -> Result<Option<NormalizedConversation>> {
     let file =
@@ -197,11 +204,8 @@ fn parse_factory_session(path: &Path) -> Result<Option<NormalizedConversation>> 
                 // Parse timestamp
                 let created = val.get("timestamp").and_then(parse_timestamp);
 
-                // Track session time bounds
-                if started_at.is_none() {
-                    started_at = created;
-                }
-                ended_at = created.or(ended_at);
+                // Track session bounds robustly even if events are out of order.
+                update_time_bounds(&mut started_at, &mut ended_at, created);
 
                 // Extract role from message.role
                 let role = val
@@ -967,6 +971,35 @@ mod tests {
         assert!(convs[0].messages[0].created_at.is_some());
         assert!(convs[0].messages[1].created_at.is_some());
         assert!(convs[0].messages[2].created_at.is_some());
+    }
+
+    #[test]
+    fn edge_timestamp_bounds_handle_out_of_order_events() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_factory_storage(&dir);
+        let session_dir = storage.join("-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let content = concat!(
+            r#"{"type":"message","timestamp":"2025-12-01T11:00:00Z","message":{"role":"assistant","content":"Later event first"}}"#,
+            "\n",
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Earlier event second"}}"#,
+            "\n",
+        );
+        fs::write(session_dir.join("out-of-order.jsonl"), content).unwrap();
+
+        let connector = FactoryConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        let conv = &convs[0];
+        let expected_start = conv.messages.iter().filter_map(|m| m.created_at).min();
+        let expected_end = conv.messages.iter().filter_map(|m| m.created_at).max();
+
+        assert_eq!(conv.started_at, expected_start);
+        assert_eq!(conv.ended_at, expected_end);
+        assert!(conv.ended_at >= conv.started_at);
     }
 
     #[test]
