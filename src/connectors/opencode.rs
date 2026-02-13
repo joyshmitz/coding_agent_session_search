@@ -226,16 +226,20 @@ impl Connector for OpenCodeConnector {
             }
 
             // Build normalized conversation
+            let msg_started_at = messages.iter().filter_map(|m| m.created_at).min();
+            let msg_ended_at = messages.iter().filter_map(|m| m.created_at).max();
+
             let started_at = session
                 .time
                 .as_ref()
                 .and_then(|t| normalize_opencode_timestamp(t.created))
-                .or_else(|| messages.first().and_then(|m| m.created_at));
+                .or(msg_started_at);
             let ended_at = session
                 .time
                 .as_ref()
                 .and_then(|t| normalize_opencode_timestamp(t.updated))
-                .or_else(|| messages.last().and_then(|m| m.created_at));
+                .or(msg_ended_at)
+                .or(started_at);
 
             let workspace = session.directory.map(PathBuf::from);
             let title = session.title.or_else(|| {
@@ -1919,6 +1923,87 @@ mod tests {
         let third_pos = content.find("Third").unwrap();
         assert!(first_pos < second_pos);
         assert!(second_pos < third_pos);
+    }
+
+    #[test]
+    fn edge_session_ended_at_uses_latest_available_message_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        // Session with no explicit time metadata
+        let session = json!({"id": "sess-mixed-ts", "projectID": "proj-001"});
+        write_session(&storage, "proj-001", &session);
+
+        // Message with timestamp
+        let timed_message = json!({
+            "id": "msg-timed",
+            "role": "user",
+            "sessionID": "sess-mixed-ts",
+            "time": {"created": 1733000000}
+        });
+        write_message(&storage, "sess-mixed-ts", &timed_message);
+        write_part(
+            &storage,
+            "msg-timed",
+            &json!({"id": "p-timed", "messageID": "msg-timed", "type": "text", "text": "Timestamped"}),
+        );
+
+        // Later message without timestamp (sorts after timestamped messages)
+        let untimed_message = json!({
+            "id": "msg-untimed",
+            "role": "assistant",
+            "sessionID": "sess-mixed-ts"
+        });
+        write_message(&storage, "sess-mixed-ts", &untimed_message);
+        write_part(
+            &storage,
+            "msg-untimed",
+            &json!({"id": "p-untimed", "messageID": "msg-untimed", "type": "text", "text": "No timestamp"}),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].started_at, Some(1_733_000_000_000));
+        assert_eq!(convs[0].ended_at, Some(1_733_000_000_000));
+        assert_eq!(convs[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn edge_session_ended_at_falls_back_to_started_at_when_updated_missing() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_opencode_storage(&dir);
+
+        // Session has created time but no updated time
+        let session = json!({
+            "id": "sess-created-only",
+            "projectID": "proj-001",
+            "time": {"created": 1733000500}
+        });
+        write_session(&storage, "proj-001", &session);
+
+        // Message has no timestamp
+        let message = json!({
+            "id": "msg-no-time",
+            "role": "user",
+            "sessionID": "sess-created-only"
+        });
+        write_message(&storage, "sess-created-only", &message);
+        write_part(
+            &storage,
+            "msg-no-time",
+            &json!({"id": "p-no-time", "messageID": "msg-no-time", "type": "text", "text": "Only session created time"}),
+        );
+
+        let connector = OpenCodeConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].started_at, Some(1_733_000_500_000));
+        assert_eq!(convs[0].ended_at, Some(1_733_000_500_000));
     }
 
     #[test]
