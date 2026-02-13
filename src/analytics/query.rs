@@ -43,6 +43,19 @@ fn table_has_plan_token_rollups(conn: &Connection, table: &str) -> bool {
         && table_has_column(conn, table, "plan_api_tokens_total")
 }
 
+fn normalize_epoch_millis(ts: i64) -> i64 {
+    // Support legacy second-based values while preserving millisecond values.
+    if (0..100_000_000_000).contains(&ts) {
+        ts.saturating_mul(1000)
+    } else {
+        ts
+    }
+}
+
+fn is_recently_updated(last_updated: Option<i64>, now_ms: i64, threshold_ms: i64) -> bool {
+    last_updated.is_some_and(|ts| (now_ms - normalize_epoch_millis(ts)).abs() < threshold_ms)
+}
+
 /// Internal stats from a single COUNT/MIN/MAX query on a rollup table.
 #[derive(Debug, Default)]
 struct RollupStats {
@@ -199,18 +212,14 @@ pub fn query_status(conn: &Connection, _filter: &AnalyticsFilter) -> AnalyticsRe
     // 4. Drift detection.
     let mut drift_signals: Vec<DriftSignal> = Vec::new();
 
-    let now_epoch = std::time::SystemTime::now()
+    let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    let stale_threshold_secs: i64 = 86400;
+    let stale_threshold_ms: i64 = 86_400_000;
 
-    let track_a_fresh = uh
-        .last_updated
-        .is_some_and(|t| (now_epoch - t).abs() < stale_threshold_secs);
-    let track_b_fresh = tds
-        .last_updated
-        .is_some_and(|t| (now_epoch - t).abs() < stale_threshold_secs);
+    let track_a_fresh = is_recently_updated(uh.last_updated, now_ms, stale_threshold_ms);
+    let track_b_fresh = is_recently_updated(tds.last_updated, now_ms, stale_threshold_ms);
 
     if track_a_fresh && !track_b_fresh && has_token_daily_stats {
         drift_signals.push(DriftSignal {
@@ -1553,6 +1562,96 @@ mod tests {
         ).unwrap();
 
         conn
+    }
+
+    fn setup_status_freshness_db(
+        hourly_last_updated: i64,
+        track_b_last_updated: i64,
+    ) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_hourly (
+                hour_id INTEGER NOT NULL,
+                last_updated INTEGER NOT NULL
+            );
+            CREATE TABLE token_daily_stats (
+                day_id INTEGER NOT NULL,
+                last_updated INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO usage_hourly (hour_id, last_updated) VALUES (?1, ?2)",
+            rusqlite::params![123_i64, hourly_last_updated],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO token_daily_stats (day_id, last_updated) VALUES (?1, ?2)",
+            rusqlite::params![456_i64, track_b_last_updated],
+        )
+        .unwrap();
+
+        conn
+    }
+
+    #[test]
+    fn normalize_epoch_millis_preserves_negative_millisecond_values() {
+        assert_eq!(normalize_epoch_millis(-1_000), -1_000);
+        assert_eq!(normalize_epoch_millis(-86_400_000), -86_400_000);
+        assert_eq!(normalize_epoch_millis(1_700_000_000), 1_700_000_000_000);
+    }
+
+    #[test]
+    fn query_status_treats_millisecond_timestamps_as_fresh() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let conn = setup_status_freshness_db(now_ms - 1_000, now_ms - 2_000);
+
+        let result = query_status(&conn, &AnalyticsFilter::default()).unwrap();
+
+        assert!(result.drift.track_a_fresh);
+        assert!(result.drift.track_b_fresh);
+        assert_eq!(result.recommended_action, "none");
+    }
+
+    #[test]
+    fn query_status_supports_legacy_second_timestamps() {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let conn = setup_status_freshness_db(now_secs - 5, now_secs - 10);
+
+        let result = query_status(&conn, &AnalyticsFilter::default()).unwrap();
+
+        assert!(result.drift.track_a_fresh);
+        assert!(result.drift.track_b_fresh);
+    }
+
+    #[test]
+    fn query_status_detects_millisecond_freshness_mismatch() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let stale_ms = now_ms - (3 * 86_400_000);
+        let conn = setup_status_freshness_db(now_ms - 1_000, stale_ms);
+
+        let result = query_status(&conn, &AnalyticsFilter::default()).unwrap();
+
+        assert!(result.drift.track_a_fresh);
+        assert!(!result.drift.track_b_fresh);
+        assert_eq!(result.recommended_action, "rebuild_track_b");
+        assert!(
+            result
+                .drift
+                .signals
+                .iter()
+                .any(|signal| signal.signal == "track_freshness_mismatch")
+        );
     }
 
     #[test]
