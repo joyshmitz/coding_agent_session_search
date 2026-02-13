@@ -614,6 +614,28 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
         }
 
         let file_path = site_dir.join(rel_path);
+        let metadata = match fs::symlink_metadata(&file_path) {
+            Ok(meta) => meta,
+            Err(_) => {
+                errors.push(format!("File in manifest but missing: {}", rel_path));
+                continue;
+            }
+        };
+
+        if metadata.file_type().is_symlink() {
+            errors.push(format!(
+                "integrity.json references symlink (security violation): {}",
+                rel_path
+            ));
+            continue;
+        }
+        if !metadata.file_type().is_file() {
+            errors.push(format!(
+                "integrity.json references non-file entry (security violation): {}",
+                rel_path
+            ));
+            continue;
+        }
 
         // Extra safety: verify resolved path is still under site_dir
         if let (Ok(canonical_site), Ok(canonical_file)) =
@@ -624,11 +646,6 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
                 "integrity.json path escapes site directory (security violation): {}",
                 rel_path
             ));
-            continue;
-        }
-
-        if !file_path.exists() {
-            errors.push(format!("File in manifest but missing: {}", rel_path));
             continue;
         }
 
@@ -652,7 +669,10 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
     }
 
     // Check for extra files not in manifest
-    let actual_files = collect_all_files(site_dir);
+    let actual_files = match collect_all_files(site_dir) {
+        Ok(files) => files,
+        Err(e) => return CheckResult::fail(format!("Failed to enumerate files: {}", e)),
+    };
     for file in actual_files {
         // Skip integrity.json itself
         if file == "integrity.json" {
@@ -906,23 +926,33 @@ fn compute_file_hash(path: &Path) -> Result<String> {
 }
 
 /// Collect all files in a directory recursively
-fn collect_all_files(dir: &Path) -> Vec<String> {
+fn collect_all_files(dir: &Path) -> Result<Vec<String>> {
     let mut files = Vec::new();
-    collect_files_recursive(dir, dir, &mut files);
-    files
+    collect_files_recursive(dir, dir, &mut files)?;
+    Ok(files)
 }
 
-fn collect_files_recursive(base: &Path, current: &Path, files: &mut Vec<String>) {
-    if let Ok(entries) = fs::read_dir(current) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_files_recursive(base, &path, files);
-            } else if let Ok(rel) = path.strip_prefix(base) {
+fn collect_files_recursive(base: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        let file_type = metadata.file_type();
+
+        if file_type.is_symlink() {
+            if let Ok(rel) = path.strip_prefix(base) {
                 files.push(rel.to_string_lossy().replace('\\', "/"));
             }
+            continue;
+        }
+
+        if file_type.is_dir() {
+            collect_files_recursive(base, &path, files)?;
+        } else if file_type.is_file() && let Ok(rel) = path.strip_prefix(base) {
+            files.push(rel.to_string_lossy().replace('\\', "/"));
         }
     }
+    Ok(())
 }
 
 /// Calculate total size of a directory
@@ -930,12 +960,19 @@ fn calculate_dir_size(dir: &Path) -> Result<u64> {
     let mut total = 0u64;
 
     fn calc_recursive(path: &Path, total: &mut u64) -> Result<()> {
-        if path.is_dir() {
+        let metadata = fs::symlink_metadata(path)?;
+        let file_type = metadata.file_type();
+
+        if file_type.is_symlink() {
+            return Ok(());
+        }
+
+        if file_type.is_dir() {
             for entry in fs::read_dir(path)? {
                 calc_recursive(&entry?.path(), total)?;
             }
-        } else {
-            *total += path.metadata()?.len();
+        } else if file_type.is_file() {
+            *total += metadata.len();
         }
         Ok(())
     }
@@ -1074,6 +1111,87 @@ mod tests {
                 .map(|d| d.contains("security violation"))
                 .unwrap_or(false),
             "Should mention security violation"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_collect_all_files_lists_symlink_without_recursing() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        fs::write(temp.path().join("root.txt"), "root").unwrap();
+        fs::create_dir_all(outside.path().join("nested")).unwrap();
+        fs::write(outside.path().join("nested/hidden.txt"), "hidden").unwrap();
+        symlink(outside.path().join("nested"), temp.path().join("linked-dir")).unwrap();
+
+        let files = collect_all_files(temp.path()).unwrap();
+        assert!(files.contains(&"root.txt".to_string()));
+        assert!(files.contains(&"linked-dir".to_string()));
+        assert!(!files.iter().any(|f| f.starts_with("linked-dir/")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_calculate_dir_size_skips_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        fs::write(temp.path().join("small.txt"), vec![0u8; 8]).unwrap();
+        fs::write(outside.path().join("large.bin"), vec![0u8; 8192]).unwrap();
+        symlink(outside.path().join("large.bin"), temp.path().join("linked.bin")).unwrap();
+
+        let size = calculate_dir_size(temp.path()).unwrap();
+        assert_eq!(size, 8);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_integrity_rejects_symlink_manifest_entry() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        fs::create_dir_all(site_dir.join("payload")).unwrap();
+        fs::write(site_dir.join("payload/real.bin"), b"payload").unwrap();
+        symlink(
+            site_dir.join("payload/real.bin"),
+            site_dir.join("payload/alias.bin"),
+        )
+        .unwrap();
+
+        let alias_hash = compute_file_hash(&site_dir.join("payload/real.bin")).unwrap();
+        let mut files = BTreeMap::new();
+        files.insert(
+            "payload/alias.bin".to_string(),
+            IntegrityEntry {
+                sha256: alias_hash,
+                size: 7,
+            },
+        );
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
+        fs::write(
+            site_dir.join("integrity.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let result = check_integrity(site_dir, false);
+        assert!(!result.passed);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|d| d.contains("symlink"))
+                .unwrap_or(false)
         );
     }
 
