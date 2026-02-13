@@ -4,11 +4,13 @@
 │All agents › All workspaces › Any time › Balanced › all sources                                                                                               │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭Results (1)───────────────────────────────────────────────────────────────────────────────────────────────────│╭Detail [Messages] ↩───────────────────────────╮
-│▶   1. ▼ @aider Large-snippet rendering edge case                                                             ││  ● Messages  │  Snippets  │  Raw  │  Json    │
-│      M█▇ 6.4 [ci-linux] mt suffix │ ws /workspace/cass                                                       ││Large-snippet rendering edge case             │
-│      /workspace/cass/tests/regression/long_snippet.md:9                                                      ││agent=aider │ ws=/workspace/cass │ source=ci-l│
-│    │ The following snippet intentionally exceeds normal row budgets to exercise truncation, striping,        ││────────────────────────────────────────────  │
-│    │ selection, and horizontal clipping behavior under compact and spacious densities.                       ││  This is a deliberately long snippet line tha│
+│▶   1. ▼ @aider Large-snippet rendering edge case                                                             ││  ● Messages  │  Snippets  │  Raw  │  Json  │ │
+│      M█▇ 6.4 [ci-linux] mt suffix │ ws /workspace/cass                                                       ││✓ aider │ /workspace/cass │ ci-linux @ci-linux│
+│      /workspace/cass/tests/regression/long_snippet.md:9                                                      ││────────────────────────────────────────────  │
+│    │ The following snippet intentionally exceeds normal row budgets to exercise truncation, striping,        ││Large-snippet rendering edge case             │
+│    │ selection, and horizontal clipping behavior under compact and spacious densities.                       ││agent=aider │ ws=/workspace/cass │ source=ci-l│
+│                                                                                                              ││────────────────────────────────────────────  │
+│                                                                                                              ││  This is a deliberately long snippet line tha│
 │                                                                                                              ││                                              │
 │                                                                                                              ││                                              │
 │                                                                                                              ││                                              │
@@ -16,9 +18,7 @@
 │                                                                                                              ││                                              │
 │                                                                                                              ││                                              │
 │                                                                                                              ││                                              │
-│                                                                                                              ││                                              │
-│                                                                                                              ││                                              │
-│                                                                                                              ││                                              │
+│1 hits                                                                                                        ││                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────│╰──────────────────────────────────────────────╯
  hits:1 | view:wide/cozy | query:HYB / PFX | perf:lat:— cache:cold | runtime:stable | scope:rank:balanced ctx:M src:all                                         
   | Enter=open Ctrl+M/Ctrl+X=select Tab=focus F1=help                                                                                                           
