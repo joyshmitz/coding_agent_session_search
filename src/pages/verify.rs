@@ -452,7 +452,7 @@ fn check_payload_manifest(site_dir: &Path) -> CheckResult {
                 }
             }
 
-            // Check for contiguous chunk files (no gaps)
+            // Inventory chunk files to detect unexpected indices without scanning up to max(index).
             let mut found_chunks: HashSet<u32> = HashSet::new();
             if let Ok(entries) = fs::read_dir(&payload_dir) {
                 for entry in entries.flatten() {
@@ -470,16 +470,10 @@ fn check_payload_manifest(site_dir: &Path) -> CheckResult {
                 }
             }
 
-            // Check for gaps
-            if !found_chunks.is_empty() {
-                let max_chunk = *found_chunks.iter().max().unwrap_or(&0);
-                for i in 0..=max_chunk {
-                    if !found_chunks.contains(&i) {
-                        errors.push(format!(
-                            "Gap in chunk sequence: chunk-{:05}.bin is missing",
-                            i
-                        ));
-                    }
+            let expected_chunk_count = enc.payload.files.len() as u32;
+            for idx in found_chunks {
+                if idx >= expected_chunk_count {
+                    errors.push(format!("Unexpected chunk file index: chunk-{:05}.bin", idx));
                 }
             }
         }
@@ -524,15 +518,30 @@ fn check_size_limits(site_dir: &Path) -> CheckResult {
             } else if let Ok(entries) = fs::read_dir(&payload_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().map(|e| e == "bin").unwrap_or(false)
-                        && let Ok(meta) = path.metadata()
-                        && meta.len() > MAX_CHUNK_SIZE
-                    {
-                        errors.push(format!(
-                            "{} exceeds 100MB limit ({} bytes)",
-                            path.file_name().unwrap_or_default().to_string_lossy(),
-                            meta.len()
-                        ));
+                    if path.extension().map(|e| e == "bin").unwrap_or(false) {
+                        match fs::symlink_metadata(&path) {
+                            Ok(meta) => {
+                                if meta.file_type().is_symlink() {
+                                    errors.push(format!(
+                                        "{} must not be a symlink",
+                                        path.file_name().unwrap_or_default().to_string_lossy()
+                                    ));
+                                    continue;
+                                }
+                                if meta.file_type().is_file() && meta.len() > MAX_CHUNK_SIZE {
+                                    errors.push(format!(
+                                        "{} exceeds 100MB limit ({} bytes)",
+                                        path.file_name().unwrap_or_default().to_string_lossy(),
+                                        meta.len()
+                                    ));
+                                }
+                            }
+                            Err(err) => errors.push(format!(
+                                "failed to stat {}: {}",
+                                path.file_name().unwrap_or_default().to_string_lossy(),
+                                err
+                            )),
+                        }
                     }
                 }
             }
@@ -546,14 +555,25 @@ fn check_size_limits(site_dir: &Path) -> CheckResult {
                         "payload file not found for size check: {}",
                         unenc.payload.path
                     ));
-                } else if let Ok(meta) = payload_path.metadata()
-                    && meta.len() > MAX_CHUNK_SIZE
-                {
-                    errors.push(format!(
-                        "{} exceeds 100MB limit ({} bytes)",
-                        unenc.payload.path,
-                        meta.len()
-                    ));
+                } else {
+                    match fs::symlink_metadata(&payload_path) {
+                        Ok(meta) => {
+                            if meta.file_type().is_symlink() {
+                                errors
+                                    .push(format!("{} must not be a symlink", unenc.payload.path));
+                            } else if meta.file_type().is_file() && meta.len() > MAX_CHUNK_SIZE {
+                                errors.push(format!(
+                                    "{} exceeds 100MB limit ({} bytes)",
+                                    unenc.payload.path,
+                                    meta.len()
+                                ));
+                            }
+                        }
+                        Err(err) => errors.push(format!(
+                            "failed to stat payload file {}: {}",
+                            unenc.payload.path, err
+                        )),
+                    }
                 }
             }
         }
@@ -948,7 +968,9 @@ fn collect_files_recursive(base: &Path, current: &Path, files: &mut Vec<String>)
 
         if file_type.is_dir() {
             collect_files_recursive(base, &path, files)?;
-        } else if file_type.is_file() && let Ok(rel) = path.strip_prefix(base) {
+        } else if file_type.is_file()
+            && let Ok(rel) = path.strip_prefix(base)
+        {
             files.push(rel.to_string_lossy().replace('\\', "/"));
         }
     }
@@ -1125,7 +1147,11 @@ mod tests {
         fs::write(temp.path().join("root.txt"), "root").unwrap();
         fs::create_dir_all(outside.path().join("nested")).unwrap();
         fs::write(outside.path().join("nested/hidden.txt"), "hidden").unwrap();
-        symlink(outside.path().join("nested"), temp.path().join("linked-dir")).unwrap();
+        symlink(
+            outside.path().join("nested"),
+            temp.path().join("linked-dir"),
+        )
+        .unwrap();
 
         let files = collect_all_files(temp.path()).unwrap();
         assert!(files.contains(&"root.txt".to_string()));
@@ -1143,7 +1169,11 @@ mod tests {
 
         fs::write(temp.path().join("small.txt"), vec![0u8; 8]).unwrap();
         fs::write(outside.path().join("large.bin"), vec![0u8; 8192]).unwrap();
-        symlink(outside.path().join("large.bin"), temp.path().join("linked.bin")).unwrap();
+        symlink(
+            outside.path().join("large.bin"),
+            temp.path().join("linked.bin"),
+        )
+        .unwrap();
 
         let size = calculate_dir_size(temp.path()).unwrap();
         assert_eq!(size, 8);
@@ -1443,6 +1473,101 @@ mod tests {
 
         let result = check_size_limits(site_dir);
         assert!(result.passed);
+    }
+
+    #[test]
+    fn test_payload_manifest_rejects_unexpected_high_chunk_index() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let payload_dir = site_dir.join("payload");
+        fs::create_dir_all(&payload_dir).unwrap();
+
+        let config = r#"{
+          "version": 2,
+          "export_id": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "base_nonce": "AAAAAAAAAAAAAAAA",
+          "compression": "deflate",
+          "kdf_defaults": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 },
+          "payload": {
+            "chunk_size": 1024,
+            "chunk_count": 1,
+            "total_compressed_size": 14,
+            "total_plaintext_size": 100,
+            "files": ["payload/chunk-00000.bin"]
+          },
+          "key_slots": [{
+            "id": 0,
+            "slot_type": "password",
+            "kdf": "argon2id",
+            "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "wrapped_dek": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "nonce": "AAAAAAAAAAAAAAAA",
+            "argon2_params": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 }
+          }]
+        }"#;
+        fs::write(site_dir.join("config.json"), config).unwrap();
+
+        fs::write(payload_dir.join("chunk-00000.bin"), "small").unwrap();
+        fs::write(payload_dir.join("chunk-99999.bin"), "unexpected").unwrap();
+
+        let result = check_payload_manifest(site_dir);
+        assert!(!result.passed);
+        let details = result.details.unwrap_or_default();
+        assert!(details.contains("Unexpected chunk file index: chunk-99999.bin"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_size_limits_rejects_symlinked_chunk() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let payload_dir = site_dir.join("payload");
+        fs::create_dir_all(&payload_dir).unwrap();
+
+        let config = r#"{
+          "version": 2,
+          "export_id": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "base_nonce": "AAAAAAAAAAAAAAAA",
+          "compression": "deflate",
+          "kdf_defaults": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 },
+          "payload": {
+            "chunk_size": 1024,
+            "chunk_count": 1,
+            "total_compressed_size": 14,
+            "total_plaintext_size": 100,
+            "files": ["payload/chunk-00000.bin"]
+          },
+          "key_slots": [{
+            "id": 0,
+            "slot_type": "password",
+            "kdf": "argon2id",
+            "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "wrapped_dek": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "nonce": "AAAAAAAAAAAAAAAA",
+            "argon2_params": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 }
+          }]
+        }"#;
+        fs::write(site_dir.join("config.json"), config).unwrap();
+
+        fs::write(outside.path().join("chunk-00000.bin"), "external").unwrap();
+        symlink(
+            outside.path().join("chunk-00000.bin"),
+            payload_dir.join("chunk-00000.bin"),
+        )
+        .unwrap();
+
+        let result = check_size_limits(site_dir);
+        assert!(!result.passed);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|d| d.contains("must not be a symlink"))
+                .unwrap_or(false)
+        );
     }
 
     #[test]
