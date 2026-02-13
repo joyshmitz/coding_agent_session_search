@@ -18,7 +18,7 @@
 │                                                                             │
 │                                                                             │
 │                                                                             │
-│                                                                             │
+│1 hits                                                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
  hits:1 | view:narrow/compact | query:HYB / PFX | perf:lat:— cache:cold        
                                                                                

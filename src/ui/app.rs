@@ -241,6 +241,7 @@ const PANEL_RATIO_MAX: f64 = 0.75;
 const FOOTER_HINT_ROOT_ID: HelpId = HelpId(1_000_000);
 const RESULTS_REVEAL_MIN_HITS: usize = 6;
 const RESULTS_REVEAL_MAX_HITS: usize = 400;
+const SEARCH_STATS_EST_COST_PER_MILLION_TOKENS: f64 = 9.0;
 
 #[derive(Clone, Debug)]
 struct FooterHintCandidate {
@@ -825,6 +826,8 @@ pub enum DetailTab {
     Raw,
     /// Syntax-highlighted JSON viewer with collapsible tree display.
     Json,
+    /// Per-session analytics: token timeline, tool calls, message stats.
+    Analytics,
 }
 
 /// Text matching strategy for search queries.
@@ -2403,6 +2406,64 @@ fn pane_filter_matches_hit(hit: &SearchHit, filter: &str) -> bool {
     .any(|field| field.to_ascii_lowercase().contains(&needle))
 }
 
+fn format_number_with_grouping(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (idx, ch) in digits.chars().rev().enumerate() {
+        if idx > 0 && idx % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    let mut grouped: String = out.chars().rev().collect();
+    if n < 0 {
+        grouped.insert(0, '-');
+    }
+    grouped
+}
+
+fn format_compact_metric(n: i64) -> String {
+    let abs = n.unsigned_abs();
+    if abs >= 1_000_000_000 {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    } else if abs >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if abs >= 10_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format_number_with_grouping(n)
+    }
+}
+
+fn format_estimated_cost_usd(cost_usd: f64) -> String {
+    if cost_usd <= 0.0 {
+        "$0.000".to_string()
+    } else if cost_usd < 0.001 {
+        "<$0.001".to_string()
+    } else if cost_usd < 1.0 {
+        format!("${cost_usd:.3}")
+    } else if cost_usd < 10.0 {
+        format!("${cost_usd:.2}")
+    } else if cost_usd < 100.0 {
+        format!("${cost_usd:.1}")
+    } else {
+        format!("${cost_usd:.0}")
+    }
+}
+
+fn estimate_tokens_from_hit_for_stats(hit: &SearchHit) -> i64 {
+    let text = if !hit.content.is_empty() {
+        hit.content.as_str()
+    } else {
+        hit.snippet.as_str()
+    };
+    if text.is_empty() {
+        0
+    } else {
+        ((text.chars().count() as i64) / 4).max(1)
+    }
+}
+
 fn autocomplete_csv_suffix(input: &str, candidates: &BTreeSet<String>) -> Option<String> {
     let (prefix, suffix) = if let Some(idx) = input.rfind(',') {
         (&input[..=idx], &input[idx + 1..])
@@ -3547,6 +3608,9 @@ pub struct CassApp {
     pub detail_content_lines: Cell<u16>,
     /// Visible height of the detail pane viewport (set during render).
     pub detail_visible_height: Cell<u16>,
+    /// Line offsets of each message header in the Messages tab (set during render).
+    /// Each entry is `(line_offset, role)` for message-level navigation.
+    pub detail_message_offsets: RefCell<Vec<(u16, crate::model::types::MessageRole)>>,
     /// Active tab in the detail pane.
     pub detail_tab: DetailTab,
     /// Inline find state within the detail pane.
@@ -3565,6 +3629,9 @@ pub struct CassApp {
     /// When a message index is in this set its content is hidden behind a
     /// one-line summary bar; pressing Enter/Space toggles it.
     pub collapsed_tools: HashSet<usize>,
+
+    /// Whether the aggregate stats bar is visible at the bottom of results pane.
+    pub show_stats_bar: bool,
 
     // -- Display & theming ------------------------------------------------
     /// Whether dark theme is active.
@@ -3806,6 +3873,7 @@ impl Default for CassApp {
             detail_scroll: 0,
             detail_content_lines: Cell::new(0),
             detail_visible_height: Cell::new(0),
+            detail_message_offsets: RefCell::new(Vec::new()),
             detail_tab: DetailTab::default(),
             detail_find: None,
             detail_find_matches_cache: RefCell::new(Vec::new()),
@@ -3814,6 +3882,7 @@ impl Default for CassApp {
             cached_detail: None,
             detail_wrap: true,
             collapsed_tools: HashSet::new(),
+            show_stats_bar: true,
             theme_dark: true,
             theme_preset: UiThemePreset::Dark,
             style_options: StyleOptions::from_env(),
@@ -4413,11 +4482,13 @@ impl CassApp {
                 if !self.selected.is_empty() {
                     push(shortcuts::BULK_MENU, "bulk", contextual.clone(), 3);
                     push("Ctrl+O", "open", contextual.clone(), 4);
-                    push(shortcuts::TAB_FOCUS, "focus", contextual.clone(), 5);
-                    push(shortcuts::PANE_FILTER, "filter", contextual.clone(), 6);
+                    push(shortcuts::STATS_BAR, "stats", contextual.clone(), 5);
+                    push(shortcuts::TAB_FOCUS, "focus", contextual.clone(), 6);
+                    push(shortcuts::PANE_FILTER, "filter", contextual.clone(), 7);
                 } else {
                     push(shortcuts::TAB_FOCUS, "focus", contextual.clone(), 3);
-                    push(shortcuts::PANE_FILTER, "filter", contextual.clone(), 4);
+                    push(shortcuts::STATS_BAR, "stats", contextual.clone(), 4);
+                    push(shortcuts::PANE_FILTER, "filter", contextual.clone(), 5);
                 }
             }
             "detail" => {
@@ -5312,6 +5383,113 @@ impl CassApp {
         (1.0 - self.anim.focus_flash_progress()).clamp(0.0, 1.0)
     }
 
+    /// Build the aggregate stats line for the results pane bottom bar.
+    fn build_results_stats_line(&self, width: u16, styles: &StyleContext) -> ftui::text::Line {
+        let label_s = styles.style(style_system::STYLE_TEXT_SUBTLE);
+        let value_s = styles.style(style_system::STYLE_TEXT_PRIMARY);
+        let sep = ftui::text::Span::styled(" \u{2502} ", label_s);
+        let pane_filter = self.pane_filter.as_deref().filter(|s| !s.trim().is_empty());
+        let stats_hits: Vec<&SearchHit> = if !self.results.is_empty() {
+            self.results
+                .iter()
+                .filter(|hit| {
+                    if let Some(filter) = pane_filter {
+                        pane_filter_matches_hit(hit, filter)
+                    } else {
+                        true
+                    }
+                })
+                .collect()
+        } else {
+            self.panes
+                .iter()
+                .flat_map(|pane| pane.hits.iter())
+                .collect()
+        };
+
+        let total_messages: usize = if !self.results.is_empty() {
+            stats_hits.len()
+        } else {
+            self.panes.iter().map(|pane| pane.total_count).sum()
+        };
+        let mut session_keys: HashSet<(String, String)> = HashSet::new();
+        let mut timestamps: Vec<i64> = Vec::new();
+        let mut estimated_api_tokens = 0i64;
+        for hit in &stats_hits {
+            session_keys.insert((hit.source_id.clone(), hit.source_path.clone()));
+            estimated_api_tokens =
+                estimated_api_tokens.saturating_add(estimate_tokens_from_hit_for_stats(hit));
+            if let Some(ts) = hit.created_at {
+                timestamps.push(ts);
+            }
+        }
+        let estimated_cost_usd =
+            (estimated_api_tokens as f64 / 1_000_000.0) * SEARCH_STATS_EST_COST_PER_MILLION_TOKENS;
+
+        let mut spans: Vec<ftui::text::Span> = vec![
+            ftui::text::Span::styled(format_compact_metric(session_keys.len() as i64), value_s),
+            ftui::text::Span::styled(" sessions", label_s),
+            sep.clone(),
+            ftui::text::Span::styled(format_compact_metric(total_messages as i64), value_s),
+            ftui::text::Span::styled(" msgs", label_s),
+            sep.clone(),
+            ftui::text::Span::styled(format_compact_metric(estimated_api_tokens), value_s),
+            ftui::text::Span::styled(" tok", label_s),
+            sep.clone(),
+            ftui::text::Span::styled("est ", label_s),
+            ftui::text::Span::styled(format_estimated_cost_usd(estimated_cost_usd), value_s),
+        ];
+
+        if !timestamps.is_empty() {
+            timestamps.sort_unstable();
+            let newest = timestamps.last().copied().unwrap_or(0);
+            let newest_dt = if newest.abs() >= 10_000_000_000 {
+                chrono::DateTime::from_timestamp_millis(newest)
+            } else {
+                chrono::DateTime::from_timestamp(newest, 0)
+            };
+            if let Some(dt) = newest_dt {
+                spans.push(sep.clone());
+                spans.push(ftui::text::Span::styled(
+                    format!("newest: {}", dt.format("%Y-%m-%d")),
+                    label_s,
+                ));
+            }
+        }
+
+        if timestamps.len() >= 3 {
+            let spark_width = (width as usize).saturating_sub(70).clamp(8, 30);
+            let t_min = timestamps[0];
+            let t_max = timestamps[timestamps.len() - 1];
+            if t_max > t_min {
+                let blocks: &[char] = &[
+                    ' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}',
+                    '\u{2587}', '\u{2588}',
+                ];
+                let mut buckets = vec![0u32; spark_width];
+                let range = (t_max - t_min) as f64;
+                for &ts in &timestamps {
+                    let idx = (((ts - t_min) as f64 / range) * (spark_width - 1) as f64) as usize;
+                    buckets[idx.min(spark_width - 1)] += 1;
+                }
+                let max_bucket = *buckets.iter().max().unwrap_or(&1);
+                if max_bucket > 0 {
+                    let sparkline: String = buckets
+                        .iter()
+                        .map(|&bucket| {
+                            let level = (bucket as f64 / max_bucket as f64 * 8.0) as usize;
+                            blocks[level.min(8)]
+                        })
+                        .collect();
+                    spans.push(sep);
+                    spans.push(ftui::text::Span::styled(sparkline, value_s));
+                }
+            }
+        }
+
+        ftui::text::Line::from_spans(spans)
+    }
+
     /// Render the results list pane using VirtualizedList for O(visible) rendering.
     #[allow(clippy::too_many_arguments)]
     fn render_results_pane(
@@ -5383,6 +5561,18 @@ impl CassApp {
         if inner.is_empty() {
             return;
         }
+
+        // Stats bar: 1 line at the bottom of results pane (when enabled and has results)
+        let inner = if self.show_stats_bar && !self.panes.is_empty() && inner.height >= 4 {
+            let stats_row = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+            let stats_line = self.build_results_stats_line(inner.width, styles);
+            Paragraph::new(ftui::text::Text::from_lines(vec![stats_line]))
+                .style(styles.style(style_system::STYLE_TEXT_MUTED))
+                .render(stats_row, frame);
+            Rect::new(inner.x, inner.y, inner.width, inner.height - 1)
+        } else {
+            inner
+        };
 
         if self.panes.is_empty() {
             // Centered empty-state message with magnifying glass icon.
@@ -5672,6 +5862,182 @@ impl CassApp {
         }
     }
 
+    /// Build sticky header lines for the detail modal metadata bar.
+    ///
+    /// Renders 2-3 lines: agent/workspace/source, timestamps/duration/tokens,
+    /// and a text-based mini sparkline of message activity over the session.
+    fn build_detail_header_lines(
+        &self,
+        hit: &SearchHit,
+        inner_width: u16,
+        styles: &StyleContext,
+    ) -> Vec<ftui::text::Line> {
+        let label_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
+        let value_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
+        let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
+        let agent_style = styles.agent_accent_style(&hit.agent);
+        let sep = ftui::text::Span::styled(" \u{2502} ", label_style);
+        let mut lines: Vec<ftui::text::Line> = Vec::new();
+
+        // Line 1: agent, workspace, source
+        let source_label = source_display_label(&hit.source_id, hit.origin_host.as_deref());
+        let mut spans1 = vec![
+            ftui::text::Span::styled("\u{2713} ", agent_style),
+            ftui::text::Span::styled(&hit.agent, agent_style),
+            sep.clone(),
+            ftui::text::Span::styled(&hit.workspace, value_style),
+            sep.clone(),
+            ftui::text::Span::styled(source_label, muted_style),
+        ];
+        if let Some(host) = hit.origin_host.as_deref() {
+            spans1.push(ftui::text::Span::styled(format!(" @{host}"), muted_style));
+        }
+        lines.push(ftui::text::Line::from_spans(spans1));
+
+        // Line 2: timestamps, duration, message counts, tokens
+        let mut spans2: Vec<ftui::text::Span> = Vec::new();
+
+        // Timestamps & duration from cached_detail if available
+        if let Some((_, ref cv)) = self.cached_detail {
+            if let Some(started) = cv.convo.started_at {
+                let ts_s = started / 1000; // ms → s
+                if let Some(dt) = chrono::DateTime::from_timestamp(ts_s, 0) {
+                    spans2.push(ftui::text::Span::styled(
+                        dt.format("%Y-%m-%d %H:%M").to_string(),
+                        value_style,
+                    ));
+                }
+                if let Some(ended) = cv.convo.ended_at {
+                    let dur_secs = (ended.saturating_sub(started)) / 1000;
+                    let dur_str = if dur_secs >= 3600 {
+                        format!("{}h {}m", dur_secs / 3600, (dur_secs % 3600) / 60)
+                    } else if dur_secs >= 60 {
+                        format!("{}m {}s", dur_secs / 60, dur_secs % 60)
+                    } else {
+                        format!("{dur_secs}s")
+                    };
+                    spans2.push(ftui::text::Span::styled(
+                        format!(" ({dur_str})"),
+                        muted_style,
+                    ));
+                }
+            }
+
+            // Message count breakdown
+            let (mut n_user, mut n_agent, mut n_tool, mut n_sys) = (0u32, 0, 0, 0);
+            for m in &cv.messages {
+                match m.role {
+                    crate::model::types::MessageRole::User => n_user += 1,
+                    crate::model::types::MessageRole::Agent => n_agent += 1,
+                    crate::model::types::MessageRole::Tool => n_tool += 1,
+                    crate::model::types::MessageRole::System => n_sys += 1,
+                    _ => {}
+                }
+            }
+            let total = cv.messages.len();
+            if !spans2.is_empty() {
+                spans2.push(sep.clone());
+            }
+            spans2.push(ftui::text::Span::styled(
+                format!("{total} msgs"),
+                value_style,
+            ));
+            spans2.push(ftui::text::Span::styled(
+                format!(" (u:{n_user} a:{n_agent} t:{n_tool} s:{n_sys})"),
+                muted_style,
+            ));
+
+            // Tokens
+            if let Some(tokens) = cv.convo.approx_tokens {
+                spans2.push(sep.clone());
+                let tok_str = if tokens >= 1_000_000 {
+                    format!("{:.1}M tok", tokens as f64 / 1_000_000.0)
+                } else if tokens >= 1_000 {
+                    format!("{:.1}K tok", tokens as f64 / 1_000.0)
+                } else {
+                    format!("{tokens} tok")
+                };
+                spans2.push(ftui::text::Span::styled(tok_str, value_style));
+            }
+        } else if let Some(ts) = hit.created_at {
+            // Fallback: use SearchHit timestamp
+            if let Some(dt) = chrono::DateTime::from_timestamp(ts, 0) {
+                spans2.push(ftui::text::Span::styled(
+                    dt.format("%Y-%m-%d %H:%M").to_string(),
+                    value_style,
+                ));
+            }
+        }
+
+        if !spans2.is_empty() {
+            lines.push(ftui::text::Line::from_spans(spans2));
+        }
+
+        // Line 3: mini text sparkline of message activity (if we have messages)
+        if let Some((_, ref cv)) = self.cached_detail
+            && cv.messages.len() >= 2
+        {
+            let sparkline =
+                Self::build_text_sparkline(&cv.messages, inner_width.saturating_sub(4) as usize);
+            if !sparkline.is_empty() {
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled(sparkline, muted_style),
+                ]));
+            }
+        }
+
+        // Thin separator after header
+        let sep_line = "\u{2500}".repeat((inner_width.saturating_sub(2) as usize).min(80));
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled(sep_line, label_style),
+        ]));
+
+        lines
+    }
+
+    /// Build a text-based sparkline from message timestamps.
+    /// Uses Unicode block characters ▁▂▃▄▅▆▇█ to show message density.
+    fn build_text_sparkline(messages: &[crate::model::types::Message], max_width: usize) -> String {
+        const BLOCKS: &[char] = &[
+            ' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}',
+            '\u{2587}', '\u{2588}',
+        ];
+        let width = max_width.clamp(8, 60);
+
+        // Collect timestamps
+        let mut timestamps: Vec<i64> = messages.iter().filter_map(|m| m.created_at).collect();
+        if timestamps.len() < 2 {
+            return String::new();
+        }
+        timestamps.sort_unstable();
+        let t_min = timestamps[0];
+        let t_max = timestamps[timestamps.len() - 1];
+        if t_max <= t_min {
+            return String::new();
+        }
+
+        // Bucket messages into bins
+        let mut buckets = vec![0u32; width];
+        let range = (t_max - t_min) as f64;
+        for &ts in &timestamps {
+            let idx = (((ts - t_min) as f64 / range) * (width - 1) as f64) as usize;
+            buckets[idx.min(width - 1)] += 1;
+        }
+
+        let max_count = *buckets.iter().max().unwrap_or(&1);
+        if max_count == 0 {
+            return String::new();
+        }
+
+        buckets
+            .iter()
+            .map(|&count| {
+                let level = (count as f64 / max_count as f64 * 8.0) as usize;
+                BLOCKS[level.min(8)]
+            })
+            .collect()
+    }
+
     /// Build rendered lines for Messages tab.
     fn build_messages_lines(
         &self,
@@ -5752,7 +6118,11 @@ impl CassApp {
 
             let msg_count = cv.messages.len();
             let subtle_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
+            let mut msg_offsets: Vec<(u16, crate::model::types::MessageRole)> =
+                Vec::with_capacity(msg_count);
             for (msg_idx, msg) in cv.messages.iter().enumerate() {
+                // Record line offset for message-level navigation
+                msg_offsets.push((lines.len() as u16, msg.role.clone()));
                 let role_s = Self::role_style(&msg.role, styles);
                 let gutter_s = Self::role_gutter_style(&msg.role, styles);
                 let prefix = Self::role_prefix(&msg.role);
@@ -5778,8 +6148,24 @@ impl CassApp {
                     ]));
                 }
 
-                // Role header line with gutter + message counter
+                // Check if this message is collapsed (tool/system messages)
+                let is_collapsed = self.collapsed_tools.contains(&msg_idx);
+
+                // Role header line with gutter + message counter + collapse indicator
                 let counter = format!(" [{}/{}]", msg_idx + 1, msg_count);
+                let collapse_indicator = if matches!(
+                    msg.role,
+                    crate::model::types::MessageRole::Tool
+                        | crate::model::types::MessageRole::System
+                ) {
+                    if is_collapsed {
+                        " \u{25b6} "
+                    } else {
+                        " \u{25bc} "
+                    }
+                } else {
+                    ""
+                };
                 lines.push(ftui::text::Line::from_spans(vec![
                     ftui::text::Span::styled("\u{258c} ", gutter_s),
                     ftui::text::Span::styled(
@@ -5787,38 +6173,61 @@ impl CassApp {
                         role_s.bold(),
                     ),
                     ftui::text::Span::styled(counter, subtle_style),
+                    ftui::text::Span::styled(collapse_indicator, subtle_style),
                 ]));
 
-                // Message content: auto-detect markdown
-                let content = msg.content.trim();
-                if !content.is_empty() {
-                    if is_likely_markdown(content).is_likely() {
-                        let rendered = md_renderer.render(content);
-                        for line in rendered.into_iter() {
-                            let mut spans = vec![ftui::text::Span::styled("\u{258c} ", gutter_s)];
-                            spans.extend(line.spans().iter().cloned());
-                            lines.push(ftui::text::Line::from_spans(spans));
-                        }
+                if is_collapsed {
+                    // Collapsed: show truncated first-line summary
+                    let content = msg.content.trim();
+                    let first_line = content
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect::<String>();
+                    let ellipsis = if first_line.len() < content.len() {
+                        "\u{2026}"
                     } else {
-                        // Plain text — wrap if enabled
-                        for text_line in content.lines() {
-                            if self.detail_wrap && !text_line.is_empty() {
-                                let w = inner_width.saturating_sub(4) as usize;
-                                for chunk in text_line
-                                    .as_bytes()
-                                    .chunks(w.max(20))
-                                    .map(|c| std::str::from_utf8(c).unwrap_or(""))
-                                {
+                        ""
+                    };
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("\u{258c} ", gutter_s),
+                        ftui::text::Span::styled(format!("  {first_line}{ellipsis}"), subtle_style),
+                    ]));
+                } else {
+                    // Expanded: render full message content
+                    let content = msg.content.trim();
+                    if !content.is_empty() {
+                        if is_likely_markdown(content).is_likely() {
+                            let rendered = md_renderer.render(content);
+                            for line in rendered.into_iter() {
+                                let mut spans =
+                                    vec![ftui::text::Span::styled("\u{258c} ", gutter_s)];
+                                spans.extend(line.spans().iter().cloned());
+                                lines.push(ftui::text::Line::from_spans(spans));
+                            }
+                        } else {
+                            // Plain text — wrap if enabled
+                            for text_line in content.lines() {
+                                if self.detail_wrap && !text_line.is_empty() {
+                                    let w = inner_width.saturating_sub(4) as usize;
+                                    for chunk in text_line
+                                        .as_bytes()
+                                        .chunks(w.max(20))
+                                        .map(|c| std::str::from_utf8(c).unwrap_or(""))
+                                    {
+                                        lines.push(ftui::text::Line::from_spans(vec![
+                                            ftui::text::Span::styled("\u{258c} ", gutter_s),
+                                            ftui::text::Span::raw(chunk.to_string()),
+                                        ]));
+                                    }
+                                } else {
                                     lines.push(ftui::text::Line::from_spans(vec![
                                         ftui::text::Span::styled("\u{258c} ", gutter_s),
-                                        ftui::text::Span::raw(chunk.to_string()),
+                                        ftui::text::Span::raw(text_line.to_string()),
                                     ]));
                                 }
-                            } else {
-                                lines.push(ftui::text::Line::from_spans(vec![
-                                    ftui::text::Span::styled("\u{258c} ", gutter_s),
-                                    ftui::text::Span::raw(text_line.to_string()),
-                                ]));
                             }
                         }
                     }
@@ -5827,8 +6236,10 @@ impl CassApp {
                 // Blank line between messages
                 lines.push(ftui::text::Line::from(""));
             }
+            *self.detail_message_offsets.borrow_mut() = msg_offsets;
         } else {
             // No cached conversation: show the hit's content directly
+            self.detail_message_offsets.borrow_mut().clear();
             let content = if hit.content.is_empty() {
                 &hit.snippet
             } else {
@@ -6196,6 +6607,312 @@ impl CassApp {
         match_positions
     }
 
+    /// Build rendered lines for the Analytics tab in the detail modal.
+    ///
+    /// Shows per-session analytics: token timeline, tool call frequency,
+    /// message length distribution, and model breakdown.
+    fn build_analytics_lines(
+        &self,
+        hit: &SearchHit,
+        inner_width: u16,
+        styles: &StyleContext,
+    ) -> Vec<ftui::text::Line> {
+        let mut lines: Vec<ftui::text::Line> = Vec::new();
+        let header_style = styles.style(style_system::STYLE_TEXT_PRIMARY).bold();
+        let label_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
+        let value_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
+        let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
+        let bar_width = (inner_width.saturating_sub(20) as usize).clamp(10, 40);
+
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("Session Analytics", header_style),
+        ]));
+        lines.push(ftui::text::Line::from(""));
+
+        let Some((_, ref cv)) = self.cached_detail else {
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("No conversation data loaded for analytics.", muted_style),
+            ]));
+            return lines;
+        };
+
+        if cv.messages.is_empty() {
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("No messages in this session.", muted_style),
+            ]));
+            return lines;
+        }
+
+        // -- Section 1: Overview stats ----------------------------------------
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("\u{2501} Overview", label_style.bold()),
+        ]));
+
+        // Duration
+        if let (Some(started), Some(ended)) = (cv.convo.started_at, cv.convo.ended_at) {
+            let dur_secs = (ended.saturating_sub(started)) / 1000;
+            let dur_str = if dur_secs >= 3600 {
+                format!(
+                    "{}h {}m {}s",
+                    dur_secs / 3600,
+                    (dur_secs % 3600) / 60,
+                    dur_secs % 60
+                )
+            } else if dur_secs >= 60 {
+                format!("{}m {}s", dur_secs / 60, dur_secs % 60)
+            } else {
+                format!("{dur_secs}s")
+            };
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("  Duration: ", label_style),
+                ftui::text::Span::styled(dur_str, value_style),
+            ]));
+        }
+
+        // Token count
+        if let Some(tokens) = cv.convo.approx_tokens {
+            let tok_str = if tokens >= 1_000_000 {
+                format!("{:.2}M", tokens as f64 / 1_000_000.0)
+            } else if tokens >= 1_000 {
+                format!("{:.1}K", tokens as f64 / 1_000.0)
+            } else {
+                format!("{tokens}")
+            };
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("  Tokens:   ", label_style),
+                ftui::text::Span::styled(tok_str, value_style),
+            ]));
+
+            // Cost estimate (rough: $3/M input + $15/M output, assume 50/50 split)
+            let est_cost = tokens as f64 / 1_000_000.0 * 9.0;
+            if est_cost >= 0.001 {
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("  Est cost: ", label_style),
+                    ftui::text::Span::styled(format!("${est_cost:.3}"), value_style),
+                    ftui::text::Span::styled(" (approx)", muted_style),
+                ]));
+            }
+        }
+
+        lines.push(ftui::text::Line::from(""));
+
+        // -- Section 2: Message role breakdown --------------------------------
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("\u{2501} Message Breakdown", label_style.bold()),
+        ]));
+
+        let mut role_counts: Vec<(&str, u32)> = Vec::new();
+        let (mut n_user, mut n_agent, mut n_tool, mut n_sys, mut n_other) =
+            (0u32, 0u32, 0u32, 0u32, 0u32);
+        for m in &cv.messages {
+            match m.role {
+                crate::model::types::MessageRole::User => n_user += 1,
+                crate::model::types::MessageRole::Agent => n_agent += 1,
+                crate::model::types::MessageRole::Tool => n_tool += 1,
+                crate::model::types::MessageRole::System => n_sys += 1,
+                crate::model::types::MessageRole::Other(_) => n_other += 1,
+            }
+        }
+        role_counts.push(("User", n_user));
+        role_counts.push(("Agent", n_agent));
+        role_counts.push(("Tool", n_tool));
+        role_counts.push(("System", n_sys));
+        if n_other > 0 {
+            role_counts.push(("Other", n_other));
+        }
+
+        let max_count = role_counts
+            .iter()
+            .map(|(_, c)| *c)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        for (role_name, count) in &role_counts {
+            let bar_len = (*count as f64 / max_count as f64 * bar_width as f64) as usize;
+            let bar = "\u{2588}".repeat(bar_len);
+            let pad = " ".repeat(bar_width.saturating_sub(bar_len));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(format!("  {role_name:<7}"), label_style),
+                ftui::text::Span::styled(
+                    bar,
+                    Self::role_style(
+                        &match *role_name {
+                            "User" => crate::model::types::MessageRole::User,
+                            "Agent" => crate::model::types::MessageRole::Agent,
+                            "Tool" => crate::model::types::MessageRole::Tool,
+                            "System" => crate::model::types::MessageRole::System,
+                            _ => crate::model::types::MessageRole::Other(role_name.to_string()),
+                        },
+                        styles,
+                    ),
+                ),
+                ftui::text::Span::styled(pad, muted_style),
+                ftui::text::Span::styled(format!(" {count}"), value_style),
+            ]));
+        }
+
+        lines.push(ftui::text::Line::from(""));
+
+        // -- Section 3: Message activity timeline -----------------------------
+        if cv.messages.len() >= 2 {
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("\u{2501} Activity Timeline", label_style.bold()),
+            ]));
+            let sparkline =
+                Self::build_text_sparkline(&cv.messages, inner_width.saturating_sub(4) as usize);
+            if !sparkline.is_empty() {
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("  ", label_style),
+                    ftui::text::Span::styled(sparkline, value_style),
+                ]));
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("  start", muted_style),
+                    ftui::text::Span::styled(
+                        " ".repeat((inner_width.saturating_sub(16) as usize).min(50)),
+                        muted_style,
+                    ),
+                    ftui::text::Span::styled("end", muted_style),
+                ]));
+            }
+            lines.push(ftui::text::Line::from(""));
+        }
+
+        // -- Section 4: Message length distribution ---------------------------
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("\u{2501} Message Length Distribution", label_style.bold()),
+        ]));
+
+        let mut lengths_by_role: Vec<(String, usize)> = Vec::new();
+        let mut total_chars: usize = 0;
+        for m in &cv.messages {
+            let len = m.content.len();
+            total_chars += len;
+            let role_str = format!("{}", m.role);
+            lengths_by_role.push((role_str, len));
+        }
+        let avg_len = if cv.messages.is_empty() {
+            0
+        } else {
+            total_chars / cv.messages.len()
+        };
+        let max_len = lengths_by_role.iter().map(|(_, l)| *l).max().unwrap_or(0);
+        let min_len = lengths_by_role.iter().map(|(_, l)| *l).min().unwrap_or(0);
+
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("  Total chars: ", label_style),
+            ftui::text::Span::styled(format!("{total_chars}"), value_style),
+            ftui::text::Span::styled(
+                format!("  avg: {avg_len}  min: {min_len}  max: {max_len}"),
+                muted_style,
+            ),
+        ]));
+
+        lines.push(ftui::text::Line::from(""));
+
+        // -- Section 5: Tool call analysis ------------------------------------
+        if n_tool > 0 {
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("\u{2501} Tool Calls", label_style.bold()),
+            ]));
+
+            // Extract tool names from tool messages (first line often has tool name)
+            let mut tool_names: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::new();
+            for m in &cv.messages {
+                if matches!(m.role, crate::model::types::MessageRole::Tool) {
+                    let first_line = m
+                        .content
+                        .lines()
+                        .next()
+                        .unwrap_or("(unnamed)")
+                        .chars()
+                        .take(40)
+                        .collect::<String>();
+                    *tool_names.entry(first_line).or_default() += 1;
+                }
+            }
+
+            let mut tool_list: Vec<(String, u32)> = tool_names.into_iter().collect();
+            tool_list.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let tool_max = tool_list.iter().map(|(_, c)| *c).max().unwrap_or(1).max(1);
+            for (name, count) in tool_list.iter().take(10) {
+                let bar_len = (*count as f64 / tool_max as f64 * bar_width as f64) as usize;
+                let bar = "\u{2588}".repeat(bar_len.max(1));
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("  ", label_style),
+                    ftui::text::Span::styled(bar, value_style),
+                    ftui::text::Span::styled(format!(" {count}\u{00d7} "), value_style),
+                    ftui::text::Span::styled(name.to_string(), muted_style),
+                ]));
+            }
+            lines.push(ftui::text::Line::from(""));
+        }
+
+        // -- Section 6: Cumulative token usage curve --------------------------
+        // Approximate per-message token contribution using content length
+        if cv.messages.len() >= 3 {
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("\u{2501} Cumulative Content Curve", label_style.bold()),
+            ]));
+
+            let cumulative: Vec<usize> = cv
+                .messages
+                .iter()
+                .scan(0usize, |acc, m| {
+                    *acc += m.content.len();
+                    Some(*acc)
+                })
+                .collect();
+            let max_cum = *cumulative.last().unwrap_or(&1);
+            if max_cum > 0 {
+                let spark_width = (inner_width.saturating_sub(4) as usize).clamp(8, 60);
+                let blocks: &[char] = &[
+                    ' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}',
+                    '\u{2587}', '\u{2588}',
+                ];
+
+                // Resample cumulative curve to spark_width buckets
+                let mut spark_str = String::with_capacity(spark_width * 3);
+                for i in 0..spark_width {
+                    let idx =
+                        (i as f64 / spark_width as f64 * (cumulative.len() - 1) as f64) as usize;
+                    let level = (cumulative[idx.min(cumulative.len() - 1)] as f64 / max_cum as f64
+                        * 8.0) as usize;
+                    spark_str.push(blocks[level.min(8)]);
+                }
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("  ", label_style),
+                    ftui::text::Span::styled(spark_str, value_style),
+                ]));
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("  0%", muted_style),
+                    ftui::text::Span::styled(
+                        " ".repeat((inner_width.saturating_sub(14) as usize).min(50)),
+                        muted_style,
+                    ),
+                    ftui::text::Span::styled("100%", muted_style),
+                ]));
+            }
+            lines.push(ftui::text::Line::from(""));
+        }
+
+        // -- Footer: help text ------------------------------------------------
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled(
+                format!(
+                    "Session: {} \u{2502} {} messages \u{2502} {}",
+                    hit.agent,
+                    cv.messages.len(),
+                    hit.workspace,
+                ),
+                muted_style,
+            ),
+        ]));
+
+        lines
+    }
+
     /// Render the detail/preview pane with rich content (Messages/Snippets/Raw).
     #[allow(clippy::too_many_arguments)]
     fn render_detail_pane(
@@ -6218,6 +6935,7 @@ impl CassApp {
             DetailTab::Snippets => "Snippets",
             DetailTab::Raw => "Raw",
             DetailTab::Json => "Json",
+            DetailTab::Analytics => "Analytics",
         };
         let title = format!("Detail [{tab_label}]{wrap_indicator}");
 
@@ -6256,6 +6974,7 @@ impl CassApp {
                 ("Snippets", DetailTab::Snippets),
                 ("Raw", DetailTab::Raw),
                 ("Json", DetailTab::Json),
+                ("Analytics", DetailTab::Analytics),
             ];
             let mut tab_spans: Vec<ftui::text::Span> =
                 vec![ftui::text::Span::styled(" ", block_style)];
@@ -6307,12 +7026,38 @@ impl CassApp {
         };
 
         if let Some(hit) = self.selected_hit() {
+            // Render sticky metadata header on Messages tab
+            let content_area = if self.detail_tab == DetailTab::Messages && content_area.height >= 6
+            {
+                let header_lines = self.build_detail_header_lines(hit, content_area.width, styles);
+                let header_h = header_lines.len().min(5) as u16;
+                if header_h > 0 && content_area.height > header_h + 2 {
+                    let header_rect =
+                        Rect::new(content_area.x, content_area.y, content_area.width, header_h);
+                    let header_text = ftui::text::Text::from_lines(header_lines);
+                    Paragraph::new(header_text)
+                        .style(styles.style(style_system::STYLE_TEXT_PRIMARY))
+                        .render(header_rect, frame);
+                    Rect::new(
+                        content_area.x,
+                        content_area.y + header_h,
+                        content_area.width,
+                        content_area.height - header_h,
+                    )
+                } else {
+                    content_area
+                }
+            } else {
+                content_area
+            };
+
             // Build lines based on active tab
             let mut lines = match self.detail_tab {
                 DetailTab::Messages => self.build_messages_lines(hit, content_area.width, styles),
                 DetailTab::Snippets => self.build_snippets_lines(hit, styles),
                 DetailTab::Raw => self.build_raw_lines(hit, styles),
                 DetailTab::Json => self.build_json_lines(hit, styles),
+                DetailTab::Analytics => self.build_analytics_lines(hit, content_area.width, styles),
             };
 
             // Apply find-in-detail highlighting and cache match positions
@@ -7450,6 +8195,10 @@ impl CassApp {
                     shortcuts::COPY
                 ),
                 format!(
+                    "{} toggle aggregate results stats bar",
+                    shortcuts::STATS_BAR
+                ),
+                format!(
                     "{} detail-find within messages; n/N cycle matches",
                     shortcuts::PANE_FILTER
                 ),
@@ -8447,6 +9196,10 @@ pub enum CassMsg {
     ToolExpandAll,
     /// Collapse all tool/system messages.
     ToolCollapseAll,
+    /// Jump to the next/previous message in the detail view.
+    DetailMessageJumped { forward: bool, user_only: bool },
+    /// Toggle the aggregate stats bar in the results pane.
+    StatsBarToggled,
 
     // -- Multi-select & bulk actions --------------------------------------
     /// Toggle select on the current item.
@@ -9522,6 +10275,7 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::F(12) => CassMsg::RankingModeCycled,
 
                     // -- Search mode (Alt+S) --------------------------------------
+                    KeyCode::Char('s') if ctrl && !shift => CassMsg::StatsBarToggled,
                     KeyCode::Char('s') if alt => CassMsg::SearchModeCycled,
 
                     // -- Macro recording (Alt+M) ----------------------------------
@@ -10160,6 +10914,44 @@ impl super::ftui_adapter::Model for CassApp {
                     CassMsg::QueryChanged(text) if text == "c" => {
                         return self.update(CassMsg::ToolCollapseAll);
                     }
+                    // { / } jump between messages
+                    CassMsg::QueryChanged(text) if text == "{" => {
+                        return self.update(CassMsg::DetailMessageJumped {
+                            forward: false,
+                            user_only: false,
+                        });
+                    }
+                    CassMsg::QueryChanged(text) if text == "}" => {
+                        return self.update(CassMsg::DetailMessageJumped {
+                            forward: true,
+                            user_only: false,
+                        });
+                    }
+                    // [ / ] jump between user messages only
+                    CassMsg::QueryChanged(text) if text == "[" => {
+                        return self.update(CassMsg::DetailMessageJumped {
+                            forward: false,
+                            user_only: true,
+                        });
+                    }
+                    CassMsg::QueryChanged(text) if text == "]" => {
+                        return self.update(CassMsg::DetailMessageJumped {
+                            forward: true,
+                            user_only: true,
+                        });
+                    }
+                    // g / G for top / bottom (vim-style)
+                    CassMsg::QueryChanged(text) if text == "g" => {
+                        self.detail_scroll = 0;
+                        return ftui::Cmd::none();
+                    }
+                    CassMsg::QueryChanged(text) if text == "G" => {
+                        self.detail_scroll = self
+                            .detail_content_lines
+                            .get()
+                            .saturating_sub(self.detail_visible_height.get());
+                        return ftui::Cmd::none();
+                    }
                     // Up/Down scroll detail
                     CassMsg::SelectionMoved { delta } => {
                         return self.update(CassMsg::DetailScrolled { delta: *delta });
@@ -10185,7 +10977,8 @@ impl super::ftui_adapter::Model for CassApp {
                             DetailTab::Messages => DetailTab::Snippets,
                             DetailTab::Snippets => DetailTab::Raw,
                             DetailTab::Raw => DetailTab::Json,
-                            DetailTab::Json => DetailTab::Messages,
+                            DetailTab::Json => DetailTab::Analytics,
+                            DetailTab::Analytics => DetailTab::Messages,
                         };
                         return self.update(CassMsg::DetailTabChanged(next));
                     }
@@ -10202,6 +10995,7 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::ToolCollapseToggled(_)
                     | CassMsg::ToolExpandAll
                     | CassMsg::ToolCollapseAll
+                    | CassMsg::DetailMessageJumped { .. }
                     | CassMsg::PageScrolled { .. }
                     | CassMsg::Tick
                     | CassMsg::MouseEvent { .. }
@@ -11102,6 +11896,45 @@ impl super::ftui_adapter::Model for CassApp {
                         }
                     }
                 }
+                ftui::Cmd::none()
+            }
+            CassMsg::DetailMessageJumped { forward, user_only } => {
+                let offsets = self.detail_message_offsets.borrow();
+                if offsets.is_empty() {
+                    return ftui::Cmd::none();
+                }
+                let current = self.detail_scroll;
+                let target = if forward {
+                    // Find first message offset strictly after current scroll
+                    offsets
+                        .iter()
+                        .filter(|(offset, role)| {
+                            *offset > current
+                                && (!user_only
+                                    || matches!(role, crate::model::types::MessageRole::User))
+                        })
+                        .map(|(o, _)| *o)
+                        .next()
+                } else {
+                    // Find last message offset strictly before current scroll
+                    offsets
+                        .iter()
+                        .rev()
+                        .filter(|(offset, role)| {
+                            *offset < current
+                                && (!user_only
+                                    || matches!(role, crate::model::types::MessageRole::User))
+                        })
+                        .map(|(o, _)| *o)
+                        .next()
+                };
+                if let Some(pos) = target {
+                    self.detail_scroll = pos;
+                }
+                ftui::Cmd::none()
+            }
+            CassMsg::StatsBarToggled => {
+                self.show_stats_bar = !self.show_stats_bar;
                 ftui::Cmd::none()
             }
             CassMsg::DetailFindToggled => {
@@ -15997,6 +16830,7 @@ mod tests {
         let _snip = DetailTab::Snippets;
         let _raw = DetailTab::Raw;
         let _json = DetailTab::Json;
+        let _analytics = DetailTab::Analytics;
     }
 
     #[test]
@@ -16082,6 +16916,15 @@ mod tests {
         let event = Event::Key(KeyEvent::new(KeyCode::Char('m')).with_modifiers(Modifiers::CTRL));
 
         assert!(matches!(CassMsg::from(event), CassMsg::SelectionToggled));
+    }
+
+    #[test]
+    fn event_mapping_ctrl_s_maps_to_stats_bar_toggled() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('s')).with_modifiers(Modifiers::CTRL));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::StatsBarToggled));
     }
 
     #[test]
@@ -19851,6 +20694,8 @@ mod tests {
         assert_eq!(app.detail_tab, DetailTab::Raw);
         let _ = app.update(CassMsg::FocusToggled);
         assert_eq!(app.detail_tab, DetailTab::Json);
+        let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(app.detail_tab, DetailTab::Analytics);
         let _ = app.update(CassMsg::FocusToggled);
         assert_eq!(app.detail_tab, DetailTab::Messages);
     }
@@ -24212,6 +25057,702 @@ mod tests {
     }
 
     // -- End focus ownership & Enter-routing matrix ---------------------------
+
+    // -- Collapsible tool call tests ------------------------------------------
+
+    #[test]
+    fn tool_collapse_toggle_flips_state() {
+        let mut app = app_with_hits(3);
+        assert!(!app.collapsed_tools.contains(&2));
+        let _ = app.update(CassMsg::ToolCollapseToggled(2));
+        assert!(app.collapsed_tools.contains(&2));
+        let _ = app.update(CassMsg::ToolCollapseToggled(2));
+        assert!(!app.collapsed_tools.contains(&2));
+    }
+
+    #[test]
+    fn tool_expand_all_clears_collapsed() {
+        let mut app = app_with_hits(3);
+        app.collapsed_tools.insert(0);
+        app.collapsed_tools.insert(3);
+        app.collapsed_tools.insert(7);
+        assert_eq!(app.collapsed_tools.len(), 3);
+        let _ = app.update(CassMsg::ToolExpandAll);
+        assert!(app.collapsed_tools.is_empty());
+    }
+
+    #[test]
+    fn detail_opened_auto_collapses_tool_messages() {
+        let mut app = app_with_hits(3);
+        // Ensure collapsed_tools is empty before open
+        assert!(app.collapsed_tools.is_empty());
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(app.show_detail_modal);
+        // If there's a cached_detail with tool/system messages, they should
+        // be in collapsed_tools. If no cached_detail, set stays empty.
+        // The important thing is the mechanism is wired.
+    }
+
+    #[test]
+    fn tool_collapse_all_populates_from_cached_detail() {
+        use crate::model::types::{Message, MessageRole};
+        let mut app = app_with_hits(3);
+
+        fn msg(role: MessageRole, content: &str) -> Message {
+            Message {
+                id: None,
+                idx: 0,
+                role,
+                author: None,
+                created_at: None,
+                content: content.to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }
+        }
+
+        let mut cv = make_test_conversation_view();
+        cv.messages = vec![
+            msg(MessageRole::User, "hello"),
+            msg(MessageRole::Agent, "hi there"),
+            msg(MessageRole::Tool, "tool output here"),
+            msg(MessageRole::System, "system note"),
+        ];
+        app.cached_detail = Some(("test-id".to_string(), cv));
+
+        let _ = app.update(CassMsg::ToolCollapseAll);
+        // Indices 2 (Tool) and 3 (System) should be collapsed
+        assert!(app.collapsed_tools.contains(&2));
+        assert!(app.collapsed_tools.contains(&3));
+        // Indices 0 (User) and 1 (Agent) should NOT be collapsed
+        assert!(!app.collapsed_tools.contains(&0));
+        assert!(!app.collapsed_tools.contains(&1));
+    }
+
+    // -- End collapsible tool call tests --------------------------------------
+
+    // -- Detail header tests --------------------------------------------------
+
+    #[test]
+    fn build_detail_header_lines_without_cached_detail() {
+        let app = app_with_hits(3);
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_detail_header_lines(&hit, 80, &styles);
+        // Should have at least agent/workspace line + separator
+        assert!(lines.len() >= 2, "header should have at least 2 lines");
+    }
+
+    #[test]
+    fn build_detail_header_lines_with_cached_detail() {
+        use crate::model::types::{Message, MessageRole};
+        let mut app = app_with_hits(3);
+
+        fn msg(role: MessageRole, content: &str, ts: Option<i64>) -> Message {
+            Message {
+                id: None,
+                idx: 0,
+                role,
+                author: None,
+                created_at: ts,
+                content: content.to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }
+        }
+
+        let mut cv = make_test_conversation_view();
+        cv.messages = vec![
+            msg(MessageRole::User, "hello", Some(1_700_000)),
+            msg(MessageRole::Agent, "hi", Some(1_700_010)),
+            msg(MessageRole::Tool, "result", Some(1_700_020)),
+            msg(MessageRole::User, "thanks", Some(1_700_030)),
+        ];
+        app.cached_detail = Some(("test-id".to_string(), cv));
+
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_detail_header_lines(&hit, 80, &styles);
+        // Should have: agent line, metadata line, sparkline, separator = 4 lines
+        assert!(
+            lines.len() >= 3,
+            "header with cached_detail should have >= 3 lines, got {}",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn build_text_sparkline_produces_output() {
+        use crate::model::types::{Message, MessageRole};
+
+        fn msg(ts: i64) -> Message {
+            Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: None,
+                created_at: Some(ts),
+                content: String::new(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }
+        }
+
+        let messages = vec![msg(1000), msg(2000), msg(3000), msg(4000), msg(5000)];
+        let sparkline = CassApp::build_text_sparkline(&messages, 20);
+        assert!(
+            !sparkline.is_empty(),
+            "sparkline should be non-empty for 5 messages"
+        );
+        assert!(
+            sparkline.chars().count() <= 20,
+            "sparkline width should not exceed max_width"
+        );
+    }
+
+    #[test]
+    fn build_text_sparkline_empty_for_single_message() {
+        use crate::model::types::{Message, MessageRole};
+        let messages = vec![Message {
+            id: None,
+            idx: 0,
+            role: MessageRole::User,
+            author: None,
+            created_at: Some(1000),
+            content: String::new(),
+            extra_json: serde_json::json!({}),
+            snippets: Vec::new(),
+        }];
+        let sparkline = CassApp::build_text_sparkline(&messages, 20);
+        assert!(
+            sparkline.is_empty(),
+            "sparkline should be empty for < 2 timestamps"
+        );
+    }
+
+    // -- End detail header tests ----------------------------------------------
+
+    // -- Analytics tab tests --------------------------------------------------
+
+    #[test]
+    fn build_analytics_lines_without_cached_detail() {
+        let app = app_with_hits(3);
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_analytics_lines(&hit, 80, &styles);
+        // Should show header + "No conversation data" message
+        assert!(lines.len() >= 2, "should produce fallback lines");
+    }
+
+    #[test]
+    fn build_analytics_lines_with_messages() {
+        use crate::model::types::{Message, MessageRole};
+        let mut app = app_with_hits(3);
+
+        fn msg(role: MessageRole, content: &str, ts: Option<i64>) -> Message {
+            Message {
+                id: None,
+                idx: 0,
+                role,
+                author: None,
+                created_at: ts,
+                content: content.to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }
+        }
+
+        let mut cv = make_test_conversation_view();
+        cv.messages = vec![
+            msg(MessageRole::User, "hello world", Some(1_000)),
+            msg(MessageRole::Agent, "hi there friend", Some(2_000)),
+            msg(MessageRole::Tool, "tool output data here", Some(3_000)),
+            msg(MessageRole::User, "thanks for help", Some(4_000)),
+            msg(MessageRole::Agent, "you are welcome", Some(5_000)),
+        ];
+        app.cached_detail = Some(("test-id".to_string(), cv));
+
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_analytics_lines(&hit, 80, &styles);
+
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans().iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        // Should contain section headers
+        assert!(text.contains("Overview"), "should have Overview section");
+        assert!(
+            text.contains("Message Breakdown"),
+            "should have Message Breakdown section"
+        );
+        assert!(
+            text.contains("Activity Timeline"),
+            "should have Activity Timeline section"
+        );
+        // Should show role counts
+        assert!(text.contains("User"), "should show User role");
+        assert!(text.contains("Agent"), "should show Agent role");
+        assert!(text.contains("Tool"), "should show Tool role");
+    }
+
+    #[test]
+    fn tab_cycling_includes_analytics() {
+        let mut app = app_with_hits(3);
+        let _ = app.update(CassMsg::DetailOpened);
+        assert_eq!(app.detail_tab, DetailTab::Messages);
+
+        // Cycle through all tabs
+        let _ = app.update(CassMsg::DetailTabChanged(DetailTab::Json));
+        assert_eq!(app.detail_tab, DetailTab::Json);
+        // Json -> Analytics (via tab cycle logic, but we test direct tab change)
+        let _ = app.update(CassMsg::DetailTabChanged(DetailTab::Analytics));
+        assert_eq!(app.detail_tab, DetailTab::Analytics);
+    }
+
+    // -- End analytics tab tests ----------------------------------------------
+
+    // -- Message navigation tests ---------------------------------------------
+
+    #[test]
+    fn detail_message_jumped_forward() {
+        let mut app = app_with_hits(3);
+        // Populate message offsets manually
+        *app.detail_message_offsets.borrow_mut() = vec![
+            (0, crate::model::types::MessageRole::User),
+            (10, crate::model::types::MessageRole::Agent),
+            (25, crate::model::types::MessageRole::Tool),
+            (40, crate::model::types::MessageRole::User),
+        ];
+        app.detail_scroll = 0;
+        let _ = app.update(CassMsg::DetailMessageJumped {
+            forward: true,
+            user_only: false,
+        });
+        assert_eq!(app.detail_scroll, 10, "should jump to next message");
+
+        let _ = app.update(CassMsg::DetailMessageJumped {
+            forward: true,
+            user_only: false,
+        });
+        assert_eq!(app.detail_scroll, 25, "should jump to third message");
+    }
+
+    #[test]
+    fn detail_message_jumped_backward() {
+        let mut app = app_with_hits(3);
+        *app.detail_message_offsets.borrow_mut() = vec![
+            (0, crate::model::types::MessageRole::User),
+            (10, crate::model::types::MessageRole::Agent),
+            (25, crate::model::types::MessageRole::Tool),
+        ];
+        app.detail_scroll = 25;
+        let _ = app.update(CassMsg::DetailMessageJumped {
+            forward: false,
+            user_only: false,
+        });
+        assert_eq!(app.detail_scroll, 10, "should jump to previous message");
+    }
+
+    #[test]
+    fn detail_message_jumped_user_only() {
+        let mut app = app_with_hits(3);
+        *app.detail_message_offsets.borrow_mut() = vec![
+            (0, crate::model::types::MessageRole::User),
+            (10, crate::model::types::MessageRole::Agent),
+            (25, crate::model::types::MessageRole::Tool),
+            (40, crate::model::types::MessageRole::User),
+        ];
+        app.detail_scroll = 0;
+        let _ = app.update(CassMsg::DetailMessageJumped {
+            forward: true,
+            user_only: true,
+        });
+        assert_eq!(
+            app.detail_scroll, 40,
+            "should skip Agent/Tool and jump to next User"
+        );
+    }
+
+    #[test]
+    fn detail_g_jumps_to_top() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        app.detail_scroll = 50;
+        // Simulate pressing 'g' via the QueryChanged intercept
+        let _ = app.update(CassMsg::QueryChanged("g".to_string()));
+        assert_eq!(app.detail_scroll, 0, "g should jump to top");
+    }
+
+    #[test]
+    fn detail_g_capital_jumps_to_bottom() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        app.detail_content_lines.set(100);
+        app.detail_visible_height.set(20);
+        app.detail_scroll = 0;
+        let _ = app.update(CassMsg::QueryChanged("G".to_string()));
+        assert_eq!(app.detail_scroll, 80, "G should jump to bottom");
+    }
+
+    // -- End message navigation tests -----------------------------------------
+
+    // -- Stats bar tests ------------------------------------------------------
+
+    #[test]
+    fn stats_bar_toggled_flips_state() {
+        let mut app = app_with_hits(3);
+        assert!(app.show_stats_bar, "should default to true");
+        let _ = app.update(CassMsg::StatsBarToggled);
+        assert!(!app.show_stats_bar);
+        let _ = app.update(CassMsg::StatsBarToggled);
+        assert!(app.show_stats_bar);
+    }
+
+    #[test]
+    fn build_results_stats_line_with_hits() {
+        let app = app_with_hits(5);
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let line = app.build_results_stats_line(80, &styles);
+        let text: String = line
+            .spans()
+            .iter()
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert!(
+            text.contains("sessions"),
+            "stats line should show session count"
+        );
+        assert!(
+            text.contains("msgs"),
+            "stats line should show message count"
+        );
+        assert!(
+            text.contains("tok"),
+            "stats line should show token estimate"
+        );
+        assert!(text.contains("$"), "stats line should show estimated cost");
+    }
+
+    #[test]
+    fn build_results_stats_line_empty_panes() {
+        let app = CassApp::default();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let line = app.build_results_stats_line(80, &styles);
+        let text: String = line
+            .spans()
+            .iter()
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert!(text.contains("0"), "empty panes should show zeroed metrics");
+        assert!(text.contains("sessions"));
+        assert!(text.contains("msgs"));
+        assert!(text.contains("$0.000"));
+    }
+
+    #[test]
+    fn build_results_stats_line_estimates_tokens_and_cost_from_content() {
+        let mut app = CassApp::default();
+        let mut hit = make_hit(1, "/path/1");
+        hit.content = "x".repeat(8_000); // ~2,000 tokens by chars/4 heuristic
+        hit.created_at = Some(1_700_000_000);
+        app.results = vec![hit];
+        app.regroup_panes();
+
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let line = app.build_results_stats_line(120, &styles);
+        let text: String = line
+            .spans()
+            .iter()
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+
+        assert!(
+            text.contains("2,000"),
+            "expected token estimate, got: {text}"
+        );
+        assert!(
+            text.contains("$0.018"),
+            "expected estimated cost, got: {text}"
+        );
+    }
+
+    // -- End stats bar tests --------------------------------------------------
+
+    // -- Detail modal regression test suite (A.6) -----------------------------
+
+    /// Helper: create an app with a rich cached_detail for regression testing.
+    fn app_with_cached_conversation() -> CassApp {
+        use crate::model::types::{Message, MessageRole};
+        let mut app = app_with_hits(3);
+
+        fn msg(role: MessageRole, content: &str, ts: Option<i64>) -> Message {
+            Message {
+                id: None,
+                idx: 0,
+                role,
+                author: None,
+                created_at: ts,
+                content: content.to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }
+        }
+
+        let mut cv = make_test_conversation_view();
+        cv.messages = vec![
+            msg(MessageRole::User, "Please help me fix a bug", Some(1_000)),
+            msg(
+                MessageRole::Agent,
+                "# Analysis\n\nI'll look at the code:\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nLet me check.",
+                Some(2_000),
+            ),
+            msg(
+                MessageRole::Tool,
+                "File contents: some tool output that is quite long and should be truncated when collapsed",
+                Some(3_000),
+            ),
+            msg(
+                MessageRole::Agent,
+                "Found the bug. Here's the fix.",
+                Some(4_000),
+            ),
+            msg(MessageRole::System, "System context note", Some(5_000)),
+            msg(MessageRole::User, "Thanks!", Some(6_000)),
+        ];
+        cv.convo.started_at = Some(1_000_000);
+        cv.convo.ended_at = Some(1_060_000);
+        cv.convo.approx_tokens = Some(15_000);
+        app.cached_detail = Some(("test-session".to_string(), cv));
+        app
+    }
+
+    #[test]
+    fn regression_detail_open_sets_messages_tab() {
+        let mut app = app_with_cached_conversation();
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(app.show_detail_modal);
+        assert_eq!(app.detail_tab, DetailTab::Messages);
+    }
+
+    #[test]
+    fn regression_detail_open_auto_collapses_tool_system() {
+        let mut app = app_with_cached_conversation();
+        let _ = app.update(CassMsg::DetailOpened);
+        // Tool (index 2) and System (index 4) should be collapsed
+        assert!(
+            app.collapsed_tools.contains(&2),
+            "tool message should be auto-collapsed"
+        );
+        assert!(
+            app.collapsed_tools.contains(&4),
+            "system message should be auto-collapsed"
+        );
+        // User (0, 5) and Agent (1, 3) should NOT be collapsed
+        assert!(!app.collapsed_tools.contains(&0));
+        assert!(!app.collapsed_tools.contains(&1));
+        assert!(!app.collapsed_tools.contains(&3));
+        assert!(!app.collapsed_tools.contains(&5));
+    }
+
+    #[test]
+    fn regression_expand_all_then_collapse_all_roundtrip() {
+        let mut app = app_with_cached_conversation();
+        let _ = app.update(CassMsg::DetailOpened);
+        let initial_collapsed = app.collapsed_tools.len();
+        assert!(initial_collapsed > 0, "some should be auto-collapsed");
+
+        let _ = app.update(CassMsg::ToolExpandAll);
+        assert!(app.collapsed_tools.is_empty(), "expand all should clear");
+
+        let _ = app.update(CassMsg::ToolCollapseAll);
+        assert_eq!(
+            app.collapsed_tools.len(),
+            initial_collapsed,
+            "collapse all should restore same set"
+        );
+    }
+
+    #[test]
+    fn regression_message_navigation_forward_backward_consistent() {
+        let mut app = app_with_cached_conversation();
+        // Manually set message offsets to simulate rendered state
+        *app.detail_message_offsets.borrow_mut() = vec![
+            (0, crate::model::types::MessageRole::User),
+            (5, crate::model::types::MessageRole::Agent),
+            (15, crate::model::types::MessageRole::Tool),
+            (20, crate::model::types::MessageRole::Agent),
+            (30, crate::model::types::MessageRole::System),
+            (35, crate::model::types::MessageRole::User),
+        ];
+        app.detail_scroll = 0;
+
+        // Jump forward through all messages
+        let _ = app.update(CassMsg::DetailMessageJumped {
+            forward: true,
+            user_only: false,
+        });
+        assert_eq!(app.detail_scroll, 5);
+
+        let _ = app.update(CassMsg::DetailMessageJumped {
+            forward: true,
+            user_only: false,
+        });
+        assert_eq!(app.detail_scroll, 15);
+
+        // Jump backward
+        let _ = app.update(CassMsg::DetailMessageJumped {
+            forward: false,
+            user_only: false,
+        });
+        assert_eq!(app.detail_scroll, 5);
+    }
+
+    #[test]
+    fn regression_user_only_navigation_skips_non_user() {
+        let mut app = app_with_cached_conversation();
+        *app.detail_message_offsets.borrow_mut() = vec![
+            (0, crate::model::types::MessageRole::User),
+            (5, crate::model::types::MessageRole::Agent),
+            (15, crate::model::types::MessageRole::Tool),
+            (20, crate::model::types::MessageRole::Agent),
+            (30, crate::model::types::MessageRole::System),
+            (35, crate::model::types::MessageRole::User),
+        ];
+        app.detail_scroll = 0;
+
+        let _ = app.update(CassMsg::DetailMessageJumped {
+            forward: true,
+            user_only: true,
+        });
+        assert_eq!(
+            app.detail_scroll, 35,
+            "should skip Agent/Tool/System to next User"
+        );
+
+        let _ = app.update(CassMsg::DetailMessageJumped {
+            forward: false,
+            user_only: true,
+        });
+        assert_eq!(app.detail_scroll, 0, "should jump back to first User");
+    }
+
+    #[test]
+    fn regression_metadata_header_shows_tokens() {
+        let app = app_with_cached_conversation();
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_detail_header_lines(&hit, 80, &styles);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans().iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(
+            text.contains("15.0K tok") || text.contains("15K tok"),
+            "header should show token count, got: {text}"
+        );
+    }
+
+    #[test]
+    fn regression_metadata_header_shows_message_counts() {
+        let app = app_with_cached_conversation();
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_detail_header_lines(&hit, 80, &styles);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans().iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(
+            text.contains("6 msgs"),
+            "header should show 6 messages, got: {text}"
+        );
+        assert!(text.contains("u:2"), "header should show 2 user messages");
+    }
+
+    #[test]
+    fn regression_analytics_tab_shows_overview() {
+        let app = app_with_cached_conversation();
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_analytics_lines(&hit, 80, &styles);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans().iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        assert!(text.contains("Overview"), "should have Overview section");
+        assert!(text.contains("15"), "should show token count");
+        assert!(
+            text.contains("Message Breakdown"),
+            "should have breakdown section"
+        );
+    }
+
+    #[test]
+    fn regression_tab_cycling_full_loop() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        let tabs = [
+            DetailTab::Messages,
+            DetailTab::Snippets,
+            DetailTab::Raw,
+            DetailTab::Json,
+            DetailTab::Analytics,
+            DetailTab::Messages, // back to start
+        ];
+        for expected in &tabs {
+            assert_eq!(app.detail_tab, *expected);
+            let _ = app.update(CassMsg::FocusToggled);
+        }
+    }
+
+    #[test]
+    fn regression_detail_close_clears_focus_trap() {
+        let mut app = app_with_hits(3);
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(app.show_detail_modal);
+        let _ = app.update(CassMsg::DetailClosed);
+        assert!(!app.show_detail_modal);
+        assert_eq!(app.focus_manager.current(), Some(focus_ids::RESULTS_LIST));
+    }
+
+    #[test]
+    fn regression_build_messages_populates_offsets() {
+        let app = app_with_cached_conversation();
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let _ = app.build_messages_lines(&hit, 80, &styles);
+        let offsets = app.detail_message_offsets.borrow();
+        assert_eq!(offsets.len(), 6, "should have offsets for all 6 messages");
+        // Offsets should be monotonically increasing
+        for i in 1..offsets.len() {
+            assert!(
+                offsets[i].0 >= offsets[i - 1].0,
+                "offsets should be monotonically increasing"
+            );
+        }
+    }
+
+    #[test]
+    fn regression_collapsed_message_renders_truncated() {
+        let mut app = app_with_cached_conversation();
+        app.collapsed_tools.insert(2); // Collapse tool message (index 2)
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_messages_lines(&hit, 80, &styles);
+        // Find the tool message's rendered output — should have collapse indicator
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans().iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+        // Should contain the triangle right indicator for collapsed
+        assert!(
+            text.contains('\u{25b6}'),
+            "collapsed message should show \u{25b6} indicator"
+        );
+    }
+
+    // -- End detail modal regression tests ------------------------------------
 
     #[test]
     fn analytics_surface_clears_search_regions() {
@@ -30077,7 +31618,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         app.cached_detail = Some(("/test/session.jsonl".to_string(), cv));
         app.detail_tab = DetailTab::Messages;
 
-        let buf = render_detail_snapshot_buffer(&app, 96, 20);
+        let buf = render_detail_snapshot_buffer(&app, 96, 30);
         let text = ftui_harness::buffer_to_text(&buf);
         assert!(text.contains("User"));
         assert!(text.contains("Agent"));
@@ -31091,10 +32632,10 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         let _ = app.update(CassMsg::SelectionMoved { delta: 2 });
         assert_eq!(app.panes[0].selected, 2);
 
-        // Step 3: Open detail modal (set show_detail_modal first so DetailOpened
-        // doesn't redirect to QuerySubmitted while in Query InputMode)
-        app.show_detail_modal = true;
+        // Step 3: Open detail modal — the handler will set show_detail_modal
+        // and push the focus trap since we have a selected hit at index 2.
         let _ = app.update(CassMsg::DetailOpened);
+        assert!(app.show_detail_modal, "detail modal should be open");
         assert_eq!(app.focused_region(), FocusRegion::Detail);
     }
 

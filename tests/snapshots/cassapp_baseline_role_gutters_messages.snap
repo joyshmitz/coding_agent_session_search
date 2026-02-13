@@ -1,5 +1,9 @@
 ╭Detail [Messages] ↩───────────────────────────────────────────────────────────────────────────╮
-│  ● Messages  │  Snippets  │  Raw  │  Json                                                    │
+│  ● Messages  │  Snippets  │  Raw  │  Json  │  Analytics                                      │
+│✓ aider │ /workspace/cass │ ci-linux @ci-linux                                                │
+│1970-01-20 16:13 (0s) │ 4 msgs (u:1 a:1 t:1 s:1) │ 1.0K tok                                   │
+│█                  █                   █                   █                                  │
+│────────────────────────────────────────────────────────────────────────────────              │
 │Large-snippet rendering edge case                                                             │
 │agent=aider │ ws=/workspace/cass │ source=ci-linux (remote) │ score=0.640 (6.4/10) │ ws_orig=/│
 │────────────────────────────────────────────────────────────────────────────────────────────  │
@@ -11,10 +15,16 @@
 │▌ Assistant response: proposing tab, find-bar, and pill refinements.                          │
 │                                                                                              │
 │  ────────────────────────────────────────────────────────────                                │
-│▌ ⚙ Tool (ubs) 22:13:40 [3/4]                                                                 │
+│▌ ⚙ Tool (ubs) 22:13:40 [3/4] ▼                                                               │
 │▌ Tool output: scan completed with deterministic fixture checks.                              │
 │                                                                                              │
 │  ────────────────────────────────────────────────────────────                                │
-│▌ ℹ System (runtime) 22:13:50 [4/4]                                                           │
-│▌ System event: render budget remains stable at full quality.                       1/18 (0%) │
+│▌ ℹ System (runtime) 22:13:50 [4/4] ▼                                                         │
+│▌ System event: render budget remains stable at full quality.                                 │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
+│                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯

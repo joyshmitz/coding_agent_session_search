@@ -5,10 +5,12 @@
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭Results (1)───────────────────────────────────────────────────────────────────────│╭Detail [Messages] ↩───────────────╮
 │▶   1. ▼ @aider Large-snippet rendering edge case                                 ││  ● Messages  │  Snippets  │  Raw │
-│      M█▇ 6.4 [ci-linux] mt suffix │ ws /workspace/cass                           ││Large-snippet rendering edge case │
-│      /workspace/cass/tests/regression/long_snippet.md:9                          ││agent=aider │ ws=/workspace/cass ││
-│    │ The following snippet intentionally exceeds normal row budgets to           ││────────────────────────────────  │
-│    │ exercise truncation, striping, selection, and horizontal clipping beh...    ││  This is a deliberately long snip│
+│      M█▇ 6.4 [ci-linux] mt suffix │ ws /workspace/cass                           ││✓ aider │ /workspace/cass │ ci-lin│
+│      /workspace/cass/tests/regression/long_snippet.md:9                          ││────────────────────────────────  │
+│    │ The following snippet intentionally exceeds normal row budgets to           ││Large-snippet rendering edge case │
+│    │ exercise truncation, striping, selection, and horizontal clipping beh...    ││agent=aider │ ws=/workspace/cass ││
+│                                                                                  ││────────────────────────────────  │
+│                                                                                  ││  This is a deliberately long snip│
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │
@@ -16,9 +18,7 @@
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │
-│                                                                                  ││                                  │
-│                                                                                  ││                                  │
-│                                                                                  ││                                  │
+│1 hits                                                                            ││                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────│╰──────────────────────────────────╯
  hits:1 | view:med/cozy | query:HYB / PFX | perf:lat:— cache:cold | runtime:stable                                      
   | Enter=open Ctrl+M/Ctrl+X=select Tab=focus F1=help                                                                   
