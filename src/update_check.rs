@@ -488,6 +488,7 @@ pub fn spawn_update_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_state_should_check() {
@@ -745,6 +746,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_fetch_release_success() {
         // Start local server with valid release JSON
         let release_json = r#"{
@@ -777,6 +779,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_fetch_release_404_error() {
         let (addr, handle) = start_test_server(r#"{"message": "Not Found"}"#, 404);
 
@@ -802,6 +805,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_fetch_release_malformed_json() {
         let (addr, handle) = start_test_server("this is not json", 200);
 
@@ -821,6 +825,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_fetch_release_missing_fields() {
         // JSON that doesn't have required fields
         let incomplete_json = r#"{"some_other_field": "value"}"#;
@@ -844,6 +849,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_fetch_release_server_error() {
         let (addr, handle) = start_test_server(r#"{"error": "Internal error"}"#, 500);
 
@@ -863,6 +869,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_version_comparison_with_real_fetch() {
         // Test the full flow: fetch -> parse -> compare
         let release_json = r#"{
@@ -895,6 +902,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_prerelease_version_handling() {
         // Test handling of pre-release versions from server
         let release_json = r#"{
@@ -936,6 +944,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_connection_refused_is_offline_friendly() {
         // Point to a port that's not listening
         unsafe {
@@ -968,6 +977,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn integration_async_fetch_release_success() {
         let release_json = r#"{
             "tag_name": "v1.0.0",
@@ -993,6 +1003,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn integration_async_fetch_release_error() {
         let (addr, handle) = start_test_server(r#"{"error": "forbidden"}"#, 403);
 
@@ -1012,6 +1023,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_release_api_base_url_default() {
         // When env var is not set, should use GitHub API
         unsafe {
@@ -1030,6 +1042,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_release_api_base_url_override() {
         let custom_url = "http://localhost:8080/api";
         unsafe {
