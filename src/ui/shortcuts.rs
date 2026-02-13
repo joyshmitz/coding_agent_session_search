@@ -31,6 +31,7 @@ pub const CYCLE_TIME_PRESETS: &str = "Shift+F5";
 pub const PALETTE: &str = "Ctrl+P";
 pub const DENSITY: &str = "Ctrl+D";
 pub const BORDERS: &str = "Ctrl+B";
+pub const STATS_BAR: &str = "Ctrl+S";
 
 // Actions
 pub const COPY: &str = "y";
@@ -118,6 +119,7 @@ mod tests {
         assert!(!HISTORY_NEXT.is_empty());
         assert!(!HISTORY_PREV.is_empty());
         assert!(!HISTORY_CYCLE.is_empty());
+        assert!(!STATS_BAR.is_empty());
         assert!(!TOGGLE_SELECT.is_empty());
     }
 
@@ -130,6 +132,7 @@ mod tests {
         assert_eq!(HISTORY_NEXT, "Ctrl+n");
         assert_eq!(HISTORY_PREV, "Ctrl+p");
         assert_eq!(HISTORY_CYCLE, "Ctrl+R");
+        assert_eq!(STATS_BAR, "Ctrl+S");
         assert_eq!(TOGGLE_SELECT, "Ctrl+M/Ctrl+X");
     }
 
@@ -270,6 +273,7 @@ mod tests {
             HISTORY_NEXT,
             HISTORY_PREV,
             HISTORY_CYCLE,
+            STATS_BAR,
             TOGGLE_SELECT,
         ];
 
@@ -330,6 +334,7 @@ mod tests {
             HISTORY_NEXT,
             HISTORY_PREV,
             HISTORY_CYCLE,
+            STATS_BAR,
             TOGGLE_SELECT,
         ];
 

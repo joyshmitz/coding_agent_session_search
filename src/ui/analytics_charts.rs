@@ -107,6 +107,8 @@ pub struct AnalyticsChartData {
     pub total_cost_usd: f64,
     /// Daily cost: `(label, estimated_cost_usd)`.
     pub daily_cost: Vec<(String, f64)>,
+    /// Per-session points for Explorer scatter (x=messages, y=API tokens).
+    pub session_scatter: Vec<crate::analytics::SessionScatterPoint>,
     // ── Tools view (enhanced) ─────────────────────────────────
     /// Full tool report rows (agent → calls, msgs, tokens, derived metrics).
     pub tool_rows: Vec<crate::analytics::ToolRow>,
@@ -265,6 +267,11 @@ pub fn load_chart_data(
             .collect();
         data.total_tool_calls = result.total_tool_calls;
         data.tool_rows = result.rows;
+    }
+
+    // Per-session scatter points (messages vs API tokens).
+    if let Ok(points) = analytics::query::query_session_scatter(conn, &filter, 600) {
+        data.session_scatter = points;
     }
 
     // Daily timeseries (for sparklines and line chart).
@@ -689,7 +696,7 @@ fn format_compact(n: i64) -> String {
     }
 }
 
-/// Render the Explorer view: interactive metric selector + line chart + overlays.
+/// Render the Explorer view: interactive metric selector + line area/scatter charts.
 pub fn render_explorer(
     data: &AnalyticsChartData,
     state: &ExplorerState,
@@ -740,7 +747,7 @@ pub fn render_explorer(
     };
 
     let header_text = format!(
-        " {} ({})  |  {}  |  Zoom: {}  |  Overlay: {}  |  m/M g/G z/Z o{}",
+        " {} ({})  |  {}  |  Zoom: {}  |  Overlay: {}  |  Scatter: auto  |  m/M g/G z/Z o{}",
         state.metric.label(),
         total_display,
         state.group_by.label(),
@@ -752,21 +759,17 @@ pub fn render_explorer(
         .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 200)))
         .render(chunks[0], frame);
 
-    // ── Build series ─────────────────────────────────────────────
+    // ── Build primary + overlay series ──────────────────────────
     let primary_points: Vec<(f64, f64)> = metric_data
         .iter()
         .enumerate()
         .map(|(i, (_, v))| (i as f64, *v))
         .collect();
 
-    let mut series = vec![ChartSeries::new(
-        state.metric.label(),
-        &primary_points,
-        metric_color,
-    )];
-
     // Dimension overlay: add a series per top-N item (max 5 for readability).
-    let overlay_data: Vec<Vec<(f64, f64)>>;
+    let mut overlay_data: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut overlay_labels: Vec<String> = Vec::new();
+    let mut overlay_colors: Vec<PackedRgba> = Vec::new();
     let dim_breakdown: Option<StrF64Slice<'_>> = match state.overlay {
         ExplorerOverlay::None => Option::None,
         ExplorerOverlay::ByAgent => Some(match state.metric {
@@ -790,7 +793,8 @@ pub fn render_explorer(
         for (i, points) in overlay_data.iter().enumerate().take(5) {
             if !points.is_empty() {
                 let name = breakdown.get(i).map(|(n, _)| n.as_str()).unwrap_or("other");
-                series.push(ChartSeries::new(name, points, agent_color(i)).markers(true));
+                overlay_labels.push(name.to_string());
+                overlay_colors.push(agent_color(i));
             }
         }
     }
@@ -808,8 +812,517 @@ pub fn render_explorer(
         vec![]
     };
 
-    let chart = FtuiLineChart::new(series).x_labels(x_labels).legend(true);
-    chart.render(chunks[1], frame);
+    let chart_body = chunks[1];
+    let show_scatter =
+        chart_body.height >= 10 && chart_body.width >= 50 && !data.session_scatter.is_empty();
+    if show_scatter {
+        let sub = Flex::vertical()
+            .constraints([Constraint::Percentage(65.0), Constraint::Percentage(35.0)])
+            .split(chart_body);
+        render_explorer_line_canvas(
+            state.metric,
+            metric_data,
+            &primary_points,
+            metric_color,
+            &overlay_data,
+            &overlay_labels,
+            &overlay_colors,
+            &x_labels,
+            sub[0],
+            frame,
+        );
+        render_explorer_scatter(&data.session_scatter, sub[1], frame);
+    } else {
+        render_explorer_line_canvas(
+            state.metric,
+            metric_data,
+            &primary_points,
+            metric_color,
+            &overlay_data,
+            &overlay_labels,
+            &overlay_colors,
+            &x_labels,
+            chart_body,
+            frame,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_explorer_line_canvas(
+    metric: ExplorerMetric,
+    metric_data: &[(String, f64)],
+    primary_points: &[(f64, f64)],
+    primary_color: PackedRgba,
+    overlay_data: &[Vec<(f64, f64)>],
+    overlay_labels: &[String],
+    overlay_colors: &[PackedRgba],
+    x_labels: &[&str],
+    area: Rect,
+    frame: &mut ftui::Frame,
+) {
+    if area.height < 5 || area.width < 20 {
+        let mut series = vec![ChartSeries::new(
+            metric.label(),
+            primary_points,
+            primary_color,
+        )];
+        for (idx, points) in overlay_data.iter().enumerate() {
+            if points.is_empty() {
+                continue;
+            }
+            let name = overlay_labels
+                .get(idx)
+                .map(String::as_str)
+                .unwrap_or("overlay");
+            let color = overlay_colors
+                .get(idx)
+                .copied()
+                .unwrap_or_else(|| agent_color(idx));
+            series.push(ChartSeries::new(name, points, color).markers(true));
+        }
+        FtuiLineChart::new(series)
+            .x_labels(x_labels.to_vec())
+            .legend(true)
+            .render(area, frame);
+        return;
+    }
+
+    let annotation = build_explorer_annotation_line(metric, metric_data, overlay_labels);
+    let chunks = Flex::vertical()
+        .constraints([Constraint::Fixed(1), Constraint::Min(4)])
+        .split(area);
+    Paragraph::new(annotation)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(150, 160, 180)))
+        .render(chunks[0], frame);
+
+    let chart_outer = chunks[1];
+    if chart_outer.height < 4 || chart_outer.width < 12 {
+        return;
+    }
+
+    let mut y_max = primary_points
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(0.0_f64, f64::max);
+    for points in overlay_data {
+        for (_, y) in points {
+            y_max = y_max.max(*y);
+        }
+    }
+    if y_max <= 0.0 {
+        y_max = 1.0;
+    }
+
+    let top_label = format_explorer_metric_value(metric, y_max);
+    let bottom_label = format_explorer_metric_value(metric, 0.0);
+    let y_axis_w = (top_label.len().max(bottom_label.len()) as u16 + 1)
+        .min(chart_outer.width.saturating_sub(6))
+        .max(1);
+    let x_axis_h = 2u16;
+    if chart_outer.height <= x_axis_h || chart_outer.width <= y_axis_w + 3 {
+        return;
+    }
+    let plot_area = Rect {
+        x: chart_outer.x + y_axis_w,
+        y: chart_outer.y,
+        width: chart_outer.width.saturating_sub(y_axis_w),
+        height: chart_outer.height.saturating_sub(x_axis_h),
+    };
+    if plot_area.width < 2 || plot_area.height < 2 {
+        return;
+    }
+
+    let mut painter = Painter::for_area(plot_area, CanvasMode::Braille);
+    let (px_w, px_h) = painter.size();
+    if px_w < 2 || px_h < 2 {
+        return;
+    }
+    let px_w = i32::from(px_w);
+    let px_h = i32::from(px_h);
+    let x_max = if primary_points.len() > 1 {
+        primary_points.len() as f64 - 1.0
+    } else {
+        1.0
+    };
+    let y_range = y_max.max(1.0);
+    let to_px = |x: f64, y: f64| -> (i32, i32) {
+        let px = ((x / x_max) * (px_w as f64 - 1.0)).round() as i32;
+        let py = (((y_max - y) / y_range) * (px_h as f64 - 1.0)).round() as i32;
+        (px.clamp(0, px_w - 1), py.clamp(0, px_h - 1))
+    };
+
+    let baseline = px_h - 1;
+    let fill_color = dim_color(primary_color, 0.35);
+    if primary_points.len() >= 2 {
+        for window in primary_points.windows(2) {
+            let (x0, y0) = to_px(window[0].0, window[0].1);
+            let (x1, y1) = to_px(window[1].0, window[1].1);
+            if x0 == x1 {
+                painter.line_colored(x0, (y0 + 1).min(baseline), x0, baseline, Some(fill_color));
+            } else {
+                let (start, end, ys, ye) = if x0 < x1 {
+                    (x0, x1, y0, y1)
+                } else {
+                    (x1, x0, y1, y0)
+                };
+                for x in start..=end {
+                    let t = if end == start {
+                        0.0
+                    } else {
+                        (x - start) as f64 / (end - start) as f64
+                    };
+                    let y = (ys as f64 + (ye - ys) as f64 * t).round() as i32;
+                    painter.line_colored(x, (y + 1).min(baseline), x, baseline, Some(fill_color));
+                }
+            }
+        }
+    }
+
+    for window in primary_points.windows(2) {
+        let (x0, y0) = to_px(window[0].0, window[0].1);
+        let (x1, y1) = to_px(window[1].0, window[1].1);
+        painter.line_colored(x0, y0, x1, y1, Some(primary_color));
+    }
+    if let Some((x, y)) = primary_points.first() {
+        let (px, py) = to_px(*x, *y);
+        painter.point_colored(px, py, primary_color);
+    }
+
+    for (idx, points) in overlay_data.iter().enumerate() {
+        let color = overlay_colors
+            .get(idx)
+            .copied()
+            .unwrap_or_else(|| agent_color(idx));
+        for window in points.windows(2) {
+            let (x0, y0) = to_px(window[0].0, window[0].1);
+            let (x1, y1) = to_px(window[1].0, window[1].1);
+            painter.line_colored(x0, y0, x1, y1, Some(color));
+        }
+        for (x, y) in points.iter().step_by(4) {
+            let (px, py) = to_px(*x, *y);
+            painter.point_colored(px, py, color);
+        }
+    }
+
+    if !primary_points.is_empty() {
+        let avg = primary_points.iter().map(|(_, y)| *y).sum::<f64>() / primary_points.len() as f64;
+        let (_, avg_y) = to_px(0.0, avg);
+        painter.line_colored(
+            0,
+            avg_y,
+            px_w - 1,
+            avg_y,
+            Some(PackedRgba::rgb(100, 100, 100)),
+        );
+        if let Some((peak_idx, (_, peak_val))) = primary_points.iter().enumerate().max_by(|a, b| {
+            a.1.1
+                .partial_cmp(&b.1.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            let (peak_x, peak_y) = to_px(peak_idx as f64, *peak_val);
+            for d in -1..=1 {
+                painter.point_colored(peak_x + d, peak_y, PackedRgba::rgb(255, 220, 90));
+                painter.point_colored(peak_x, peak_y + d, PackedRgba::rgb(255, 220, 90));
+            }
+        }
+    }
+
+    let canvas = CanvasRef::from_painter(&painter)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(190, 200, 220)));
+    canvas.render(plot_area, frame);
+
+    let axis_color = PackedRgba::rgb(120, 130, 145);
+    let y_axis_x = plot_area.x.saturating_sub(1);
+    for y in plot_area.y..plot_area.y + plot_area.height {
+        Paragraph::new("│")
+            .style(ftui::Style::new().fg(axis_color))
+            .render(
+                Rect {
+                    x: y_axis_x,
+                    y,
+                    width: 1,
+                    height: 1,
+                },
+                frame,
+            );
+    }
+    let x_axis_y = plot_area.y + plot_area.height.saturating_sub(1);
+    for x in plot_area.x..plot_area.x + plot_area.width {
+        Paragraph::new("─")
+            .style(ftui::Style::new().fg(axis_color))
+            .render(
+                Rect {
+                    x,
+                    y: x_axis_y,
+                    width: 1,
+                    height: 1,
+                },
+                frame,
+            );
+    }
+    Paragraph::new("└")
+        .style(ftui::Style::new().fg(axis_color))
+        .render(
+            Rect {
+                x: y_axis_x,
+                y: x_axis_y,
+                width: 1,
+                height: 1,
+            },
+            frame,
+        );
+
+    Paragraph::new(top_label)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(170, 170, 185)))
+        .render(
+            Rect {
+                x: chart_outer.x,
+                y: chart_outer.y,
+                width: y_axis_w,
+                height: 1,
+            },
+            frame,
+        );
+    Paragraph::new(bottom_label)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 160)))
+        .render(
+            Rect {
+                x: chart_outer.x,
+                y: x_axis_y,
+                width: y_axis_w,
+                height: 1,
+            },
+            frame,
+        );
+
+    if !x_labels.is_empty() {
+        let label_y = chart_outer.y + chart_outer.height.saturating_sub(1);
+        let slots = x_labels.len().saturating_sub(1).max(1) as u16;
+        for (idx, label) in x_labels.iter().enumerate() {
+            if label.is_empty() {
+                continue;
+            }
+            let width = (label.len() as u16).min(plot_area.width);
+            if width == 0 {
+                continue;
+            }
+            let raw_x = if idx == 0 {
+                plot_area.x
+            } else if idx + 1 == x_labels.len() {
+                plot_area.x + plot_area.width.saturating_sub(width)
+            } else {
+                let t = (idx as u16).saturating_mul(plot_area.width.saturating_sub(1)) / slots;
+                plot_area.x + t.saturating_sub(width / 2)
+            };
+            let x = raw_x.clamp(
+                plot_area.x,
+                plot_area.x + plot_area.width.saturating_sub(width),
+            );
+            Paragraph::new(*label)
+                .style(ftui::Style::new().fg(PackedRgba::rgb(150, 150, 170)))
+                .render(
+                    Rect {
+                        x,
+                        y: label_y,
+                        width,
+                        height: 1,
+                    },
+                    frame,
+                );
+        }
+    }
+}
+
+fn render_explorer_scatter(
+    points: &[crate::analytics::SessionScatterPoint],
+    area: Rect,
+    frame: &mut ftui::Frame,
+) {
+    if area.height < 4 || area.width < 24 {
+        return;
+    }
+    if points.is_empty() {
+        Paragraph::new(" Scatter: no per-session data")
+            .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
+            .render(area, frame);
+        return;
+    }
+
+    let chunks = Flex::vertical()
+        .constraints([Constraint::Fixed(1), Constraint::Min(3)])
+        .split(area);
+
+    let valid: Vec<&crate::analytics::SessionScatterPoint> = points
+        .iter()
+        .filter(|p| p.message_count > 0 && p.api_tokens_total >= 0)
+        .collect();
+    if valid.is_empty() {
+        Paragraph::new(" Scatter: no positive session points")
+            .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
+            .render(area, frame);
+        return;
+    }
+
+    let avg_messages =
+        valid.iter().map(|p| p.message_count as f64).sum::<f64>() / valid.len() as f64;
+    let avg_tokens =
+        valid.iter().map(|p| p.api_tokens_total as f64).sum::<f64>() / valid.len() as f64;
+    let avg_efficiency = if avg_messages > 0.0 {
+        avg_tokens / avg_messages
+    } else {
+        0.0
+    };
+    let header = format!(
+        " Scatter: session tokens vs messages ({})  avg tok/msg {}",
+        valid.len(),
+        format_compact(avg_efficiency.round() as i64)
+    );
+    Paragraph::new(header)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(160, 170, 185)))
+        .render(chunks[0], frame);
+
+    let plot_area = chunks[1];
+    if plot_area.width < 4 || plot_area.height < 2 {
+        return;
+    }
+    let mut painter = Painter::for_area(plot_area, CanvasMode::HalfBlock);
+    let (px_w, px_h) = painter.size();
+    if px_w < 3 || px_h < 3 {
+        return;
+    }
+    let px_w = i32::from(px_w);
+    let px_h = i32::from(px_h);
+
+    let max_messages = valid
+        .iter()
+        .map(|p| p.message_count)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
+    let max_tokens = valid
+        .iter()
+        .map(|p| p.api_tokens_total)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
+    let to_px = |messages: f64, tokens: f64| -> (i32, i32) {
+        let x = ((messages / max_messages) * (px_w as f64 - 1.0)).round() as i32;
+        let y = (((max_tokens - tokens) / max_tokens) * (px_h as f64 - 1.0)).round() as i32;
+        (x.clamp(0, px_w - 1), y.clamp(0, px_h - 1))
+    };
+
+    // Axes and average guides.
+    let baseline = px_h - 1;
+    painter.line_colored(
+        0,
+        baseline,
+        px_w - 1,
+        baseline,
+        Some(PackedRgba::rgb(90, 95, 110)),
+    );
+    painter.line_colored(0, 0, 0, px_h - 1, Some(PackedRgba::rgb(90, 95, 110)));
+    let (avg_x, avg_y) = to_px(avg_messages, avg_tokens);
+    painter.line_colored(
+        avg_x,
+        0,
+        avg_x,
+        px_h - 1,
+        Some(PackedRgba::rgb(110, 120, 135)),
+    );
+    painter.line_colored(
+        0,
+        avg_y,
+        px_w - 1,
+        avg_y,
+        Some(PackedRgba::rgb(110, 120, 135)),
+    );
+
+    for point in valid {
+        let ratio = point.api_tokens_total as f64 / point.message_count.max(1) as f64;
+        let color = if ratio > avg_efficiency * 1.25 {
+            PackedRgba::rgb(255, 150, 60)
+        } else if ratio < avg_efficiency * 0.75 {
+            PackedRgba::rgb(90, 220, 120)
+        } else {
+            PackedRgba::rgb(120, 190, 255)
+        };
+        let (x, y) = to_px(point.message_count as f64, point.api_tokens_total as f64);
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if dx * dx + dy * dy <= 1 {
+                    painter.point_colored(x + dx, y + dy, color);
+                }
+            }
+        }
+    }
+
+    let canvas = CanvasRef::from_painter(&painter)
+        .style(ftui::Style::new().fg(PackedRgba::rgb(170, 180, 200)));
+    canvas.render(plot_area, frame);
+}
+
+fn dim_color(color: PackedRgba, factor: f32) -> PackedRgba {
+    let f = factor.clamp(0.0, 1.0);
+    PackedRgba::rgb(
+        (color.r() as f32 * f) as u8,
+        (color.g() as f32 * f) as u8,
+        (color.b() as f32 * f) as u8,
+    )
+}
+
+fn format_explorer_metric_value(metric: ExplorerMetric, value: f64) -> String {
+    match metric {
+        ExplorerMetric::Cost => format!("${value:.2}"),
+        _ => format_compact(value.round() as i64),
+    }
+}
+
+fn build_explorer_annotation_line(
+    metric: ExplorerMetric,
+    metric_data: &[(String, f64)],
+    overlay_labels: &[String],
+) -> String {
+    if metric_data.is_empty() {
+        return " No explorer data".to_string();
+    }
+    let mut peak_idx = 0usize;
+    let mut peak_val = metric_data[0].1;
+    for (idx, (_, value)) in metric_data.iter().enumerate() {
+        if *value > peak_val {
+            peak_val = *value;
+            peak_idx = idx;
+        }
+    }
+    let avg = metric_data.iter().map(|(_, value)| *value).sum::<f64>() / metric_data.len() as f64;
+    let first = metric_data.first().map(|(_, v)| *v).unwrap_or(0.0);
+    let last = metric_data.last().map(|(_, v)| *v).unwrap_or(0.0);
+    let trend_pct = if first.abs() > f64::EPSILON {
+        ((last - first) / first) * 100.0
+    } else {
+        0.0
+    };
+
+    let mut line = format!(
+        " Peak {} ({})  |  Avg {}  |  Trend {:+.1}%",
+        format_explorer_metric_value(metric, peak_val),
+        metric_data
+            .get(peak_idx)
+            .map(|(label, _)| label.as_str())
+            .unwrap_or("-"),
+        format_explorer_metric_value(metric, avg),
+        trend_pct
+    );
+    if !overlay_labels.is_empty() {
+        let preview = overlay_labels
+            .iter()
+            .take(3)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        line.push_str(&format!("  |  Top overlay: {preview}"));
+    }
+    line
 }
 
 /// Get the daily series data and color for a given explorer metric.
@@ -2258,6 +2771,42 @@ mod tests {
         assert_eq!(format_compact(10_000), "10.0K");
         assert_eq!(format_compact(1_500_000), "1.5M");
         assert_eq!(format_compact(2_300_000_000), "2.3B");
+    }
+
+    #[test]
+    fn format_explorer_metric_value_cost_is_currency() {
+        assert_eq!(
+            format_explorer_metric_value(ExplorerMetric::Cost, 12.3456),
+            "$12.35"
+        );
+    }
+
+    #[test]
+    fn build_explorer_annotation_line_contains_peak_avg_trend() {
+        let metric_data = vec![
+            ("2026-02-01".to_string(), 100.0),
+            ("2026-02-02".to_string(), 300.0),
+            ("2026-02-03".to_string(), 200.0),
+        ];
+        let line = build_explorer_annotation_line(
+            ExplorerMetric::ApiTokens,
+            &metric_data,
+            &["codex".to_string(), "claude_code".to_string()],
+        );
+        assert!(line.contains("Peak"));
+        assert!(line.contains("Avg"));
+        assert!(line.contains("Trend"));
+        assert!(line.contains("2026-02-02"));
+        assert!(line.contains("Top overlay: codex"));
+    }
+
+    #[test]
+    fn dim_color_scales_channels_down() {
+        let c = PackedRgba::rgb(200, 100, 50);
+        let d = dim_color(c, 0.5);
+        assert_eq!(d.r(), 100);
+        assert_eq!(d.g(), 50);
+        assert_eq!(d.b(), 25);
     }
 
     #[test]
