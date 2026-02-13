@@ -91,7 +91,7 @@ curl -sS -X POST http://127.0.0.1:8765/mcp -H 'Content-Type: application/json' -
 
 # Register agent
 curl -sS -X POST http://127.0.0.1:8765/mcp -H 'Content-Type: application/json' -d \
-'{"jsonrpc":"2.0","id":"register","method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/data/projects/coding_agent_session_search","program":"codex","model":"gpt-5"}}}'
+'{"jsonrpc":"2.0","id":"register","method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/data/projects/coding_agent_session_search","program":"codex","model":"gpt-5","name":"YourAgentName"}}}'
 
 # Send message
 curl -sS -X POST http://127.0.0.1:8765/mcp -H 'Content-Type: application/json' -d \

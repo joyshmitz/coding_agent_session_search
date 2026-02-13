@@ -11922,6 +11922,14 @@ impl super::ftui_adapter::Model for CassApp {
                 bytes_downloaded,
                 total,
             } => {
+                // Respect explicit non-download semantic modes and ignore stale
+                // download lifecycle events that may arrive out of order.
+                if matches!(
+                    self.semantic_availability,
+                    SemanticAvailability::HashFallback | SemanticAvailability::Disabled { .. }
+                ) {
+                    return ftui::Cmd::none();
+                }
                 let progress_pct = if total == 0 {
                     0
                 } else {
@@ -11944,6 +11952,12 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::ModelDownloadCompleted => {
+                if matches!(
+                    self.semantic_availability,
+                    SemanticAvailability::HashFallback | SemanticAvailability::Disabled { .. }
+                ) {
+                    return ftui::Cmd::none();
+                }
                 if self.show_consent_dialog {
                     self.show_consent_dialog = false;
                     self.focus_manager.pop_trap();
@@ -11961,6 +11975,12 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::ModelDownloadFailed(err) => {
+                if matches!(
+                    self.semantic_availability,
+                    SemanticAvailability::HashFallback | SemanticAvailability::Disabled { .. }
+                ) {
+                    return ftui::Cmd::none();
+                }
                 if self.show_consent_dialog {
                     self.show_consent_dialog = false;
                     self.focus_manager.pop_trap();
@@ -11974,6 +11994,12 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::ModelDownloadCancelled => {
+                if matches!(
+                    self.semantic_availability,
+                    SemanticAvailability::HashFallback | SemanticAvailability::Disabled { .. }
+                ) {
+                    return ftui::Cmd::none();
+                }
                 if self.show_consent_dialog {
                     self.show_consent_dialog = false;
                     self.focus_manager.pop_trap();
@@ -15763,6 +15789,44 @@ mod tests {
         ));
         assert!(app.status.contains("hash embedder fallback"));
         assert_eq!(app.toast_manager.len(), 1);
+    }
+
+    #[test]
+    fn model_download_events_do_not_override_hash_fallback() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::HashModeAccepted);
+        let status_after_hash = app.status.clone();
+
+        let _ = app.update(CassMsg::ModelDownloadProgress {
+            bytes_downloaded: 10,
+            total: 100,
+        });
+        assert!(matches!(
+            app.semantic_availability,
+            SemanticAvailability::HashFallback
+        ));
+        assert_eq!(app.status, status_after_hash);
+
+        let _ = app.update(CassMsg::ModelDownloadCompleted);
+        assert!(matches!(
+            app.semantic_availability,
+            SemanticAvailability::HashFallback
+        ));
+        assert_eq!(app.status, status_after_hash);
+
+        let _ = app.update(CassMsg::ModelDownloadFailed("late failure".to_string()));
+        assert!(matches!(
+            app.semantic_availability,
+            SemanticAvailability::HashFallback
+        ));
+        assert_eq!(app.status, status_after_hash);
+
+        let _ = app.update(CassMsg::ModelDownloadCancelled);
+        assert!(matches!(
+            app.semantic_availability,
+            SemanticAvailability::HashFallback
+        ));
+        assert_eq!(app.status, status_after_hash);
     }
 
     #[test]

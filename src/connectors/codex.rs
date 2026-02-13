@@ -126,6 +126,13 @@ impl CodexConnector {
     }
 }
 
+fn update_time_bounds(started_at: &mut Option<i64>, ended_at: &mut Option<i64>, ts: Option<i64>) {
+    if let Some(ts) = ts {
+        *started_at = Some(started_at.map_or(ts, |curr| curr.min(ts)));
+        *ended_at = Some(ended_at.map_or(ts, |curr| curr.max(ts)));
+    }
+}
+
 impl Connector for CodexConnector {
     fn detect(&self) -> DetectionResult {
         let home = Self::home();
@@ -248,7 +255,7 @@ impl Connector for CodexConnector {
                                         .and_then(|v| v.as_str())
                                         .map(PathBuf::from);
                                 }
-                                started_at = started_at.or(created);
+                                update_time_bounds(&mut started_at, &mut ended_at, created);
                             }
                             "response_item" => {
                                 // Main message entries with nested payload
@@ -267,8 +274,7 @@ impl Connector for CodexConnector {
                                         continue;
                                     }
 
-                                    started_at = started_at.or(created);
-                                    ended_at = created.or(ended_at);
+                                    update_time_bounds(&mut started_at, &mut ended_at, created);
 
                                     messages.push(NormalizedMessage {
                                         idx: 0, // will be re-assigned after filtering
@@ -293,8 +299,11 @@ impl Connector for CodexConnector {
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("");
                                             if !text.is_empty() {
-                                                started_at = started_at.or(created);
-                                                ended_at = created.or(ended_at);
+                                                update_time_bounds(
+                                                    &mut started_at,
+                                                    &mut ended_at,
+                                                    created,
+                                                );
                                                 messages.push(NormalizedMessage {
                                                     idx: 0, // will be re-assigned after filtering
                                                     role: "user".to_string(),
@@ -313,8 +322,11 @@ impl Connector for CodexConnector {
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("");
                                             if !text.is_empty() {
-                                                started_at = started_at.or(created);
-                                                ended_at = created.or(ended_at);
+                                                update_time_bounds(
+                                                    &mut started_at,
+                                                    &mut ended_at,
+                                                    created,
+                                                );
                                                 messages.push(NormalizedMessage {
                                                     idx: 0, // will be re-assigned after filtering
                                                     role: "assistant".to_string(),
@@ -390,8 +402,7 @@ impl Connector for CodexConnector {
                             // NOTE: Do NOT filter individual messages by timestamp.
                             // File-level check is sufficient for incremental indexing.
 
-                            started_at = started_at.or(created);
-                            ended_at = created.or(ended_at);
+                            update_time_bounds(&mut started_at, &mut ended_at, created);
 
                             messages.push(NormalizedMessage {
                                 idx: 0, // will be re-assigned after filtering
@@ -1240,6 +1251,32 @@ not valid json at all
         assert!(convs[0].started_at.is_some());
         assert!(convs[0].ended_at.is_some());
         assert!(convs[0].messages[0].created_at.is_some());
+    }
+
+    #[test]
+    fn scan_tracks_timestamp_bounds_for_out_of_order_events() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","timestamp":"2025-12-01T11:00:00Z","payload":{"role":"assistant","content":"Second chronologically"}}
+{"type":"response_item","timestamp":"2025-12-01T10:00:00Z","payload":{"role":"user","content":"First chronologically"}}
+"#;
+        fs::write(sessions.join("rollout-out-of-order.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        let conv = &convs[0];
+        let expected_start = conv.messages.iter().filter_map(|m| m.created_at).min();
+        let expected_end = conv.messages.iter().filter_map(|m| m.created_at).max();
+
+        assert_eq!(conv.started_at, expected_start);
+        assert_eq!(conv.ended_at, expected_end);
+        assert!(conv.ended_at >= conv.started_at);
     }
 
     // =====================================================
