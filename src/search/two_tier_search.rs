@@ -212,6 +212,22 @@ pub struct TwoTierIndex {
 }
 
 impl TwoTierIndex {
+    fn fast_dimension(&self) -> usize {
+        if self.metadata.doc_count == 0 {
+            0
+        } else {
+            self.fast_embeddings.len() / self.metadata.doc_count
+        }
+    }
+
+    fn quality_dimension(&self) -> usize {
+        if self.metadata.doc_count == 0 {
+            0
+        } else {
+            self.quality_embeddings.len() / self.metadata.doc_count
+        }
+    }
+
     /// Build a two-tier index from entries.
     pub fn build(
         fast_embedder_id: impl Into<String>,
@@ -340,7 +356,16 @@ impl TwoTierIndex {
             return Vec::new();
         }
 
-        let dim = query_vec.len();
+        let dim = self.fast_dimension();
+        if query_vec.len() != dim {
+            warn!(
+                expected_dimension = dim,
+                got_dimension = query_vec.len(),
+                "Fast query embedding dimension mismatch; returning no results"
+            );
+            return Vec::new();
+        }
+
         let mut heap = BinaryHeap::with_capacity(k + 1);
 
         for idx in 0..self.metadata.doc_count {
@@ -369,7 +394,16 @@ impl TwoTierIndex {
             return Vec::new();
         }
 
-        let dim = query_vec.len();
+        let dim = self.quality_dimension();
+        if query_vec.len() != dim {
+            warn!(
+                expected_dimension = dim,
+                got_dimension = query_vec.len(),
+                "Quality query embedding dimension mismatch; returning no results"
+            );
+            return Vec::new();
+        }
+
         let mut heap = BinaryHeap::with_capacity(k + 1);
 
         for idx in 0..self.metadata.doc_count {
@@ -394,7 +428,16 @@ impl TwoTierIndex {
 
     /// Get quality scores for a set of document indices.
     pub fn quality_scores_for_indices(&self, query_vec: &[f32], indices: &[usize]) -> Vec<f32> {
-        let dim = query_vec.len();
+        let dim = self.quality_dimension();
+        if query_vec.len() != dim {
+            warn!(
+                expected_dimension = dim,
+                got_dimension = query_vec.len(),
+                "Quality query embedding dimension mismatch during refinement; using zero scores"
+            );
+            return vec![0.0; indices.len()];
+        }
+
         indices
             .iter()
             .map(|&idx| {
@@ -574,6 +617,20 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.phase {
             0 => {
+                if self.searcher.config.quality_only {
+                    self.phase = 2;
+                    let start = Instant::now();
+                    return match self.searcher.search_quality_only(&self.query, self.k) {
+                        Ok(results) => Some(SearchPhase::Refined {
+                            results,
+                            latency_ms: start.elapsed().as_millis() as u64,
+                        }),
+                        Err(e) => Some(SearchPhase::RefinementFailed {
+                            error: e.to_string(),
+                        }),
+                    };
+                }
+
                 // Phase 1: Fast search
                 self.phase = 1;
                 let start = Instant::now();
@@ -597,7 +654,9 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                     Err(e) => {
                         warn!(error = %e, "Fast embedding failed");
                         self.phase = 2; // Skip to end
-                        None
+                        Some(SearchPhase::RefinementFailed {
+                            error: format!("fast embedding failed: {e}"),
+                        })
                     }
                 }
             }
@@ -775,6 +834,72 @@ fn dot_product_f16(a: &[f16], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::daemon_client::{DaemonClient, DaemonError};
+    use crate::search::embedder::{Embedder, EmbedderError};
+    use crate::search::hash_embedder::HashEmbedder;
+    use std::sync::Arc;
+
+    struct TestDaemon {
+        dim: usize,
+        available: bool,
+    }
+
+    struct FailingEmbedder {
+        dim: usize,
+    }
+
+    impl Embedder for FailingEmbedder {
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedderError> {
+            Err(EmbedderError::EmbeddingFailed(
+                "synthetic fast embed failure".to_string(),
+            ))
+        }
+
+        fn dimension(&self) -> usize {
+            self.dim
+        }
+
+        fn id(&self) -> &str {
+            "failing-embedder"
+        }
+
+        fn is_semantic(&self) -> bool {
+            false
+        }
+    }
+
+    impl DaemonClient for TestDaemon {
+        fn id(&self) -> &str {
+            "test-daemon"
+        }
+
+        fn is_available(&self) -> bool {
+            self.available
+        }
+
+        fn embed(&self, _text: &str, _request_id: &str) -> Result<Vec<f32>, DaemonError> {
+            Ok(vec![1.0; self.dim])
+        }
+
+        fn embed_batch(
+            &self,
+            texts: &[&str],
+            _request_id: &str,
+        ) -> Result<Vec<Vec<f32>>, DaemonError> {
+            Ok(vec![vec![1.0; self.dim]; texts.len()])
+        }
+
+        fn rerank(
+            &self,
+            _query: &str,
+            _documents: &[&str],
+            _request_id: &str,
+        ) -> Result<Vec<f32>, DaemonError> {
+            Err(DaemonError::Unavailable(
+                "rerank unsupported in test daemon".to_string(),
+            ))
+        }
+    }
 
     fn make_test_entries(count: usize, fast_dim: usize, quality_dim: usize) -> Vec<TwoTierEntry> {
         (0..count)
@@ -998,5 +1123,110 @@ mod tests {
         let scores = index.quality_scores_for_indices(&query, &indices);
 
         assert_eq!(scores.len(), 3);
+    }
+
+    #[test]
+    fn test_search_fast_dimension_mismatch_returns_empty() {
+        let config = TwoTierConfig::default();
+        let entries = make_test_entries(5, config.fast_dimension, config.quality_dimension);
+        let index = TwoTierIndex::build("fast-256", "quality-384", &config, entries).unwrap();
+
+        let bad_query = vec![0.5; config.fast_dimension.saturating_sub(1)];
+        let results = index.search_fast(&bad_query, 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_quality_dimension_mismatch_returns_empty() {
+        let config = TwoTierConfig::default();
+        let entries = make_test_entries(5, config.fast_dimension, config.quality_dimension);
+        let index = TwoTierIndex::build("fast-256", "quality-384", &config, entries).unwrap();
+
+        let bad_query = vec![0.5; config.quality_dimension.saturating_sub(1)];
+        let results = index.search_quality(&bad_query, 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_quality_scores_for_indices_dimension_mismatch_returns_zeros() {
+        let config = TwoTierConfig::default();
+        let entries = make_test_entries(5, config.fast_dimension, config.quality_dimension);
+        let index = TwoTierIndex::build("fast-256", "quality-384", &config, entries).unwrap();
+
+        let bad_query = vec![0.5; config.quality_dimension.saturating_sub(1)];
+        let scores = index.quality_scores_for_indices(&bad_query, &[0, 2, 4]);
+        assert_eq!(scores, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_quality_only_mode_emits_only_refined_phase() {
+        let config = TwoTierConfig {
+            fast_dimension: 8,
+            quality_dimension: 8,
+            quality_only: true,
+            ..Default::default()
+        };
+        let entries = make_test_entries(4, config.fast_dimension, config.quality_dimension);
+        let index = TwoTierIndex::build("fast-8", "quality-8", &config, entries).unwrap();
+
+        let fast_embedder: Arc<dyn Embedder> = Arc::new(HashEmbedder::new(config.fast_dimension));
+        let daemon = Arc::new(TestDaemon {
+            dim: config.quality_dimension,
+            available: true,
+        });
+        let searcher = TwoTierSearcher::new(&index, fast_embedder, Some(daemon), config);
+        let phases: Vec<SearchPhase> = searcher.search("query", 3).collect();
+
+        assert_eq!(phases.len(), 1);
+        assert!(matches!(phases[0], SearchPhase::Refined { .. }));
+    }
+
+    #[test]
+    fn test_quality_only_mode_without_daemon_reports_failure() {
+        let config = TwoTierConfig {
+            fast_dimension: 8,
+            quality_dimension: 8,
+            quality_only: true,
+            ..Default::default()
+        };
+        let entries = make_test_entries(4, config.fast_dimension, config.quality_dimension);
+        let index = TwoTierIndex::build("fast-8", "quality-8", &config, entries).unwrap();
+
+        let fast_embedder: Arc<dyn Embedder> = Arc::new(HashEmbedder::new(config.fast_dimension));
+        let daemon = Arc::new(TestDaemon {
+            dim: config.quality_dimension,
+            available: false,
+        });
+        let searcher = TwoTierSearcher::new(&index, fast_embedder, Some(daemon), config);
+        let phases: Vec<SearchPhase> = searcher.search("query", 3).collect();
+
+        assert_eq!(phases.len(), 1);
+        assert!(matches!(phases[0], SearchPhase::RefinementFailed { .. }));
+    }
+
+    #[test]
+    fn test_fast_embedding_failure_yields_failure_phase() {
+        let config = TwoTierConfig {
+            fast_dimension: 8,
+            quality_dimension: 8,
+            fast_only: false,
+            quality_only: false,
+            ..Default::default()
+        };
+        let entries = make_test_entries(4, config.fast_dimension, config.quality_dimension);
+        let index = TwoTierIndex::build("fast-8", "quality-8", &config, entries).unwrap();
+
+        let fast_embedder: Arc<dyn Embedder> = Arc::new(FailingEmbedder {
+            dim: config.fast_dimension,
+        });
+        let daemon = Arc::new(TestDaemon {
+            dim: config.quality_dimension,
+            available: true,
+        });
+        let searcher = TwoTierSearcher::new(&index, fast_embedder, Some(daemon), config);
+        let phases: Vec<SearchPhase> = searcher.search("query", 3).collect();
+
+        assert_eq!(phases.len(), 1);
+        assert!(matches!(phases[0], SearchPhase::RefinementFailed { .. }));
     }
 }

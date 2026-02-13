@@ -374,11 +374,16 @@ where
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let file_type = metadata.file_type();
 
-        if path.is_dir() {
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() {
             visit_files(&path, f)?;
-        } else {
-            let metadata = std::fs::metadata(&path)?;
+        } else if file_type.is_file() {
             f(&path, metadata.len())?;
         }
     }
@@ -553,5 +558,44 @@ mod tests {
             estimate.chunk_count, 2,
             "Exactly two chunks' worth should be 2 chunks, not 3"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_visit_files_skips_symlink_paths() {
+        use std::collections::HashSet;
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let src = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        std::fs::write(src.path().join("root.txt"), "root").unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::fs::create_dir_all(outside.path().join("nested")).unwrap();
+        std::fs::write(outside.path().join("nested/hidden.txt"), "hidden").unwrap();
+
+        symlink(
+            outside.path().join("secret.txt"),
+            src.path().join("linked-file.txt"),
+        )
+        .unwrap();
+        symlink(outside.path().join("nested"), src.path().join("linked-dir")).unwrap();
+
+        let mut visited = HashSet::new();
+        visit_files(src.path(), &mut |path, _size| {
+            visited.insert(
+                path.strip_prefix(src.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(visited.contains("root.txt"));
+        assert!(!visited.contains("linked-file.txt"));
+        assert!(!visited.iter().any(|p| p.starts_with("linked-dir/")));
     }
 }

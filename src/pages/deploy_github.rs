@@ -558,10 +558,16 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&src_path)?;
+        let file_type = metadata.file_type();
 
-        if src_path.is_dir() {
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
+        } else if file_type.is_file() {
             std::fs::copy(&src_path, &dst_path)?;
         }
     }
@@ -679,11 +685,16 @@ fn visit_files(dir: &Path, f: &mut impl FnMut(&Path, u64)) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let file_type = metadata.file_type();
 
-        if path.is_dir() {
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() {
             visit_files(&path, f)?;
-        } else {
-            let metadata = std::fs::metadata(&path)?;
+        } else if file_type.is_file() {
             f(&path, metadata.len());
         }
     }
@@ -774,5 +785,68 @@ mod tests {
 
         assert!(dst.path().join("root.txt").exists());
         assert!(dst.path().join("subdir/nested.txt").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_copy_dir_recursive_skips_symlinks() {
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        std::fs::write(src.path().join("root.txt"), "root").unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        symlink(
+            outside.path().join("secret.txt"),
+            src.path().join("linked-file.txt"),
+        )
+        .unwrap();
+        symlink(outside.path(), src.path().join("linked-dir")).unwrap();
+
+        copy_dir_recursive(src.path(), dst.path()).unwrap();
+
+        assert!(dst.path().join("root.txt").exists());
+        assert!(!dst.path().join("linked-file.txt").exists());
+        assert!(!dst.path().join("linked-dir").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_visit_files_skips_symlink_paths() {
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let src = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        std::fs::write(src.path().join("root.txt"), "root").unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::fs::create_dir_all(outside.path().join("nested")).unwrap();
+        std::fs::write(outside.path().join("nested/hidden.txt"), "hidden").unwrap();
+
+        symlink(
+            outside.path().join("secret.txt"),
+            src.path().join("linked-file.txt"),
+        )
+        .unwrap();
+        symlink(outside.path().join("nested"), src.path().join("linked-dir")).unwrap();
+
+        let mut visited = Vec::new();
+        visit_files(src.path(), &mut |path, _size| {
+            visited.push(
+                path.strip_prefix(src.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        })
+        .unwrap();
+
+        assert!(visited.contains(&"root.txt".to_string()));
+        assert!(!visited.contains(&"linked-file.txt".to_string()));
+        assert!(!visited.iter().any(|p| p.starts_with("linked-dir/")));
     }
 }

@@ -468,12 +468,41 @@ fn check_project_exists(
         .map(|out| {
             if out.status.success() {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                stdout.lines().any(|line| line.contains(project_name))
+                output_contains_project(&stdout, project_name)
             } else {
                 false
             }
         })
         .unwrap_or(false)
+}
+
+fn output_contains_project(stdout: &str, project_name: &str) -> bool {
+    stdout.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('┌')
+            || trimmed.starts_with('├')
+            || trimmed.starts_with('└')
+        {
+            return false;
+        }
+
+        // Wrangler table output usually places the project name in the first column.
+        let trimmed_edges = trimmed.trim_matches(|c| matches!(c, '│' | '|'));
+        let first_cell = trimmed_edges
+            .split(['│', '|'])
+            .next()
+            .unwrap_or(trimmed_edges)
+            .trim();
+        if first_cell == project_name {
+            return true;
+        }
+
+        // Fallback for non-table output.
+        trimmed_edges
+            .split_whitespace()
+            .any(|token| token == project_name)
+    })
 }
 
 /// Create a new Cloudflare Pages project
@@ -958,17 +987,15 @@ fn upload_assets(
     file_map: &HashMap<String, AssetFile>,
     skip_caching: bool,
 ) -> Result<()> {
-    let hashes: Vec<String> = file_map.values().map(|file| file.hash.clone()).collect();
+    let mut hashes: Vec<String> = file_map.values().map(|file| file.hash.clone()).collect();
+    hashes.sort();
+    hashes.dedup();
     let missing_hashes = if skip_caching {
         hashes.clone()
     } else {
         check_missing_hashes(client, base_url, jwt, &hashes)?
     };
-    let missing_set: std::collections::HashSet<String> = missing_hashes.into_iter().collect();
-    let mut missing_files: Vec<&AssetFile> = file_map
-        .values()
-        .filter(|file| missing_set.contains(&file.hash))
-        .collect();
+    let mut missing_files = select_missing_files(file_map, &missing_hashes);
     missing_files.sort_by_key(|file| std::cmp::Reverse(file.size_bytes));
 
     let buckets = build_upload_buckets(&missing_files);
@@ -1037,6 +1064,24 @@ fn build_upload_buckets<'a>(files: &[&'a AssetFile]) -> Vec<Vec<&'a AssetFile>> 
         .filter(|bucket| !bucket.files.is_empty())
         .map(|bucket| bucket.files)
         .collect()
+}
+
+fn select_missing_files<'a>(
+    file_map: &'a HashMap<String, AssetFile>,
+    missing_hashes: &[String],
+) -> Vec<&'a AssetFile> {
+    let missing_set: std::collections::HashSet<&str> =
+        missing_hashes.iter().map(String::as_str).collect();
+    let mut by_hash: HashMap<String, &'a AssetFile> = HashMap::new();
+
+    for file in file_map.values() {
+        if missing_set.contains(file.hash.as_str()) {
+            // Only one upload per content hash is needed.
+            by_hash.entry(file.hash.clone()).or_insert(file);
+        }
+    }
+
+    by_hash.into_values().collect()
 }
 
 fn upload_bucket(client: &Client, base_url: &str, jwt: &str, bucket: &[&AssetFile]) -> Result<()> {
@@ -1135,10 +1180,16 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&src_path)?;
+        let file_type = metadata.file_type();
 
-        if src_path.is_dir() {
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
+        } else if file_type.is_file() {
             std::fs::copy(&src_path, &dst_path)?;
         }
     }
@@ -1256,5 +1307,87 @@ mod tests {
 
         assert!(dst.path().join("root.txt").exists());
         assert!(dst.path().join("subdir/nested.txt").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_copy_dir_recursive_skips_symlinks() {
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        std::fs::write(src.path().join("root.txt"), "root").unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        symlink(
+            outside.path().join("secret.txt"),
+            src.path().join("linked-file.txt"),
+        )
+        .unwrap();
+        symlink(outside.path(), src.path().join("linked-dir")).unwrap();
+
+        copy_dir_recursive(src.path(), dst.path()).unwrap();
+
+        assert!(dst.path().join("root.txt").exists());
+        assert!(!dst.path().join("linked-file.txt").exists());
+        assert!(!dst.path().join("linked-dir").exists());
+    }
+
+    #[test]
+    fn test_output_contains_project_exact_match() {
+        let list_output = "\
+┌──────────────┬────────────┐
+│ Name         │ Production │
+├──────────────┼────────────┤
+│ cass-archive │ main       │
+│ cass-prod    │ main       │
+└──────────────┴────────────┘";
+
+        assert!(output_contains_project(list_output, "cass-archive"));
+        assert!(!output_contains_project(list_output, "cass"));
+    }
+
+    #[test]
+    fn test_select_missing_files_dedupes_by_hash() {
+        let mut file_map = HashMap::new();
+        file_map.insert(
+            "a.txt".to_string(),
+            AssetFile {
+                path: PathBuf::from("/tmp/a.txt"),
+                content_type: "text/plain".to_string(),
+                size_bytes: 10,
+                hash: "hash-shared".to_string(),
+            },
+        );
+        file_map.insert(
+            "b.txt".to_string(),
+            AssetFile {
+                path: PathBuf::from("/tmp/b.txt"),
+                content_type: "text/plain".to_string(),
+                size_bytes: 10,
+                hash: "hash-shared".to_string(),
+            },
+        );
+        file_map.insert(
+            "c.txt".to_string(),
+            AssetFile {
+                path: PathBuf::from("/tmp/c.txt"),
+                content_type: "text/plain".to_string(),
+                size_bytes: 8,
+                hash: "hash-unique".to_string(),
+            },
+        );
+
+        let missing = vec!["hash-shared".to_string(), "hash-unique".to_string()];
+        let selected = select_missing_files(&file_map, &missing);
+
+        // Two unique hashes should produce two uploads, not three files.
+        assert_eq!(selected.len(), 2);
+        let hashes: std::collections::HashSet<_> =
+            selected.iter().map(|f| f.hash.as_str()).collect();
+        assert!(hashes.contains("hash-shared"));
+        assert!(hashes.contains("hash-unique"));
     }
 }
