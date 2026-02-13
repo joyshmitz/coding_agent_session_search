@@ -805,6 +805,10 @@ pub struct DrilldownContext {
     pub until_ms: Option<i64>,
     /// Agent slug to filter by (from breakdowns / tools selection).
     pub agent: Option<String>,
+    /// Workspace path to filter by (from workspace breakdown selection).
+    pub workspace: Option<String>,
+    /// Source filter to apply (from source breakdown selection).
+    pub source_filter: Option<SourceFilter>,
     /// Model family to filter by (from cost / models selection).
     pub model: Option<String>,
 }
@@ -3557,6 +3561,10 @@ pub struct CassApp {
     pub cached_detail: Option<(String, ConversationView)>,
     /// Whether word-wrap is enabled in the detail pane.
     pub detail_wrap: bool,
+    /// Indices of tool/system messages that are collapsed in the detail modal.
+    /// When a message index is in this set its content is hidden behind a
+    /// one-line summary bar; pressing Enter/Space toggles it.
+    pub collapsed_tools: HashSet<usize>,
 
     // -- Display & theming ------------------------------------------------
     /// Whether dark theme is active.
@@ -3805,6 +3813,7 @@ impl Default for CassApp {
             modal_scroll: 0,
             cached_detail: None,
             detail_wrap: true,
+            collapsed_tools: HashSet::new(),
             theme_dark: true,
             theme_preset: UiThemePreset::Dark,
             style_options: StyleOptions::from_env(),
@@ -5738,7 +5747,8 @@ impl CassApp {
 
         // If we have a cached conversation, render full messages
         if let Some((_, ref cv)) = self.cached_detail {
-            let md_renderer = MarkdownRenderer::new(styles.markdown_theme());
+            let md_renderer = MarkdownRenderer::new(styles.markdown_theme())
+                .with_syntax_theme(styles.syntax_highlight_theme());
 
             let msg_count = cv.messages.len();
             let subtle_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
@@ -5825,7 +5835,8 @@ impl CassApp {
                 &hit.content
             };
             if is_likely_markdown(content).is_likely() {
-                let md_renderer = MarkdownRenderer::new(styles.markdown_theme());
+                let md_renderer = MarkdownRenderer::new(styles.markdown_theme())
+                    .with_syntax_theme(styles.syntax_highlight_theme());
                 let rendered = md_renderer.render(content);
                 for line in rendered.into_iter() {
                     lines.push(line);
@@ -8142,6 +8153,8 @@ impl CassApp {
                     since_ms: Some(since),
                     until_ms: Some(until),
                     agent: None,
+                    workspace: None,
+                    source_filter: None,
                     model: None,
                 })
             }
@@ -8153,6 +8166,8 @@ impl CassApp {
                     since_ms: Some(since),
                     until_ms: Some(until),
                     agent: None,
+                    workspace: None,
+                    source_filter: None,
                     model: None,
                 })
             }
@@ -8165,25 +8180,30 @@ impl CassApp {
                             since_ms: base_since,
                             until_ms: base_until,
                             agent: Some(agent.clone()),
+                            workspace: None,
+                            source_filter: None,
                             model: None,
                         })
                     }
                     BreakdownTab::Workspace => {
-                        let (_ws, _) = data.workspace_tokens.get(idx)?;
-                        // Workspace drilldown inherits time filters only.
+                        let (workspace, _) = data.workspace_tokens.get(idx)?;
                         Some(DrilldownContext {
                             since_ms: base_since,
                             until_ms: base_until,
                             agent: None,
+                            workspace: Some(workspace.clone()),
+                            source_filter: None,
                             model: None,
                         })
                     }
                     BreakdownTab::Source => {
-                        let (_src, _) = data.source_tokens.get(idx)?;
+                        let (source_id, _) = data.source_tokens.get(idx)?;
                         Some(DrilldownContext {
                             since_ms: base_since,
                             until_ms: base_until,
                             agent: None,
+                            workspace: None,
+                            source_filter: Some(SourceFilter::SourceId(source_id.clone())),
                             model: None,
                         })
                     }
@@ -8193,6 +8213,8 @@ impl CassApp {
                             since_ms: base_since,
                             until_ms: base_until,
                             agent: None,
+                            workspace: None,
+                            source_filter: None,
                             model: Some(model.clone()),
                         })
                     }
@@ -8205,6 +8227,8 @@ impl CassApp {
                     since_ms: base_since,
                     until_ms: base_until,
                     agent: Some(row.key.clone()),
+                    workspace: None,
+                    source_filter: None,
                     model: None,
                 })
             }
@@ -8215,6 +8239,8 @@ impl CassApp {
                     since_ms: base_since,
                     until_ms: base_until,
                     agent: None,
+                    workspace: None,
+                    source_filter: None,
                     model: Some(model.clone()),
                 })
             }
@@ -8225,6 +8251,8 @@ impl CassApp {
                     since_ms: base_since,
                     until_ms: base_until,
                     agent: Some(agent.clone()),
+                    workspace: None,
+                    source_filter: None,
                     model: None,
                 })
             }
@@ -8235,6 +8263,8 @@ impl CassApp {
                     since_ms: base_since,
                     until_ms: base_until,
                     agent: Some(agent.clone()),
+                    workspace: None,
+                    source_filter: None,
                     model: None,
                 })
             }
@@ -8411,6 +8441,12 @@ pub enum CassMsg {
     DetailFindNavigated { forward: bool },
     /// Toggle JSON viewer tab (syntax-highlighted tree view).
     ToggleJsonView,
+    /// Toggle collapse for a tool/system message at the given index.
+    ToolCollapseToggled(usize),
+    /// Expand all collapsed tool/system messages.
+    ToolExpandAll,
+    /// Collapse all tool/system messages.
+    ToolCollapseAll,
 
     // -- Multi-select & bulk actions --------------------------------------
     /// Toggle select on the current item.
@@ -10936,9 +10972,23 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::DetailOpened => {
                 let focus_id = self.focus_manager.current();
                 let has_selected_hit = self.selected_hit().is_some();
+
+                // Re-entrant Enter while detail is already open should be a no-op.
+                // This avoids stacking duplicate focus traps on rapid key repeats.
+                if self.show_detail_modal {
+                    tracing::debug!(
+                        route = "detail_modal_noop",
+                        reason = "modal_already_open",
+                        focus_id = ?focus_id,
+                        detail_tab = ?self.detail_tab,
+                        "enter routing decision"
+                    );
+                    return ftui::Cmd::none();
+                }
+
                 // Enter should prioritize opening the selected hit in context.
                 // If there is no active hit, fall back to query submit behavior.
-                if !self.show_detail_modal && !has_selected_hit {
+                if !has_selected_hit {
                     tracing::debug!(
                         route = "query_submit_fallback",
                         reason = "no_selected_hit",
@@ -10949,16 +10999,10 @@ impl super::ftui_adapter::Model for CassApp {
                     return self.update(CassMsg::QuerySubmitted);
                 }
                 // Ensure Enter lands on the contextual conversation view.
-                if !self.show_detail_modal {
-                    self.detail_tab = DetailTab::Messages;
-                }
+                self.detail_tab = DetailTab::Messages;
                 tracing::debug!(
                     route = "detail_modal_open",
-                    reason = if self.show_detail_modal {
-                        "modal_already_open"
-                    } else {
-                        "selected_hit"
-                    },
+                    reason = "selected_hit",
                     focus_id = ?focus_id,
                     show_detail_modal = self.show_detail_modal,
                     detail_tab = ?self.detail_tab,
@@ -10991,8 +11035,13 @@ impl super::ftui_adapter::Model for CassApp {
                         self.detail_tab = DetailTab::Json;
                     }
                     self.detail_scroll = 0;
-                    self.show_detail_modal = true;
-                    self.focus_manager.push_trap(focus_ids::GROUP_DETAIL_MODAL);
+                    // Only push a focus trap when the modal is freshly opened;
+                    // avoid stacking duplicate traps on re-entry (e.g. pressing
+                    // 'J' while the detail modal is already visible).
+                    if !self.show_detail_modal {
+                        self.show_detail_modal = true;
+                        self.focus_manager.push_trap(focus_ids::GROUP_DETAIL_MODAL);
+                    }
                     self.focus_manager.focus(focus_ids::DETAIL_MODAL);
                 } else {
                     self.status = "No active result to view.".to_string();
@@ -11001,6 +11050,33 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::DetailWrapToggled => {
                 self.detail_wrap = !self.detail_wrap;
+                ftui::Cmd::none()
+            }
+            CassMsg::ToolCollapseToggled(idx) => {
+                if self.collapsed_tools.contains(&idx) {
+                    self.collapsed_tools.remove(&idx);
+                } else {
+                    self.collapsed_tools.insert(idx);
+                }
+                ftui::Cmd::none()
+            }
+            CassMsg::ToolExpandAll => {
+                self.collapsed_tools.clear();
+                ftui::Cmd::none()
+            }
+            CassMsg::ToolCollapseAll => {
+                // Collapse all tool/system messages from the cached detail.
+                if let Some((_, ref cv)) = self.cached_detail {
+                    for (idx, msg) in cv.messages.iter().enumerate() {
+                        if matches!(
+                            msg.role,
+                            crate::model::types::MessageRole::Tool
+                                | crate::model::types::MessageRole::System
+                        ) {
+                            self.collapsed_tools.insert(idx);
+                        }
+                    }
+                }
                 ftui::Cmd::none()
             }
             CassMsg::DetailFindToggled => {
@@ -11358,10 +11434,14 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::ViewRaw => {
                 if self.selected_hit().is_some() {
                     self.detail_tab = DetailTab::Raw;
-                    self.show_detail_modal = true;
                     self.detail_scroll = 0;
                     self.modal_scroll = 0;
-                    self.focus_manager.push_trap(focus_ids::GROUP_DETAIL_MODAL);
+                    // Guard against duplicate focus traps when modal is already
+                    // open (e.g. pressing 'v' while in the detail view).
+                    if !self.show_detail_modal {
+                        self.show_detail_modal = true;
+                        self.focus_manager.push_trap(focus_ids::GROUP_DETAIL_MODAL);
+                    }
                     self.focus_manager.focus(focus_ids::DETAIL_MODAL);
                 } else {
                     self.status = "No active result to view.".to_string();
@@ -13114,12 +13194,16 @@ impl super::ftui_adapter::Model for CassApp {
                     since_ms,
                     until_ms,
                     agent,
+                    workspace,
+                    source_filter: drill_source_filter,
                     model,
                 } = ctx;
                 tracing::debug!(
                     since_ms = ?since_ms,
                     until_ms = ?until_ms,
                     agent = ?agent,
+                    workspace = ?workspace,
+                    source_filter = ?drill_source_filter,
                     model = ?model,
                     "analytics drilldown requested"
                 );
@@ -13143,16 +13227,47 @@ impl super::ftui_adapter::Model for CassApp {
                     self.filters.agents.clear();
                     self.filters.agents.insert(agent);
                 }
-                // Clear query — user types next.
+                // Apply selected workspace filter on top of inherited globals.
+                if let Some(workspace) = workspace {
+                    self.filters.workspaces.clear();
+                    self.filters.workspaces.insert(workspace);
+                }
+                // Apply selected source filter on top of inherited globals.
+                if let Some(source_filter) = drill_source_filter {
+                    self.filters.source_filter = source_filter;
+                }
+                // Seed the query for model-driven drilldowns so Cost view
+                // selections immediately narrow to relevant sessions.
                 self.query.clear();
-                self.cursor_pos = 0;
+                if let Some(ref model_name) = model {
+                    self.query = model_name.clone();
+                }
+                self.cursor_pos = self.query.chars().count();
                 self.input_mode = InputMode::Query;
 
-                self.status = if let Some(model) = model {
-                    format!("Drilldown from analytics (model: {model}) — type a query or browse")
+                let mut origin_parts = Vec::new();
+                if let Some(ref agent) = self.filters.agents.iter().next()
+                    && self.filters.agents.len() == 1
+                {
+                    origin_parts.push(format!("agent: {agent}"));
+                }
+                if let Some(ref workspace) = self.filters.workspaces.iter().next()
+                    && self.filters.workspaces.len() == 1
+                {
+                    origin_parts.push(format!("workspace: {workspace}"));
+                }
+                if !self.filters.source_filter.is_all() {
+                    origin_parts.push(format!("source: {}", self.filters.source_filter));
+                }
+                if let Some(model) = model.as_ref() {
+                    origin_parts.push(format!("model: {model}"));
+                }
+                let suffix = if origin_parts.is_empty() {
+                    String::new()
                 } else {
-                    "Drilldown from analytics — type a query or browse".to_string()
+                    format!(" ({})", origin_parts.join(", "))
                 };
+                self.status = format!("Drilldown from analytics{suffix} — type a query or browse");
                 ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::ExplorerMetricCycled { forward } => {
@@ -13173,6 +13288,15 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     self.explorer_group_by.prev()
                 };
+                // Hourly timelines become noisy at broad ranges; selecting Hour
+                // defaults Explorer to the most useful dense window.
+                if self.explorer_group_by == crate::analytics::GroupBy::Hour {
+                    self.explorer_zoom = ExplorerZoom::Week;
+                    let (since_ms, until_ms) = self.explorer_zoom.to_range();
+                    self.analytics_filters.since_ms = since_ms;
+                    self.analytics_filters.until_ms = until_ms;
+                    self.status = "Explorer set to Hourly (last 7 days).".to_string();
+                }
                 // Invalidate cache so timeseries reloads with new granularity.
                 self.analytics_cache = None;
                 ftui::Cmd::none()
@@ -13183,6 +13307,19 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     self.explorer_zoom.prev()
                 };
+
+                // Hourly granularity is constrained to short windows.
+                if self.explorer_group_by == crate::analytics::GroupBy::Hour
+                    && matches!(
+                        self.explorer_zoom,
+                        ExplorerZoom::All | ExplorerZoom::Month | ExplorerZoom::Quarter
+                    )
+                {
+                    self.explorer_group_by = crate::analytics::GroupBy::Day;
+                    self.status = "Hourly Explorer supports up to 7 days; switched to Daily."
+                        .to_string();
+                }
+
                 let (since_ms, until_ms) = self.explorer_zoom.to_range();
                 self.analytics_filters.since_ms = since_ms;
                 self.analytics_filters.until_ms = until_ms;
@@ -20811,6 +20948,8 @@ mod tests {
             since_ms: Some(30_000),
             until_ms: Some(40_000),
             agent: None,
+            workspace: None,
+            source_filter: None,
             model: None,
         }));
 
@@ -20840,6 +20979,8 @@ mod tests {
             since_ms: None,
             until_ms: None,
             agent: Some("codex".into()),
+            workspace: None,
+            source_filter: None,
             model: None,
         }));
 
@@ -20857,6 +20998,8 @@ mod tests {
             since_ms: Some(1),
             until_ms: Some(2),
             agent: None,
+            workspace: None,
+            source_filter: None,
             model: None,
         }));
         assert!(matches!(extract_msg(cmd), Some(CassMsg::SearchRequested)));
@@ -20866,6 +21009,67 @@ mod tests {
         let _ = app.update(CassMsg::ViewStackPopped);
         assert_eq!(app.surface, AppSurface::Analytics);
         assert_eq!(app.analytics_selection, 3);
+    }
+
+    #[test]
+    fn analytics_drilldown_workspace_dimension_overrides_inherited_workspaces() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_filters
+            .workspaces
+            .insert("/analytics/ws".into());
+
+        let _ = app.update(CassMsg::AnalyticsDrilldown(DrilldownContext {
+            since_ms: None,
+            until_ms: None,
+            agent: None,
+            workspace: Some("/target/ws".into()),
+            source_filter: None,
+            model: None,
+        }));
+
+        let expected: HashSet<String> = ["/target/ws"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(app.filters.workspaces, expected);
+    }
+
+    #[test]
+    fn analytics_drilldown_source_dimension_overrides_inherited_source_filter() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_filters.source_filter = SourceFilter::Remote;
+
+        let _ = app.update(CassMsg::AnalyticsDrilldown(DrilldownContext {
+            since_ms: None,
+            until_ms: None,
+            agent: None,
+            workspace: None,
+            source_filter: Some(SourceFilter::SourceId("work-laptop".into())),
+            model: None,
+        }));
+
+        assert_eq!(
+            app.filters.source_filter,
+            SourceFilter::SourceId("work-laptop".into())
+        );
+    }
+
+    #[test]
+    fn analytics_drilldown_model_dimension_seeds_query() {
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+
+        let _ = app.update(CassMsg::AnalyticsDrilldown(DrilldownContext {
+            since_ms: None,
+            until_ms: None,
+            agent: None,
+            workspace: None,
+            source_filter: None,
+            model: Some("gpt-4o".into()),
+        }));
+
+        assert_eq!(app.query, "gpt-4o");
+        assert_eq!(app.cursor_pos, "gpt-4o".chars().count());
+        assert_eq!(app.input_mode, InputMode::Query);
     }
 
     #[test]
@@ -23818,6 +24022,54 @@ mod tests {
     }
 
     #[test]
+    fn enter_reentry_does_not_stack_detail_focus_traps() {
+        let mut app = app_with_hits(3);
+
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(app.show_detail_modal);
+        assert!(app.focus_manager.is_trapped());
+
+        // Rapid Enter repeats should not accumulate additional traps.
+        for _ in 0..3 {
+            let _ = app.update(CassMsg::DetailOpened);
+        }
+
+        let _ = app.update(CassMsg::DetailClosed);
+        assert!(
+            !app.show_detail_modal,
+            "closing once should exit detail modal after re-entry presses"
+        );
+        assert!(
+            !app.focus_manager.is_trapped(),
+            "rapid Enter re-entry should not leave stale traps"
+        );
+        assert_eq!(
+            app.focus_manager.current(),
+            Some(focus_ids::RESULTS_LIST),
+            "focus should restore to results list after close"
+        );
+    }
+
+    #[test]
+    fn enter_reentry_preserves_detail_scroll_state() {
+        let mut app = app_with_hits(3);
+        let _ = app.update(CassMsg::DetailOpened);
+        app.detail_scroll = 11;
+        app.modal_scroll = 7;
+
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert_eq!(
+            app.detail_scroll, 11,
+            "re-entry should not reset detail scroll"
+        );
+        assert_eq!(
+            app.modal_scroll, 7,
+            "re-entry should not reset modal scroll"
+        );
+    }
+
+    #[test]
     fn enter_matrix_pane_filter_mode_applies_filter() {
         // PaneFilter mode with focus on SEARCH_BAR → applies pane filter
         let mut app = app_with_hits(3);
@@ -23873,6 +24125,65 @@ mod tests {
 
         // 4. Selection should still be on the row we navigated to.
         assert_eq!(app.panes[0].selected, 2);
+    }
+
+    #[test]
+    fn toggle_json_view_while_modal_open_no_duplicate_trap() {
+        // Pressing 'J' (ToggleJsonView) while detail modal is already open
+        // should switch tabs but NOT push a duplicate focus trap.
+        let mut app = app_with_hits(3);
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(app.show_detail_modal);
+        assert_eq!(app.detail_tab, DetailTab::Messages);
+
+        // Toggle to Json — modal stays open, no duplicate trap.
+        let _ = app.update(CassMsg::ToggleJsonView);
+        assert!(app.show_detail_modal);
+        assert_eq!(app.detail_tab, DetailTab::Json);
+
+        // Toggle back to Raw.
+        let _ = app.update(CassMsg::ToggleJsonView);
+        assert!(app.show_detail_modal);
+        assert_eq!(app.detail_tab, DetailTab::Raw);
+
+        // Single Escape should close the detail modal cleanly.
+        let _ = app.update(CassMsg::DetailClosed);
+        assert!(!app.show_detail_modal);
+        assert_eq!(app.focus_manager.current(), Some(focus_ids::RESULTS_LIST));
+    }
+
+    #[test]
+    fn rapid_enter_presses_no_focus_trap_stack() {
+        // Rapid Enter presses should not corrupt the focus stack.
+        let mut app = app_with_hits(3);
+
+        // Press Enter 5 times rapidly.
+        for _ in 0..5 {
+            let _ = app.update(CassMsg::DetailOpened);
+        }
+        assert!(app.show_detail_modal);
+
+        // A single close should return to results, not leave stale traps.
+        let _ = app.update(CassMsg::DetailClosed);
+        assert!(!app.show_detail_modal);
+        assert_eq!(app.focus_manager.current(), Some(focus_ids::RESULTS_LIST));
+    }
+
+    #[test]
+    fn enter_with_empty_panes_submits_query() {
+        // When panes are empty (no results at all), Enter should fall back
+        // to query submit rather than opening a detail modal.
+        let mut app = CassApp::default();
+        app.input_mode = InputMode::Query;
+        app.input_buffer = "some query".into();
+        assert!(app.panes.is_empty() || app.panes.iter().all(|p| p.hits.is_empty()));
+
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert!(
+            !app.show_detail_modal,
+            "empty panes should not open detail modal"
+        );
     }
 
     // -- End focus ownership & Enter-routing matrix ---------------------------
@@ -24802,6 +25113,8 @@ mod tests {
         let until = ctx.until_ms.unwrap();
         assert_eq!(until - since, 86_400_000);
         assert!(ctx.agent.is_none());
+        assert!(ctx.workspace.is_none());
+        assert!(ctx.source_filter.is_none());
         assert!(ctx.model.is_none());
     }
 
@@ -24817,6 +25130,8 @@ mod tests {
         let ctx = app.build_drilldown_context().expect("should build context");
         assert_eq!(ctx.model.as_deref(), Some("claude-3-sonnet"));
         assert!(ctx.agent.is_none());
+        assert!(ctx.workspace.is_none());
+        assert!(ctx.source_filter.is_none());
     }
 
     #[test]
@@ -24847,6 +25162,45 @@ mod tests {
 
         let ctx = app.build_drilldown_context().expect("should build context");
         assert_eq!(ctx.agent.as_deref(), Some("codex"));
+        assert!(ctx.workspace.is_none());
+        assert!(ctx.source_filter.is_none());
+        assert!(ctx.model.is_none());
+    }
+
+    #[test]
+    fn build_drilldown_context_workspace_breakdown() {
+        let mut app = CassApp::default();
+        app.analytics_view = AnalyticsView::Breakdowns;
+        app.breakdown_tab = BreakdownTab::Workspace;
+        let mut data = AnalyticsChartData::default();
+        data.workspace_tokens = vec![("/ws/a".into(), 500.0), ("/ws/b".into(), 300.0)];
+        app.analytics_cache = Some(data);
+        app.analytics_selection = 1;
+
+        let ctx = app.build_drilldown_context().expect("should build context");
+        assert_eq!(ctx.workspace.as_deref(), Some("/ws/b"));
+        assert!(ctx.agent.is_none());
+        assert!(ctx.source_filter.is_none());
+        assert!(ctx.model.is_none());
+    }
+
+    #[test]
+    fn build_drilldown_context_source_breakdown() {
+        let mut app = CassApp::default();
+        app.analytics_view = AnalyticsView::Breakdowns;
+        app.breakdown_tab = BreakdownTab::Source;
+        let mut data = AnalyticsChartData::default();
+        data.source_tokens = vec![("local".into(), 100.0), ("work-laptop".into(), 80.0)];
+        app.analytics_cache = Some(data);
+        app.analytics_selection = 1;
+
+        let ctx = app.build_drilldown_context().expect("should build context");
+        assert_eq!(
+            ctx.source_filter,
+            Some(SourceFilter::SourceId("work-laptop".into()))
+        );
+        assert!(ctx.agent.is_none());
+        assert!(ctx.workspace.is_none());
         assert!(ctx.model.is_none());
     }
 
@@ -24892,6 +25246,8 @@ mod tests {
 
         let ctx = app.build_drilldown_context().expect("should build context");
         assert_eq!(ctx.agent.as_deref(), Some("codex"));
+        assert!(ctx.workspace.is_none());
+        assert!(ctx.source_filter.is_none());
         assert!(ctx.model.is_none());
     }
 
@@ -24999,6 +25355,66 @@ mod tests {
             app.analytics_cache.is_none(),
             "cache should be invalidated on group-by change"
         );
+    }
+
+    #[test]
+    fn explorer_hour_group_by_defaults_to_week_zoom_range() {
+        use crate::analytics::GroupBy;
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        app.explorer_zoom = ExplorerZoom::All;
+        app.analytics_filters.since_ms = None;
+        app.analytics_filters.until_ms = None;
+
+        // Shift+g: Day -> Hour.
+        let _ = app.update(CassMsg::ExplorerGroupByCycled { forward: false });
+        assert_eq!(app.explorer_group_by, GroupBy::Hour);
+        assert_eq!(app.explorer_zoom, ExplorerZoom::Week);
+        assert!(
+            app.analytics_filters.since_ms.is_some(),
+            "hourly mode should default to a bounded 7-day range"
+        );
+        assert!(
+            app.analytics_filters.until_ms.is_none(),
+            "hourly default range should end at now"
+        );
+    }
+
+    #[test]
+    fn explorer_hourly_zoom_long_ranges_auto_switch_to_daily() {
+        use crate::analytics::GroupBy;
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        app.explorer_group_by = GroupBy::Hour;
+        app.explorer_zoom = ExplorerZoom::Week;
+
+        // Week -> Month should fall back to daily granularity.
+        let _ = app.update(CassMsg::ExplorerZoomCycled { forward: true });
+        assert_eq!(app.explorer_zoom, ExplorerZoom::Month);
+        assert_eq!(app.explorer_group_by, GroupBy::Day);
+
+        // Day-range filters should still update for the selected zoom.
+        assert!(
+            app.analytics_filters.since_ms.is_some(),
+            "zoom changes should continue applying time filters"
+        );
+    }
+
+    #[test]
+    fn explorer_hourly_zoom_within_24h_or_7d_keeps_hour_group_by() {
+        use crate::analytics::GroupBy;
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.analytics_view = AnalyticsView::Explorer;
+        app.explorer_group_by = GroupBy::Hour;
+        app.explorer_zoom = ExplorerZoom::Day;
+
+        // Day -> Week should stay hourly.
+        let _ = app.update(CassMsg::ExplorerZoomCycled { forward: true });
+        assert_eq!(app.explorer_zoom, ExplorerZoom::Week);
+        assert_eq!(app.explorer_group_by, GroupBy::Hour);
     }
 
     #[test]

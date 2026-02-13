@@ -23,6 +23,7 @@ use ftui::{
     TerminalCapabilities, Theme, ThemeBuilder,
 };
 use ftui_extras::markdown::MarkdownTheme;
+use ftui_extras::syntax::HighlightTheme;
 use serde::{Deserialize, Serialize};
 
 pub const STYLE_APP_ROOT: &str = "app.root";
@@ -1052,7 +1053,21 @@ impl StyleContext {
             strikethrough: Style::new().fg(to_packed(r.text_muted)).strikethrough(),
             list_bullet: Style::new().fg(to_packed(r.info)),
             horizontal_rule: Style::new().fg(to_packed(r.border)).dim(),
-            table_theme: TableTheme::default(),
+            table_theme: TableTheme {
+                border: Style::new().fg(to_packed(r.border)),
+                header: Style::new()
+                    .fg(to_packed(r.text))
+                    .bg(to_packed(blend(r.surface, r.primary, 0.15)))
+                    .bold(),
+                row: Style::new().fg(to_packed(r.text)),
+                row_alt: Style::new().fg(to_packed(r.text)).bg(to_packed(blend(
+                    r.background,
+                    r.surface,
+                    0.3,
+                ))),
+                divider: Style::new().fg(to_packed(r.border)).dim(),
+                ..TableTheme::default()
+            },
             task_done: Style::new().fg(to_packed(r.success)),
             task_todo: Style::new().fg(to_packed(r.text_muted)),
             math_inline: Style::new().fg(to_packed(r.warning)).italic(),
@@ -1064,6 +1079,15 @@ impl StyleContext {
             admonition_important: Style::new().fg(to_packed(r.primary)).bold(),
             admonition_warning: Style::new().fg(to_packed(r.warning)).bold(),
             admonition_caution: Style::new().fg(to_packed(r.error)).bold(),
+        }
+    }
+
+    /// Return a syntax highlight theme matching the current UI theme brightness.
+    pub fn syntax_highlight_theme(&self) -> HighlightTheme {
+        if self.options.dark_mode {
+            HighlightTheme::dark()
+        } else {
+            HighlightTheme::light()
         }
     }
 }
@@ -4259,6 +4283,38 @@ mod tests {
         assert!(
             md.link.has_attr(ftui::StyleFlags::UNDERLINE),
             "link style should include underline"
+        );
+    }
+
+    #[test]
+    fn markdown_theme_table_has_themed_border() {
+        for preset in UiThemePreset::all() {
+            let ctx = context_for_preset(preset);
+            let md = ctx.markdown_theme();
+            assert!(
+                md.table_theme.border.fg.is_some(),
+                "table border must have fg for preset {}",
+                preset.name()
+            );
+            assert!(
+                md.table_theme.header.fg.is_some(),
+                "table header must have fg for preset {}",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn syntax_highlight_theme_matches_dark_mode() {
+        let dark_ctx = context_for_preset(UiThemePreset::Dark);
+        let light_ctx = context_for_preset(UiThemePreset::Light);
+        let dark_hl = dark_ctx.syntax_highlight_theme();
+        let light_hl = light_ctx.syntax_highlight_theme();
+        // Dark and light highlight themes should differ (keyword color at minimum).
+        assert_ne!(
+            format!("{:?}", dark_hl.keyword.fg),
+            format!("{:?}", light_hl.keyword.fg),
+            "dark and light syntax themes should differ"
         );
     }
 
