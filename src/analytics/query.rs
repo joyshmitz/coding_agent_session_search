@@ -1205,6 +1205,203 @@ pub fn query_tools(
 }
 
 // ---------------------------------------------------------------------------
+// query_session_scatter
+// ---------------------------------------------------------------------------
+
+/// Query per-session `(message_count, api_tokens_total)` points for Explorer
+/// scatter plots.
+///
+/// Uses `conversations` + `messages` as the primary source and prefers
+/// `message_metrics` API-token columns when available. Falls back to
+/// `token_usage.total_tokens`, then conversation rollups.
+pub fn query_session_scatter(
+    conn: &Connection,
+    filter: &AnalyticsFilter,
+    limit: usize,
+) -> AnalyticsResult<Vec<SessionScatterPoint>> {
+    if !table_exists(conn, "conversations")
+        || !table_exists(conn, "messages")
+        || !table_exists(conn, "agents")
+    {
+        return Ok(Vec::new());
+    }
+
+    let mut where_parts: Vec<String> = Vec::new();
+    let mut bind_values: Vec<String> = Vec::new();
+
+    // Agent filters.
+    if !filter.agents.is_empty() {
+        let placeholders: Vec<String> = filter
+            .agents
+            .iter()
+            .map(|agent| {
+                bind_values.push(agent.clone());
+                format!("?{}", bind_values.len())
+            })
+            .collect();
+        where_parts.push(format!("a.slug IN ({})", placeholders.join(", ")));
+    }
+
+    // Source filter.
+    match &filter.source {
+        SourceFilter::All => {}
+        SourceFilter::Local => {
+            bind_values.push("local".into());
+            where_parts.push(format!("c.source_id = ?{}", bind_values.len()));
+        }
+        SourceFilter::Remote => {
+            bind_values.push("local".into());
+            where_parts.push(format!("c.source_id != ?{}", bind_values.len()));
+        }
+        SourceFilter::Specific(s) => {
+            bind_values.push(s.clone());
+            where_parts.push(format!("c.source_id = ?{}", bind_values.len()));
+        }
+    }
+
+    // Workspace filters.
+    if !filter.workspace_ids.is_empty() {
+        let placeholders: Vec<String> = filter
+            .workspace_ids
+            .iter()
+            .map(|workspace_id| {
+                bind_values.push(workspace_id.to_string());
+                format!("?{}", bind_values.len())
+            })
+            .collect();
+        where_parts.push(format!(
+            "COALESCE(c.workspace_id, 0) IN ({})",
+            placeholders.join(", ")
+        ));
+    }
+
+    // Time filters use message timestamp (or conversation started_at fallback),
+    // normalized to milliseconds for legacy second-based values.
+    let timestamp_expr = "CASE \
+            WHEN COALESCE(m.created_at, c.started_at, 0) BETWEEN 0 AND 100000000000 \
+            THEN COALESCE(m.created_at, c.started_at, 0) * 1000 \
+            ELSE COALESCE(m.created_at, c.started_at, 0) \
+        END";
+    if let Some(since_ms) = filter.since_ms {
+        bind_values.push(since_ms.to_string());
+        where_parts.push(format!("{timestamp_expr} >= ?{}", bind_values.len()));
+    }
+    if let Some(until_ms) = filter.until_ms {
+        bind_values.push(until_ms.to_string());
+        where_parts.push(format!("{timestamp_expr} <= ?{}", bind_values.len()));
+    }
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+
+    let has_message_metrics = table_exists(conn, "message_metrics");
+    let has_token_usage = table_exists(conn, "token_usage");
+    let has_conv_rollup = table_has_column(conn, "conversations", "grand_total_tokens");
+    let has_mm_api_source =
+        has_message_metrics && table_has_column(conn, "message_metrics", "api_data_source");
+
+    let message_metrics_join = if has_message_metrics {
+        " LEFT JOIN message_metrics mm ON mm.message_id = m.id"
+    } else {
+        ""
+    };
+    let token_usage_join = if has_token_usage {
+        " LEFT JOIN token_usage tu ON tu.message_id = m.id"
+    } else {
+        ""
+    };
+
+    let mm_api_sum = "COALESCE(mm.api_input_tokens, 0)
+            + COALESCE(mm.api_output_tokens, 0)
+            + COALESCE(mm.api_cache_read_tokens, 0)
+            + COALESCE(mm.api_cache_creation_tokens, 0)
+            + COALESCE(mm.api_thinking_tokens, 0)";
+    let mm_has_api_values = "(mm.api_input_tokens IS NOT NULL
+            OR mm.api_output_tokens IS NOT NULL
+            OR mm.api_cache_read_tokens IS NOT NULL
+            OR mm.api_cache_creation_tokens IS NOT NULL
+            OR mm.api_thinking_tokens IS NOT NULL)";
+    let token_expr = if has_message_metrics && has_token_usage {
+        if has_mm_api_source {
+            format!(
+                "SUM(CASE
+                    WHEN mm.message_id IS NOT NULL
+                        AND (
+                            (mm.api_data_source = 'api' AND {mm_has_api_values})
+                            OR (mm.api_data_source IS NULL AND {mm_has_api_values})
+                        )
+                    THEN {mm_api_sum}
+                    ELSE COALESCE(tu.total_tokens, 0)
+                 END)"
+            )
+        } else {
+            format!(
+                "SUM(CASE
+                    WHEN mm.message_id IS NOT NULL
+                        AND {mm_has_api_values}
+                    THEN {mm_api_sum}
+                    ELSE COALESCE(tu.total_tokens, 0)
+                 END)"
+            )
+        }
+    } else if has_message_metrics {
+        format!("SUM({mm_api_sum})")
+    } else if has_token_usage {
+        "SUM(COALESCE(tu.total_tokens, 0))".to_string()
+    } else if has_conv_rollup {
+        "MAX(COALESCE(c.grand_total_tokens, 0))".to_string()
+    } else {
+        "0".to_string()
+    };
+
+    let sql = format!(
+        "SELECT c.source_id,
+                c.source_path,
+                COUNT(m.id) AS message_count,
+                COALESCE({token_expr}, 0) AS api_tokens_total
+         FROM conversations c
+         JOIN messages m ON m.conversation_id = c.id
+         JOIN agents a ON a.id = c.agent_id
+         {message_metrics_join}
+         {token_usage_join}
+         {where_clause}
+         GROUP BY c.id, c.source_id, c.source_path
+         HAVING COUNT(m.id) > 0
+         ORDER BY api_tokens_total DESC, message_count DESC
+         LIMIT {limit}"
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| AnalyticsError::Db(format!("Failed to prepare session scatter query: {e}")))?;
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect();
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(SessionScatterPoint {
+                source_id: row.get(0)?,
+                source_path: row.get(1)?,
+                message_count: row.get(2)?,
+                api_tokens_total: row.get(3)?,
+            })
+        })
+        .map_err(|e| AnalyticsError::Db(format!("Session scatter query failed: {e}")))?;
+
+    let mut points = Vec::new();
+    for row in rows {
+        points.push(row.map_err(|e| AnalyticsError::Db(format!("Row read error: {e}")))?);
+    }
+    Ok(points)
+}
+
+// ---------------------------------------------------------------------------
 // Unpriced models — discover unknown/unmatched pricing
 // ---------------------------------------------------------------------------
 
@@ -1514,6 +1711,84 @@ mod tests {
         conn
     }
 
+    fn setup_usage_hourly_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_hourly (
+                hour_id INTEGER NOT NULL,
+                agent_slug TEXT NOT NULL,
+                workspace_id INTEGER NOT NULL DEFAULT 0,
+                source_id TEXT NOT NULL DEFAULT 'local',
+                message_count INTEGER NOT NULL DEFAULT 0,
+                user_message_count INTEGER NOT NULL DEFAULT 0,
+                assistant_message_count INTEGER NOT NULL DEFAULT 0,
+                tool_call_count INTEGER NOT NULL DEFAULT 0,
+                plan_message_count INTEGER NOT NULL DEFAULT 0,
+                plan_content_tokens_est_total INTEGER NOT NULL DEFAULT 0,
+                plan_api_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_coverage_message_count INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_total INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_user INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_assistant INTEGER NOT NULL DEFAULT 0,
+                api_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_input_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_output_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_cache_read_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_cache_creation_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_thinking_tokens_total INTEGER NOT NULL DEFAULT 0,
+                last_updated INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (hour_id, agent_slug, workspace_id, source_id)
+            );",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO usage_hourly (
+                hour_id, agent_slug, workspace_id, source_id,
+                message_count, user_message_count, assistant_message_count,
+                tool_call_count, plan_message_count,
+                plan_content_tokens_est_total, plan_api_tokens_total,
+                api_coverage_message_count,
+                content_tokens_est_total, content_tokens_est_user, content_tokens_est_assistant,
+                api_tokens_total, api_input_tokens_total, api_output_tokens_total,
+                api_cache_read_tokens_total, api_cache_creation_tokens_total, api_thinking_tokens_total,
+                last_updated
+             ) VALUES
+                (?1, 'codex', 1, 'local',
+                 10, 4, 6, 3, 1,
+                 200, 400,
+                 8,
+                 1200, 500, 700,
+                 1400, 700, 550, 100, 25, 25,
+                 ?2)",
+            rusqlite::params![1000_i64, 1_i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_hourly (
+                hour_id, agent_slug, workspace_id, source_id,
+                message_count, user_message_count, assistant_message_count,
+                tool_call_count, plan_message_count,
+                plan_content_tokens_est_total, plan_api_tokens_total,
+                api_coverage_message_count,
+                content_tokens_est_total, content_tokens_est_user, content_tokens_est_assistant,
+                api_tokens_total, api_input_tokens_total, api_output_tokens_total,
+                api_cache_read_tokens_total, api_cache_creation_tokens_total, api_thinking_tokens_total,
+                last_updated
+             ) VALUES
+                (?1, 'codex', 1, 'local',
+                 20, 9, 11, 5, 2,
+                 400, 700,
+                 17,
+                 2200, 900, 1300,
+                 2600, 1300, 1000, 200, 50, 50,
+                 ?2)",
+            rusqlite::params![1001_i64, 2_i64],
+        )
+        .unwrap();
+        conn
+    }
+
     /// Create an in-memory database with the token_daily_stats schema and seed data.
     fn setup_token_daily_stats_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -1592,6 +1867,192 @@ mod tests {
         )
         .unwrap();
 
+        conn
+    }
+
+    fn setup_session_scatter_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                slug TEXT NOT NULL
+            );
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                started_at INTEGER,
+                grand_total_tokens INTEGER
+            );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                created_at INTEGER,
+                content TEXT NOT NULL
+            );
+             CREATE TABLE message_metrics (
+                message_id INTEGER PRIMARY KEY,
+                api_input_tokens INTEGER,
+                api_output_tokens INTEGER,
+                api_cache_read_tokens INTEGER,
+                api_cache_creation_tokens INTEGER,
+                api_thinking_tokens INTEGER
+            );",
+        )
+        .unwrap();
+
+        conn.execute("INSERT INTO agents (id, slug) VALUES (1, 'codex')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, slug) VALUES (2, 'claude_code')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO conversations
+             (id, agent_id, workspace_id, source_id, source_path, started_at, grand_total_tokens)
+             VALUES (1, 1, 10, 'local', '/sessions/a.jsonl', 1700000000000, 1000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversations
+             (id, agent_id, workspace_id, source_id, source_path, started_at, grand_total_tokens)
+             VALUES (2, 2, 20, 'remote-ci', '/sessions/b.jsonl', 1700000000000, 2300)",
+            [],
+        )
+        .unwrap();
+
+        // Session A: 2 messages, total api tokens = 1000.
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (11, 1, 0, 'user', 1700000001000, 'a1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (12, 1, 1, 'assistant', 1700000002000, 'a2')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_metrics
+             (message_id, api_input_tokens, api_output_tokens, api_cache_read_tokens, api_cache_creation_tokens, api_thinking_tokens)
+             VALUES (11, 200, 250, 0, 0, 50)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_metrics
+             (message_id, api_input_tokens, api_output_tokens, api_cache_read_tokens, api_cache_creation_tokens, api_thinking_tokens)
+             VALUES (12, 200, 300, 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        // Session B: 3 messages, total api tokens = 2300.
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (21, 2, 0, 'user', 1700000001000, 'b1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (22, 2, 1, 'assistant', 1700000002000, 'b2')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (23, 2, 2, 'assistant', 1700000003000, 'b3')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_metrics
+             (message_id, api_input_tokens, api_output_tokens, api_cache_read_tokens, api_cache_creation_tokens, api_thinking_tokens)
+             VALUES (21, 300, 500, 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_metrics
+             (message_id, api_input_tokens, api_output_tokens, api_cache_read_tokens, api_cache_creation_tokens, api_thinking_tokens)
+             VALUES (22, 500, 500, 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_metrics
+             (message_id, api_input_tokens, api_output_tokens, api_cache_read_tokens, api_cache_creation_tokens, api_thinking_tokens)
+             VALUES (23, 200, 300, 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        conn
+    }
+
+    fn setup_session_scatter_with_token_usage_fallback_db() -> Connection {
+        let conn = setup_session_scatter_db();
+        conn.execute_batch(
+            "CREATE TABLE token_usage (
+                message_id INTEGER PRIMARY KEY,
+                total_tokens INTEGER
+            );",
+        )
+        .unwrap();
+
+        // Keep message 11 with concrete API split from message_metrics.
+        conn.execute(
+            "INSERT INTO token_usage (message_id, total_tokens) VALUES (11, 999)",
+            [],
+        )
+        .unwrap();
+        // Message 12 has message_metrics row but no API split; token_usage should be used.
+        conn.execute(
+            "UPDATE message_metrics
+             SET api_input_tokens = NULL,
+                 api_output_tokens = NULL,
+                 api_cache_read_tokens = NULL,
+                 api_cache_creation_tokens = NULL,
+                 api_thinking_tokens = NULL
+             WHERE message_id = 12",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO token_usage (message_id, total_tokens) VALUES (12, 900)",
+            [],
+        )
+        .unwrap();
+
+        conn
+    }
+
+    fn setup_session_scatter_with_api_source_column_db() -> Connection {
+        let conn = setup_session_scatter_with_token_usage_fallback_db();
+        conn.execute(
+            "ALTER TABLE message_metrics ADD COLUMN api_data_source TEXT",
+            [],
+        )
+        .unwrap();
+        // Mark only session A rows as explicit API rows; keep session B rows NULL
+        // to simulate legacy records after schema migration.
+        conn.execute(
+            "UPDATE message_metrics
+             SET api_data_source = 'api'
+             WHERE message_id IN (11, 12)",
+            [],
+        )
+        .unwrap();
         conn
     }
 
@@ -1728,6 +2189,22 @@ mod tests {
     }
 
     #[test]
+    fn query_tokens_timeseries_hourly_reads_usage_hourly_rollup() {
+        let conn = setup_usage_hourly_db();
+        let filter = AnalyticsFilter::default();
+        let result = query_tokens_timeseries(&conn, &filter, GroupBy::Hour).unwrap();
+
+        assert_eq!(result.source_table, "usage_hourly");
+        assert_eq!(result.group_by, GroupBy::Hour);
+        assert_eq!(result.buckets.len(), 2);
+        assert_eq!(result.totals.message_count, 30);
+        assert_eq!(result.totals.tool_call_count, 8);
+        assert_eq!(result.totals.api_tokens_total, 4000);
+        assert_eq!(result.totals.plan_content_tokens_est_total, 600);
+        assert_eq!(result.totals.plan_api_tokens_total, 1100);
+    }
+
+    #[test]
     fn query_breakdown_result_to_json_shape() {
         let conn = setup_usage_daily_db();
         let filter = AnalyticsFilter::default();
@@ -1790,6 +2267,92 @@ mod tests {
         assert!(json["rows"].is_array());
         assert!(json["totals"]["tool_call_count"].is_number());
         assert!(json["_meta"]["elapsed_ms"].is_number());
+    }
+
+    #[test]
+    fn query_tools_hour_group_uses_usage_hourly() {
+        let conn = setup_usage_hourly_db();
+        let filter = AnalyticsFilter::default();
+        let result = query_tools(&conn, &filter, GroupBy::Hour, 10).unwrap();
+
+        assert_eq!(result.source_table, "usage_hourly");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "codex");
+        assert_eq!(result.rows[0].tool_call_count, 8);
+        assert_eq!(result.rows[0].message_count, 30);
+        assert_eq!(result.rows[0].api_tokens_total, 4000);
+    }
+
+    #[test]
+    fn query_session_scatter_returns_sorted_points() {
+        let conn = setup_session_scatter_db();
+        let points = query_session_scatter(&conn, &AnalyticsFilter::default(), 10).unwrap();
+
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].source_path, "/sessions/b.jsonl");
+        assert_eq!(points[0].message_count, 3);
+        assert_eq!(points[0].api_tokens_total, 2300);
+
+        assert_eq!(points[1].source_path, "/sessions/a.jsonl");
+        assert_eq!(points[1].message_count, 2);
+        assert_eq!(points[1].api_tokens_total, 1000);
+    }
+
+    #[test]
+    fn query_session_scatter_applies_agent_and_source_filters() {
+        let conn = setup_session_scatter_db();
+        let filter = AnalyticsFilter {
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            ..Default::default()
+        };
+
+        let points = query_session_scatter(&conn, &filter, 10).unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].source_id, "local");
+        assert_eq!(points[0].source_path, "/sessions/a.jsonl");
+        assert_eq!(points[0].message_count, 2);
+        assert_eq!(points[0].api_tokens_total, 1000);
+    }
+
+    #[test]
+    fn query_session_scatter_falls_back_to_token_usage_when_mm_tokens_missing() {
+        let conn = setup_session_scatter_with_token_usage_fallback_db();
+        let filter = AnalyticsFilter {
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            ..Default::default()
+        };
+
+        let points = query_session_scatter(&conn, &filter, 10).unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].source_path, "/sessions/a.jsonl");
+        assert_eq!(points[0].message_count, 2);
+        // Message 11: 500 from message_metrics (preferred over token_usage=999).
+        // Message 12: 900 from token_usage (message_metrics fields are NULL).
+        assert_eq!(points[0].api_tokens_total, 1400);
+    }
+
+    #[test]
+    fn query_session_scatter_with_api_source_column_preserves_legacy_mm_rows() {
+        let conn = setup_session_scatter_with_api_source_column_db();
+        let points = query_session_scatter(&conn, &AnalyticsFilter::default(), 10).unwrap();
+
+        assert_eq!(points.len(), 2);
+        let session_a = points
+            .iter()
+            .find(|p| p.source_path == "/sessions/a.jsonl")
+            .expect("session A should exist");
+        let session_b = points
+            .iter()
+            .find(|p| p.source_path == "/sessions/b.jsonl")
+            .expect("session B should exist");
+
+        // Session A still uses mixed mm/token_usage fallback correctly.
+        assert_eq!(session_a.api_tokens_total, 1400);
+        // Session B rows have NULL api_data_source but valid API columns and
+        // must continue using message_metrics values.
+        assert_eq!(session_b.api_tokens_total, 2300);
     }
 
     #[test]

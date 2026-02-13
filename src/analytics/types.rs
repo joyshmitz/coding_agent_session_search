@@ -521,6 +521,23 @@ impl ToolReport {
 }
 
 // ---------------------------------------------------------------------------
+// Session scatter result
+// ---------------------------------------------------------------------------
+
+/// A single per-session point for Explorer scatter plots.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SessionScatterPoint {
+    /// Source identifier (`local`, remote source id, etc.).
+    pub source_id: String,
+    /// Session path used as the stable per-session key.
+    pub source_path: String,
+    /// Total messages in the session (x-axis).
+    pub message_count: i64,
+    /// Total API tokens in the session (y-axis).
+    pub api_tokens_total: i64,
+}
+
+// ---------------------------------------------------------------------------
 // Status result types
 // ---------------------------------------------------------------------------
 
