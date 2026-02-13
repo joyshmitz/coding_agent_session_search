@@ -695,8 +695,16 @@ impl CursorConnector {
         let mut ended_at: Option<i64> = None;
         let mut update_time_bounds = |candidate_ts: Option<i64>| {
             if let Some(ts) = candidate_ts {
-                started_at = Some(started_at.map_or(ts, |current| current.min(ts)));
-                ended_at = Some(ended_at.map_or(ts, |current| current.max(ts)));
+                started_at = Some(if let Some(current) = started_at {
+                    current.min(ts)
+                } else {
+                    ts
+                });
+                ended_at = Some(if let Some(current) = ended_at {
+                    current.max(ts)
+                } else {
+                    ts
+                });
             }
         };
 
