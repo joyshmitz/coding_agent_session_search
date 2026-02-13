@@ -229,12 +229,12 @@ impl Connector for OpenCodeConnector {
             let started_at = session
                 .time
                 .as_ref()
-                .and_then(|t| t.created)
+                .and_then(|t| normalize_opencode_timestamp(t.created))
                 .or_else(|| messages.first().and_then(|m| m.created_at));
             let ended_at = session
                 .time
                 .as_ref()
-                .and_then(|t| t.updated)
+                .and_then(|t| normalize_opencode_timestamp(t.updated))
                 .or_else(|| messages.last().and_then(|m| m.created_at));
 
             let workspace = session.directory.map(PathBuf::from);
@@ -272,6 +272,10 @@ fn looks_like_opencode_storage(path: &std::path::Path) -> bool {
     // relying on the path name containing "opencode" is too loose and causes shadowing
     // if the CASS data directory has "opencode" in its name.
     path.join("session").exists() && path.join("message").exists()
+}
+
+fn normalize_opencode_timestamp(ts: Option<i64>) -> Option<i64> {
+    ts.and_then(|raw| crate::connectors::parse_timestamp(&serde_json::Value::from(raw)))
 }
 
 fn session_has_updates(
@@ -416,7 +420,8 @@ fn load_messages(session_msg_dir: &Path, part_dir: &Path) -> Result<Vec<Normaliz
             .unwrap_or_else(|| "assistant".to_string());
 
         // Determine timestamp
-        let created_at = msg_info.time.as_ref().and_then(|t| t.created);
+        let created_at =
+            normalize_opencode_timestamp(msg_info.time.as_ref().and_then(|t| t.created));
 
         // Author from model_id for assistant messages
         let author = if role == "assistant" {
@@ -1428,9 +1433,9 @@ mod tests {
         let ctx = ScanContext::local_default(storage.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        assert_eq!(convs[0].started_at, Some(1733000000));
-        assert_eq!(convs[0].ended_at, Some(1733000200));
-        assert_eq!(convs[0].messages[0].created_at, Some(1733000050));
+        assert_eq!(convs[0].started_at, Some(1_733_000_000_000));
+        assert_eq!(convs[0].ended_at, Some(1_733_000_200_000));
+        assert_eq!(convs[0].messages[0].created_at, Some(1_733_000_050_000));
     }
 
     #[test]

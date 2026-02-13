@@ -11442,6 +11442,10 @@ fn load_opencode_session_for_export(
     use std::collections::HashMap;
     use walkdir::WalkDir;
 
+    let normalize_opencode_ts = |ts: Option<i64>| {
+        ts.and_then(|raw| crate::connectors::parse_timestamp(&serde_json::Value::from(raw)))
+    };
+
     // Parse session file
     let session_content = std::fs::read_to_string(session_path)
         .with_context(|| format!("read session file {}", session_path.display()))?;
@@ -11452,8 +11456,8 @@ fn load_opencode_session_for_export(
         .as_str()
         .context("session missing 'id' field")?;
     let session_title = session["title"].as_str().map(String::from);
-    let session_start = session["time"]["created"].as_i64();
-    let session_end = session["time"]["updated"].as_i64();
+    let session_start = normalize_opencode_ts(session["time"]["created"].as_i64());
+    let session_end = normalize_opencode_ts(session["time"]["updated"].as_i64());
 
     // Find storage root by going up from session file
     // Path: storage/session/{projectID}/{sessionID}.json
@@ -11517,6 +11521,8 @@ fn load_opencode_session_for_export(
     }
 
     let mut messages: Vec<(i64, serde_json::Value)> = Vec::new();
+    let mut message_ts_min: Option<i64> = None;
+    let mut message_ts_max: Option<i64> = None;
 
     for entry in WalkDir::new(&message_dir)
         .max_depth(1)
@@ -11584,30 +11590,33 @@ fn load_opencode_session_for_export(
         }
 
         let role = msg_info.role.unwrap_or_else(|| "assistant".to_string());
-        let timestamp = msg_info.time.as_ref().and_then(|t| t.created).unwrap_or(0);
+        let timestamp = normalize_opencode_ts(msg_info.time.as_ref().and_then(|t| t.created));
+        if let Some(ts) = timestamp {
+            message_ts_min = Some(message_ts_min.map_or(ts, |current| current.min(ts)));
+            message_ts_max = Some(message_ts_max.map_or(ts, |current| current.max(ts)));
+        }
 
         // Build JSON value matching expected format for formatters
-        let msg_json = serde_json::json!({
+        let mut msg_json = serde_json::json!({
             "role": role,
             "content": assembled_content,
-            "timestamp": timestamp,
             "model": msg_info.model_id,
         });
+        if let Some(ts) = timestamp {
+            msg_json["timestamp"] = serde_json::Value::from(ts);
+        }
 
-        messages.push((timestamp, msg_json));
+        // Keep unknown timestamps at the end while preserving deterministic output.
+        messages.push((timestamp.unwrap_or(i64::MAX), msg_json));
     }
 
     // Sort by timestamp
     messages.sort_by_key(|(ts, _)| *ts);
     let sorted_messages: Vec<serde_json::Value> = messages.into_iter().map(|(_, m)| m).collect();
 
-    // Compute timestamps from messages if not in session
-    let start = session_start.or_else(|| {
-        sorted_messages
-            .first()
-            .and_then(|m| m["timestamp"].as_i64())
-    });
-    let end = session_end.or_else(|| sorted_messages.last().and_then(|m| m["timestamp"].as_i64()));
+    // Compute timestamps from messages if not available in session metadata.
+    let start = session_start.or(message_ts_min);
+    let end = session_end.or(message_ts_max);
 
     Ok((session_title, start, end, sorted_messages))
 }
@@ -11682,7 +11691,7 @@ fn run_export(
                 continue;
             }
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-                if let Some(ts) = msg.get("timestamp").and_then(|t| t.as_i64()) {
+                if let Some(ts) = extract_message_timestamp(&msg) {
                     if session_start.is_none_or(|start| ts < start) {
                         session_start = Some(ts);
                     }
@@ -11920,7 +11929,7 @@ fn run_export_html(
                 continue;
             }
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-                if let Some(ts) = msg.get("timestamp").and_then(|t| t.as_i64()) {
+                if let Some(ts) = extract_message_timestamp(&msg) {
                     if session_start.is_none_or(|start| ts < start) {
                         session_start = Some(ts);
                     }
@@ -11965,7 +11974,7 @@ fn run_export_html(
         .filter_map(|(i, msg)| {
             let role = extract_role(msg);
             let content = extract_text_content(msg);
-            let ts = msg.get("timestamp").and_then(|t| t.as_i64());
+            let ts = extract_message_timestamp(msg);
             let timestamp = ts
                 .and_then(|ts| chrono::Utc.timestamp_millis_opt(ts).single())
                 .map(|dt| dt.to_rfc3339());
@@ -12688,6 +12697,133 @@ pub fn group_messages_for_export(
 // ============================================================================
 // Unit Tests for Message Grouping Algorithm
 // ============================================================================
+
+#[cfg(test)]
+mod opencode_export_tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn load_opencode_export_ignores_missing_message_timestamps() {
+        let temp = TempDir::new().expect("tempdir");
+        let storage = temp.path().join("storage");
+        let session_dir = storage.join("session/project-1");
+        let message_dir = storage.join("message/session-1");
+        let part_dir = storage.join("part");
+
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        fs::create_dir_all(&message_dir).expect("create message dir");
+        fs::create_dir_all(&part_dir).expect("create part dir");
+
+        let session_path = session_dir.join("session-1.json");
+        fs::write(
+            &session_path,
+            json!({
+                "id": "session-1",
+                "title": "OpenCode Export Test"
+            })
+            .to_string(),
+        )
+        .expect("write session");
+
+        fs::write(
+            message_dir.join("m1.json"),
+            json!({
+                "id": "m1",
+                "role": "assistant",
+                "modelID": "model-x"
+            })
+            .to_string(),
+        )
+        .expect("write message without ts");
+        fs::write(
+            message_dir.join("m2.json"),
+            json!({
+                "id": "m2",
+                "role": "assistant",
+                "modelID": "model-x",
+                "time": {
+                    "created": 1733000000
+                }
+            })
+            .to_string(),
+        )
+        .expect("write message with ts");
+
+        fs::create_dir_all(part_dir.join("m1")).expect("create parts m1");
+        fs::create_dir_all(part_dir.join("m2")).expect("create parts m2");
+        fs::write(
+            part_dir.join("m1/part-1.json"),
+            json!({
+                "messageID": "m1",
+                "type": "text",
+                "text": "no timestamp content"
+            })
+            .to_string(),
+        )
+        .expect("write part m1");
+        fs::write(
+            part_dir.join("m2/part-1.json"),
+            json!({
+                "messageID": "m2",
+                "type": "text",
+                "text": "has timestamp content"
+            })
+            .to_string(),
+        )
+        .expect("write part m2");
+
+        let (_title, start, end, messages) =
+            load_opencode_session_for_export(&session_path).expect("load opencode export");
+
+        // Bounds should come from the real timestamp, never from a synthetic 0 value.
+        assert_eq!(start, Some(1_733_000_000_000));
+        assert_eq!(end, Some(1_733_000_000_000));
+        assert_eq!(messages.len(), 2);
+
+        // Missing timestamp should remain missing in exported message JSON.
+        assert_eq!(
+            messages[0].get("timestamp").and_then(|v| v.as_i64()),
+            Some(1_733_000_000_000)
+        );
+        assert!(
+            messages[1].get("timestamp").is_none(),
+            "message without timestamp should not get an artificial 0"
+        );
+    }
+}
+
+#[cfg(test)]
+mod export_timestamp_tests {
+    use super::extract_message_timestamp;
+    use serde_json::json;
+
+    #[test]
+    fn extract_message_timestamp_parses_multiple_shapes() {
+        let direct_i64 = json!({"timestamp": 1_733_000_000});
+        assert_eq!(
+            extract_message_timestamp(&direct_i64),
+            Some(1_733_000_000_000)
+        );
+
+        let direct_iso = json!({"timestamp": "2025-12-01T10:00:00Z"});
+        assert!(extract_message_timestamp(&direct_iso).is_some());
+
+        let nested_message = json!({"message": {"timestamp": "1733000000"}});
+        assert_eq!(
+            extract_message_timestamp(&nested_message),
+            Some(1_733_000_000_000)
+        );
+
+        let nested_payload = json!({"payload": {"timestamp": 1_733_000_123_000i64}});
+        assert_eq!(
+            extract_message_timestamp(&nested_payload),
+            Some(1_733_000_123_000)
+        );
+    }
+}
 
 #[cfg(test)]
 mod message_grouping_tests {
@@ -13508,6 +13644,21 @@ fn run_expand(path: &Path, line: usize, context: usize, json: bool) -> CliResult
         messages.len()
     );
     Ok(())
+}
+
+fn extract_message_timestamp(msg: &serde_json::Value) -> Option<i64> {
+    msg.get("timestamp")
+        .and_then(crate::connectors::parse_timestamp)
+        .or_else(|| {
+            msg.get("message")
+                .and_then(|m| m.get("timestamp"))
+                .and_then(crate::connectors::parse_timestamp)
+        })
+        .or_else(|| {
+            msg.get("payload")
+                .and_then(|p| p.get("timestamp"))
+                .and_then(crate::connectors::parse_timestamp)
+        })
 }
 
 fn extract_text_content(msg: &serde_json::Value) -> String {

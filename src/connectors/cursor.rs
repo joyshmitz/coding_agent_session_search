@@ -691,23 +691,26 @@ impl CursorConnector {
         seen_ids.insert(id.clone());
 
         let mut messages = Vec::new();
-        let mut started_at = None;
-        let mut ended_at = None;
+        let mut started_at: Option<i64> = None;
+        let mut ended_at: Option<i64> = None;
+        let mut update_time_bounds = |candidate_ts: Option<i64>| {
+            if let Some(ts) = candidate_ts {
+                started_at = Some(started_at.map_or(ts, |current| current.min(ts)));
+                ended_at = Some(ended_at.map_or(ts, |current| current.max(ts)));
+            }
+        };
 
         // Parse tabs array
         if let Some(tabs) = val.get("tabs").and_then(|v| v.as_array()) {
             for tab in tabs {
-                let tab_ts = tab.get("timestamp").and_then(|v| v.as_i64());
+                let tab_ts = tab.get("timestamp").and_then(crate::connectors::parse_timestamp);
 
                 // NOTE: Do NOT filter by timestamp here! File-level check is sufficient.
 
                 if let Some(bubbles) = tab.get("bubbles").and_then(|v| v.as_array()) {
                     for bubble in bubbles {
                         if let Some(msg) = Self::parse_bubble(bubble, messages.len()) {
-                            if started_at.is_none() {
-                                started_at = msg.created_at.or(tab_ts);
-                            }
-                            ended_at = msg.created_at.or(tab_ts);
+                            update_time_bounds(msg.created_at.or(tab_ts));
                             messages.push(msg);
                         }
                     }
@@ -1334,6 +1337,60 @@ mod tests {
         assert_eq!(conv.agent_slug, "cursor");
         assert!(conv.external_id.as_ref().unwrap().starts_with("aichat-"));
         assert_eq!(conv.messages.len(), 2);
+    }
+
+    #[test]
+    fn parse_aichat_data_tracks_min_max_out_of_order_timestamps() {
+        let key = "aichat.bounds";
+        let value = json!({
+            "tabs": [
+                {
+                    "timestamp": 1700000200,
+                    "bubbles": [
+                        {"text": "later", "type": "ai", "timestamp": 1700000300}
+                    ]
+                },
+                {
+                    "timestamp": 1700000000,
+                    "bubbles": [
+                        {"text": "earlier", "type": "user", "timestamp": 1700000100}
+                    ]
+                }
+            ]
+        })
+        .to_string();
+
+        let mut seen = HashSet::new();
+        let conv =
+            CursorConnector::parse_aichat_data(key, &value, Path::new("/test"), None, &mut seen)
+                .expect("aichat conversation should parse");
+
+        // Bounds should be based on true min/max timestamps, not traversal order.
+        assert_eq!(conv.started_at, Some(1_700_000_100_000));
+        assert_eq!(conv.ended_at, Some(1_700_000_300_000));
+    }
+
+    #[test]
+    fn parse_aichat_data_parses_string_tab_timestamp() {
+        let key = "aichat.string-ts";
+        let value = json!({
+            "tabs": [{
+                "timestamp": "1700000400",
+                "bubbles": [
+                    {"text": "no bubble timestamp", "type": "user"}
+                ]
+            }]
+        })
+        .to_string();
+
+        let mut seen = HashSet::new();
+        let conv =
+            CursorConnector::parse_aichat_data(key, &value, Path::new("/test"), None, &mut seen)
+                .expect("aichat conversation should parse");
+
+        // String timestamps should be normalized to milliseconds.
+        assert_eq!(conv.started_at, Some(1_700_000_400_000));
+        assert_eq!(conv.ended_at, Some(1_700_000_400_000));
     }
 
     #[test]
