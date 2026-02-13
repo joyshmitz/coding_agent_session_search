@@ -321,6 +321,19 @@ fn default_output_dir() -> String {
 }
 
 impl PagesConfig {
+    fn normalized_path_mode(&self) -> Option<String> {
+        self.filters
+            .path_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|mode| !mode.is_empty())
+            .map(str::to_ascii_lowercase)
+    }
+
+    fn normalized_target(&self) -> String {
+        self.deployment.target.trim().to_ascii_lowercase()
+    }
+
     /// Load configuration from a file path.
     ///
     /// If path is "-", reads from stdin.
@@ -408,20 +421,21 @@ impl PagesConfig {
         }
 
         // Validate path_mode if specified
-        if let Some(ref mode) = self.filters.path_mode {
-            match mode.to_lowercase().as_str() {
+        if let Some(mode) = self.normalized_path_mode() {
+            match mode.as_str() {
                 "relative" | "basename" | "full" | "hash" => {}
                 _ => {
                     errors.push(format!(
                         "Invalid filters.path_mode: '{}'. Must be one of: relative, basename, full, hash",
-                        mode
+                        self.filters.path_mode.as_deref().unwrap_or_default()
                     ));
                 }
             }
         }
 
         // Validate deployment target
-        match self.deployment.target.to_lowercase().as_str() {
+        let target = self.normalized_target();
+        match target.as_str() {
             "local" | "github" | "cloudflare" => {}
             _ => {
                 errors.push(format!(
@@ -432,7 +446,7 @@ impl PagesConfig {
         }
 
         // Validate GitHub deployment config
-        if self.deployment.target.to_lowercase() == "github" && self.deployment.repo.is_none() {
+        if target == "github" && self.deployment.repo.is_none() {
             errors.push(
                 "deployment.repo is required when target is 'github'. \
                  Specify the repository name for GitHub Pages deployment."
@@ -440,7 +454,6 @@ impl PagesConfig {
             );
         }
 
-        let target = self.deployment.target.to_lowercase();
         if target == "cloudflare" {
             let account_id_set = self.deployment.account_id.is_some();
             let api_token_set = self.deployment.api_token.is_some();
@@ -511,7 +524,7 @@ impl PagesConfig {
             );
         }
 
-        if self.deployment.target.to_lowercase() == "github" && self.deployment.branch.is_some() {
+        if target == "github" && self.deployment.branch.is_some() {
             warnings.push(
                 "deployment.branch is set for GitHub Pages, but cass always deploys to gh-pages. The value will be ignored."
                     .to_string(),
@@ -542,9 +555,7 @@ impl PagesConfig {
                 since_ts: self.filters.since.as_deref().and_then(parse_time_input),
                 until_ts: self.filters.until.as_deref().and_then(parse_time_input),
                 path_mode: self
-                    .filters
-                    .path_mode
-                    .clone()
+                    .normalized_path_mode()
                     .unwrap_or_else(|| "relative".to_string()),
             },
             encryption: ResolvedEncryption {
@@ -567,7 +578,7 @@ impl PagesConfig {
                 hide_metadata: self.bundle.hide_metadata,
             },
             deployment: ResolvedDeployment {
-                target: self.deployment.target.clone(),
+                target: self.normalized_target(),
                 output_dir: PathBuf::from(&self.deployment.output_dir),
                 repo: self.deployment.repo.clone(),
                 branch: self.deployment.branch.clone(),
@@ -588,7 +599,7 @@ impl PagesConfig {
         };
 
         // Parse deploy target
-        let target = match self.deployment.target.to_lowercase().as_str() {
+        let target = match self.normalized_target().as_str() {
             "github" => DeployTarget::GitHubPages,
             "cloudflare" => DeployTarget::CloudflarePages,
             _ => DeployTarget::Local,
@@ -862,5 +873,45 @@ mod tests {
 
         config.filters.path_mode = Some(" FULL ".to_string());
         assert!(matches!(config.path_mode(), PathMode::Full));
+    }
+
+    #[test]
+    fn test_validate_path_mode_trims_whitespace() {
+        let mut config = PagesConfig::default();
+        config.encryption.password = Some("test123".to_string());
+        config.filters.path_mode = Some(" FULL ".to_string());
+
+        let result = config.validate();
+        assert!(result.valid, "{:?}", result.errors);
+
+        let resolved = result.resolved.expect("resolved config should exist");
+        assert_eq!(resolved.filters.path_mode, "full");
+    }
+
+    #[test]
+    fn test_validate_target_trims_whitespace() {
+        let mut config = PagesConfig::default();
+        config.encryption.password = Some("test123".to_string());
+        config.deployment.target = " GitHub ".to_string();
+        config.deployment.repo = Some("example-repo".to_string());
+
+        let result = config.validate();
+        assert!(result.valid, "{:?}", result.errors);
+
+        let resolved = result.resolved.expect("resolved config should exist");
+        assert_eq!(resolved.deployment.target, "github");
+    }
+
+    #[test]
+    fn test_to_wizard_state_target_trims_whitespace() {
+        let mut config = PagesConfig::default();
+        config.encryption.password = Some("test123".to_string());
+        config.deployment.target = " cloudflare ".to_string();
+
+        let state = config
+            .to_wizard_state(PathBuf::from("/tmp/test.db"))
+            .expect("wizard state should parse");
+
+        assert!(matches!(state.target, DeployTarget::CloudflarePages));
     }
 }
