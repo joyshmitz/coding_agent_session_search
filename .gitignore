@@ -33,6 +33,7 @@ temp_*.rs
 # Alternative target directories (benchmarks, tests, checks)
 target_*/
 target-*/
+.target-*/
 
 # Web test artifacts
 web/node_modules/
@@ -97,6 +98,9 @@ session_export.html
 flamegraph.svg
 perf.data
 perf.data.old
+
+# One-off analysis output
+user_requests_output.txt
 
 # Beads daemon rotated logs
 .beads/daemon-*.log.gz
