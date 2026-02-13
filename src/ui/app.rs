@@ -10152,6 +10152,14 @@ impl super::ftui_adapter::Model for CassApp {
                     CassMsg::QueryChanged(text) if text == "w" => {
                         return self.update(CassMsg::DetailWrapToggled);
                     }
+                    // e expands all tool/system messages
+                    CassMsg::QueryChanged(text) if text == "e" => {
+                        return self.update(CassMsg::ToolExpandAll);
+                    }
+                    // c collapses all tool/system messages
+                    CassMsg::QueryChanged(text) if text == "c" => {
+                        return self.update(CassMsg::ToolCollapseAll);
+                    }
                     // Up/Down scroll detail
                     CassMsg::SelectionMoved { delta } => {
                         return self.update(CassMsg::DetailScrolled { delta: *delta });
@@ -10191,6 +10199,9 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::DetailFindQueryChanged(_)
                     | CassMsg::DetailFindNavigated { .. }
                     | CassMsg::ToggleJsonView
+                    | CassMsg::ToolCollapseToggled(_)
+                    | CassMsg::ToolExpandAll
+                    | CassMsg::ToolCollapseAll
                     | CassMsg::PageScrolled { .. }
                     | CassMsg::Tick
                     | CassMsg::MouseEvent { .. }
@@ -11011,6 +11022,20 @@ impl super::ftui_adapter::Model for CassApp {
                 self.show_detail_modal = true;
                 self.detail_scroll = 0;
                 self.modal_scroll = 0;
+                // Auto-collapse tool/system messages on open for a compact
+                // initial view; user can expand with Enter or 'e'.
+                self.collapsed_tools.clear();
+                if let Some((_, ref cv)) = self.cached_detail {
+                    for (idx, msg) in cv.messages.iter().enumerate() {
+                        if matches!(
+                            msg.role,
+                            crate::model::types::MessageRole::Tool
+                                | crate::model::types::MessageRole::System
+                        ) {
+                            self.collapsed_tools.insert(idx);
+                        }
+                    }
+                }
                 self.focus_manager.push_trap(focus_ids::GROUP_DETAIL_MODAL);
                 self.focus_manager.focus(focus_ids::DETAIL_MODAL);
                 ftui::Cmd::none()
@@ -13316,8 +13341,8 @@ impl super::ftui_adapter::Model for CassApp {
                     )
                 {
                     self.explorer_group_by = crate::analytics::GroupBy::Day;
-                    self.status = "Hourly Explorer supports up to 7 days; switched to Daily."
-                        .to_string();
+                    self.status =
+                        "Hourly Explorer supports up to 7 days; switched to Daily.".to_string();
                 }
 
                 let (since_ms, until_ms) = self.explorer_zoom.to_range();
