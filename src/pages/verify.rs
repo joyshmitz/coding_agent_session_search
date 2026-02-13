@@ -447,42 +447,80 @@ fn check_payload_manifest(site_dir: &Path) -> CheckResult {
                 }
 
                 let chunk_path = site_dir.join(expected_file);
-                if !chunk_path.exists() {
-                    errors.push(format!("Missing chunk file: {}", expected_file));
+                match fs::symlink_metadata(&chunk_path) {
+                    Ok(meta) => {
+                        let file_type = meta.file_type();
+                        if file_type.is_symlink() {
+                            errors.push(format!("{expected_file} must not be a symlink"));
+                        } else if !file_type.is_file() {
+                            errors.push(format!("{expected_file} must be a regular file"));
+                        }
+                    }
+                    Err(_) => errors.push(format!("Missing chunk file: {}", expected_file)),
                 }
             }
 
-            // Inventory chunk files to detect unexpected indices without scanning up to max(index).
-            let mut found_chunks: HashSet<u32> = HashSet::new();
-            if let Ok(entries) = fs::read_dir(&payload_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with("chunk-")
-                        && name_str.ends_with(".bin")
-                        && let Some(num_str) = name_str
+            // Inventory chunk files to detect malformed names and out-of-range indices.
+            match fs::read_dir(&payload_dir) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(err) => {
+                                errors
+                                    .push(format!("Failed to read payload directory entry: {err}"));
+                                continue;
+                            }
+                        };
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if !name_str.starts_with("chunk-") || !name_str.ends_with(".bin") {
+                            continue;
+                        }
+
+                        let Some(num_str) = name_str
                             .strip_prefix("chunk-")
                             .and_then(|s| s.strip_suffix(".bin"))
-                        && let Ok(num) = num_str.parse::<u32>()
-                    {
-                        found_chunks.insert(num);
+                        else {
+                            errors.push(format!("Malformed chunk filename: {name_str}"));
+                            continue;
+                        };
+
+                        if num_str.len() < 5 || !num_str.chars().all(|c| c.is_ascii_digit()) {
+                            errors.push(format!("Malformed chunk filename: {name_str}"));
+                            continue;
+                        }
+
+                        let idx = match num_str.parse::<usize>() {
+                            Ok(idx) => idx,
+                            Err(_) => {
+                                errors.push(format!("Malformed chunk filename: {name_str}"));
+                                continue;
+                            }
+                        };
+
+                        if idx >= enc.payload.files.len() {
+                            errors.push(format!("Unexpected chunk file index: chunk-{idx:05}.bin"));
+                        }
                     }
                 }
-            }
-
-            let expected_chunk_count = enc.payload.files.len() as u32;
-            for idx in found_chunks {
-                if idx >= expected_chunk_count {
-                    errors.push(format!("Unexpected chunk file index: chunk-{:05}.bin", idx));
-                }
+                Err(err) => errors.push(format!("Failed to read payload/ directory: {err}")),
             }
         }
         ArchiveConfig::Unencrypted(unenc) => {
             let rel_path = Path::new(&unenc.payload.path);
             if validate_payload_path(&mut errors, "payload.path", rel_path) {
                 let payload_path = site_dir.join(rel_path);
-                if !payload_path.exists() {
-                    errors.push(format!("Missing payload file: {}", unenc.payload.path));
+                match fs::symlink_metadata(&payload_path) {
+                    Ok(meta) => {
+                        let file_type = meta.file_type();
+                        if file_type.is_symlink() {
+                            errors.push(format!("{} must not be a symlink", unenc.payload.path));
+                        } else if !file_type.is_file() {
+                            errors.push(format!("{} must be a regular file", unenc.payload.path));
+                        }
+                    }
+                    Err(_) => errors.push(format!("Missing payload file: {}", unenc.payload.path)),
                 }
             }
         }
@@ -515,34 +553,62 @@ fn check_size_limits(site_dir: &Path) -> CheckResult {
             let payload_dir = site_dir.join("payload");
             if !payload_dir.is_dir() {
                 errors.push("payload/ directory not found for size check".to_string());
-            } else if let Ok(entries) = fs::read_dir(&payload_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map(|e| e == "bin").unwrap_or(false) {
-                        match fs::symlink_metadata(&path) {
-                            Ok(meta) => {
-                                if meta.file_type().is_symlink() {
+            } else {
+                match fs::read_dir(&payload_dir) {
+                    Ok(entries) => {
+                        for entry in entries {
+                            let entry = match entry {
+                                Ok(entry) => entry,
+                                Err(err) => {
                                     errors.push(format!(
-                                        "{} must not be a symlink",
-                                        path.file_name().unwrap_or_default().to_string_lossy()
+                                        "Failed to read payload directory entry: {err}"
                                     ));
                                     continue;
                                 }
-                                if meta.file_type().is_file() && meta.len() > MAX_CHUNK_SIZE {
-                                    errors.push(format!(
-                                        "{} exceeds 100MB limit ({} bytes)",
+                            };
+                            let path = entry.path();
+                            if path.extension().map(|e| e == "bin").unwrap_or(false) {
+                                match fs::symlink_metadata(&path) {
+                                    Ok(meta) => {
+                                        let file_type = meta.file_type();
+                                        if file_type.is_symlink() {
+                                            errors.push(format!(
+                                                "{} must not be a symlink",
+                                                path.file_name()
+                                                    .unwrap_or_default()
+                                                    .to_string_lossy()
+                                            ));
+                                            continue;
+                                        }
+                                        if !file_type.is_file() {
+                                            errors.push(format!(
+                                                "{} must be a regular file",
+                                                path.file_name()
+                                                    .unwrap_or_default()
+                                                    .to_string_lossy()
+                                            ));
+                                            continue;
+                                        }
+                                        if meta.len() > MAX_CHUNK_SIZE {
+                                            errors.push(format!(
+                                                "{} exceeds 100MB limit ({} bytes)",
+                                                path.file_name()
+                                                    .unwrap_or_default()
+                                                    .to_string_lossy(),
+                                                meta.len()
+                                            ));
+                                        }
+                                    }
+                                    Err(err) => errors.push(format!(
+                                        "failed to stat {}: {}",
                                         path.file_name().unwrap_or_default().to_string_lossy(),
-                                        meta.len()
-                                    ));
+                                        err
+                                    )),
                                 }
                             }
-                            Err(err) => errors.push(format!(
-                                "failed to stat {}: {}",
-                                path.file_name().unwrap_or_default().to_string_lossy(),
-                                err
-                            )),
                         }
                     }
+                    Err(err) => errors.push(format!("Failed to read payload/ directory: {err}")),
                 }
             }
         }
@@ -558,10 +624,14 @@ fn check_size_limits(site_dir: &Path) -> CheckResult {
                 } else {
                     match fs::symlink_metadata(&payload_path) {
                         Ok(meta) => {
-                            if meta.file_type().is_symlink() {
+                            let file_type = meta.file_type();
+                            if file_type.is_symlink() {
                                 errors
                                     .push(format!("{} must not be a symlink", unenc.payload.path));
-                            } else if meta.file_type().is_file() && meta.len() > MAX_CHUNK_SIZE {
+                            } else if !file_type.is_file() {
+                                errors
+                                    .push(format!("{} must be a regular file", unenc.payload.path));
+                            } else if meta.len() > MAX_CHUNK_SIZE {
                                 errors.push(format!(
                                     "{} exceeds 100MB limit ({} bytes)",
                                     unenc.payload.path,
@@ -600,6 +670,15 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
 
     let mut errors = Vec::new();
     let mut checked_files: HashSet<String> = HashSet::new();
+    let canonical_site = match site_dir.canonicalize() {
+        Ok(path) => path,
+        Err(e) => {
+            return CheckResult::fail(format!(
+                "Failed to resolve site directory for integrity checks: {}",
+                e
+            ));
+        }
+    };
 
     // Verify each file in manifest
     for (rel_path, entry) in &manifest.files {
@@ -642,14 +721,9 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
             }
         };
 
-        if metadata.file_type().is_symlink() {
-            errors.push(format!(
-                "integrity.json references symlink (security violation): {}",
-                rel_path
-            ));
-            continue;
-        }
-        if !metadata.file_type().is_file() {
+        let file_type = metadata.file_type();
+
+        if !file_type.is_file() && !file_type.is_symlink() {
             errors.push(format!(
                 "integrity.json references non-file entry (security violation): {}",
                 rel_path
@@ -657,16 +731,41 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
             continue;
         }
 
-        // Extra safety: verify resolved path is still under site_dir
-        if let (Ok(canonical_site), Ok(canonical_file)) =
-            (site_dir.canonicalize(), file_path.canonicalize())
-            && !canonical_file.starts_with(&canonical_site)
-        {
+        // Resolve symlinks and ensure final target remains within site_dir.
+        let canonical_file = match file_path.canonicalize() {
+            Ok(path) => path,
+            Err(_) => {
+                errors.push(format!("File in manifest but missing: {}", rel_path));
+                continue;
+            }
+        };
+        if !canonical_file.starts_with(&canonical_site) {
             errors.push(format!(
                 "integrity.json path escapes site directory (security violation): {}",
                 rel_path
             ));
             continue;
+        }
+
+        // For symlinks, only permit links to regular files within site_dir.
+        if file_type.is_symlink() {
+            match fs::metadata(&file_path) {
+                Ok(target_meta) if target_meta.file_type().is_file() => {}
+                Ok(_) => {
+                    errors.push(format!(
+                        "integrity.json symlink target is not a regular file (security violation): {}",
+                        rel_path
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "Failed to resolve symlink target for {}: {}",
+                        rel_path, e
+                    ));
+                    continue;
+                }
+            }
         }
 
         // Compute hash
@@ -1181,26 +1280,26 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_integrity_rejects_symlink_manifest_entry() {
+    fn test_integrity_rejects_symlink_manifest_entry_to_directory() {
         use std::os::unix::fs::symlink;
 
         let temp = TempDir::new().unwrap();
         let site_dir = temp.path();
-        fs::create_dir_all(site_dir.join("payload")).unwrap();
-        fs::write(site_dir.join("payload/real.bin"), b"payload").unwrap();
+        fs::create_dir_all(site_dir.join("payload/real-dir")).unwrap();
+        fs::write(site_dir.join("payload/real-dir/content.txt"), b"payload").unwrap();
         symlink(
-            site_dir.join("payload/real.bin"),
-            site_dir.join("payload/alias.bin"),
+            site_dir.join("payload/real-dir"),
+            site_dir.join("payload/alias-dir"),
         )
         .unwrap();
 
-        let alias_hash = compute_file_hash(&site_dir.join("payload/real.bin")).unwrap();
         let mut files = BTreeMap::new();
         files.insert(
-            "payload/alias.bin".to_string(),
+            "payload/alias-dir".to_string(),
             IntegrityEntry {
-                sha256: alias_hash,
-                size: 7,
+                // Hash/size are irrelevant here; verification should fail before hashing.
+                sha256: "deadbeef".repeat(8),
+                size: 0,
             },
         );
         let manifest = IntegrityManifest {
@@ -1220,7 +1319,7 @@ mod tests {
             result
                 .details
                 .as_ref()
-                .map(|d| d.contains("symlink"))
+                .map(|d| d.contains("not a regular file"))
                 .unwrap_or(false)
         );
     }
@@ -1514,6 +1613,219 @@ mod tests {
         assert!(!result.passed);
         let details = result.details.unwrap_or_default();
         assert!(details.contains("Unexpected chunk file index: chunk-99999.bin"));
+    }
+
+    #[test]
+    fn test_payload_manifest_rejects_non_file_chunk_entry() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let payload_dir = site_dir.join("payload");
+        fs::create_dir_all(&payload_dir).unwrap();
+
+        let config = r#"{
+          "version": 2,
+          "export_id": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "base_nonce": "AAAAAAAAAAAAAAAA",
+          "compression": "deflate",
+          "kdf_defaults": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 },
+          "payload": {
+            "chunk_size": 1024,
+            "chunk_count": 1,
+            "total_compressed_size": 14,
+            "total_plaintext_size": 100,
+            "files": ["payload/chunk-00000.bin"]
+          },
+          "key_slots": [{
+            "id": 0,
+            "slot_type": "password",
+            "kdf": "argon2id",
+            "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "wrapped_dek": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "nonce": "AAAAAAAAAAAAAAAA",
+            "argon2_params": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 }
+          }]
+        }"#;
+        fs::write(site_dir.join("config.json"), config).unwrap();
+        fs::create_dir_all(payload_dir.join("chunk-00000.bin")).unwrap();
+
+        let result = check_payload_manifest(site_dir);
+        assert!(!result.passed);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|d| d.contains("payload/chunk-00000.bin must be a regular file"))
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn test_payload_manifest_rejects_malformed_chunk_filename() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let payload_dir = site_dir.join("payload");
+        fs::create_dir_all(&payload_dir).unwrap();
+
+        let config = r#"{
+          "version": 2,
+          "export_id": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "base_nonce": "AAAAAAAAAAAAAAAA",
+          "compression": "deflate",
+          "kdf_defaults": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 },
+          "payload": {
+            "chunk_size": 1024,
+            "chunk_count": 1,
+            "total_compressed_size": 14,
+            "total_plaintext_size": 100,
+            "files": ["payload/chunk-00000.bin"]
+          },
+          "key_slots": [{
+            "id": 0,
+            "slot_type": "password",
+            "kdf": "argon2id",
+            "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "wrapped_dek": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "nonce": "AAAAAAAAAAAAAAAA",
+            "argon2_params": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 }
+          }]
+        }"#;
+        fs::write(site_dir.join("config.json"), config).unwrap();
+        fs::write(payload_dir.join("chunk-00000.bin"), "small").unwrap();
+        fs::write(payload_dir.join("chunk-1.bin"), "malformed").unwrap();
+
+        let result = check_payload_manifest(site_dir);
+        assert!(!result.passed);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|d| d.contains("Malformed chunk filename: chunk-1.bin"))
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn test_payload_manifest_treats_six_digit_chunk_name_as_unexpected_not_malformed() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let payload_dir = site_dir.join("payload");
+        fs::create_dir_all(&payload_dir).unwrap();
+
+        let config = r#"{
+          "version": 2,
+          "export_id": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "base_nonce": "AAAAAAAAAAAAAAAA",
+          "compression": "deflate",
+          "kdf_defaults": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 },
+          "payload": {
+            "chunk_size": 1024,
+            "chunk_count": 1,
+            "total_compressed_size": 14,
+            "total_plaintext_size": 100,
+            "files": ["payload/chunk-00000.bin"]
+          },
+          "key_slots": [{
+            "id": 0,
+            "slot_type": "password",
+            "kdf": "argon2id",
+            "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "wrapped_dek": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "nonce": "AAAAAAAAAAAAAAAA",
+            "argon2_params": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 }
+          }]
+        }"#;
+        fs::write(site_dir.join("config.json"), config).unwrap();
+        fs::write(payload_dir.join("chunk-00000.bin"), "small").unwrap();
+        fs::write(payload_dir.join("chunk-100000.bin"), "unexpected").unwrap();
+
+        let result = check_payload_manifest(site_dir);
+        assert!(!result.passed);
+        let details = result.details.unwrap_or_default();
+        assert!(details.contains("Unexpected chunk file index: chunk-100000.bin"));
+        assert!(!details.contains("Malformed chunk filename: chunk-100000.bin"));
+    }
+
+    #[test]
+    fn test_unencrypted_payload_must_be_regular_file() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let payload_dir = site_dir.join("payload");
+        fs::create_dir_all(&payload_dir).unwrap();
+        fs::create_dir_all(payload_dir.join("data.sqlite")).unwrap();
+
+        let config = r#"{
+          "encrypted": false,
+          "version": "1.0",
+          "payload": {
+            "path": "payload/data.sqlite",
+            "format": "sqlite"
+          }
+        }"#;
+        fs::write(site_dir.join("config.json"), config).unwrap();
+
+        let manifest_result = check_payload_manifest(site_dir);
+        assert!(!manifest_result.passed);
+        assert!(
+            manifest_result
+                .details
+                .as_ref()
+                .map(|d| d.contains("payload/data.sqlite must be a regular file"))
+                .unwrap_or(false)
+        );
+
+        let size_result = check_size_limits(site_dir);
+        assert!(!size_result.passed);
+        assert!(
+            size_result
+                .details
+                .as_ref()
+                .map(|d| d.contains("payload/data.sqlite must be a regular file"))
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn test_size_limits_rejects_non_file_chunk_entry() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+        let payload_dir = site_dir.join("payload");
+        fs::create_dir_all(&payload_dir).unwrap();
+
+        let config = r#"{
+          "version": 2,
+          "export_id": "AAAAAAAAAAAAAAAAAAAAAA==",
+          "base_nonce": "AAAAAAAAAAAAAAAA",
+          "compression": "deflate",
+          "kdf_defaults": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 },
+          "payload": {
+            "chunk_size": 1024,
+            "chunk_count": 1,
+            "total_compressed_size": 14,
+            "total_plaintext_size": 100,
+            "files": ["payload/chunk-00000.bin"]
+          },
+          "key_slots": [{
+            "id": 0,
+            "slot_type": "password",
+            "kdf": "argon2id",
+            "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "wrapped_dek": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "nonce": "AAAAAAAAAAAAAAAA",
+            "argon2_params": { "memory_kb": 65536, "iterations": 3, "parallelism": 4 }
+          }]
+        }"#;
+        fs::write(site_dir.join("config.json"), config).unwrap();
+        fs::create_dir_all(payload_dir.join("chunk-00000.bin")).unwrap();
+
+        let result = check_size_limits(site_dir);
+        assert!(!result.passed);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|d| d.contains("chunk-00000.bin must be a regular file"))
+                .unwrap_or(false)
+        );
     }
 
     #[test]
