@@ -231,7 +231,7 @@ impl Embedder for FastEmbedder {
             return Err(EmbedderError::InvalidInput("empty text".to_string()));
         }
 
-        let mut model = self
+        let model = self
             .model
             .lock()
             .map_err(|_| EmbedderError::Internal("fastembed lock poisoned".to_string()))?;
@@ -269,7 +269,7 @@ impl Embedder for FastEmbedder {
             return Ok(Vec::new());
         }
 
-        let mut model = self
+        let model = self
             .model
             .lock()
             .map_err(|_| EmbedderError::Internal("fastembed lock poisoned".to_string()))?;
