@@ -276,6 +276,7 @@ enum LoadingContext {
     DetailModal,
     Analytics,
     IndexRefresh,
+    StateLoad,
 }
 
 impl LoadingContext {
@@ -285,6 +286,7 @@ impl LoadingContext {
             Self::DetailModal => "detail",
             Self::Analytics => "analytics",
             Self::IndexRefresh => "index",
+            Self::StateLoad => "state",
         }
     }
 }
@@ -9933,6 +9935,10 @@ pub enum CassMsg {
     AnalyticsEntered,
     /// Deferred analytics data load (lets UI render a loading frame first).
     AnalyticsLoadRequested,
+    /// Async analytics chart data loaded successfully.
+    AnalyticsChartDataLoaded(Box<AnalyticsChartData>),
+    /// Async analytics chart data load failed.
+    AnalyticsChartDataFailed(String),
     /// Navigate to a specific analytics subview.
     AnalyticsViewChanged(AnalyticsView),
     /// Pop the view stack (Esc from analytics returns to search).
@@ -13894,6 +13900,7 @@ impl super::ftui_adapter::Model for CassApp {
 
             // -- State persistence --------------------------------------------
             CassMsg::StateLoadRequested => {
+                self.set_loading_context(LoadingContext::StateLoad);
                 let state_path = self.state_file_path();
                 ftui::Cmd::task(move || match load_persisted_state_from_path(&state_path) {
                     Ok(Some(state)) => CassMsg::StateLoaded(Box::new(state)),
@@ -13902,6 +13909,7 @@ impl super::ftui_adapter::Model for CassApp {
                 })
             }
             CassMsg::StateLoaded(state) => {
+                self.clear_loading_context(LoadingContext::StateLoad);
                 self.search_mode = state.search_mode;
                 self.match_mode = state.match_mode;
                 self.ranking_mode = state.ranking_mode;
@@ -13924,6 +13932,7 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::StateLoadFailed(err) => {
+                self.clear_loading_context(LoadingContext::StateLoad);
                 self.status = format!("Failed to load TUI state: {err}");
                 ftui::Cmd::none()
             }
@@ -14502,14 +14511,45 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsLoadRequested => {
-                if let Some(db) = &self.db_reader {
-                    self.analytics_cache = Some(super::analytics_charts::load_chart_data(
-                        db,
-                        &self.analytics_filters,
-                        self.explorer_group_by,
-                    ));
+                if self.db_reader.is_none() {
+                    self.clear_loading_context(LoadingContext::Analytics);
+                    return ftui::Cmd::none();
                 }
+                let db_path = self.db_path.clone();
+                let filters = self.analytics_filters.clone();
+                let group_by = self.explorer_group_by;
+                #[cfg(test)]
+                {
+                    let _ = (db_path, filters, group_by);
+                    return ftui::Cmd::task(|| {
+                        CassMsg::AnalyticsChartDataLoaded(Box::new(
+                            AnalyticsChartData::default(),
+                        ))
+                    });
+                }
+                #[cfg(not(test))]
+                {
+                    ftui::Cmd::task(move || {
+                        match crate::storage::sqlite::SqliteStorage::open_readonly(&db_path)
+                        {
+                            Ok(db) => CassMsg::AnalyticsChartDataLoaded(Box::new(
+                                super::analytics_charts::load_chart_data(
+                                    &db, &filters, group_by,
+                                ),
+                            )),
+                            Err(e) => CassMsg::AnalyticsChartDataFailed(e.to_string()),
+                        }
+                    })
+                }
+            }
+            CassMsg::AnalyticsChartDataLoaded(data) => {
+                self.analytics_cache = Some(*data);
                 self.clear_loading_context(LoadingContext::Analytics);
+                ftui::Cmd::none()
+            }
+            CassMsg::AnalyticsChartDataFailed(err) => {
+                self.clear_loading_context(LoadingContext::Analytics);
+                self.status = format!("Analytics load failed: {err}");
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsViewChanged(view) => {
@@ -15675,9 +15715,14 @@ impl super::ftui_adapter::Model for CassApp {
                 };
                 let mut hud_lanes = Vec::with_capacity(8);
                 if !self.status.is_empty() {
+                    let status_value = if self.loading_context.is_some() {
+                        format!("{} {}", self.loading_spinner_glyph(), self.status)
+                    } else {
+                        self.status.clone()
+                    };
                     hud_lanes.push(FooterHudLane {
                         key: "status",
-                        value: self.status.clone(),
+                        value: status_value,
                         value_style: status_warning_s,
                     });
                 }
