@@ -711,7 +711,9 @@ impl CursorConnector {
         // Parse tabs array
         if let Some(tabs) = val.get("tabs").and_then(|v| v.as_array()) {
             for tab in tabs {
-                let tab_ts = tab.get("timestamp").and_then(crate::connectors::parse_timestamp);
+                let tab_ts = tab
+                    .get("timestamp")
+                    .and_then(crate::connectors::parse_timestamp);
 
                 // NOTE: Do NOT filter by timestamp here! File-level check is sufficient.
 
