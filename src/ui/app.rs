@@ -100,7 +100,7 @@
 //!   variants, responsive SIZE_MATRIX (16 entries), perf envelope checks
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::Arc;
@@ -122,7 +122,7 @@ use crate::ui::components::pills::Pill;
 use crate::ui::components::toast::ToastManager;
 use crate::ui::data::{
     BudgetHealthContract, CockpitState, ConversationView, DiffStrategyContract, InputMode,
-    ResizeRegimeContract, format_time_short,
+    ResizeRegimeContract, format_time_short, load_conversation,
 };
 use crate::ui::shortcuts;
 use crate::ui::time_parser::parse_time_input;
@@ -242,6 +242,8 @@ const FOOTER_HINT_ROOT_ID: HelpId = HelpId(1_000_000);
 const RESULTS_REVEAL_MIN_HITS: usize = 6;
 const RESULTS_REVEAL_MAX_HITS: usize = 400;
 const SEARCH_STATS_EST_COST_PER_MILLION_TOKENS: f64 = 9.0;
+const SURFACE_TRANSITION_DURATION: Duration = Duration::from_millis(160);
+const ANALYTICS_VIEW_TRANSITION_DURATION: Duration = Duration::from_millis(120);
 
 #[derive(Clone, Debug)]
 struct FooterHintCandidate {
@@ -249,6 +251,78 @@ struct FooterHintCandidate {
     action: &'static str,
     context: HintContext,
     static_priority: u32,
+}
+
+#[derive(Clone, Debug)]
+struct ViewTransition {
+    from_label: String,
+    to_label: String,
+    started_at: Instant,
+    duration: Duration,
+    from_snapshot: Option<ftui::Buffer>,
+    slide_direction: i16,
+}
+
+#[derive(Clone, Debug)]
+struct ViewSnapshot {
+    surface: AppSurface,
+    analytics_view: Option<AnalyticsView>,
+    buffer: ftui::Buffer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoadingContext {
+    Search,
+    DetailModal,
+    Analytics,
+    IndexRefresh,
+}
+
+impl LoadingContext {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::DetailModal => "detail",
+            Self::Analytics => "analytics",
+            Self::IndexRefresh => "index",
+        }
+    }
+}
+
+impl ViewTransition {
+    fn new(
+        from_label: impl Into<String>,
+        to_label: impl Into<String>,
+        duration: Duration,
+        from_snapshot: Option<ftui::Buffer>,
+        slide_direction: i16,
+    ) -> Self {
+        Self {
+            from_label: from_label.into(),
+            to_label: to_label.into(),
+            started_at: Instant::now(),
+            duration,
+            from_snapshot,
+            slide_direction,
+        }
+    }
+
+    fn progress(&self, now: Instant) -> f32 {
+        if self.duration.is_zero() {
+            return 1.0;
+        }
+        (now.duration_since(self.started_at).as_secs_f32() / self.duration.as_secs_f32())
+            .clamp(0.0, 1.0)
+    }
+
+    fn is_done(&self, now: Instant) -> bool {
+        self.progress(now) >= 1.0
+    }
+
+    fn eased_progress(&self, now: Instant) -> f32 {
+        let p = self.progress(now);
+        1.0 - (1.0 - p) * (1.0 - p)
+    }
 }
 
 impl FooterHintCandidate {
@@ -505,6 +579,24 @@ pub enum AppSurface {
     Sources,
 }
 
+impl AppSurface {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Search => "Search",
+            Self::Analytics => "Analytics",
+            Self::Sources => "Sources",
+        }
+    }
+
+    fn nav_order(self) -> i16 {
+        match self {
+            Self::Search => 0,
+            Self::Analytics => 1,
+            Self::Sources => 2,
+        }
+    }
+}
+
 /// Analytics subview within the Analytics surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AnalyticsView {
@@ -554,6 +646,10 @@ impl AnalyticsView {
             Self::Plans,
             Self::Coverage,
         ]
+    }
+
+    fn nav_order(self) -> i16 {
+        Self::all().iter().position(|v| *v == self).unwrap_or(0) as i16
     }
 }
 
@@ -2287,6 +2383,8 @@ pub struct ResultItem {
     pub source_remote_style: ftui::Style,
     /// File location path style (subtle).
     pub location_style: ftui::Style,
+    /// Inline mini-analytics for this hit's conversation/session.
+    pub mini_analytics: Option<RowMiniAnalytics>,
     /// Per-row reveal progress (0.0 = hidden / 1.0 = fully visible).
     pub reveal_progress: f32,
     /// Focus-flash intensity injected from app animation state (0.0-1.0).
@@ -2297,6 +2395,16 @@ pub struct ResultItem {
     pub query_highlight_style: ftui::Style,
     /// Whether this row is currently under the mouse cursor.
     pub hovered: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RowMiniAnalytics {
+    /// Number of matched messages in the current result set for this session.
+    pub matched_messages: usize,
+    /// Estimated total API tokens (chars/4 heuristic) for matched messages.
+    pub estimated_tokens: i64,
+    /// Estimated cost in USD from estimated tokens.
+    pub estimated_cost_usd: f64,
 }
 
 fn source_display_label(source_id: &str, origin_host: Option<&str>) -> String {
@@ -2682,6 +2790,49 @@ impl ResultItem {
         out.truncate(max_lines);
         out
     }
+
+    fn mini_analytics_spans(&self) -> Vec<ftui::text::Span<'static>> {
+        let Some(analytics) = self.mini_analytics else {
+            return Vec::new();
+        };
+        if analytics.matched_messages == 0 {
+            return Vec::new();
+        }
+
+        let token_text = format!("{} tok", format_compact_metric(analytics.estimated_tokens));
+        let msg_text = if analytics.matched_messages == 1 {
+            "1 msg".to_string()
+        } else {
+            format!(
+                "{} msgs",
+                format_compact_metric(analytics.matched_messages as i64)
+            )
+        };
+
+        match LayoutBreakpoint::from_width(self.max_width) {
+            LayoutBreakpoint::Narrow => Vec::new(),
+            LayoutBreakpoint::MediumNarrow => vec![
+                ftui::text::Span::styled("● ", self.agent_accent_style),
+                ftui::text::Span::styled(token_text, self.text_primary_style),
+            ],
+            LayoutBreakpoint::Medium | LayoutBreakpoint::Wide => {
+                let mut spans = vec![
+                    ftui::text::Span::styled("● ", self.agent_accent_style),
+                    ftui::text::Span::styled(token_text, self.text_primary_style),
+                ];
+                if analytics.estimated_cost_usd >= 0.001 {
+                    spans.push(ftui::text::Span::styled(" · ", self.text_subtle_style));
+                    spans.push(ftui::text::Span::styled(
+                        format_estimated_cost_usd(analytics.estimated_cost_usd),
+                        self.success_style,
+                    ));
+                }
+                spans.push(ftui::text::Span::styled(" · ", self.text_subtle_style));
+                spans.push(ftui::text::Span::styled(msg_text, self.text_subtle_style));
+                spans
+            }
+        }
+    }
 }
 
 impl RenderItem for ResultItem {
@@ -2805,6 +2956,11 @@ impl RenderItem for ResultItem {
                 format!("mt {}", self.match_type_label()),
                 self.text_subtle_style,
             ));
+            let analytics_spans = self.mini_analytics_spans();
+            if !analytics_spans.is_empty() {
+                meta_spans.push(ftui::text::Span::styled(" · ", self.text_muted_style));
+                meta_spans.extend(analytics_spans);
+            }
             meta_spans.push(ftui::text::Span::styled(" · ", self.text_muted_style));
             meta_spans.push(ftui::text::Span::styled(
                 snippet_preview,
@@ -2837,6 +2993,14 @@ impl RenderItem for ResultItem {
                     self.text_subtle_style,
                 ));
                 meta_spans.push(ftui::text::Span::styled(ts, self.text_muted_style));
+            }
+            let analytics_spans = self.mini_analytics_spans();
+            if !analytics_spans.is_empty() {
+                meta_spans.push(ftui::text::Span::styled(
+                    " \u{2502} ",
+                    self.text_subtle_style,
+                ));
+                meta_spans.extend(analytics_spans);
             }
         }
         let meta_line = ftui::text::Line::from_spans(meta_spans);
@@ -3720,6 +3884,10 @@ pub struct CassApp {
     // -- Animation & timing -----------------------------------------------
     /// Spring-based animation state (focus flash, reveal, modal, panel).
     pub anim: AnimationState,
+    /// Active view/surface transition state.
+    view_transition: Option<ViewTransition>,
+    /// Most recently rendered full-frame snapshot for transition blending.
+    view_transition_snapshot: RefCell<Option<ViewSnapshot>>,
     /// Start time of the reveal animation (legacy, kept for tui.rs compat).
     pub reveal_anim_start: Option<Instant>,
     /// End time of the focus-flash indicator (legacy, kept for tui.rs compat).
@@ -3734,6 +3902,8 @@ pub struct CassApp {
     pub search_dirty_since: Option<Instant>,
     /// Current spinner frame index.
     pub spinner_frame: usize,
+    /// Active loading indicator context for async/deferred operations.
+    loading_context: Option<LoadingContext>,
 
     // -- Saved views ------------------------------------------------------
     /// Up to 9 saved filter+ranking presets (Ctrl+1..9).
@@ -3941,6 +4111,8 @@ impl Default for CassApp {
             undo_history: UndoHistory::default(),
             terminal_focused: true,
             anim: AnimationState::from_env(),
+            view_transition: None,
+            view_transition_snapshot: RefCell::new(None),
             reveal_anim_start: None,
             focus_flash_until: None,
             peek_badge_until: None,
@@ -3948,6 +4120,7 @@ impl Default for CassApp {
             dirty_since: None,
             search_dirty_since: None,
             spinner_frame: 0,
+            loading_context: None,
             saved_views: Vec::new(),
             last_search_bar_area: RefCell::new(None),
             last_results_inner: RefCell::new(None),
@@ -5372,6 +5545,242 @@ impl CassApp {
             && (RESULTS_REVEAL_MIN_HITS..=RESULTS_REVEAL_MAX_HITS).contains(&hit_count)
     }
 
+    fn loading_spinner_glyph(&self) -> &'static str {
+        const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
+        FRAMES[self.spinner_frame % FRAMES.len()]
+    }
+
+    fn loading_hud_token(&self) -> Option<String> {
+        self.loading_context
+            .map(|ctx| format!("{} {}", self.loading_spinner_glyph(), ctx.label()))
+    }
+
+    fn set_loading_context(&mut self, context: LoadingContext) {
+        self.loading_context = Some(context);
+    }
+
+    fn clear_loading_context(&mut self, context: LoadingContext) {
+        if self.loading_context.is_some_and(|active| active == context) {
+            self.loading_context = None;
+        }
+    }
+
+    fn schedule_analytics_reload(&mut self) -> ftui::Cmd<CassMsg> {
+        if self.db_reader.is_none() {
+            self.clear_loading_context(LoadingContext::Analytics);
+            return ftui::Cmd::none();
+        }
+        self.set_loading_context(LoadingContext::Analytics);
+        ftui::Cmd::msg(CassMsg::AnalyticsLoadRequested)
+    }
+
+    fn view_transition_motion_enabled(
+        &self,
+        degradation: ftui::render::budget::DegradationLevel,
+    ) -> bool {
+        self.anim.enabled
+            && !matches!(
+                degradation,
+                ftui::render::budget::DegradationLevel::EssentialOnly
+                    | ftui::render::budget::DegradationLevel::Skeleton
+                    | ftui::render::budget::DegradationLevel::SkipFrame
+            )
+    }
+
+    fn capture_view_transition_snapshot(&self, frame: &super::ftui_adapter::Frame) {
+        let snapshot = ViewSnapshot {
+            surface: self.surface,
+            analytics_view: if self.surface == AppSurface::Analytics {
+                Some(self.analytics_view)
+            } else {
+                None
+            },
+            buffer: frame.buffer.clone(),
+        };
+        *self.view_transition_snapshot.borrow_mut() = Some(snapshot);
+    }
+
+    fn latest_surface_snapshot(&self, surface: AppSurface) -> Option<ftui::Buffer> {
+        self.view_transition_snapshot
+            .borrow()
+            .as_ref()
+            .filter(|snapshot| snapshot.surface == surface)
+            .map(|snapshot| snapshot.buffer.clone())
+    }
+
+    fn latest_analytics_snapshot(&self, view: AnalyticsView) -> Option<ftui::Buffer> {
+        self.view_transition_snapshot
+            .borrow()
+            .as_ref()
+            .filter(|snapshot| {
+                snapshot.surface == AppSurface::Analytics
+                    && snapshot
+                        .analytics_view
+                        .is_some_and(|analytics| analytics == view)
+            })
+            .map(|snapshot| snapshot.buffer.clone())
+    }
+
+    fn shifted_copy_geometry(area: Rect, shift_cols: i16) -> Option<(Rect, u16)> {
+        if area.is_empty() || area.width == 0 {
+            return None;
+        }
+        if shift_cols == 0 {
+            return Some((area, area.x));
+        }
+        let shift_abs = shift_cols.unsigned_abs();
+        if shift_abs >= area.width {
+            return None;
+        }
+        let visible_w = area.width.saturating_sub(shift_abs);
+        if shift_cols > 0 {
+            Some((
+                Rect::new(area.x, area.y, visible_w, area.height),
+                area.x.saturating_add(shift_abs),
+            ))
+        } else {
+            Some((
+                Rect::new(
+                    area.x.saturating_add(shift_abs),
+                    area.y,
+                    visible_w,
+                    area.height,
+                ),
+                area.x,
+            ))
+        }
+    }
+
+    fn start_surface_transition(&mut self, from: AppSurface, to: AppSurface) {
+        if from == to || !self.anim.enabled {
+            self.view_transition = None;
+            return;
+        }
+        let slide_direction = if to.nav_order() >= from.nav_order() {
+            -1
+        } else {
+            1
+        };
+        self.view_transition = Some(ViewTransition::new(
+            from.label(),
+            to.label(),
+            SURFACE_TRANSITION_DURATION,
+            self.latest_surface_snapshot(from),
+            slide_direction,
+        ));
+    }
+
+    fn start_analytics_view_transition(&mut self, from: AnalyticsView, to: AnalyticsView) {
+        if from == to || !self.anim.enabled {
+            return;
+        }
+        let slide_direction = if to.nav_order() >= from.nav_order() {
+            -1
+        } else {
+            1
+        };
+        self.view_transition = Some(ViewTransition::new(
+            format!("Analytics {}", from.label()),
+            format!("Analytics {}", to.label()),
+            ANALYTICS_VIEW_TRANSITION_DURATION,
+            self.latest_analytics_snapshot(from),
+            slide_direction,
+        ));
+    }
+
+    fn render_view_transition_overlay(
+        &self,
+        frame: &mut super::ftui_adapter::Frame,
+        area: Rect,
+        styles: &StyleContext,
+        degradation: ftui::render::budget::DegradationLevel,
+        apply_style: bool,
+    ) {
+        if !apply_style || !self.view_transition_motion_enabled(degradation) {
+            return;
+        }
+        let Some(transition) = self.view_transition.as_ref() else {
+            return;
+        };
+        if area.is_empty() || area.height == 0 {
+            return;
+        }
+
+        let now = Instant::now();
+        let progress = transition.progress(now);
+        if progress >= 1.0 {
+            return;
+        }
+        let eased = transition.eased_progress(now);
+
+        if let Some(snapshot) = transition.from_snapshot.as_ref() {
+            let copy_area = area.intersection(&snapshot.bounds());
+            if !copy_area.is_empty() {
+                let max_slide = ((copy_area.width as f32) * 0.16).round().clamp(4.0, 18.0) as i16;
+                let slide_cols = ((max_slide as f32) * eased).round() as i16;
+                let shift = transition.slide_direction * slide_cols;
+                if let Some((src_rect, dst_x)) = Self::shifted_copy_geometry(copy_area, shift) {
+                    let outgoing_opacity = ((1.0 - eased) * 0.92).clamp(0.0, 1.0);
+                    if outgoing_opacity > 0.01 {
+                        frame.buffer.push_scissor(copy_area);
+                        frame.buffer.push_opacity(outgoing_opacity);
+                        frame
+                            .buffer
+                            .copy_from(snapshot, src_rect, dst_x, src_rect.y);
+                        frame.buffer.pop_opacity();
+                        frame.buffer.pop_scissor();
+                    }
+                }
+            }
+        }
+
+        let edge_mix = (1.0 - eased).clamp(0.0, 1.0);
+        if edge_mix <= 0.01 {
+            return;
+        }
+        let accent = styles
+            .style(style_system::STYLE_STATUS_INFO)
+            .fg
+            .unwrap_or(ftui::PackedRgba::rgb(80, 160, 240));
+        let pane_bg = styles
+            .style(style_system::STYLE_PANE_BASE)
+            .bg
+            .unwrap_or(ftui::PackedRgba::rgb(10, 12, 16));
+        let edge_color = ftui::PackedRgba::rgb(
+            lerp_u8(pane_bg.r(), accent.r(), 0.35 + edge_mix * 0.45),
+            lerp_u8(pane_bg.g(), accent.g(), 0.35 + edge_mix * 0.45),
+            lerp_u8(pane_bg.b(), accent.b(), 0.35 + edge_mix * 0.45),
+        );
+        let max_slide = ((area.width as f32) * 0.16).round().clamp(4.0, 18.0) as i16;
+        let slide_cols = ((max_slide as f32) * eased).round() as i16;
+        let shift = transition.slide_direction * slide_cols;
+        let edge_x = if shift <= 0 {
+            area.x
+                .saturating_add(area.width.saturating_sub(1))
+                .saturating_sub(shift.unsigned_abs())
+        } else {
+            area.x
+                .saturating_add(shift.unsigned_abs().saturating_sub(1))
+        }
+        .min(area.x.saturating_add(area.width.saturating_sub(1)));
+        Block::new()
+            .style(ftui::Style::new().bg(edge_color))
+            .render(Rect::new(edge_x, area.y, 1, area.height), frame);
+
+        let label = format!(" {} -> {} ", transition.from_label, transition.to_label);
+        let label_w = label.chars().count() as u16;
+        if label_w > 0 && label_w < area.width {
+            let label_x = area
+                .x
+                .saturating_add(area.width.saturating_sub(label_w))
+                .saturating_sub(1);
+            let label_area = Rect::new(label_x, area.y, label_w, 1);
+            Paragraph::new(label)
+                .style(styles.style(style_system::STYLE_KBD_KEY))
+                .render(label_area, frame);
+        }
+    }
+
     fn results_focus_flash_intensity(
         &self,
         degradation: ftui::render::budget::DegradationLevel,
@@ -5383,13 +5792,9 @@ impl CassApp {
         (1.0 - self.anim.focus_flash_progress()).clamp(0.0, 1.0)
     }
 
-    /// Build the aggregate stats line for the results pane bottom bar.
-    fn build_results_stats_line(&self, width: u16, styles: &StyleContext) -> ftui::text::Line {
-        let label_s = styles.style(style_system::STYLE_TEXT_SUBTLE);
-        let value_s = styles.style(style_system::STYLE_TEXT_PRIMARY);
-        let sep = ftui::text::Span::styled(" \u{2502} ", label_s);
+    fn filtered_result_hits_for_stats(&self) -> Vec<&SearchHit> {
         let pane_filter = self.pane_filter.as_deref().filter(|s| !s.trim().is_empty());
-        let stats_hits: Vec<&SearchHit> = if !self.results.is_empty() {
+        if !self.results.is_empty() {
             self.results
                 .iter()
                 .filter(|hit| {
@@ -5404,14 +5809,42 @@ impl CassApp {
             self.panes
                 .iter()
                 .flat_map(|pane| pane.hits.iter())
+                .filter(|hit| {
+                    if let Some(filter) = pane_filter {
+                        pane_filter_matches_hit(hit, filter)
+                    } else {
+                        true
+                    }
+                })
                 .collect()
-        };
+        }
+    }
 
-        let total_messages: usize = if !self.results.is_empty() {
-            stats_hits.len()
-        } else {
-            self.panes.iter().map(|pane| pane.total_count).sum()
-        };
+    fn build_result_row_mini_analytics_map(&self) -> HashMap<(String, String), RowMiniAnalytics> {
+        let mut by_session: HashMap<(String, String), RowMiniAnalytics> = HashMap::new();
+        for hit in self.filtered_result_hits_for_stats() {
+            let key = (hit.source_id.clone(), hit.source_path.clone());
+            let entry = by_session.entry(key).or_default();
+            entry.matched_messages += 1;
+            entry.estimated_tokens = entry
+                .estimated_tokens
+                .saturating_add(estimate_tokens_from_hit_for_stats(hit));
+        }
+        for analytics in by_session.values_mut() {
+            analytics.estimated_cost_usd = (analytics.estimated_tokens as f64 / 1_000_000.0)
+                * SEARCH_STATS_EST_COST_PER_MILLION_TOKENS;
+        }
+        by_session
+    }
+
+    /// Build the aggregate stats line for the results pane bottom bar.
+    fn build_results_stats_line(&self, width: u16, styles: &StyleContext) -> ftui::text::Line {
+        let label_s = styles.style(style_system::STYLE_TEXT_SUBTLE);
+        let value_s = styles.style(style_system::STYLE_TEXT_PRIMARY);
+        let sep = ftui::text::Span::styled(" \u{2502} ", label_s);
+        let stats_hits = self.filtered_result_hits_for_stats();
+
+        let total_messages: usize = stats_hits.len();
         let mut session_keys: HashSet<(String, String)> = HashSet::new();
         let mut timestamps: Vec<i64> = Vec::new();
         let mut estimated_api_tokens = 0i64;
@@ -5592,6 +6025,8 @@ impl CassApp {
             return;
         }
 
+        let mini_analytics_by_session = self.build_result_row_mini_analytics_map();
+
         // Legacy-parity rendering path: when there's only one pane, render a single
         // unified list without per-pane chrome.
         if self.panes.len() == 1 {
@@ -5614,6 +6049,9 @@ impl CassApp {
                 .map(|(i, hit)| {
                     let even = i % 2 == 0;
                     let queued = self.selected.contains(&SelectedHitKey::from_hit(hit));
+                    let mini_analytics = mini_analytics_by_session
+                        .get(&(hit.source_id.clone(), hit.source_path.clone()))
+                        .copied();
                     ResultItem {
                         index: i + 1,
                         hit: hit.clone(),
@@ -5637,6 +6075,7 @@ impl CassApp {
                         source_local_style: styles.style(style_system::STYLE_SOURCE_LOCAL),
                         source_remote_style: styles.style(style_system::STYLE_SOURCE_REMOTE),
                         location_style: styles.style(style_system::STYLE_LOCATION),
+                        mini_analytics,
                         reveal_progress: if reveal_motion_enabled {
                             self.anim.reveal_progress(i) as f32
                         } else {
@@ -5745,6 +6184,9 @@ impl CassApp {
                 .map(|(i, hit)| {
                     let even = i % 2 == 0;
                     let queued = self.selected.contains(&SelectedHitKey::from_hit(hit));
+                    let mini_analytics = mini_analytics_by_session
+                        .get(&(hit.source_id.clone(), hit.source_path.clone()))
+                        .copied();
                     ResultItem {
                         index: i + 1,
                         hit: hit.clone(),
@@ -5768,6 +6210,7 @@ impl CassApp {
                         source_local_style: styles.style(style_system::STYLE_SOURCE_LOCAL),
                         source_remote_style: styles.style(style_system::STYLE_SOURCE_REMOTE),
                         location_style: styles.style(style_system::STYLE_LOCATION),
+                        mini_analytics,
                         reveal_progress: if reveal_motion_enabled {
                             self.anim.reveal_progress(i) as f32
                         } else {
@@ -7026,6 +7469,16 @@ impl CassApp {
         };
 
         if let Some(hit) = self.selected_hit() {
+            if self.loading_context == Some(LoadingContext::DetailModal) {
+                let loading_line = format!(
+                    "{} Loading conversation details...",
+                    self.loading_spinner_glyph()
+                );
+                Paragraph::new(loading_line)
+                    .style(text_muted_style)
+                    .render(content_area, frame);
+                return;
+            }
             // Render sticky metadata header on Messages tab
             let content_area = if self.detail_tab == DetailTab::Messages && content_area.height >= 6
             {
@@ -9176,6 +9629,8 @@ pub enum CassMsg {
     // -- Detail view ------------------------------------------------------
     /// Open the detail modal for the currently selected result.
     DetailOpened,
+    /// Load full conversation detail for the selected source path.
+    DetailLoadRequested { source_path: String },
     /// Close the detail modal.
     DetailClosed,
     /// Switch detail tab.
@@ -9198,7 +9653,7 @@ pub enum CassMsg {
     ToolCollapseAll,
     /// Jump to the next/previous message in the detail view.
     DetailMessageJumped { forward: bool, user_only: bool },
-    /// Toggle the aggregate stats bar in the results pane.
+    /// Toggle the aggregate stats bar in the results pane (Ctrl+S).
     StatsBarToggled,
 
     // -- Multi-select & bulk actions --------------------------------------
@@ -9476,6 +9931,8 @@ pub enum CassMsg {
     // -- Analytics surface ------------------------------------------------
     /// Switch to analytics surface (pushes Search onto back-stack).
     AnalyticsEntered,
+    /// Deferred analytics data load (lets UI render a loading frame first).
+    AnalyticsLoadRequested,
     /// Navigate to a specific analytics subview.
     AnalyticsViewChanged(AnalyticsView),
     /// Pop the view stack (Esc from analytics returns to search).
@@ -10276,6 +10733,7 @@ impl From<super::ftui_adapter::Event> for CassMsg {
 
                     // -- Search mode (Alt+S) --------------------------------------
                     KeyCode::Char('s') if ctrl && !shift => CassMsg::StatsBarToggled,
+                    KeyCode::Char('S') if ctrl && !shift => CassMsg::StatsBarToggled,
                     KeyCode::Char('s') if alt => CassMsg::SearchModeCycled,
 
                     // -- Macro recording (Alt+M) ----------------------------------
@@ -10305,7 +10763,7 @@ impl From<super::ftui_adapter::Event> for CassMsg {
 
                     // -- Sources management -----------------------------------------
                     KeyCode::Char('s') if ctrl && shift => CassMsg::SourcesEntered,
-                    KeyCode::Char('S') if ctrl => CassMsg::SourcesEntered,
+                    KeyCode::Char('S') if ctrl && shift => CassMsg::SourcesEntered,
 
                     // -- Inspector overlay -----------------------------------------
                     KeyCode::Char('i') if ctrl && shift => CassMsg::InspectorToggled,
@@ -10873,6 +11331,7 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::DetailFindQueryChanged(_)
                     | CassMsg::DetailFindNavigated { .. }
                     | CassMsg::DetailClosed
+                    | CassMsg::DetailLoadRequested { .. }
                     | CassMsg::DetailTabChanged(_)
                     | CassMsg::DetailScrolled { .. }
                     | CassMsg::DetailWrapToggled
@@ -10984,6 +11443,7 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     // Let these through unchanged
                     CassMsg::DetailClosed
+                    | CassMsg::DetailLoadRequested { .. }
                     | CassMsg::DetailOpened
                     | CassMsg::DetailTabChanged(_)
                     | CassMsg::DetailScrolled { .. }
@@ -11111,8 +11571,7 @@ impl super::ftui_adapter::Model for CassApp {
                     let views = AnalyticsView::all();
                     if let Some(cur_idx) = views.iter().position(|v| *v == self.analytics_view) {
                         let next = (cur_idx as i32 + delta).rem_euclid(views.len() as i32) as usize;
-                        self.analytics_view = views[next];
-                        self.analytics_selection = 0; // reset selection on view change
+                        return self.update(CassMsg::AnalyticsViewChanged(views[next]));
                     }
                     return ftui::Cmd::none();
                 }
@@ -11410,11 +11869,13 @@ impl super::ftui_adapter::Model for CassApp {
                 };
                 // Skip empty queries.
                 if params.query.trim().is_empty() {
+                    self.clear_loading_context(LoadingContext::Search);
                     return ftui::Cmd::none();
                 }
                 // Dispatch async search if a service is available.
                 if let Some(svc) = self.search_service.clone() {
                     self.status = "Searching\u{2026}".to_string();
+                    self.set_loading_context(LoadingContext::Search);
                     ftui::Cmd::task(move || match svc.execute(&params) {
                         Ok(result) => CassMsg::SearchCompleted {
                             hits: result.hits,
@@ -11425,6 +11886,7 @@ impl super::ftui_adapter::Model for CassApp {
                         Err(e) => CassMsg::SearchFailed(e),
                     })
                 } else {
+                    self.clear_loading_context(LoadingContext::Search);
                     ftui::Cmd::none()
                 }
             }
@@ -11434,6 +11896,7 @@ impl super::ftui_adapter::Model for CassApp {
                 suggestions,
                 wildcard_fallback,
             } => {
+                self.clear_loading_context(LoadingContext::Search);
                 self.last_search_ms = Some(elapsed_ms);
                 self.suggestions = suggestions;
                 self.wildcard_fallback = wildcard_fallback;
@@ -11469,6 +11932,7 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::SearchFailed(err) => {
+                self.clear_loading_context(LoadingContext::Search);
                 self.status = format!("Search error: {err}");
                 ftui::Cmd::none()
             }
@@ -11832,12 +12296,45 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 self.focus_manager.push_trap(focus_ids::GROUP_DETAIL_MODAL);
                 self.focus_manager.focus(focus_ids::DETAIL_MODAL);
+                let Some(hit) = self.selected_hit() else {
+                    self.clear_loading_context(LoadingContext::DetailModal);
+                    return ftui::Cmd::none();
+                };
+                let source_path = hit.source_path.clone();
+                let needs_reload = self
+                    .cached_detail
+                    .as_ref()
+                    .is_none_or(|(cached_path, _)| cached_path != &source_path);
+                if needs_reload {
+                    self.cached_detail = None;
+                    self.set_loading_context(LoadingContext::DetailModal);
+                    return ftui::Cmd::msg(CassMsg::DetailLoadRequested { source_path });
+                }
+                self.clear_loading_context(LoadingContext::DetailModal);
+                ftui::Cmd::none()
+            }
+            CassMsg::DetailLoadRequested { source_path } => {
+                if let Some(db) = self.db_reader.as_ref() {
+                    match load_conversation(db, &source_path) {
+                        Ok(Some(view)) => {
+                            self.cached_detail = Some((source_path, view));
+                        }
+                        Ok(None) => {
+                            // Keep fallback rendering from SearchHit content.
+                        }
+                        Err(err) => {
+                            self.status = format!("Failed to load conversation detail: {err}");
+                        }
+                    }
+                }
+                self.clear_loading_context(LoadingContext::DetailModal);
                 ftui::Cmd::none()
             }
             CassMsg::DetailClosed => {
                 self.show_detail_modal = false;
                 self.focus_manager.pop_trap();
                 self.focus_manager.focus(focus_ids::RESULTS_LIST);
+                self.clear_loading_context(LoadingContext::DetailModal);
                 ftui::Cmd::none()
             }
             CassMsg::DetailTabChanged(tab) => {
@@ -13340,6 +13837,7 @@ impl super::ftui_adapter::Model for CassApp {
                     return ftui::Cmd::none();
                 }
                 self.index_refresh_in_flight = true;
+                self.set_loading_context(LoadingContext::IndexRefresh);
                 self.status = "Refreshing index...".to_string();
                 let data_dir = self.data_dir.clone();
                 let db_path = self.db_path.clone();
@@ -13383,11 +13881,13 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::IndexRefreshCompleted => {
                 self.index_refresh_in_flight = false;
+                self.clear_loading_context(LoadingContext::IndexRefresh);
                 self.status = "Index refresh complete".to_string();
                 ftui::Cmd::none()
             }
             CassMsg::IndexRefreshFailed(err) => {
                 self.index_refresh_in_flight = false;
+                self.clear_loading_context(LoadingContext::IndexRefresh);
                 self.status = format!("Index refresh failed: {err}");
                 ftui::Cmd::none()
             }
@@ -13512,6 +14012,13 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 // Tick spring-based animations.
                 self.anim.tick(dt);
+                if self
+                    .view_transition
+                    .as_ref()
+                    .is_some_and(|transition| transition.is_done(now))
+                {
+                    self.view_transition = None;
+                }
                 // Drive modal_open spring target from current modal state.
                 let any_modal = self.show_export_modal
                     || self.show_bulk_modal
@@ -13982,33 +14489,52 @@ impl super::ftui_adapter::Model for CassApp {
             // -- Analytics surface ---------------------------------------------
             CassMsg::AnalyticsEntered => {
                 self.pane_split_drag = None;
+                let previous_surface = self.surface;
                 if self.surface != AppSurface::Analytics {
                     self.view_stack.push(self.surface);
                     self.surface = AppSurface::Analytics;
+                    self.start_surface_transition(previous_surface, self.surface);
                 }
-                // Load chart data on entry (lazy, from db_reader).
-                if self.analytics_cache.is_none()
-                    && let Some(db) = &self.db_reader
-                {
+                // Deferred load on entry so the UI can render a loading frame first.
+                if self.analytics_cache.is_none() {
+                    return self.schedule_analytics_reload();
+                }
+                ftui::Cmd::none()
+            }
+            CassMsg::AnalyticsLoadRequested => {
+                if let Some(db) = &self.db_reader {
                     self.analytics_cache = Some(super::analytics_charts::load_chart_data(
                         db,
                         &self.analytics_filters,
                         self.explorer_group_by,
                     ));
                 }
+                self.clear_loading_context(LoadingContext::Analytics);
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsViewChanged(view) => {
-                self.analytics_view = view;
-                self.analytics_selection = 0; // reset selection on view change
+                let previous_view = self.analytics_view;
+                if previous_view != view {
+                    self.analytics_view = view;
+                    self.analytics_selection = 0; // reset selection on view change
+                    self.start_analytics_view_transition(previous_view, view);
+                }
+                if self.surface == AppSurface::Analytics && self.analytics_cache.is_none() {
+                    return self.schedule_analytics_reload();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::ViewStackPopped => {
                 self.pane_split_drag = None;
+                let previous_surface = self.surface;
                 if let Some(prev) = self.view_stack.pop() {
                     self.surface = prev;
                 } else {
                     self.surface = AppSurface::Search;
+                }
+                self.start_surface_transition(previous_surface, self.surface);
+                if self.surface != AppSurface::Analytics {
+                    self.clear_loading_context(LoadingContext::Analytics);
                 }
                 ftui::Cmd::none()
             }
@@ -14016,26 +14542,41 @@ impl super::ftui_adapter::Model for CassApp {
                 self.analytics_filters.since_ms = since_ms;
                 self.analytics_filters.until_ms = until_ms;
                 self.analytics_cache = None; // invalidate chart data on filter change
+                if self.surface == AppSurface::Analytics {
+                    return self.schedule_analytics_reload();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsAgentFilterSet(agents) => {
                 self.analytics_filters.agents = agents;
                 self.analytics_cache = None;
+                if self.surface == AppSurface::Analytics {
+                    return self.schedule_analytics_reload();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsWorkspaceFilterSet(workspaces) => {
                 self.analytics_filters.workspaces = workspaces;
                 self.analytics_cache = None;
+                if self.surface == AppSurface::Analytics {
+                    return self.schedule_analytics_reload();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsSourceFilterSet(sf) => {
                 self.analytics_filters.source_filter = sf;
                 self.analytics_cache = None;
+                if self.surface == AppSurface::Analytics {
+                    return self.schedule_analytics_reload();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsFiltersClearAll => {
                 self.analytics_filters = AnalyticsFilterState::default();
                 self.analytics_cache = None;
+                if self.surface == AppSurface::Analytics {
+                    return self.schedule_analytics_reload();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsSelectionMoved { delta } => {
@@ -14067,8 +14608,10 @@ impl super::ftui_adapter::Model for CassApp {
                 );
 
                 // Push analytics surface onto the back-stack.
+                let previous_surface = self.surface;
                 self.view_stack.push(AppSurface::Analytics);
                 self.surface = AppSurface::Search;
+                self.start_surface_transition(previous_surface, self.surface);
 
                 // Convert drilldown context into search filters.
                 self.filters.created_from = since_ms;
@@ -14126,6 +14669,7 @@ impl super::ftui_adapter::Model for CassApp {
                     format!(" ({})", origin_parts.join(", "))
                 };
                 self.status = format!("Drilldown from analytics{suffix} — type a query or browse");
+                self.clear_loading_context(LoadingContext::Analytics);
                 ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::ExplorerMetricCycled { forward } => {
@@ -14157,6 +14701,9 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 // Invalidate cache so timeseries reloads with new granularity.
                 self.analytics_cache = None;
+                if self.surface == AppSurface::Analytics {
+                    return self.schedule_analytics_reload();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::ExplorerZoomCycled { forward } => {
@@ -14182,6 +14729,9 @@ impl super::ftui_adapter::Model for CassApp {
                 self.analytics_filters.since_ms = since_ms;
                 self.analytics_filters.until_ms = until_ms;
                 self.analytics_cache = None;
+                if self.surface == AppSurface::Analytics {
+                    return self.schedule_analytics_reload();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::BreakdownTabCycled { forward } => {
@@ -14205,10 +14755,13 @@ impl super::ftui_adapter::Model for CassApp {
             // -- Sources management (2noh9.4.9) ----------------------------------
             CassMsg::SourcesEntered => {
                 self.pane_split_drag = None;
+                let previous_surface = self.surface;
                 if self.surface != AppSurface::Sources {
                     self.view_stack.push(self.surface);
                     self.surface = AppSurface::Sources;
+                    self.start_surface_transition(previous_surface, self.surface);
                 }
+                self.clear_loading_context(LoadingContext::Analytics);
                 #[cfg(not(test))]
                 self.load_sources_view();
                 ftui::Cmd::none()
@@ -15096,6 +15649,9 @@ impl super::ftui_adapter::Model for CassApp {
                 if !degradation.is_full() {
                     runtime_parts.push(format!("deg:{}", degradation.as_str()));
                 }
+                if let Some(loading) = self.loading_hud_token() {
+                    runtime_parts.push(loading);
+                }
                 if !self.selected.is_empty() {
                     runtime_parts.push(format!("sel:{}", self.selected.len()));
                 }
@@ -15259,24 +15815,32 @@ impl super::ftui_adapter::Model for CassApp {
                 let content_inner = content_block.inner(vertical[1]);
                 content_block.render(vertical[1], frame);
                 if render_content && !content_inner.is_empty() {
-                    let empty_data = AnalyticsChartData::default();
-                    let chart_data = self.analytics_cache.as_ref().unwrap_or(&empty_data);
-                    let explorer_state = super::analytics_charts::ExplorerState {
-                        metric: self.explorer_metric,
-                        overlay: self.explorer_overlay,
-                        group_by: self.explorer_group_by,
-                        zoom: self.explorer_zoom,
-                    };
-                    super::analytics_charts::render_analytics_content(
-                        self.analytics_view,
-                        chart_data,
-                        &explorer_state,
-                        self.breakdown_tab,
-                        self.heatmap_metric,
-                        self.analytics_selection,
-                        content_inner,
-                        frame,
-                    );
+                    if self.loading_context == Some(LoadingContext::Analytics) {
+                        let loading_line =
+                            format!("{} Loading analytics...", self.loading_spinner_glyph());
+                        Paragraph::new(loading_line)
+                            .style(text_muted_style)
+                            .render(content_inner, frame);
+                    } else {
+                        let empty_data = AnalyticsChartData::default();
+                        let chart_data = self.analytics_cache.as_ref().unwrap_or(&empty_data);
+                        let explorer_state = super::analytics_charts::ExplorerState {
+                            metric: self.explorer_metric,
+                            overlay: self.explorer_overlay,
+                            group_by: self.explorer_group_by,
+                            zoom: self.explorer_zoom,
+                        };
+                        super::analytics_charts::render_analytics_content(
+                            self.analytics_view,
+                            chart_data,
+                            &explorer_state,
+                            self.breakdown_tab,
+                            self.heatmap_metric,
+                            self.analytics_selection,
+                            content_inner,
+                            frame,
+                        );
+                    }
                 }
 
                 // ── Analytics status footer ──────────────────────────────
@@ -15285,6 +15849,12 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     format!(" | deg:{}", degradation.as_str())
                 };
+                let analytics_loading_tag =
+                    if self.loading_context == Some(LoadingContext::Analytics) {
+                        format!(" | {} loading", self.loading_spinner_glyph())
+                    } else {
+                        String::new()
+                    };
                 let drilldown_hint = if self.analytics_selectable_count() > 0 {
                     format!(
                         " | [{}/{}] Enter=drilldown",
@@ -15304,7 +15874,7 @@ impl super::ftui_adapter::Model for CassApp {
                     format!("{} Esc=back", drilldown_hint)
                 };
                 let analytics_status = format!(
-                    " Analytics: {} | {}{nav_hints}{analytics_deg_tag}",
+                    " Analytics: {} | {}{nav_hints}{analytics_deg_tag}{analytics_loading_tag}",
                     self.analytics_view.label(),
                     breakpoint.footer_label(),
                 );
@@ -15437,6 +16007,9 @@ impl super::ftui_adapter::Model for CassApp {
                     .render(vertical[2], frame);
             }
         }
+
+        self.capture_view_transition_snapshot(frame);
+        self.render_view_transition_overlay(frame, area, &styles, degradation, apply_style);
 
         // ── Modal backdrop dim ────────────────────────────────────────
         // When any modal is open, render a dimmed backdrop over the full
@@ -16928,6 +17501,17 @@ mod tests {
     }
 
     #[test]
+    fn event_mapping_ctrl_shift_s_maps_to_sources_entered() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(
+            KeyEvent::new(KeyCode::Char('s')).with_modifiers(Modifiers::CTRL | Modifiers::SHIFT),
+        );
+
+        assert!(matches!(CassMsg::from(event), CassMsg::SourcesEntered));
+    }
+
+    #[test]
     fn event_mapping_alt_h_maps_to_help_toggled() {
         use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
 
@@ -17183,6 +17767,11 @@ mod tests {
             "expected first refresh to dispatch Task, got: {debug_first}"
         );
         assert!(app.index_refresh_in_flight, "refresh should mark in-flight");
+        assert_eq!(
+            app.loading_context,
+            Some(LoadingContext::IndexRefresh),
+            "index refresh should set loading context while in flight"
+        );
 
         let second = app.update(CassMsg::IndexRefreshRequested);
         let debug_second = format!("{second:?}");
@@ -17194,6 +17783,21 @@ mod tests {
             app.status.contains("already running"),
             "status should explain duplicate refresh suppression"
         );
+    }
+
+    #[test]
+    fn index_refresh_terminal_states_clear_loading_context() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::IndexRefreshRequested);
+        assert_eq!(app.loading_context, Some(LoadingContext::IndexRefresh));
+
+        let _ = app.update(CassMsg::IndexRefreshCompleted);
+        assert!(app.loading_context.is_none());
+
+        let _ = app.update(CassMsg::IndexRefreshRequested);
+        assert_eq!(app.loading_context, Some(LoadingContext::IndexRefresh));
+        let _ = app.update(CassMsg::IndexRefreshFailed("boom".into()));
+        assert!(app.loading_context.is_none());
     }
 
     #[test]
@@ -18935,6 +19539,7 @@ mod tests {
         assert!(app.search_dirty_since.is_none(), "dirty state should clear");
         // No search dispatched (no service, query is empty whitespace)
         assert!(app.status.is_empty());
+        assert!(app.loading_context.is_none());
     }
 
     #[test]
@@ -18964,6 +19569,11 @@ mod tests {
         app.search_service = Some(fixture.clone());
         let cmd = app.update(CassMsg::SearchRequested);
         assert!(app.status.contains("Searching"));
+        assert_eq!(
+            app.loading_context,
+            Some(LoadingContext::Search),
+            "search request should raise loading context"
+        );
         // Cmd should be a Task variant (non-none).
         // Verify by extracting the task closure via format debug.
         let debug = format!("{cmd:?}");
@@ -18981,6 +19591,25 @@ mod tests {
             debug.contains("None"),
             "expected Cmd::None without service, got: {debug}"
         );
+        assert!(app.loading_context.is_none());
+    }
+
+    #[test]
+    fn search_terminal_states_clear_loading_context() {
+        let mut app = CassApp::default();
+        app.loading_context = Some(LoadingContext::Search);
+
+        let _ = app.update(CassMsg::SearchCompleted {
+            hits: vec![],
+            elapsed_ms: 1,
+            suggestions: vec![],
+            wildcard_fallback: false,
+        });
+        assert!(app.loading_context.is_none());
+
+        app.loading_context = Some(LoadingContext::Search);
+        let _ = app.update(CassMsg::SearchFailed("boom".into()));
+        assert!(app.loading_context.is_none());
     }
 
     // ==================== VirtualizedList integration tests ====================
@@ -19028,6 +19657,7 @@ mod tests {
                 source_local_style: ftui::Style::default(),
                 source_remote_style: ftui::Style::default(),
                 location_style: ftui::Style::default(),
+                mini_analytics: None,
                 reveal_progress: 1.0,
                 focus_flash_intensity: 0.0,
                 query_terms: vec![],
@@ -19197,6 +19827,7 @@ mod tests {
             source_local_style: ftui::Style::default(),
             source_remote_style: ftui::Style::default(),
             location_style: ftui::Style::default(),
+            mini_analytics: None,
             reveal_progress: 1.0,
             focus_flash_intensity: 0.0,
             query_terms: vec![],
@@ -19221,6 +19852,7 @@ mod tests {
             source_local_style: ftui::Style::default(),
             source_remote_style: ftui::Style::default(),
             location_style: ftui::Style::default(),
+            mini_analytics: None,
             reveal_progress: 1.0,
             focus_flash_intensity: 0.0,
             query_terms: vec![],
@@ -19255,6 +19887,7 @@ mod tests {
             source_local_style: ftui::Style::default(),
             source_remote_style: ftui::Style::default(),
             location_style: ftui::Style::default(),
+            mini_analytics: None,
             reveal_progress: 1.0,
             focus_flash_intensity: 0.0,
             query_terms: vec![],
@@ -19285,6 +19918,7 @@ mod tests {
             source_local_style: ftui::Style::default(),
             source_remote_style: ftui::Style::default(),
             location_style: ftui::Style::default(),
+            mini_analytics: None,
             reveal_progress: 1.0,
             focus_flash_intensity: 0.0,
             query_terms: vec![],
@@ -19292,6 +19926,70 @@ mod tests {
             hovered: false,
         };
         assert_eq!(remote_item.source_badge(), "[laptop]");
+    }
+
+    #[test]
+    fn result_item_mini_analytics_hidden_on_narrow() {
+        let mut item = make_result_item(make_test_hit(), DensityMode::Cozy.row_height());
+        item.max_width = 72; // Narrow breakpoint
+        item.mini_analytics = Some(RowMiniAnalytics {
+            matched_messages: 5,
+            estimated_tokens: 2_500,
+            estimated_cost_usd: 0.018,
+        });
+
+        let text: String = item
+            .mini_analytics_spans()
+            .iter()
+            .map(|span| span.content.as_ref().to_string())
+            .collect();
+        assert!(text.is_empty(), "narrow rows should hide analytics badges");
+    }
+
+    #[test]
+    fn result_item_mini_analytics_medium_narrow_shows_token_only() {
+        let mut item = make_result_item(make_test_hit(), DensityMode::Cozy.row_height());
+        item.max_width = 100; // MediumNarrow breakpoint
+        item.mini_analytics = Some(RowMiniAnalytics {
+            matched_messages: 5,
+            estimated_tokens: 2_500,
+            estimated_cost_usd: 0.018,
+        });
+
+        let text: String = item
+            .mini_analytics_spans()
+            .iter()
+            .map(|span| span.content.as_ref().to_string())
+            .collect();
+        assert!(text.contains("tok"), "expected token badge, got: {text}");
+        assert!(
+            !text.contains("msg"),
+            "medium-narrow should omit message badge, got: {text}"
+        );
+        assert!(
+            !text.contains('$'),
+            "medium-narrow should omit cost badge, got: {text}"
+        );
+    }
+
+    #[test]
+    fn result_item_mini_analytics_medium_shows_full_badges() {
+        let mut item = make_result_item(make_test_hit(), DensityMode::Cozy.row_height());
+        item.max_width = 140; // Medium breakpoint
+        item.mini_analytics = Some(RowMiniAnalytics {
+            matched_messages: 5,
+            estimated_tokens: 2_500,
+            estimated_cost_usd: 0.018,
+        });
+
+        let text: String = item
+            .mini_analytics_spans()
+            .iter()
+            .map(|span| span.content.as_ref().to_string())
+            .collect();
+        assert!(text.contains("tok"), "expected token badge, got: {text}");
+        assert!(text.contains("msgs"), "expected message badge, got: {text}");
+        assert!(text.contains('$'), "expected cost badge, got: {text}");
     }
 
     #[test]
@@ -21115,6 +21813,7 @@ mod tests {
             source_local_style: ftui::Style::default(),
             source_remote_style: ftui::Style::default(),
             location_style: ftui::Style::default(),
+            mini_analytics: None,
             reveal_progress: 1.0,
             focus_flash_intensity: 0.0,
             query_terms: vec![],
@@ -21294,6 +21993,35 @@ mod tests {
             app2.filters.agents.contains("claude_code"),
             "agent filter should be applied"
         );
+    }
+
+    #[test]
+    fn detail_opened_cache_miss_sets_loading_and_dispatches_detail_load() {
+        let mut app = CassApp::default();
+        app.panes.push(AgentPane {
+            agent: "claude_code".into(),
+            total_count: 1,
+            hits: vec![make_test_hit()],
+            selected: 0,
+        });
+        app.active_pane = 0;
+        let expected_path = app.panes[0].hits[0].source_path.clone();
+
+        let cmd = app.update(CassMsg::DetailOpened);
+        let msg = extract_msg(cmd);
+        assert!(
+            matches!(
+                msg,
+                Some(CassMsg::DetailLoadRequested { source_path }) if source_path == expected_path
+            ),
+            "detail open on cache miss should dispatch detail load request"
+        );
+        assert_eq!(app.loading_context, Some(LoadingContext::DetailModal));
+
+        let _ = app.update(CassMsg::DetailLoadRequested {
+            source_path: expected_path,
+        });
+        assert!(app.loading_context.is_none());
     }
 
     #[test]
@@ -21678,13 +22406,105 @@ mod tests {
 
     #[test]
     fn analytics_entered_switches_surface() {
+        use ftui::render::budget::DegradationLevel;
+
         let mut app = CassApp::default();
         assert_eq!(app.surface, AppSurface::Search);
         assert!(app.view_stack.is_empty());
+        let _ = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
 
         let _ = app.update(CassMsg::AnalyticsEntered);
         assert_eq!(app.surface, AppSurface::Analytics);
         assert_eq!(app.view_stack, vec![AppSurface::Search]);
+        let transition = app
+            .view_transition
+            .as_ref()
+            .expect("surface switch should start transition");
+        assert_eq!(transition.from_label, "Search");
+        assert_eq!(transition.to_label, "Analytics");
+        assert_eq!(transition.duration, SURFACE_TRANSITION_DURATION);
+        assert!(
+            transition.from_snapshot.is_some(),
+            "surface transition should capture previous surface snapshot"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn analytics_reload_scheduling_requires_db_and_manages_loading_context() {
+        let mut app = CassApp::default();
+        app.loading_context = Some(LoadingContext::Analytics);
+        let cmd = app.schedule_analytics_reload();
+        assert!(
+            matches!(cmd, ftui::Cmd::None),
+            "without db reader analytics reload should no-op"
+        );
+        assert!(
+            app.loading_context.is_none(),
+            "without db reader analytics loading context should clear"
+        );
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("analytics_loading.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite for analytics test");
+        app.db_reader = Some(Arc::new(storage));
+
+        let cmd = app.schedule_analytics_reload();
+        assert!(
+            matches!(extract_msg(cmd), Some(CassMsg::AnalyticsLoadRequested)),
+            "with db reader analytics reload should dispatch load message"
+        );
+        assert_eq!(app.loading_context, Some(LoadingContext::Analytics));
+
+        let _ = app.update(CassMsg::AnalyticsLoadRequested);
+        assert!(app.loading_context.is_none());
+    }
+
+    #[test]
+    fn analytics_surface_renders_loading_placeholder() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = CassApp::default();
+        app.surface = AppSurface::Analytics;
+        app.loading_context = Some(LoadingContext::Analytics);
+        let rendered = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            rendered.contains("Loading analytics..."),
+            "analytics surface should show loading placeholder text"
+        );
+    }
+
+    #[test]
+    fn detail_panel_renders_loading_placeholder() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = CassApp::default();
+        app.panes.push(AgentPane {
+            agent: "claude_code".into(),
+            total_count: 1,
+            hits: vec![make_test_hit()],
+            selected: 0,
+        });
+        app.active_pane = 0;
+        app.loading_context = Some(LoadingContext::DetailModal);
+
+        let rendered = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            rendered.contains("Loading conversation details..."),
+            "detail panel should show loading placeholder text"
+        );
     }
 
     #[test]
@@ -21699,15 +22519,151 @@ mod tests {
 
     #[test]
     fn analytics_view_changed_updates_subview() {
+        use ftui::render::budget::DegradationLevel;
+
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::AnalyticsEntered);
+        let _ = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
         assert_eq!(app.analytics_view, AnalyticsView::Dashboard);
+        app.view_transition = None;
 
         let _ = app.update(CassMsg::AnalyticsViewChanged(AnalyticsView::Heatmap));
         assert_eq!(app.analytics_view, AnalyticsView::Heatmap);
+        let transition = app
+            .view_transition
+            .as_ref()
+            .expect("analytics tab change should start transition");
+        assert_eq!(transition.from_label, "Analytics Dashboard");
+        assert_eq!(transition.to_label, "Analytics Heatmap");
+        assert_eq!(transition.duration, ANALYTICS_VIEW_TRANSITION_DURATION);
+        assert!(
+            transition.from_snapshot.is_some(),
+            "analytics subview transition should capture previous subview snapshot"
+        );
 
         let _ = app.update(CassMsg::AnalyticsViewChanged(AnalyticsView::Cost));
         assert_eq!(app.analytics_view, AnalyticsView::Cost);
+    }
+
+    #[test]
+    fn tick_clears_completed_view_transition() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert!(app.view_transition.is_some());
+
+        if let Some(transition) = app.view_transition.as_mut() {
+            transition.started_at = Instant::now() - transition.duration - Duration::from_millis(1);
+        }
+
+        let _ = app.update(CassMsg::Tick);
+        assert!(
+            app.view_transition.is_none(),
+            "expired transition should be cleared on tick"
+        );
+    }
+
+    #[test]
+    fn transition_effect_hidden_under_essential_degradation() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = CassApp::default();
+        let _ = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        let transition = app
+            .view_transition
+            .as_mut()
+            .expect("expected active transition after surface switch");
+        transition.started_at = Instant::now();
+
+        let full_transition = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        let saved_transition = app
+            .view_transition
+            .clone()
+            .expect("transition should still be active");
+        app.view_transition = None;
+        let full_static = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            full_transition != full_static,
+            "full degradation should apply transition blending"
+        );
+
+        app.view_transition = Some(saved_transition.clone());
+        let essential_transition = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::EssentialOnly,
+        ));
+        app.view_transition = None;
+        let essential_static = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::EssentialOnly,
+        ));
+        assert!(
+            essential_transition == essential_static,
+            "essential degradation should suppress transition blending"
+        );
+        app.view_transition = Some(saved_transition);
+        let essential_labeled = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            essential_labeled.contains("Search -> Analytics"),
+            "transition affordance should include source/target labels"
+        );
+    }
+
+    #[test]
+    fn active_transition_renders_cleanly_across_sizes_and_degradation_levels() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        let mut app = CassApp::default();
+        let _ = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert!(
+            app.view_transition.is_some(),
+            "analytics entry should activate transition state"
+        );
+
+        let levels = [
+            DegradationLevel::Full,
+            DegradationLevel::SimpleBorders,
+            DegradationLevel::NoStyling,
+            DegradationLevel::EssentialOnly,
+            DegradationLevel::Skeleton,
+        ];
+        let sizes = [(40, 12), (64, 18), (80, 24), (120, 40), (160, 50)];
+
+        for (width, height) in sizes {
+            for level in levels {
+                let rendered = buffer_to_text(&render_at_degradation(&app, width, height, level));
+                assert!(
+                    !rendered.is_empty(),
+                    "transition render should produce output at {width}x{height} ({level:?})"
+                );
+                assert!(
+                    !rendered.contains('\u{fffd}'),
+                    "transition render should avoid replacement glyph artifacts at {width}x{height} ({level:?})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -25477,6 +26433,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_result_row_mini_analytics_map_aggregates_by_session() {
+        let mut app = CassApp::default();
+
+        let mut a1 = make_hit(1, "/session/a");
+        a1.content = "a".repeat(4_000); // ~1,000 tok
+        a1.source_id = "local".into();
+        a1.line_number = Some(1);
+
+        let mut a2 = make_hit(2, "/session/a");
+        a2.content = "b".repeat(2_000); // ~500 tok
+        a2.source_id = "local".into();
+        a2.line_number = Some(2);
+
+        let mut b1 = make_hit(3, "/session/b");
+        b1.content = "c".repeat(800); // ~200 tok
+        b1.source_id = "remote-ci".into();
+        b1.line_number = Some(1);
+
+        app.results = vec![a1, a2, b1];
+        let by_session = app.build_result_row_mini_analytics_map();
+
+        assert_eq!(by_session.len(), 2, "expected two unique sessions");
+        let a_metrics = by_session
+            .get(&(String::from("local"), String::from("/session/a")))
+            .expect("missing session a metrics");
+        assert_eq!(a_metrics.matched_messages, 2);
+        assert_eq!(a_metrics.estimated_tokens, 1_500);
+        assert!(a_metrics.estimated_cost_usd > 0.0);
+
+        let b_metrics = by_session
+            .get(&(String::from("remote-ci"), String::from("/session/b")))
+            .expect("missing session b metrics");
+        assert_eq!(b_metrics.matched_messages, 1);
+        assert_eq!(b_metrics.estimated_tokens, 200);
+        assert!(b_metrics.estimated_cost_usd > 0.0);
+    }
+
     // -- End stats bar tests --------------------------------------------------
 
     // -- Detail modal regression test suite (A.6) -----------------------------
@@ -25533,6 +26527,36 @@ mod tests {
         let _ = app.update(CassMsg::DetailOpened);
         assert!(app.show_detail_modal);
         assert_eq!(app.detail_tab, DetailTab::Messages);
+    }
+
+    #[test]
+    fn regression_detail_open_cache_hit_uses_cached_conversation_without_reload() {
+        let mut app = app_with_cached_conversation();
+        let selected = app.panes[app.active_pane].selected;
+        app.panes[app.active_pane].hits[selected].source_path = "test-session".to_string();
+
+        let cmd = app.update(CassMsg::DetailOpened);
+
+        assert!(
+            extract_msg(cmd).is_none(),
+            "cache hit should not dispatch detail reload"
+        );
+        assert!(app.show_detail_modal, "detail modal should open");
+        assert!(
+            app.loading_context.is_none(),
+            "cache hit should not leave detail modal loading state"
+        );
+
+        let (cached_path, cached_view) = app
+            .cached_detail
+            .as_ref()
+            .expect("cached detail should remain loaded");
+        assert_eq!(cached_path, "test-session");
+        assert_eq!(cached_view.messages.len(), 6);
+        assert!(
+            cached_view.messages[0].content.contains("fix a bug"),
+            "cached conversation should remain intact after open"
+        );
     }
 
     #[test]
@@ -25609,6 +26633,31 @@ mod tests {
     }
 
     #[test]
+    fn regression_markdown_gfm_message_content_renders_expected_sections() {
+        let app = app_with_cached_conversation();
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_messages_lines(&hit, 120, &styles);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans().iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+
+        assert!(
+            text.contains("Analysis"),
+            "markdown heading should render in detail modal output"
+        );
+        assert!(
+            text.contains("fn main()"),
+            "fenced code block content should render in detail modal output"
+        );
+        assert!(
+            text.contains("println!"),
+            "syntax-highlighted code content should remain visible"
+        );
+    }
+
+    #[test]
     fn regression_user_only_navigation_skips_non_user() {
         let mut app = app_with_cached_conversation();
         *app.detail_message_offsets.borrow_mut() = vec![
@@ -25635,6 +26684,44 @@ mod tests {
             user_only: true,
         });
         assert_eq!(app.detail_scroll, 0, "should jump back to first User");
+    }
+
+    #[test]
+    fn regression_detail_find_navigation_uses_rendered_match_cache() {
+        let mut app = app_with_cached_conversation();
+        let selected = app.panes[app.active_pane].selected;
+        app.panes[app.active_pane].hits[selected].source_path = "test-session".to_string();
+
+        let _ = app.update(CassMsg::DetailOpened);
+        let _ = app.update(CassMsg::DetailFindToggled);
+        let _ = app.update(CassMsg::DetailFindQueryChanged("bug".to_string()));
+        let _ = render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+
+        let cached_matches = app.detail_find_matches_cache.borrow().clone();
+        assert!(
+            cached_matches.len() >= 2,
+            "expected at least two rendered matches for navigation"
+        );
+
+        let _ = app.update(CassMsg::DetailFindNavigated { forward: true });
+
+        let find = app
+            .detail_find
+            .as_ref()
+            .expect("detail find state should remain active");
+        assert_eq!(
+            find.matches, cached_matches,
+            "navigation should sync matches from render cache"
+        );
+        assert_eq!(
+            find.current, 1,
+            "forward navigation should advance to the next match"
+        );
+        assert_eq!(
+            app.detail_scroll,
+            cached_matches[1].saturating_sub(3),
+            "navigation should auto-scroll near the current match"
+        );
     }
 
     #[test]
@@ -27133,6 +28220,26 @@ mod tests {
             ("2026-02-06".into(), 0.4),
             ("2026-02-07".into(), 0.3),
         ];
+        data.session_scatter = vec![
+            crate::analytics::SessionScatterPoint {
+                source_id: "local".into(),
+                source_path: "/sessions/a.jsonl".into(),
+                message_count: 12,
+                api_tokens_total: 3200,
+            },
+            crate::analytics::SessionScatterPoint {
+                source_id: "local".into(),
+                source_path: "/sessions/b.jsonl".into(),
+                message_count: 9,
+                api_tokens_total: 1800,
+            },
+            crate::analytics::SessionScatterPoint {
+                source_id: "remote-ci".into(),
+                source_path: "/sessions/c.jsonl".into(),
+                message_count: 22,
+                api_tokens_total: 7100,
+            },
+        ];
         data.agent_plan_messages = vec![
             ("claude_code".into(), 120.0),
             ("codex".into(), 50.0),
@@ -27236,6 +28343,29 @@ mod tests {
         assert!(
             text.contains("API Tokens") || text.contains("Api") || text.contains("Tokens"),
             "Explorer should show metric label, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn analytics_explorer_render_shows_scatter_panel_when_space_allows() {
+        let app = analytics_app_with_data(AnalyticsView::Explorer);
+        let buf =
+            render_at_degradation(&app, 160, 40, ftui::render::budget::DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(
+            text.contains("session tokens vs messages"),
+            "Explorer should render scatter panel at wide size, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn analytics_explorer_render_compact_hides_scatter_panel() {
+        let app = analytics_app_with_data(AnalyticsView::Explorer);
+        let buf = render_at_degradation(&app, 48, 24, ftui::render::budget::DegradationLevel::Full);
+        let text = ftui_harness::buffer_to_text(&buf);
+        assert!(
+            !text.contains("session tokens vs messages"),
+            "Explorer should hide scatter panel at compact size, got:\n{text}"
         );
     }
 
@@ -28427,6 +29557,10 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         assert!(
             text.contains(shortcuts::VIM_NAV),
             "Should reference vim nav"
+        );
+        assert!(
+            text.contains(shortcuts::STATS_BAR),
+            "Should reference stats bar shortcut"
         );
     }
 
