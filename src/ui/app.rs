@@ -14521,21 +14521,14 @@ impl super::ftui_adapter::Model for CassApp {
                 #[cfg(test)]
                 {
                     let _ = (db_path, filters, group_by);
-                    return ftui::Cmd::task(|| {
-                        CassMsg::AnalyticsChartDataLoaded(Box::new(
-                            AnalyticsChartData::default(),
-                        ))
-                    });
+                    ftui::Cmd::task(|| CassMsg::AnalyticsChartDataLoaded(Box::default()))
                 }
                 #[cfg(not(test))]
                 {
                     ftui::Cmd::task(move || {
-                        match crate::storage::sqlite::SqliteStorage::open_readonly(&db_path)
-                        {
+                        match crate::storage::sqlite::SqliteStorage::open_readonly(&db_path) {
                             Ok(db) => CassMsg::AnalyticsChartDataLoaded(Box::new(
-                                super::analytics_charts::load_chart_data(
-                                    &db, &filters, group_by,
-                                ),
+                                super::analytics_charts::load_chart_data(&db, &filters, group_by),
                             )),
                             Err(e) => CassMsg::AnalyticsChartDataFailed(e.to_string()),
                         }
