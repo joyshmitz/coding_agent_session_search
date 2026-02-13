@@ -21,8 +21,8 @@ pub mod validate;
 // Re-export the most commonly used items at the crate::analytics level.
 pub use types::{
     AnalyticsError, AnalyticsFilter, AnalyticsResult, BreakdownResult, BreakdownRow, CoverageInfo,
-    DerivedMetrics, Dim, DriftInfo, DriftSignal, GroupBy, Metric, SourceFilter, StatusResult,
-    TableInfo, TimeseriesResult, ToolReport, ToolRow, UnpricedModel, UnpricedModelsReport,
-    UsageBucket,
+    DerivedMetrics, Dim, DriftInfo, DriftSignal, GroupBy, Metric, SessionScatterPoint,
+    SourceFilter, StatusResult, TableInfo, TimeseriesResult, ToolReport, ToolRow, UnpricedModel,
+    UnpricedModelsReport, UsageBucket,
 };
 pub use validate::{ValidateConfig, ValidationReport};
