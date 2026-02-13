@@ -147,7 +147,7 @@ impl Reranker for FastEmbedReranker {
             }
         }
 
-        let model = self
+        let mut model = self
             .model
             .lock()
             .map_err(|_| RerankerError::Internal("fastembed reranker lock poisoned".to_string()))?;
