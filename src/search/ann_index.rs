@@ -142,7 +142,8 @@ impl HnswIndex {
         ef_construction: usize,
     ) -> Result<Self> {
         let count = vector_index.rows().len();
-        let dimension = vector_index.header().dimension as usize;
+        let dimension = usize::try_from(vector_index.header().dimension)
+            .context("Vector index dimension exceeds platform usize")?;
         let embedder_id = vector_index.header().embedder_id.clone();
 
         if count == 0 {
@@ -375,7 +376,7 @@ impl HnswIndex {
         // Read embedder ID.
         let mut id_len_bytes = [0u8; 2];
         reader.read_exact(&mut id_len_bytes)?;
-        let id_len = u16::from_le_bytes(id_len_bytes) as usize;
+        let id_len = usize::from(u16::from_le_bytes(id_len_bytes));
         let mut id_bytes = vec![0u8; id_len];
         reader.read_exact(&mut id_bytes)?;
         let embedder_id = String::from_utf8(id_bytes)?;
@@ -383,16 +384,19 @@ impl HnswIndex {
         // Read dimension and count.
         let mut dim_bytes = [0u8; 4];
         reader.read_exact(&mut dim_bytes)?;
-        let dimension = u32::from_le_bytes(dim_bytes) as usize;
+        let dimension = usize::try_from(u32::from_le_bytes(dim_bytes))
+            .context("HNSW dimension exceeds platform usize")?;
 
         let mut count_bytes = [0u8; 4];
         reader.read_exact(&mut count_bytes)?;
-        let count = u32::from_le_bytes(count_bytes) as usize;
+        let count = usize::try_from(u32::from_le_bytes(count_bytes))
+            .context("HNSW count exceeds platform usize")?;
 
         // Read graph data length.
         let mut graph_len_bytes = [0u8; 8];
         reader.read_exact(&mut graph_len_bytes)?;
-        let graph_len = u64::from_le_bytes(graph_len_bytes) as usize;
+        let graph_len = usize::try_from(u64::from_le_bytes(graph_len_bytes))
+            .context("HNSW graph data length exceeds platform usize")?;
 
         // Read graph data to temp file.
         let mut graph_data = vec![0u8; graph_len];
@@ -407,7 +411,8 @@ impl HnswIndex {
         // Read data length.
         let mut data_len_bytes = [0u8; 8];
         reader.read_exact(&mut data_len_bytes)?;
-        let data_len = u64::from_le_bytes(data_len_bytes) as usize;
+        let data_len = usize::try_from(u64::from_le_bytes(data_len_bytes))
+            .context("HNSW data length exceeds platform usize")?;
         let mut data_data = vec![0u8; data_len];
         reader.read_exact(&mut data_data)?;
         std::fs::write(&data_path, &data_data)?;
