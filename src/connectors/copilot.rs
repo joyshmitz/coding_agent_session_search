@@ -175,6 +175,8 @@ impl CopilotConnector {
             }
         }
 
+        // Keep connector traversal deterministic across filesystems/runs.
+        files.sort();
         files
     }
 
@@ -368,6 +370,14 @@ impl CopilotConnector {
                 .get("updatedAt")
                 .or_else(|| conv.get("updated_at"))
                 .and_then(parse_timestamp);
+        }
+        // If only one boundary is available, mirror it so timeline consumers
+        // still get a consistent non-empty range.
+        if started_at.is_none() {
+            started_at = ended_at;
+        }
+        if ended_at.is_none() {
+            ended_at = started_at;
         }
 
         if messages.is_empty() {
@@ -773,6 +783,48 @@ mod tests {
         // Only the non-empty conversation should be returned.
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].external_id.as_deref(), Some("nonempty-conv"));
+    }
+
+    #[test]
+    fn find_conversation_files_returns_sorted_order() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("copilot-chat");
+        fs::create_dir_all(root.join("nested")).unwrap();
+
+        write_json(&root, "zeta.json", "[]");
+        write_json(&root, "alpha.json", "[]");
+        write_json(&root.join("nested"), "middle.json", "[]");
+
+        let files = CopilotConnector::find_conversation_files(&root);
+        let mut sorted = files.clone();
+        sorted.sort();
+        assert_eq!(files, sorted);
+    }
+
+    #[test]
+    fn scan_sets_ended_at_when_only_created_at_present() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("copilot-chat");
+        fs::create_dir_all(&root).unwrap();
+
+        // Messages have no per-message timestamps; only createdAt exists.
+        let json = r#"{
+            "id": "conv-created-only",
+            "createdAt": 1700000022000,
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"}
+            ]
+        }"#;
+        write_json(&root, "created-only.json", json);
+
+        let connector = CopilotConnector::new();
+        let ctx = ScanContext::local_default(root, None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].started_at, Some(1700000022000));
+        assert_eq!(convs[0].ended_at, Some(1700000022000));
     }
 
     #[test]

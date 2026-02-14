@@ -69,6 +69,8 @@ impl PiAgentConnector {
                 }
             }
         }
+        // Keep connector traversal deterministic across filesystems/runs.
+        out.sort();
         out
     }
 
@@ -568,6 +570,22 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let files = PiAgentConnector::session_files(dir.path());
         assert_eq!(files.len(), 0);
+    }
+
+    #[test]
+    fn session_files_returns_sorted_order() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("sessions").join("--Users-foo-project--");
+        fs::create_dir_all(&nested).unwrap();
+
+        fs::write(nested.join("2025-12-01T10-00-00_zzzz.jsonl"), "{}").unwrap();
+        fs::write(nested.join("2025-12-01T10-00-00_aaaa.jsonl"), "{}").unwrap();
+        fs::write(nested.join("2025-12-01T10-00-00_mmmm.jsonl"), "{}").unwrap();
+
+        let files = PiAgentConnector::session_files(dir.path());
+        let mut sorted = files.clone();
+        sorted.sort();
+        assert_eq!(files, sorted);
     }
 
     // =====================================================
