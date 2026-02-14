@@ -125,7 +125,7 @@ pub fn verify_bundle(path: &Path, verbose: bool) -> Result<VerifyResult> {
         println!("Verifying bundle at: {}", site_dir.display());
     }
 
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
 
     // Check 1: Required files
     if verbose {
