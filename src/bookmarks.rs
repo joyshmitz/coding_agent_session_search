@@ -137,13 +137,15 @@ impl BookmarkStore {
 
     /// Add a new bookmark
     pub fn add(&self, bookmark: &Bookmark) -> Result<i64> {
+        let line_number = line_number_to_db(bookmark.line_number)?;
+
         self.conn.execute(
             "INSERT INTO bookmarks (title, source_path, line_number, agent, workspace, note, tags, created_at, updated_at, snippet)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 bookmark.title,
                 bookmark.source_path,
-                bookmark.line_number.map(|n| n as i64),
+                line_number,
                 bookmark.agent,
                 bookmark.workspace,
                 bookmark.note,
@@ -261,14 +263,15 @@ impl BookmarkStore {
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM bookmarks", [], |row| row.get(0))?;
-        Ok(count as usize)
+        usize::try_from(count).context("bookmark count is out of range")
     }
 
     /// Check if a `source_path` + line is already bookmarked
     pub fn is_bookmarked(&self, source_path: &str, line_number: Option<usize>) -> Result<bool> {
+        let line_number = line_number_to_db(line_number)?;
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM bookmarks WHERE source_path = ?1 AND line_number IS ?2)",
-            params![source_path, line_number.map(|n| n as i64)],
+            params![source_path, line_number],
             |row| row.get(0),
         )?;
         Ok(exists)
@@ -299,18 +302,18 @@ impl BookmarkStore {
             )?;
 
             for mut bookmark in bookmarks {
+                let line_number = line_number_to_db(bookmark.line_number)?;
+
                 // Check for duplicates
-                let exists: bool = check_stmt.query_row(
-                    params![bookmark.source_path, bookmark.line_number.map(|n| n as i64)],
-                    |row| row.get(0),
-                )?;
+                let exists: bool = check_stmt
+                    .query_row(params![bookmark.source_path, line_number], |row| row.get(0))?;
 
                 if !exists {
                     bookmark.id = 0; // Reset ID for new insert
                     insert_stmt.execute(params![
                         bookmark.title,
                         bookmark.source_path,
-                        bookmark.line_number.map(|n| n as i64),
+                        line_number,
                         bookmark.agent,
                         bookmark.workspace,
                         bookmark.note,
@@ -336,7 +339,7 @@ fn row_to_bookmark(row: &rusqlite::Row) -> rusqlite::Result<Bookmark> {
         id: row.get(0)?,
         title: row.get(1)?,
         source_path: row.get(2)?,
-        line_number: row.get::<_, Option<i64>>(3)?.map(|n| n as usize),
+        line_number: line_number_from_db(row.get::<_, Option<i64>>(3)?),
         agent: row.get(4)?,
         workspace: row.get(5)?,
         note: row.get(6)?,
@@ -375,6 +378,16 @@ CREATE INDEX IF NOT EXISTS idx_bookmarks_source ON bookmarks(source_path, line_n
 CREATE INDEX IF NOT EXISTS idx_bookmarks_created ON bookmarks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bookmarks_agent ON bookmarks(agent);
 ";
+
+fn line_number_to_db(line_number: Option<usize>) -> Result<Option<i64>> {
+    line_number
+        .map(|n| i64::try_from(n).context("line number exceeds i64 range"))
+        .transpose()
+}
+
+fn line_number_from_db(line_number: Option<i64>) -> Option<usize> {
+    line_number.and_then(|n| usize::try_from(n).ok())
+}
 
 fn current_timestamp() -> i64 {
     i64::try_from(
@@ -506,6 +519,51 @@ mod tests {
         assert!(store.is_bookmarked("/file.rs", Some(10)).unwrap());
         assert!(!store.is_bookmarked("/file.rs", Some(20)).unwrap());
         assert!(!store.is_bookmarked("/other.rs", Some(10)).unwrap());
+    }
+
+    #[test]
+    fn test_negative_line_number_from_db_is_sanitized() {
+        let (store, _dir) = test_store();
+        let now = current_timestamp();
+        store
+            .conn
+            .execute(
+                "INSERT INTO bookmarks (title, source_path, line_number, agent, workspace, note, tags, created_at, updated_at, snippet)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    "NegLine",
+                    "/neg.rs",
+                    -12_i64,
+                    "agent",
+                    "/ws",
+                    "",
+                    "",
+                    now,
+                    now,
+                    ""
+                ],
+            )
+            .unwrap();
+
+        let bookmarks = store.list(None).unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].line_number, None);
+    }
+
+    #[test]
+    fn test_add_rejects_line_number_above_i64_max() {
+        if usize::BITS <= 63 {
+            return;
+        }
+
+        let (store, _dir) = test_store();
+        let too_large_line = (i64::MAX as usize).saturating_add(1);
+        let bookmark =
+            Bookmark::new("HugeLine", "/huge.rs", "agent", "/ws").with_line(too_large_line);
+        let err = store
+            .add(&bookmark)
+            .expect_err("line overflow must be rejected");
+        assert!(err.to_string().contains("line number exceeds i64 range"));
     }
 
     #[test]

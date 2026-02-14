@@ -1529,6 +1529,7 @@ pub fn dot_product_f16_simd_bench(a: &[f16], b: &[f32]) -> f32 {
 /// Default: SIMD enabled. Set CASS_SIMD_DOT=0 to disable.
 #[inline]
 fn dot_product_f16(a: &[f16], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len(), "dot_product_f16: vector length mismatch");
     if *SIMD_DOT_ENABLED {
         dot_product_f16_simd(a, b)
     } else {
