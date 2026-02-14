@@ -197,6 +197,8 @@ impl CursorConnector {
             }
         }
 
+        // Keep connector traversal deterministic across filesystems/runs.
+        dbs.sort();
         dbs
     }
 
@@ -939,6 +941,33 @@ mod tests {
 
         let dbs = CursorConnector::find_db_files(dir.path());
         assert_eq!(dbs.len(), 4); // 1 global + 3 workspace
+    }
+
+    #[test]
+    fn find_db_files_returns_sorted_order() {
+        let dir = TempDir::new().unwrap();
+
+        let ws_z = dir.path().join("workspaceStorage").join("zeta");
+        let ws_a = dir.path().join("workspaceStorage").join("alpha");
+        fs::create_dir_all(&ws_z).unwrap();
+        fs::create_dir_all(&ws_a).unwrap();
+        fs::write(ws_z.join("state.vscdb"), "").unwrap();
+        fs::write(ws_a.join("state.vscdb"), "").unwrap();
+
+        let dbs = CursorConnector::find_db_files(dir.path());
+        assert_eq!(dbs.len(), 2);
+
+        let names: Vec<_> = dbs
+            .iter()
+            .map(|p| {
+                p.parent()
+                    .and_then(|x| x.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["alpha", "zeta"]);
     }
 
     #[test]

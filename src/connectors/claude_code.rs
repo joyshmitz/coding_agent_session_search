@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -25,6 +25,22 @@ impl ClaudeCodeConnector {
         dirs::home_dir()
             .unwrap_or_default()
             .join(".claude/projects")
+    }
+
+    fn session_files(scan_target: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for entry in WalkDir::new(scan_target).into_iter().flatten() {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let ext = entry.path().extension().and_then(|s| s.to_str());
+            if ext == Some("jsonl") || ext == Some("json") || ext == Some("claude") {
+                files.push(entry.path().to_path_buf());
+            }
+        }
+        // Keep connector traversal deterministic across filesystems/runs.
+        files.sort();
+        files
     }
 }
 
@@ -74,21 +90,15 @@ impl Connector for ClaudeCodeConnector {
                 continue;
             }
 
-            for entry in WalkDir::new(&scan_target).into_iter().flatten() {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let ext = entry.path().extension().and_then(|s| s.to_str());
-                if ext != Some("jsonl") && ext != Some("json") && ext != Some("claude") {
-                    continue;
-                }
+            for path in Self::session_files(&scan_target) {
+                let ext = path.extension().and_then(|s| s.to_str());
                 // Skip files not modified since last scan (incremental indexing)
-                if !crate::connectors::file_modified_since(entry.path(), ctx.since_ts) {
+                if !crate::connectors::file_modified_since(&path, ctx.since_ts) {
                     continue;
                 }
                 file_count += 1;
                 if file_count <= 3 {
-                    tracing::debug!(path = %entry.path().display(), "claude_code found file");
+                    tracing::debug!(path = %path.display(), "claude_code found file");
                 }
 
                 let mut messages = Vec::new();
@@ -101,8 +111,8 @@ impl Connector for ClaudeCodeConnector {
                 let mut json_title: Option<String> = None;
 
                 if ext == Some("jsonl") {
-                    let file = std::fs::File::open(entry.path())
-                        .with_context(|| format!("open {}", entry.path().display()))?;
+                    let file = std::fs::File::open(&path)
+                        .with_context(|| format!("open {}", path.display()))?;
                     let reader = std::io::BufReader::new(file);
 
                     for line_res in std::io::BufRead::lines(reader) {
@@ -210,24 +220,24 @@ impl Connector for ClaudeCodeConnector {
                     super::reindex_messages(&mut messages);
                 } else {
                     // Safety check: Don't read files larger than 100MB to avoid OOM
-                    if let Ok(metadata) = fs::metadata(entry.path())
+                    if let Ok(metadata) = fs::metadata(&path)
                         && metadata.len() > 100 * 1024 * 1024
                     {
                         tracing::debug!(
-                            path = %entry.path().display(),
+                            path = %path.display(),
                             size_bytes = metadata.len(),
                             "skipping large file (>100MB)"
                         );
                         continue;
                     }
 
-                    let content_string = fs::read_to_string(entry.path())
-                        .with_context(|| format!("read {}", entry.path().display()))?;
+                    let content_string = fs::read_to_string(&path)
+                        .with_context(|| format!("read {}", path.display()))?;
                     // JSON or Claude format files
                     let val: Value = match serde_json::from_str(&content_string) {
                         Ok(v) => v,
                         Err(e) => {
-                            tracing::debug!(path = %entry.path().display(), error = %e, "claude_code skipping malformed JSON");
+                            tracing::debug!(path = %path.display(), error = %e, "claude_code skipping malformed JSON");
                             continue;
                         }
                     };
@@ -293,11 +303,11 @@ impl Connector for ClaudeCodeConnector {
                 }
                 if messages.is_empty() {
                     if file_count <= 3 {
-                        tracing::debug!(path = %entry.path().display(), "claude_code no messages extracted");
+                        tracing::debug!(path = %path.display(), "claude_code no messages extracted");
                     }
                     continue;
                 }
-                tracing::debug!(path = %entry.path().display(), messages = messages.len(), "claude_code extracted messages");
+                tracing::debug!(path = %path.display(), messages = messages.len(), "claude_code extracted messages");
 
                 // Extract title: use explicit JSON title, or fallback to first user message
                 let title = json_title.or_else(|| {
@@ -325,14 +335,13 @@ impl Connector for ClaudeCodeConnector {
 
                 convs.push(NormalizedConversation {
                     agent_slug: "claude_code".into(),
-                    external_id: entry
-                        .path()
+                    external_id: path
                         .file_name()
                         .and_then(|s| s.to_str())
                         .map(std::string::ToString::to_string),
                     title,
                     workspace, // Now populated from cwd field!
-                    source_path: entry.path().to_path_buf(),
+                    source_path: path.clone(),
                     started_at,
                     ended_at,
                     metadata: serde_json::json!({
@@ -386,6 +395,28 @@ mod tests {
     fn projects_root_returns_claude_projects_path() {
         let root = ClaudeCodeConnector::projects_root();
         assert!(root.ends_with(".claude/projects"));
+    }
+
+    #[test]
+    fn session_files_returns_sorted_order() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("b.jsonl"), "{}").unwrap();
+        fs::write(dir.path().join("a.jsonl"), "{}").unwrap();
+        fs::write(dir.path().join("ignore.txt"), "x").unwrap();
+
+        let files = ClaudeCodeConnector::session_files(dir.path());
+        assert_eq!(files.len(), 2);
+
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["a.jsonl", "b.jsonl"]);
     }
 
     // =========================================================================
