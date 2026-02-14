@@ -968,7 +968,7 @@ fn read_breakdown_rows_track_a(
                     bucket.api_coverage_message_count,
                     bucket.message_count,
                 );
-                pct as i64
+                pct.round() as i64
             }
             // Track A has no cost column; expose stable zero values.
             Metric::EstimatedCostUsd => 0,
@@ -1042,7 +1042,7 @@ fn read_breakdown_rows_track_b(
         let value = match metric {
             Metric::CoveragePct => {
                 super::derive::safe_pct(bucket.api_coverage_message_count, bucket.message_count)
-                    as i64
+                    .round() as i64
             }
             Metric::ContentEstTotal => bucket.content_tokens_est_total,
             Metric::PlanCount => 0,
@@ -1434,7 +1434,8 @@ pub fn query_unpriced_models(
         )
         .map_err(|e| AnalyticsError::Db(e.to_string()))?;
 
-    let models: Vec<UnpricedModel> = stmt
+    let mut models: Vec<UnpricedModel> = Vec::new();
+    let rows = stmt
         .query_map([limit as i64], |row| {
             Ok(UnpricedModel {
                 model_name: row.get(0)?,
@@ -1442,9 +1443,10 @@ pub fn query_unpriced_models(
                 row_count: row.get(2)?,
             })
         })
-        .map_err(|e| AnalyticsError::Db(e.to_string()))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .map_err(|e| AnalyticsError::Db(e.to_string()))?;
+    for row in rows {
+        models.push(row.map_err(|e| AnalyticsError::Db(format!("Row read error: {e}")))?);
+    }
 
     let total_unpriced_tokens: i64 = models.iter().map(|m| m.total_tokens).sum();
 

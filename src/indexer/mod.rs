@@ -33,6 +33,18 @@ use semantic::{EmbeddingInput, SemanticIndexer};
 type BatchClassificationMap =
     HashMap<(ConnectorKind, PathBuf), (ScanRoot, Option<i64>, Option<i64>)>;
 
+fn message_id_from_db(raw: i64) -> Option<u64> {
+    u64::try_from(raw).ok()
+}
+
+fn saturating_u32_from_i64(raw: i64) -> u32 {
+    match u32::try_from(raw) {
+        Ok(value) => value,
+        Err(_) if raw.is_negative() => 0,
+        Err(_) => u32::MAX,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ReindexCommand {
     Full,
@@ -1059,7 +1071,7 @@ pub fn run_index(
         // Convert to EmbeddingInput format
         let embedding_inputs: Vec<EmbeddingInput> = raw_messages
             .into_iter()
-            .map(|msg| {
+            .filter_map(|msg| {
                 let role_u8 = match msg.role.as_str() {
                     "user" => ROLE_USER,
                     "agent" | "assistant" => ROLE_ASSISTANT,
@@ -1068,16 +1080,24 @@ pub fn run_index(
                     _ => ROLE_USER, // default to user for unknown roles
                 };
 
-                EmbeddingInput {
-                    message_id: msg.message_id as u64,
+                let Some(message_id) = message_id_from_db(msg.message_id) else {
+                    tracing::warn!(
+                        raw_message_id = msg.message_id,
+                        "Skipping message with out-of-range id during semantic indexing"
+                    );
+                    return None;
+                };
+
+                Some(EmbeddingInput {
+                    message_id,
                     created_at_ms: msg.created_at.unwrap_or(0),
-                    agent_id: msg.agent_id as u32,
-                    workspace_id: msg.workspace_id.unwrap_or(0) as u32,
+                    agent_id: saturating_u32_from_i64(msg.agent_id),
+                    workspace_id: saturating_u32_from_i64(msg.workspace_id.unwrap_or(0)),
                     source_id: msg.source_id_hash,
                     role: role_u8,
                     chunk_idx: 0,
                     content: msg.content,
-                }
+                })
             })
             .collect();
 
@@ -2344,6 +2364,20 @@ mod tests {
             metadata: serde_json::json!({}),
             messages: msgs,
         }
+    }
+
+    #[test]
+    fn db_id_conversion_helpers_handle_invalid_ranges() {
+        assert_eq!(message_id_from_db(-1), None);
+        assert_eq!(message_id_from_db(0), Some(0));
+        assert_eq!(message_id_from_db(42), Some(42));
+
+        assert_eq!(saturating_u32_from_i64(-9), 0);
+        assert_eq!(saturating_u32_from_i64(17), 17);
+        assert_eq!(
+            saturating_u32_from_i64(i64::from(u32::MAX) + 1234),
+            u32::MAX
+        );
     }
 
     #[test]
