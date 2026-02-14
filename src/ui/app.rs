@@ -26732,6 +26732,10 @@ mod tests {
     fn app_with_cached_conversation() -> CassApp {
         use crate::model::types::{Message, MessageRole};
         let mut app = app_with_hits(3);
+        // Keep the selected hit source path aligned with cached_detail so
+        // DetailOpened follows the cache-hit path in this regression fixture.
+        let selected = app.panes[app.active_pane].selected;
+        app.panes[app.active_pane].hits[selected].source_path = "test-session".to_string();
 
         fn msg(role: MessageRole, content: &str, ts: Option<i64>) -> Message {
             Message {
@@ -26770,7 +26774,7 @@ mod tests {
         cv.convo.started_at = Some(1_000_000);
         cv.convo.ended_at = Some(1_060_000);
         cv.convo.approx_tokens = Some(15_000);
-        app.cached_detail = Some(("test-session".to_string(), cv));
+        app.cached_detail = Some(("/path/0".to_string(), cv));
         app
     }
 
