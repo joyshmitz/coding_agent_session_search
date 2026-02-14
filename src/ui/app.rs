@@ -14032,6 +14032,7 @@ impl super::ftui_adapter::Model for CassApp {
                 let any_modal = self.show_export_modal
                     || self.show_bulk_modal
                     || self.show_saved_views_modal
+                    || self.show_detail_modal
                     || self.show_help
                     || self.show_theme_editor
                     || self.show_inspector
@@ -15708,7 +15709,13 @@ impl super::ftui_adapter::Model for CassApp {
                 };
                 let mut hud_lanes = Vec::with_capacity(8);
                 if !self.status.is_empty() {
-                    let status_value = if self.loading_context.is_some() {
+                    // Animate the status text only for active-operation messages
+                    // (avoid a spinner on informational or error statuses).
+                    let status_value = if self.loading_context.is_some()
+                        && (self.status.starts_with("Searching")
+                            || self.status.starts_with("Indexing")
+                            || self.status.starts_with("Refreshing"))
+                    {
                         format!("{} {}", self.loading_spinner_glyph(), self.status)
                     } else {
                         self.status.clone()
@@ -16056,6 +16063,7 @@ impl super::ftui_adapter::Model for CassApp {
         let modal_visible = self.show_export_modal
             || self.show_bulk_modal
             || self.show_saved_views_modal
+            || self.show_detail_modal
             || self.show_help
             || self.show_theme_editor
             || self.show_inspector
@@ -20443,6 +20451,46 @@ mod tests {
     }
 
     #[test]
+    fn detail_modal_participates_in_modal_open_spring() {
+        let mut app = CassApp::default();
+        app.panes.push(AgentPane {
+            agent: "claude_code".into(),
+            total_count: 1,
+            hits: vec![make_test_hit()],
+            selected: 0,
+        });
+        app.active_pane = 0;
+
+        let _ = app.update(CassMsg::DetailOpened);
+        assert!(
+            app.show_detail_modal,
+            "detail modal should open before driving spring"
+        );
+
+        for _ in 0..16 {
+            app.last_tick = Instant::now() - Duration::from_millis(16);
+            let _ = app.update(CassMsg::Tick);
+        }
+        let open_pos = app.anim.modal_open.position();
+        assert!(
+            open_pos > 0.05,
+            "detail modal should drive modal spring open (pos={open_pos:.3})"
+        );
+
+        let _ = app.update(CassMsg::DetailClosed);
+        assert!(!app.show_detail_modal);
+        for _ in 0..24 {
+            app.last_tick = Instant::now() - Duration::from_millis(16);
+            let _ = app.update(CassMsg::Tick);
+        }
+        let closed_pos = app.anim.modal_open.position();
+        assert!(
+            closed_pos < open_pos,
+            "closing detail modal should reduce modal spring position (open={open_pos:.3}, closed={closed_pos:.3})"
+        );
+    }
+
+    #[test]
     fn search_focus_style_token_exists() {
         use super::style_system::{self, StyleContext, StyleOptions};
         let ctx = StyleContext::from_options(StyleOptions::default());
@@ -22494,8 +22542,25 @@ mod tests {
         );
         assert_eq!(app.loading_context, Some(LoadingContext::Analytics));
 
+        // AnalyticsLoadRequested now spawns an async task — loading context
+        // stays set until the response arrives.
         let _ = app.update(CassMsg::AnalyticsLoadRequested);
-        assert!(app.loading_context.is_none());
+        assert_eq!(
+            app.loading_context,
+            Some(LoadingContext::Analytics),
+            "loading context should remain set while async task is in flight"
+        );
+
+        // Simulate the async response arriving.
+        let _ = app.update(CassMsg::AnalyticsChartDataLoaded(Box::default()));
+        assert!(
+            app.loading_context.is_none(),
+            "loading context should clear after data arrives"
+        );
+        assert!(
+            app.analytics_cache.is_some(),
+            "analytics cache should be populated after data arrives"
+        );
     }
 
     #[test]
@@ -22515,6 +22580,156 @@ mod tests {
         assert!(
             rendered.contains("Loading analytics..."),
             "analytics surface should show loading placeholder text"
+        );
+    }
+
+    #[test]
+    fn analytics_chart_data_failure_clears_loading_and_sets_status() {
+        let mut app = CassApp::default();
+        app.loading_context = Some(LoadingContext::Analytics);
+        let _ = app.update(CassMsg::AnalyticsChartDataFailed("db locked".to_string()));
+        assert!(
+            app.loading_context.is_none(),
+            "loading context should clear on failure"
+        );
+        assert!(
+            app.status.contains("db locked"),
+            "status should contain error message"
+        );
+        assert!(
+            app.analytics_cache.is_none(),
+            "cache should remain None on failure"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn analytics_entered_sets_loading_context_when_cache_empty() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("analytics_enter.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+        let mut app = CassApp::default();
+        app.db_reader = Some(Arc::new(storage));
+        app.analytics_cache = None;
+        app.surface = AppSurface::Search;
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert_eq!(app.surface, AppSurface::Analytics);
+        assert_eq!(
+            app.loading_context,
+            Some(LoadingContext::Analytics),
+            "entering analytics with empty cache should set loading context"
+        );
+    }
+
+    #[test]
+    fn analytics_entered_skips_load_when_cache_present() {
+        let mut app = CassApp::default();
+        app.analytics_cache = Some(AnalyticsChartData::default());
+        app.surface = AppSurface::Search;
+        let _ = app.update(CassMsg::AnalyticsEntered);
+        assert_eq!(app.surface, AppSurface::Analytics);
+        assert!(
+            app.loading_context.is_none(),
+            "entering analytics with populated cache should not set loading context"
+        );
+    }
+
+    #[test]
+    fn state_load_sets_and_clears_loading_context() {
+        let mut app = CassApp::default();
+        assert!(app.loading_context.is_none());
+
+        // StateLoadRequested sets loading context.
+        let _ = app.update(CassMsg::StateLoadRequested);
+        assert_eq!(
+            app.loading_context,
+            Some(LoadingContext::StateLoad),
+            "state load should set loading context"
+        );
+
+        // StateLoaded clears it.
+        let state = persisted_state_defaults();
+        let _ = app.update(CassMsg::StateLoaded(Box::new(state)));
+        assert!(
+            app.loading_context.is_none(),
+            "state loaded should clear loading context"
+        );
+    }
+
+    #[test]
+    fn state_load_failure_clears_loading_context() {
+        let mut app = CassApp::default();
+        app.loading_context = Some(LoadingContext::StateLoad);
+        let _ = app.update(CassMsg::StateLoadFailed("disk error".to_string()));
+        assert!(
+            app.loading_context.is_none(),
+            "state load failure should clear loading context"
+        );
+        assert!(
+            app.status.contains("disk error"),
+            "status should contain the error"
+        );
+    }
+
+    #[test]
+    fn loading_hud_token_includes_spinner_and_context_label() {
+        let mut app = CassApp::default();
+        app.loading_context = Some(LoadingContext::Search);
+        app.spinner_frame = 0;
+
+        let glyph = app.loading_spinner_glyph();
+        let hud = app.loading_hud_token();
+        assert!(hud.is_some(), "should have loading HUD token during search");
+        let hud_text = hud.unwrap();
+        assert!(
+            hud_text.starts_with(glyph),
+            "HUD token should start with spinner glyph"
+        );
+        assert!(
+            hud_text.contains("search"),
+            "HUD token should contain context label"
+        );
+
+        // No loading context → no HUD token.
+        app.loading_context = None;
+        assert!(app.loading_hud_token().is_none());
+    }
+
+    #[test]
+    fn spinner_prefix_only_on_active_operation_status() {
+        use ftui::render::budget::DegradationLevel;
+        use ftui_harness::buffer_to_text;
+
+        // With a "Searching" status and active loading context, the footer
+        // should contain a spinner glyph.
+        let mut app = CassApp::default();
+        app.status = "Searching\u{2026}".to_string();
+        app.loading_context = Some(LoadingContext::Search);
+        app.spinner_frame = 0;
+        let rendered = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        let glyph = app.loading_spinner_glyph();
+        assert!(
+            rendered.contains(&format!("{glyph} Searching")),
+            "searching status should get spinner prefix in footer"
+        );
+
+        // With a non-loading status but an active loading context, no prefix.
+        app.status = "Explorer set to Hourly".to_string();
+        app.loading_context = Some(LoadingContext::Analytics);
+        let rendered = buffer_to_text(&render_at_degradation(
+            &app,
+            120,
+            24,
+            DegradationLevel::Full,
+        ));
+        assert!(
+            !rendered.contains(&format!("{glyph} Explorer")),
+            "non-loading status should NOT get spinner prefix"
         );
     }
 
