@@ -23618,6 +23618,9 @@ mod tests {
         assert_eq!(buffer_to_text(&search_buf1), buffer_to_text(&search_buf2));
 
         let _ = app.update(CassMsg::AnalyticsEntered);
+        // Clear the time-dependent view transition overlay so consecutive
+        // renders are not affected by wall-clock Instant::now() drift.
+        app.view_transition = None;
         let analytics_buf1 = render_at_degradation(&app, 80, 24, DegradationLevel::Full);
         let analytics_buf2 = render_at_degradation(&app, 80, 24, DegradationLevel::Full);
         assert_eq!(
