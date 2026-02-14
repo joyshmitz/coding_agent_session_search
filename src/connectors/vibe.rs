@@ -61,6 +61,8 @@ impl VibeConnector {
             }
         }
 
+        // Keep connector traversal deterministic across filesystems/runs.
+        out.sort();
         out
     }
 
@@ -352,5 +354,33 @@ mod tests {
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].messages.len(), 1);
         assert_eq!(convs[0].messages[0].role, "user");
+    }
+
+    #[test]
+    fn session_files_returns_sorted_order() {
+        let tmp = TempDir::new().unwrap();
+        let sessions = tmp.path().join(".vibe/logs/session");
+        fs::create_dir_all(&sessions).unwrap();
+
+        write_session(
+            &sessions,
+            "z-last",
+            &[r#"{"role":"user","content":"z","timestamp":"2025-01-27T03:30:00.000Z"}"#],
+        );
+        write_session(
+            &sessions,
+            "a-first",
+            &[r#"{"role":"user","content":"a","timestamp":"2025-01-27T03:30:00.000Z"}"#],
+        );
+        write_session(
+            &sessions,
+            "m-middle",
+            &[r#"{"role":"user","content":"m","timestamp":"2025-01-27T03:30:00.000Z"}"#],
+        );
+
+        let files = VibeConnector::session_files(&sessions);
+        let mut sorted = files.clone();
+        sorted.sort();
+        assert_eq!(files, sorted);
     }
 }

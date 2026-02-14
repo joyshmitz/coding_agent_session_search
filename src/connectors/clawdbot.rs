@@ -59,6 +59,8 @@ impl ClawdbotConnector {
             }
         }
 
+        // Keep connector traversal deterministic across filesystems/runs.
+        out.sort();
         out
     }
 }
@@ -301,5 +303,33 @@ mod tests {
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].messages.len(), 1);
         assert_eq!(convs[0].messages[0].role, "user");
+    }
+
+    #[test]
+    fn session_files_returns_sorted_order() {
+        let tmp = TempDir::new().unwrap();
+        let sessions = tmp.path().join(".clawdbot/sessions");
+        fs::create_dir_all(sessions.join("nested")).unwrap();
+
+        write_session(
+            &sessions,
+            "z-last.jsonl",
+            &[r#"{"role":"user","content":"z"}"#],
+        );
+        write_session(
+            &sessions,
+            "a-first.jsonl",
+            &[r#"{"role":"user","content":"a"}"#],
+        );
+        write_session(
+            &sessions.join("nested"),
+            "m-middle.jsonl",
+            &[r#"{"role":"user","content":"m"}"#],
+        );
+
+        let files = ClawdbotConnector::session_files(&sessions);
+        let mut sorted = files.clone();
+        sorted.sort();
+        assert_eq!(files, sorted);
     }
 }
