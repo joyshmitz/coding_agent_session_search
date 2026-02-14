@@ -330,6 +330,8 @@ impl EmbeddingWorker {
         }
 
         if inputs.is_empty() {
+            let final_completed = i64::try_from(messages.len()).unwrap_or(i64::MAX);
+            let _ = storage.update_job_progress(job_id, final_completed);
             info!(
                 model = model_name,
                 skipped = skipped_count,

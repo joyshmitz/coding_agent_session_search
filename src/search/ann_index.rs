@@ -318,8 +318,8 @@ impl HnswIndex {
         // It creates multiple files: basename.hnsw.graph and basename.hnsw.data
         // Use tempfile::tempdir() to avoid collisions from concurrent saves and
         // ensure automatic cleanup on error paths (TempDir drops on scope exit).
-        let dump_dir = tempfile::tempdir()
-            .with_context(|| "create temp dir for HNSW graph serialization")?;
+        let dump_dir =
+            tempfile::tempdir().with_context(|| "create temp dir for HNSW graph serialization")?;
         let basename = "hnsw_graph";
         self.with_hnsw(|hnsw| hnsw.file_dump(dump_dir.path(), basename))
             .with_context(|| "serialize HNSW graph")?;
