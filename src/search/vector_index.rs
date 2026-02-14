@@ -35,6 +35,7 @@ use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use bytemuck::PodCastError;
 use half::f16;
 use memmap2::Mmap;
 use rayon::prelude::*;
@@ -1357,38 +1358,35 @@ fn vector_offset_to_index(offset: u64, bytes_per: usize) -> Result<usize> {
 }
 
 fn bytes_as_f32(bytes: &[u8]) -> Result<&[f32]> {
-    if !bytes.len().is_multiple_of(4) {
-        bail!("f32 byte slice length is not a multiple of 4");
-    }
-    // SAFETY: we validate length and alignment before using the slice as f32.
-    let (prefix, aligned, suffix) = unsafe { bytes.align_to::<f32>() };
-    if !prefix.is_empty() || !suffix.is_empty() {
-        bail!("f32 byte slice is not aligned");
-    }
-    Ok(aligned)
+    bytemuck::try_cast_slice(bytes).map_err(|err| match err {
+        PodCastError::OutputSliceWouldHaveSlop => {
+            anyhow!("f32 byte slice length is not a multiple of 4")
+        }
+        PodCastError::TargetAlignmentGreaterAndInputNotAligned => {
+            anyhow!("f32 byte slice is not aligned")
+        }
+        _ => anyhow!("invalid f32 byte slice: {err}"),
+    })
 }
 
 fn bytes_as_f16(bytes: &[u8]) -> Result<&[f16]> {
-    if !bytes.len().is_multiple_of(2) {
-        bail!("f16 byte slice length is not a multiple of 2");
-    }
-    // SAFETY: we validate length and alignment before using the slice as f16.
-    let (prefix, aligned, suffix) = unsafe { bytes.align_to::<f16>() };
-    if !prefix.is_empty() || !suffix.is_empty() {
-        bail!("f16 byte slice is not aligned");
-    }
-    Ok(aligned)
+    bytemuck::try_cast_slice(bytes).map_err(|err| match err {
+        PodCastError::OutputSliceWouldHaveSlop => {
+            anyhow!("f16 byte slice length is not a multiple of 2")
+        }
+        PodCastError::TargetAlignmentGreaterAndInputNotAligned => {
+            anyhow!("f16 byte slice is not aligned")
+        }
+        _ => anyhow!("invalid f16 byte slice: {err}"),
+    })
 }
 
 fn f32_as_bytes(values: &[f32]) -> &[u8] {
-    // SAFETY: f32 has a well-defined 4-byte repr; u8 has alignment 1 so any
-    // f32 pointer is valid for a u8 read. Lifetime is tied to `values`.
-    unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, values.len() * 4) }
+    bytemuck::cast_slice(values)
 }
 
 fn f16_as_bytes(values: &[f16]) -> &[u8] {
-    // SAFETY: f16 has a well-defined 2-byte repr; same alignment reasoning as f32_as_bytes.
-    unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, values.len() * 2) }
+    bytemuck::cast_slice(values)
 }
 
 /// Scalar dot product (fallback when SIMD is disabled).
@@ -2490,5 +2488,40 @@ mod tests {
             scalar_rank, simd_rank,
             "F16 SIMD ranking changed for separated scores"
         );
+    }
+
+    #[test]
+    fn bytes_as_f32_rejects_invalid_length() {
+        let bytes = [0u8; 6];
+        let err = bytes_as_f32(&bytes).expect_err("length 6 must fail for f32");
+        assert!(err.to_string().contains("multiple of 4"));
+    }
+
+    #[test]
+    fn bytes_as_f32_rejects_misaligned_slice() {
+        let bytes = [0u8; 9];
+        let err = bytes_as_f32(&bytes[1..]).expect_err("misaligned input must fail for f32");
+        assert!(err.to_string().contains("not aligned"));
+    }
+
+    #[test]
+    fn bytes_as_f16_rejects_invalid_length() {
+        let bytes = [0u8; 3];
+        let err = bytes_as_f16(&bytes).expect_err("length 3 must fail for f16");
+        assert!(err.to_string().contains("multiple of 2"));
+    }
+
+    #[test]
+    fn byte_cast_helpers_roundtrip() -> Result<()> {
+        let f32_values = vec![1.25_f32, -2.5_f32, 3.75_f32];
+        let f32_bytes = f32_as_bytes(&f32_values);
+        let f32_roundtrip = bytes_as_f32(f32_bytes)?;
+        assert_eq!(f32_roundtrip, f32_values.as_slice());
+
+        let f16_values = vec![f16::from_f32(1.5), f16::from_f32(-2.25), f16::from_f32(3.0)];
+        let f16_bytes = f16_as_bytes(&f16_values);
+        let f16_roundtrip = bytes_as_f16(f16_bytes)?;
+        assert_eq!(f16_roundtrip, f16_values.as_slice());
+        Ok(())
     }
 }

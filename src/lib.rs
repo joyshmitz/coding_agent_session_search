@@ -2166,7 +2166,10 @@ fn heuristic_parse_recovery(
             }
         } else if arg.contains('=') && !arg.starts_with('-') {
             // 3. Handle `limit=5` (missing --)
-            let (key, val) = arg.split_once('=').unwrap();
+            let Some((key, val)) = arg.split_once('=') else {
+                final_args.push(arg.clone());
+                continue;
+            };
             let flag_candidate = format!("--{key}");
             // Quick check if adding -- makes it a valid flag
             let known_flags = [

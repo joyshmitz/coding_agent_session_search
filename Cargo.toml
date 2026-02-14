@@ -65,8 +65,9 @@ itertools = "*"
 crc32fast = "*"
 unicode-normalization = "*"
 urlencoding = "*"
-half = "*"
+half = { version = "*", features = ["bytemuck"] }
 memmap2 = "*"
+bytemuck = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries"] }
 wide = "*"  # Portable SIMD for P0 Opt 2: SIMD dot product
 arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
