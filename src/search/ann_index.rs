@@ -638,4 +638,158 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         assert!(!HnswIndex::exists(temp_dir.path(), "nonexistent"));
     }
+
+    /// Build a small VectorIndex, construct HNSW from it, save to disk,
+    /// reload (exercises the ouroboros `ReloadedHnsw` path), and verify
+    /// search results match the original built index.
+    #[test]
+    fn hnsw_build_save_load_roundtrip() {
+        use crate::search::vector_index::{Quantization, VectorEntry, VectorIndex};
+
+        // Create 5 orthogonal-ish 4-D vectors so nearest-neighbor is deterministic.
+        let entries: Vec<VectorEntry> = (0..5)
+            .map(|i| {
+                let mut v = vec![0.0_f32; 4];
+                v[i % 4] = 1.0;
+                // Give the 5th vector a diagonal component so it's distinct.
+                if i == 4 {
+                    v = vec![0.5, 0.5, 0.5, 0.5];
+                }
+                VectorEntry {
+                    message_id: i as u64,
+                    created_at_ms: (i as i64) * 1000,
+                    agent_id: 1,
+                    workspace_id: 10,
+                    source_id: 100,
+                    role: 0,
+                    chunk_idx: 0,
+                    content_hash: [i as u8; 32],
+                    vector: v,
+                }
+            })
+            .collect();
+
+        let vi = VectorIndex::build("test-embed", "v1", 4, Quantization::F32, entries)
+            .expect("build VectorIndex");
+
+        // Build HNSW from the VectorIndex.
+        let hnsw = HnswIndex::build_from_vector_index(&vi, DEFAULT_M, DEFAULT_EF_CONSTRUCTION)
+            .expect("build HNSW");
+        assert_eq!(hnsw.len(), 5);
+        assert_eq!(hnsw.dimension(), 4);
+        assert_eq!(hnsw.embedder_id(), "test-embed");
+
+        // Search the built index: query [1, 0, 0, 0] should find row 0 first.
+        let results_built = hnsw
+            .search(&[1.0, 0.0, 0.0, 0.0], 3, DEFAULT_EF_SEARCH)
+            .expect("search built");
+        assert!(
+            !results_built.is_empty(),
+            "built search should return results"
+        );
+        assert_eq!(results_built[0].row_idx, 0, "closest to [1,0,0,0] is row 0");
+
+        // Save to disk.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("test.chsw");
+        hnsw.save(&path).expect("save HNSW");
+        assert!(path.exists(), "saved file should exist");
+
+        // Load from disk (exercises ReloadedHnsw / ouroboros path).
+        let loaded = HnswIndex::load(&path).expect("load HNSW");
+        assert_eq!(loaded.len(), 5);
+        assert_eq!(loaded.dimension(), 4);
+        assert_eq!(loaded.embedder_id(), "test-embed");
+
+        // Search the loaded index and compare results.
+        let results_loaded = loaded
+            .search(&[1.0, 0.0, 0.0, 0.0], 3, DEFAULT_EF_SEARCH)
+            .expect("search loaded");
+        assert_eq!(
+            results_loaded.len(),
+            results_built.len(),
+            "loaded and built should return same count"
+        );
+        assert_eq!(
+            results_loaded[0].row_idx, results_built[0].row_idx,
+            "loaded and built should agree on top result"
+        );
+
+        // Verify search_with_stats on the loaded index.
+        let (stats_results, stats) = loaded
+            .search_with_stats(&[0.0, 0.0, 0.0, 1.0], 2, DEFAULT_EF_SEARCH)
+            .expect("search_with_stats");
+        assert!(stats.is_approximate);
+        assert_eq!(stats.index_size, 5);
+        assert_eq!(stats.dimension, 4);
+        assert_eq!(stats.k_requested, 2);
+        assert_eq!(stats.k_returned, stats_results.len());
+        assert!(
+            stats.search_time_us < 10_000_000,
+            "search shouldn't take > 10s"
+        );
+        // query [0,0,0,1] should find row 3 first.
+        assert_eq!(stats_results[0].row_idx, 3);
+    }
+
+    /// Verify search rejects queries with wrong dimension.
+    #[test]
+    fn hnsw_search_rejects_dimension_mismatch() {
+        use crate::search::vector_index::{Quantization, VectorEntry, VectorIndex};
+
+        let entries = vec![VectorEntry {
+            message_id: 1,
+            created_at_ms: 1000,
+            agent_id: 1,
+            workspace_id: 10,
+            source_id: 100,
+            role: 0,
+            chunk_idx: 0,
+            content_hash: [0xAA; 32],
+            vector: vec![1.0, 0.0, 0.0],
+        }];
+        let vi = VectorIndex::build("test", "v1", 3, Quantization::F32, entries)
+            .expect("build VectorIndex");
+        let hnsw = HnswIndex::build_from_vector_index(&vi, DEFAULT_M, DEFAULT_EF_CONSTRUCTION)
+            .expect("build HNSW");
+
+        // Wrong dimension query (4 instead of 3).
+        let err = hnsw
+            .search(&[1.0, 0.0, 0.0, 0.0], 1, DEFAULT_EF_SEARCH)
+            .expect_err("should reject dim mismatch");
+        assert!(
+            err.to_string().contains("dimension mismatch"),
+            "error should mention dimension: {err}"
+        );
+    }
+
+    /// Verify search with k=0 returns empty results without error.
+    #[test]
+    fn hnsw_search_k_zero_returns_empty() {
+        use crate::search::vector_index::{Quantization, VectorEntry, VectorIndex};
+
+        let entries = vec![VectorEntry {
+            message_id: 1,
+            created_at_ms: 1000,
+            agent_id: 1,
+            workspace_id: 10,
+            source_id: 100,
+            role: 0,
+            chunk_idx: 0,
+            content_hash: [0xBB; 32],
+            vector: vec![1.0, 0.0],
+        }];
+        let vi = VectorIndex::build("test", "v1", 2, Quantization::F32, entries)
+            .expect("build VectorIndex");
+        let hnsw = HnswIndex::build_from_vector_index(&vi, DEFAULT_M, DEFAULT_EF_CONSTRUCTION)
+            .expect("build HNSW");
+
+        let (results, stats) = hnsw
+            .search_with_stats(&[1.0, 0.0], 0, DEFAULT_EF_SEARCH)
+            .expect("k=0 should succeed");
+        assert!(results.is_empty());
+        assert_eq!(stats.k_requested, 0);
+        assert_eq!(stats.k_returned, 0);
+        assert_eq!(stats.estimated_recall, 1.0);
+    }
 }
