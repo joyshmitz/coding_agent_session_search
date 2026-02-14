@@ -286,9 +286,11 @@ impl Connector for PiAgentConnector {
                             }
 
                             // Update timestamps
-                            if started_at.is_none() {
-                                started_at = created;
-                            }
+                            started_at = match (started_at, created) {
+                                (Some(curr), Some(ts)) => Some(curr.min(ts)),
+                                (None, Some(ts)) => Some(ts),
+                                (other, None) => other,
+                            };
                             ended_at = match (ended_at, created) {
                                 (Some(curr), Some(ts)) => Some(curr.max(ts)),
                                 (None, Some(ts)) => Some(ts),

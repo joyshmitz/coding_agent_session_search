@@ -170,8 +170,8 @@ impl Connector for AmpConnector {
                             title,
                             workspace,
                             source_path: path.to_path_buf(),
-                            started_at: messages.first().and_then(|m| m.created_at),
-                            ended_at: messages.last().and_then(|m| m.created_at),
+                            started_at: messages.iter().filter_map(|m| m.created_at).min(),
+                            ended_at: messages.iter().filter_map(|m| m.created_at).max(),
                             metadata: val.clone(),
                             messages,
                         });

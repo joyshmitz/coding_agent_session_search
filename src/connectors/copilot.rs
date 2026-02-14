@@ -259,7 +259,11 @@ impl CopilotConnector {
                     let content = Self::extract_message_content(request);
                     if !content.trim().is_empty() {
                         let ts = Self::extract_turn_timestamp(request);
-                        started_at = started_at.or(ts);
+                        started_at = match (started_at, ts) {
+                            (Some(curr), Some(t)) => Some(curr.min(t)),
+                            (None, Some(t)) => Some(t),
+                            (other, None) => other,
+                        };
                         ended_at = match (ended_at, ts) {
                             (Some(curr), Some(t)) => Some(curr.max(t)),
                             (None, Some(t)) => Some(t),
@@ -282,7 +286,11 @@ impl CopilotConnector {
                     let content = Self::extract_message_content(response);
                     if !content.trim().is_empty() {
                         let ts = Self::extract_turn_timestamp(response);
-                        started_at = started_at.or(ts);
+                        started_at = match (started_at, ts) {
+                            (Some(curr), Some(t)) => Some(curr.min(t)),
+                            (None, Some(t)) => Some(t),
+                            (other, None) => other,
+                        };
                         ended_at = match (ended_at, ts) {
                             (Some(curr), Some(t)) => Some(curr.max(t)),
                             (None, Some(t)) => Some(t),
@@ -320,7 +328,11 @@ impl CopilotConnector {
                 }
 
                 let ts = Self::extract_turn_timestamp(msg);
-                started_at = started_at.or(ts);
+                started_at = match (started_at, ts) {
+                    (Some(curr), Some(t)) => Some(curr.min(t)),
+                    (None, Some(t)) => Some(t),
+                    (other, None) => other,
+                };
                 ended_at = match (ended_at, ts) {
                     (Some(curr), Some(t)) => Some(curr.max(t)),
                     (None, Some(t)) => Some(t),

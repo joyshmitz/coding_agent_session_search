@@ -301,7 +301,11 @@ impl Connector for GeminiConnector {
                 // Filtering messages would cause older messages to be lost when
                 // the file is re-indexed after new messages are added.
 
-                started_at = started_at.or(created);
+                started_at = match (started_at, created) {
+                    (Some(curr), Some(ts)) => Some(curr.min(ts)),
+                    (None, Some(ts)) => Some(ts),
+                    (other, None) => other,
+                };
                 ended_at = match (ended_at, created) {
                     (Some(current), Some(ts)) => Some(current.max(ts)),
                     (None, Some(ts)) => Some(ts),
