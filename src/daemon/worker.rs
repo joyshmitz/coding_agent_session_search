@@ -75,6 +75,44 @@ pub struct EmbeddingWorker {
     cancel_flag: Arc<AtomicBool>,
 }
 
+fn message_id_from_db(raw: i64) -> Option<u64> {
+    u64::try_from(raw).ok()
+}
+
+fn saturating_u32_from_i64(raw: i64) -> u32 {
+    match u32::try_from(raw) {
+        Ok(value) => value,
+        Err(_) if raw.is_negative() => 0,
+        Err(_) => u32::MAX,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerEmbedderKind {
+    Hash,
+    FastEmbed,
+}
+
+fn resolve_embedder_kind(model_name: &str, use_semantic: bool) -> anyhow::Result<WorkerEmbedderKind> {
+    if !use_semantic
+        || model_name.eq_ignore_ascii_case("hash")
+        || model_name.eq_ignore_ascii_case("fnv1a-384")
+    {
+        return Ok(WorkerEmbedderKind::Hash);
+    }
+
+    if model_name.eq_ignore_ascii_case("minilm")
+        || model_name.eq_ignore_ascii_case("minilm-384")
+        || model_name.eq_ignore_ascii_case("fastembed")
+    {
+        return Ok(WorkerEmbedderKind::FastEmbed);
+    }
+
+    anyhow::bail!(
+        "unsupported semantic model '{model_name}' for daemon embedding worker; supported: minilm"
+    );
+}
+
 impl EmbeddingWorker {
     /// Create a new worker and its handle.
     pub fn new() -> (Self, EmbeddingWorkerHandle) {
@@ -223,8 +261,10 @@ impl EmbeddingWorker {
         job_id: i64,
         index_path: &Path,
     ) -> anyhow::Result<()> {
+        let embedder_kind = resolve_embedder_kind(model_name, use_semantic)?;
+
         // Load existing index to check for unchanged documents
-        let existing_hashes = self.load_existing_hashes(index_path, model_name);
+        let existing_hashes = self.load_existing_hashes(index_path, embedder_kind);
 
         // Prepare inputs, skipping unchanged documents
         let mut inputs: Vec<EmbeddingInput> = Vec::new();
@@ -245,8 +285,15 @@ impl EmbeddingWorker {
             let hash = content_hash(&canonical);
             let role = role_code_from_str(&msg.role).unwrap_or(0);
 
-            // Use safe conversion for message_id (consistent with storage pattern)
-            let message_id = u64::try_from(msg.message_id).unwrap_or(0);
+            // Invalid/negative IDs indicate corrupted data; skip rather than collapsing to 0.
+            let Some(message_id) = message_id_from_db(msg.message_id) else {
+                warn!(
+                    raw_message_id = msg.message_id,
+                    "Skipping message with out-of-range id during embedding"
+                );
+                completed += 1;
+                continue;
+            };
 
             // Check if this document is unchanged - skip re-embedding if hash matches
             if let Some(existing_hash) = existing_hashes.get(&message_id)
@@ -257,9 +304,9 @@ impl EmbeddingWorker {
                 continue;
             }
 
-            // Use saturating casts to handle edge cases gracefully
-            let agent_id = u32::try_from(msg.agent_id).unwrap_or(0);
-            let workspace_id = u32::try_from(msg.workspace_id.unwrap_or(0)).unwrap_or(0);
+            // Clamp to a stable range instead of silently wrapping/failing.
+            let agent_id = saturating_u32_from_i64(msg.agent_id);
+            let workspace_id = saturating_u32_from_i64(msg.workspace_id.unwrap_or(0));
 
             inputs.push(EmbeddingInput {
                 message_id,
@@ -296,17 +343,17 @@ impl EmbeddingWorker {
         );
 
         // Create the appropriate embedder/indexer
-        let indexer = if use_semantic {
-            SemanticIndexer::new("fastembed", Some(index_path))?
-        } else {
-            SemanticIndexer::new("hash", None)?
+        let indexer = match embedder_kind {
+            WorkerEmbedderKind::Hash => SemanticIndexer::new("hash", None)?,
+            WorkerEmbedderKind::FastEmbed => SemanticIndexer::new("fastembed", Some(index_path))?,
         };
 
         // Embed messages
         let embedded = indexer.embed_messages(&inputs)?;
 
         // Update final progress
-        let _ = storage.update_job_progress(job_id, messages.len() as i64);
+        let final_completed = i64::try_from(messages.len()).unwrap_or(i64::MAX);
+        let _ = storage.update_job_progress(job_id, final_completed);
 
         // Build and save vector index
         let index = indexer.build_index(embedded)?;
@@ -323,11 +370,14 @@ impl EmbeddingWorker {
     }
 
     /// Load content hashes from an existing vector index for dedup.
-    fn load_existing_hashes(&self, index_path: &Path, model_name: &str) -> HashMap<u64, [u8; 32]> {
-        let embedder_id = match model_name {
-            "hash" => "fnv1a-384",
-            "minilm" => "minilm-384",
-            other => other,
+    fn load_existing_hashes(
+        &self,
+        index_path: &Path,
+        embedder_kind: WorkerEmbedderKind,
+    ) -> HashMap<u64, [u8; 32]> {
+        let embedder_id = match embedder_kind {
+            WorkerEmbedderKind::Hash => "fnv1a-384",
+            WorkerEmbedderKind::FastEmbed => "minilm-384",
         };
 
         let cvvi_path = index_path
@@ -440,5 +490,20 @@ mod tests {
         assert_eq!(passes.len(), 1);
         assert_eq!(passes[0].0, "hash");
         assert!(!passes[0].1); // hash is not semantic
+    }
+
+    #[test]
+    fn test_message_id_from_db_rejects_negative_ids() {
+        assert_eq!(message_id_from_db(-1), None);
+        assert_eq!(message_id_from_db(0), Some(0));
+        assert_eq!(message_id_from_db(42), Some(42));
+    }
+
+    #[test]
+    fn test_saturating_u32_from_i64_clamps_bounds() {
+        assert_eq!(saturating_u32_from_i64(-7), 0);
+        assert_eq!(saturating_u32_from_i64(0), 0);
+        assert_eq!(saturating_u32_from_i64(7), 7);
+        assert_eq!(saturating_u32_from_i64(i64::from(u32::MAX) + 123), u32::MAX);
     }
 }
