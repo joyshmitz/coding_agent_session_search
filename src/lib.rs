@@ -6682,6 +6682,108 @@ fn output_robot_results(
     let needs_truncation = truncation_budgets.has_any_limit();
     let passthrough_all_fields = all_fields_requested;
 
+    // Fast path: summary-field JSON output without optional metadata/features.
+    // Avoid intermediary serde_json::Value maps and string clones per hit.
+    if matches!(format, RobotFormat::Json)
+        && summary_projection
+        && !needs_truncation
+        && max_tokens.is_none()
+        && !include_meta
+        && warning.is_none()
+        && aggregations.is_empty()
+        && result.suggestions.is_empty()
+        && explanation.is_none()
+        && !timed_out
+    {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        use serde::{Serialize, Serializer};
+
+        struct SummaryHitCompat<'a>(&'a crate::search::query::SearchHit);
+
+        impl Serialize for SummaryHitCompat<'_> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                let hit = self.0;
+                let mut map = serializer.serialize_map(Some(5))?;
+                map.serialize_entry("source_path", &hit.source_path)?;
+                map.serialize_entry("line_number", &hit.line_number)?;
+                map.serialize_entry("agent", &hit.agent)?;
+                map.serialize_entry("title", &hit.title)?;
+                // Preserve existing score rendering behavior from serde_json::Value path.
+                map.serialize_entry("score", &(hit.score as f64))?;
+                map.end()
+            }
+        }
+
+        fn serialize_summary_hits<S>(
+            hits: &[crate::search::query::SearchHit],
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let mut seq = serializer.serialize_seq(Some(hits.len()))?;
+            for hit in hits {
+                seq.serialize_element(&SummaryHitCompat(hit))?;
+            }
+            seq.end()
+        }
+
+        #[derive(serde::Serialize)]
+        struct FastSummaryJsonPayload<'a> {
+            query: &'a str,
+            limit: usize,
+            offset: usize,
+            count: usize,
+            total_matches: usize,
+            #[serde(serialize_with = "serialize_summary_hits")]
+            hits: &'a [crate::search::query::SearchHit],
+            max_tokens: Option<usize>,
+            request_id: Option<String>,
+            cursor: Option<String>,
+            hits_clamped: bool,
+        }
+
+        let payload = FastSummaryJsonPayload {
+            query,
+            limit,
+            offset,
+            count: result.hits.len(),
+            total_matches,
+            hits: &result.hits,
+            max_tokens,
+            request_id,
+            cursor: input_cursor,
+            hits_clamped: false,
+        };
+        let stdout = std::io::stdout();
+        let mut out = BufWriter::new(stdout.lock());
+        serde_json::to_writer_pretty(&mut out, &payload).map_err(|e| CliError {
+            code: 9,
+            kind: "encode-json",
+            message: format!("failed to encode json: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+        writeln!(&mut out).map_err(|e| CliError {
+            code: 9,
+            kind: "encode-json",
+            message: format!("failed to write trailing newline: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+        out.flush().map_err(|e| CliError {
+            code: 9,
+            kind: "encode-json",
+            message: format!("failed to flush buffered json output: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+        return Ok(());
+    }
+
     // Fast path: full-field JSON output without optional metadata/features.
     // Serialize hits directly with compatibility formatting to avoid
     // materializing intermediary serde_json::Value hits.
