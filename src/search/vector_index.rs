@@ -1410,9 +1410,9 @@ fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
 
     let mut sum = f32x8::ZERO;
     for (ca, cb) in chunks_a.zip(chunks_b) {
-        // SAFETY: chunks_exact guarantees exactly 8 elements.
-        let arr_a: [f32; 8] = ca.try_into().unwrap();
-        let arr_b: [f32; 8] = cb.try_into().unwrap();
+        // chunks_exact guarantees exactly 8 elements per chunk.
+        let arr_a: [f32; 8] = ca.try_into().expect("chunks_exact guarantees 8 elements");
+        let arr_b: [f32; 8] = cb.try_into().expect("chunks_exact guarantees 8 elements");
         sum += f32x8::from(arr_a) * f32x8::from(arr_b);
     }
 
