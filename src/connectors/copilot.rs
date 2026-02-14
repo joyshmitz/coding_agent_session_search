@@ -260,7 +260,11 @@ impl CopilotConnector {
                     if !content.trim().is_empty() {
                         let ts = Self::extract_turn_timestamp(request);
                         started_at = started_at.or(ts);
-                        ended_at = ts.or(ended_at);
+                        ended_at = match (ended_at, ts) {
+                            (Some(curr), Some(t)) => Some(curr.max(t)),
+                            (None, Some(t)) => Some(t),
+                            (other, None) => other,
+                        };
 
                         messages.push(NormalizedMessage {
                             idx: messages.len() as i64,
@@ -279,7 +283,11 @@ impl CopilotConnector {
                     if !content.trim().is_empty() {
                         let ts = Self::extract_turn_timestamp(response);
                         started_at = started_at.or(ts);
-                        ended_at = ts.or(ended_at);
+                        ended_at = match (ended_at, ts) {
+                            (Some(curr), Some(t)) => Some(curr.max(t)),
+                            (None, Some(t)) => Some(t),
+                            (other, None) => other,
+                        };
 
                         messages.push(NormalizedMessage {
                             idx: messages.len() as i64,
@@ -313,7 +321,11 @@ impl CopilotConnector {
 
                 let ts = Self::extract_turn_timestamp(msg);
                 started_at = started_at.or(ts);
-                ended_at = ts.or(ended_at);
+                ended_at = match (ended_at, ts) {
+                    (Some(curr), Some(t)) => Some(curr.max(t)),
+                    (None, Some(t)) => Some(t),
+                    (other, None) => other,
+                };
 
                 messages.push(NormalizedMessage {
                     idx: messages.len() as i64,

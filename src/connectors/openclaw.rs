@@ -432,8 +432,16 @@ impl Connector for OpenClawConnector {
                                 .and_then(parse_timestamp)
                                 .or_else(|| msg.get("timestamp").and_then(parse_timestamp));
 
-                            started_at = started_at.or(created);
-                            ended_at = created.or(ended_at);
+                            started_at = match (started_at, created) {
+                                (Some(curr), Some(ts)) => Some(curr.min(ts)),
+                                (None, Some(ts)) => Some(ts),
+                                (other, None) => other,
+                            };
+                            ended_at = match (ended_at, created) {
+                                (Some(curr), Some(ts)) => Some(curr.max(ts)),
+                                (None, Some(ts)) => Some(ts),
+                                (other, None) => other,
+                            };
 
                             messages.push(NormalizedMessage {
                                 idx: messages.len() as i64,
