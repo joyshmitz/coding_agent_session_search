@@ -767,6 +767,20 @@ fn check_integrity(site_dir: &Path, verbose: bool) -> CheckResult {
             }
         }
 
+        // Fast-fail on size mismatch before the expensive SHA256 hash.
+        // Use the canonical path so symlinks resolve to the actual target size.
+        if let Ok(actual_meta) = fs::metadata(&canonical_file)
+            && actual_meta.len() != entry.size
+        {
+            errors.push(format!(
+                "Size mismatch for {}: expected {}, got {}",
+                rel_path,
+                entry.size,
+                actual_meta.len()
+            ));
+            continue;
+        }
+
         // Compute hash
         let computed_hash = match compute_file_hash(&file_path) {
             Ok(h) => h,
@@ -1506,14 +1520,10 @@ mod tests {
 
         let result = verify_bundle(&site_dir, false).unwrap();
         assert!(!result.checks.integrity.passed);
+        let details = result.checks.integrity.details.as_ref().unwrap();
         assert!(
-            result
-                .checks
-                .integrity
-                .details
-                .as_ref()
-                .unwrap()
-                .contains("Hash mismatch")
+            details.contains("Size mismatch") || details.contains("Hash mismatch"),
+            "expected size or hash mismatch, got: {details}"
         );
     }
 
