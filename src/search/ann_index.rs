@@ -358,18 +358,26 @@ impl HnswIndex {
     /// Load an HNSW index from a file.
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open HNSW file {path:?}"))?;
+        let file_len = file.metadata().context("read HNSW file metadata")?.len();
         let mut reader = BufReader::new(file);
+        let mut bytes_read = 0_u64;
 
         // Read and validate magic.
         let mut magic = [0u8; 4];
-        reader.read_exact(&mut magic)?;
+        read_exact_tracked(&mut reader, &mut magic, "magic", &mut bytes_read, file_len)?;
         if magic != HNSW_MAGIC {
             bail!("invalid HNSW magic: {:?}", magic);
         }
 
         // Read version.
         let mut version_bytes = [0u8; 2];
-        reader.read_exact(&mut version_bytes)?;
+        read_exact_tracked(
+            &mut reader,
+            &mut version_bytes,
+            "version",
+            &mut bytes_read,
+            file_len,
+        )?;
         let version = u16::from_le_bytes(version_bytes);
         if version != HNSW_VERSION {
             bail!("unsupported HNSW version: {version}");
@@ -377,32 +385,88 @@ impl HnswIndex {
 
         // Read embedder ID.
         let mut id_len_bytes = [0u8; 2];
-        reader.read_exact(&mut id_len_bytes)?;
-        let id_len = usize::from(u16::from_le_bytes(id_len_bytes));
+        read_exact_tracked(
+            &mut reader,
+            &mut id_len_bytes,
+            "embedder id length",
+            &mut bytes_read,
+            file_len,
+        )?;
+        let id_len_u64 = u64::from(u16::from_le_bytes(id_len_bytes));
+        let id_len = usize::try_from(id_len_u64)
+            .context("HNSW embedder ID length exceeds platform usize")?;
+        let id_remaining = file_len.saturating_sub(bytes_read);
+        if id_len_u64 > id_remaining {
+            bail!(
+                "HNSW file truncated: embedder id length {} exceeds remaining bytes {}",
+                id_len_u64,
+                id_remaining
+            );
+        }
         let mut id_bytes = vec![0u8; id_len];
-        reader.read_exact(&mut id_bytes)?;
+        read_exact_tracked(
+            &mut reader,
+            &mut id_bytes,
+            "embedder id",
+            &mut bytes_read,
+            file_len,
+        )?;
         let embedder_id = String::from_utf8(id_bytes)?;
 
         // Read dimension and count.
         let mut dim_bytes = [0u8; 4];
-        reader.read_exact(&mut dim_bytes)?;
+        read_exact_tracked(
+            &mut reader,
+            &mut dim_bytes,
+            "dimension",
+            &mut bytes_read,
+            file_len,
+        )?;
         let dimension = usize::try_from(u32::from_le_bytes(dim_bytes))
             .context("HNSW dimension exceeds platform usize")?;
 
         let mut count_bytes = [0u8; 4];
-        reader.read_exact(&mut count_bytes)?;
+        read_exact_tracked(
+            &mut reader,
+            &mut count_bytes,
+            "count",
+            &mut bytes_read,
+            file_len,
+        )?;
         let count = usize::try_from(u32::from_le_bytes(count_bytes))
             .context("HNSW count exceeds platform usize")?;
 
         // Read graph data length.
         let mut graph_len_bytes = [0u8; 8];
-        reader.read_exact(&mut graph_len_bytes)?;
-        let graph_len = usize::try_from(u64::from_le_bytes(graph_len_bytes))
+        read_exact_tracked(
+            &mut reader,
+            &mut graph_len_bytes,
+            "graph length",
+            &mut bytes_read,
+            file_len,
+        )?;
+        let graph_len_u64 = u64::from_le_bytes(graph_len_bytes);
+        let graph_len = usize::try_from(graph_len_u64)
             .context("HNSW graph data length exceeds platform usize")?;
+        let remaining_after_graph_len = file_len.saturating_sub(bytes_read);
+        if graph_len_u64 > remaining_after_graph_len.saturating_sub(8) {
+            bail!(
+                "HNSW file truncated/corrupt: graph length {} leaves insufficient bytes \
+                 for data section (remaining {})",
+                graph_len_u64,
+                remaining_after_graph_len
+            );
+        }
 
         // Read graph data to temp file.
         let mut graph_data = vec![0u8; graph_len];
-        reader.read_exact(&mut graph_data)?;
+        read_exact_tracked(
+            &mut reader,
+            &mut graph_data,
+            "graph data",
+            &mut bytes_read,
+            file_len,
+        )?;
 
         let temp_dir = tempfile::tempdir()?;
         let basename = "hnsw_graph";
@@ -412,11 +476,38 @@ impl HnswIndex {
 
         // Read data length.
         let mut data_len_bytes = [0u8; 8];
-        reader.read_exact(&mut data_len_bytes)?;
-        let data_len = usize::try_from(u64::from_le_bytes(data_len_bytes))
-            .context("HNSW data length exceeds platform usize")?;
+        read_exact_tracked(
+            &mut reader,
+            &mut data_len_bytes,
+            "data length",
+            &mut bytes_read,
+            file_len,
+        )?;
+        let data_len_u64 = u64::from_le_bytes(data_len_bytes);
+        let data_len =
+            usize::try_from(data_len_u64).context("HNSW data length exceeds platform usize")?;
+        let remaining_after_data_len = file_len.saturating_sub(bytes_read);
+        if data_len_u64 > remaining_after_data_len {
+            bail!(
+                "HNSW file truncated/corrupt: data length {} exceeds remaining bytes {}",
+                data_len_u64,
+                remaining_after_data_len
+            );
+        }
         let mut data_data = vec![0u8; data_len];
-        reader.read_exact(&mut data_data)?;
+        read_exact_tracked(
+            &mut reader,
+            &mut data_data,
+            "data payload",
+            &mut bytes_read,
+            file_len,
+        )?;
+        if bytes_read != file_len {
+            bail!(
+                "HNSW file has {} trailing bytes after payload",
+                file_len - bytes_read
+            );
+        }
         std::fs::write(&data_path, &data_data)?;
 
         // Load HNSW from the temporary dump files using hnsw_rs loader.
@@ -446,6 +537,25 @@ impl HnswIndex {
     pub fn exists(data_dir: &Path, embedder_id: &str) -> bool {
         hnsw_index_path(data_dir, embedder_id).exists()
     }
+}
+
+fn read_exact_tracked<R: Read>(
+    reader: &mut R,
+    buf: &mut [u8],
+    field: &str,
+    bytes_read: &mut u64,
+    file_len: u64,
+) -> Result<()> {
+    let need = u64::try_from(buf.len()).context("buffer length exceeds u64")?;
+    let remaining = file_len.saturating_sub(*bytes_read);
+    if need > remaining {
+        bail!("HNSW file truncated while reading {field}: need {need} bytes, have {remaining}");
+    }
+    reader
+        .read_exact(buf)
+        .with_context(|| format!("read {field} from HNSW file"))?;
+    *bytes_read += need;
+    Ok(())
 }
 
 /// Estimate recall based on ef/k ratio.
@@ -798,5 +908,29 @@ mod tests {
         assert_eq!(stats.k_requested, 0);
         assert_eq!(stats.k_returned, 0);
         assert_eq!(stats.estimated_recall, 1.0);
+    }
+
+    #[test]
+    fn hnsw_load_rejects_truncated_graph_payload() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("bad-truncated.chsw");
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&HNSW_MAGIC);
+        bytes.extend_from_slice(&HNSW_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(4_u16).to_le_bytes()); // embedder id len
+        bytes.extend_from_slice(b"test");
+        bytes.extend_from_slice(&(3_u32).to_le_bytes()); // dimension
+        bytes.extend_from_slice(&(1_u32).to_le_bytes()); // count
+        bytes.extend_from_slice(&(64_u64).to_le_bytes()); // claims graph bytes
+        // Intentionally omit graph/data payload.
+        std::fs::write(&path, bytes).expect("write truncated HNSW file");
+
+        let err = HnswIndex::load(&path).expect_err("load must reject truncated file");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("truncated") || msg.contains("insufficient"),
+            "unexpected error: {msg}"
+        );
     }
 }

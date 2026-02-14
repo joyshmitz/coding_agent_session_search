@@ -2325,17 +2325,25 @@ impl SearchClient {
             }
         }
 
-        // Heuristic: Fetch enough items to account for deduplication and offset.
-        // We fetch from 0 to ensure global deduplication correctness.
-        // Multiplier 3 allows for up to ~66% duplicates before we undershoot limit.
-        let fetch_limit = (offset + limit).saturating_mul(3);
+        // Adaptive fetch sizing: start at 2x target to reduce common-case work,
+        // retry at 3x only when deduplication causes shortfall.
+        // We always fetch from 0 to preserve global deduplication correctness.
+        let target_hits = offset.saturating_add(limit);
+        let initial_fetch_limit = if target_hits <= 16 {
+            target_hits.saturating_mul(2)
+        } else {
+            // Larger pages benefit from a lower first-pass over-fetch.
+            // Retry logic below preserves correctness on duplicate-heavy corpora.
+            target_hits.saturating_mul(3).div_ceil(2)
+        };
+        let fallback_fetch_limit = target_hits.saturating_mul(3);
 
         // Tantivy is the primary high-performance engine.
         if let Some((reader, fields)) = &self.reader {
             tracing::info!(
                 backend = "tantivy",
                 query = sanitized,
-                limit = fetch_limit,
+                limit = initial_fetch_limit,
                 offset = 0,
                 "search_start"
             );
@@ -2345,20 +2353,61 @@ impl SearchClient {
                 query,
                 &sanitized,
                 filters.clone(),
-                fetch_limit,
+                initial_fetch_limit,
                 0, // Always fetch from 0 for global dedup
                 field_mask,
             )?;
             if !hits.is_empty() {
-                let mut deduped = deduplicate_hits(hits);
-                // Apply session_paths filter (post-search since source_path is not indexed)
-                if !filters.session_paths.is_empty() {
-                    deduped.retain(|h| filters.session_paths.contains(&h.source_path));
+                let initial_hit_count = hits.len();
+                let page_hits = |raw_hits: Vec<SearchHit>| {
+                    let mut deduped = deduplicate_hits(raw_hits);
+                    // Apply session_paths filter (post-search since source_path is not indexed)
+                    if !filters.session_paths.is_empty() {
+                        deduped.retain(|h| filters.session_paths.contains(&h.source_path));
+                    }
+                    let deduped_len = deduped.len();
+                    let paged_hits: Vec<SearchHit> =
+                        deduped.into_iter().skip(offset).take(limit).collect();
+                    (deduped_len, paged_hits)
+                };
+
+                let (mut deduped_len, mut paged_hits) = page_hits(hits);
+
+                let needs_retry = deduped_len < target_hits
+                    && initial_hit_count == initial_fetch_limit
+                    && initial_fetch_limit < fallback_fetch_limit;
+
+                if needs_retry {
+                    tracing::debug!(
+                        query = sanitized,
+                        target_hits,
+                        deduped_len,
+                        initial_fetch_limit,
+                        fallback_fetch_limit,
+                        "retrying lexical fetch due to dedup shortfall"
+                    );
+                    let retry_hits = self.search_tantivy(
+                        reader,
+                        fields,
+                        query,
+                        &sanitized,
+                        filters.clone(),
+                        fallback_fetch_limit,
+                        0,
+                        field_mask,
+                    )?;
+                    if !retry_hits.is_empty() {
+                        (deduped_len, paged_hits) = page_hits(retry_hits);
+                    }
                 }
 
-                // Slice the page after deduplication
-                let paged_hits: Vec<SearchHit> =
-                    deduped.into_iter().skip(offset).take(limit).collect();
+                tracing::trace!(
+                    query = sanitized,
+                    target_hits,
+                    deduped_len,
+                    returned = paged_hits.len(),
+                    "lexical fetch complete"
+                );
 
                 if can_use_cache && offset == 0 {
                     self.put_cache(&sanitized, &filters, &paged_hits);
@@ -2393,7 +2442,7 @@ impl SearchClient {
             tracing::info!(
                 backend = "sqlite",
                 query = sanitized,
-                limit = fetch_limit,
+                limit = fallback_fetch_limit,
                 offset = 0,
                 "search_start"
             );
@@ -2401,7 +2450,7 @@ impl SearchClient {
                 conn,
                 query,
                 filters.clone(),
-                fetch_limit,
+                fallback_fetch_limit,
                 0, // Always fetch from 0 for global dedup
                 field_mask,
             )?;
