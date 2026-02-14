@@ -115,9 +115,11 @@ impl SizeEstimate {
                 &msg_sql,
                 rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
                 |row| {
+                    let raw_message_count = row.get::<_, i64>(0).unwrap_or(0);
+                    let raw_plaintext_bytes = row.get::<_, i64>(1).unwrap_or(0);
                     Ok((
-                        row.get::<_, i64>(0).unwrap_or(0) as u64,
-                        row.get::<_, i64>(1).unwrap_or(0) as u64,
+                        raw_message_count.max(0) as u64,
+                        raw_plaintext_bytes.max(0) as u64,
                     ))
                 },
             )
@@ -136,13 +138,21 @@ impl SizeEstimate {
         let compressed_bytes = (plaintext_bytes as f64 * COMPRESSION_RATIO) as u64;
 
         // Calculate chunk count (minimum of 1 chunk even for empty content)
-        let chunk_count = compressed_bytes.div_ceil(DEFAULT_CHUNK_SIZE).max(1) as u32;
+        let chunk_count_u64 = compressed_bytes.div_ceil(DEFAULT_CHUNK_SIZE).max(1);
+        let chunk_count = u32::try_from(chunk_count_u64).unwrap_or(u32::MAX);
 
         // Add AEAD overhead
-        let encrypted_bytes = compressed_bytes + (chunk_count as u64 * AEAD_TAG_OVERHEAD);
+        let aead_overhead = u64::from(chunk_count)
+            .checked_mul(AEAD_TAG_OVERHEAD)
+            .ok_or_else(|| anyhow::anyhow!("AEAD overhead overflow"))?;
+        let encrypted_bytes = compressed_bytes
+            .checked_add(aead_overhead)
+            .ok_or_else(|| anyhow::anyhow!("Encrypted size overflow"))?;
 
         // Total with static assets
-        let total_site_bytes = encrypted_bytes + STATIC_ASSETS_SIZE;
+        let total_site_bytes = encrypted_bytes
+            .checked_add(STATIC_ASSETS_SIZE)
+            .ok_or_else(|| anyhow::anyhow!("Total site size overflow"))?;
 
         Ok(Self {
             plaintext_bytes,
@@ -558,6 +568,13 @@ mod tests {
             estimate.chunk_count, 2,
             "Exactly two chunks' worth should be 2 chunks, not 3"
         );
+    }
+
+    #[test]
+    fn test_from_plaintext_size_handles_extremely_large_inputs() {
+        let estimate = SizeEstimate::from_plaintext_size(u64::MAX, 1, 1).unwrap();
+        assert_eq!(estimate.chunk_count, u32::MAX);
+        assert!(estimate.total_site_bytes >= estimate.compressed_bytes);
     }
 
     #[test]
