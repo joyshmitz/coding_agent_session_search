@@ -6662,16 +6662,26 @@ fn output_robot_results(
     let resolved_fields = expand_field_presets(fields);
 
     // Filter hits to requested fields, and only apply truncation when limits are configured.
+    let all_fields_requested = resolved_fields
+        .as_ref()
+        .is_none_or(|fields| fields.is_empty());
     let minimal_projection = resolved_fields.as_ref().is_some_and(|fields| {
         fields.len() == 3
             && fields[0] == "source_path"
             && fields[1] == "line_number"
             && fields[2] == "agent"
     });
+    let summary_projection = resolved_fields.as_ref().is_some_and(|fields| {
+        fields.len() == 5
+            && fields[0] == "source_path"
+            && fields[1] == "line_number"
+            && fields[2] == "agent"
+            && fields[3] == "title"
+            && fields[4] == "score"
+    });
     let needs_truncation = truncation_budgets.has_any_limit();
-    let passthrough_all_fields = resolved_fields
-        .as_ref()
-        .is_none_or(|fields| fields.is_empty());
+    let passthrough_all_fields = all_fields_requested;
+
     let filtered_hits: Vec<serde_json::Value> = if minimal_projection {
         result
             .hits
@@ -6682,6 +6692,35 @@ fn output_robot_results(
                     "line_number": hit.line_number,
                     "agent": hit.agent.as_str(),
                 })
+            })
+            .collect()
+    } else if summary_projection && !needs_truncation {
+        result
+            .hits
+            .iter()
+            .map(|hit| {
+                let mut map = serde_json::Map::with_capacity(5);
+                map.insert(
+                    "source_path".to_string(),
+                    serde_json::Value::String(hit.source_path.clone()),
+                );
+                map.insert(
+                    "line_number".to_string(),
+                    serde_json::to_value(hit.line_number).unwrap_or_default(),
+                );
+                map.insert(
+                    "agent".to_string(),
+                    serde_json::Value::String(hit.agent.clone()),
+                );
+                map.insert(
+                    "title".to_string(),
+                    serde_json::Value::String(hit.title.clone()),
+                );
+                map.insert(
+                    "score".to_string(),
+                    serde_json::to_value(hit.score).unwrap_or_default(),
+                );
+                serde_json::Value::Object(map)
             })
             .collect()
     } else if passthrough_all_fields && !needs_truncation {
