@@ -233,6 +233,8 @@ impl OpenClawConnector {
             }
         }
 
+        // Keep scan order deterministic across filesystems and runs.
+        out.sort();
         out
     }
 
@@ -443,8 +445,9 @@ impl Connector for OpenClawConnector {
                                 (other, None) => other,
                             };
 
+                            let idx = i64::try_from(messages.len()).unwrap_or(i64::MAX);
                             messages.push(NormalizedMessage {
-                                idx: messages.len() as i64,
+                                idx,
                                 role: role.to_string(),
                                 author: msg.get("model").and_then(|v| v.as_str()).map(String::from),
                                 created_at: created,
@@ -742,6 +745,34 @@ mod tests {
             std::path::MAIN_SEPARATOR,
             std::path::MAIN_SEPARATOR
         )));
+    }
+
+    #[test]
+    fn session_files_are_sorted_for_deterministic_scan_order() {
+        let tmp = TempDir::new().unwrap();
+        let sessions = tmp.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_session(
+            &sessions,
+            "z-last.jsonl",
+            &[r#"{"type":"message","message":{"role":"user","content":"z"}}"#],
+        );
+        write_session(
+            &sessions,
+            "a-first.jsonl",
+            &[r#"{"type":"message","message":{"role":"user","content":"a"}}"#],
+        );
+
+        let files = OpenClawConnector::session_files(&sessions);
+        let file_names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+            .collect();
+
+        assert_eq!(
+            file_names,
+            vec!["a-first.jsonl".to_string(), "z-last.jsonl".to_string()]
+        );
     }
 
     #[cfg(unix)]

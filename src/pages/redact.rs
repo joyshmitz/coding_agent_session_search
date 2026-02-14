@@ -54,6 +54,8 @@ pub struct CustomPattern {
 pub enum RedactionKind {
     HomePath,
     Username,
+    Email,
+    Hostname,
     PathReplacement,
     CustomPattern,
     ProjectName,
@@ -64,6 +66,8 @@ impl RedactionKind {
         match self {
             RedactionKind::HomePath => "home_path",
             RedactionKind::Username => "username",
+            RedactionKind::Email => "email",
+            RedactionKind::Hostname => "hostname",
             RedactionKind::PathReplacement => "path_replace",
             RedactionKind::CustomPattern => "custom_pattern",
             RedactionKind::ProjectName => "project_name",
@@ -186,6 +190,37 @@ impl RedactionEngine {
             }
         }
 
+        if self.config.redact_emails && EMAIL_RE.is_match(&output) {
+            output = EMAIL_RE
+                .replace_all(&output, "[EMAIL_REDACTED]")
+                .to_string();
+            changes.push(RedactionChange {
+                kind: RedactionKind::Email,
+                original: "email".to_string(),
+                redacted: "[EMAIL_REDACTED]".to_string(),
+            });
+        }
+
+        if self.config.redact_hostnames && URL_HOST_RE.is_match(&output) {
+            output = URL_HOST_RE
+                .replace_all(&output, |caps: &regex::Captures| {
+                    let scheme = caps.name("scheme").map_or("", |m| m.as_str());
+                    let userinfo = caps.name("userinfo").map_or("", |m| m.as_str());
+                    let port = caps.name("port").map_or("", |m| m.as_str());
+                    if userinfo.is_empty() {
+                        format!("{scheme}://[HOST_REDACTED]{port}")
+                    } else {
+                        format!("{scheme}://{userinfo}@[HOST_REDACTED]{port}")
+                    }
+                })
+                .to_string();
+            changes.push(RedactionChange {
+                kind: RedactionKind::Hostname,
+                original: "url_hostname".to_string(),
+                redacted: "[HOST_REDACTED]".to_string(),
+            });
+        }
+
         for pattern in &self.config.custom_patterns {
             if pattern.enabled && pattern.pattern.is_match(&output) {
                 output = pattern
@@ -232,6 +267,18 @@ impl RedactionEngine {
         anonymized
     }
 }
+
+static EMAIL_RE: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
+    Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+        .expect("email redaction regex must compile")
+});
+
+static URL_HOST_RE: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
+    Regex::new(
+        r"(?i)\b(?P<scheme>https?|ssh|wss?)://(?:(?P<userinfo>[A-Z0-9._%+-]+)@)?(?P<host>[A-Z0-9][A-Z0-9.-]*\.[A-Z]{2,})(?P<port>:\d+)?",
+    )
+    .expect("URL hostname redaction regex must compile")
+});
 
 impl RedactionReport {
     pub fn new(max_samples: usize) -> Self {
@@ -424,6 +471,57 @@ mod tests {
         let result2 = engine.redact_workspace("/home/alice/project-alpha");
         assert!(result1.output.contains("project-1"));
         assert!(result2.output.contains("project-1"));
+    }
+
+    #[test]
+    fn test_email_redaction_enabled() {
+        let engine = engine_with_context("/home/alice");
+        let result = engine.redact_text("Contact me at alice@example.com for details");
+        assert!(!result.output.contains("alice@example.com"));
+        assert!(result.output.contains("[EMAIL_REDACTED]"));
+        assert!(
+            result
+                .changes
+                .iter()
+                .any(|change| change.kind == RedactionKind::Email)
+        );
+    }
+
+    #[test]
+    fn test_email_redaction_disabled() {
+        let mut config = RedactionConfig::default();
+        config.redact_emails = false;
+        let engine = RedactionEngine::new(config);
+        let result = engine.redact_text("Email bob@example.com");
+        assert!(result.output.contains("bob@example.com"));
+    }
+
+    #[test]
+    fn test_hostname_redaction_in_urls() {
+        let mut config = RedactionConfig::default();
+        config.redact_hostnames = true;
+        config.redact_emails = false;
+        let engine = RedactionEngine::new(config);
+        let result = engine.redact_text("Fetch https://internal.example.corp:8443/api now");
+        assert!(result.output.contains("https://[HOST_REDACTED]:8443/api"));
+        assert!(
+            result
+                .changes
+                .iter()
+                .any(|change| change.kind == RedactionKind::Hostname)
+        );
+    }
+
+    #[test]
+    fn test_hostname_redaction_preserves_non_url_paths() {
+        let mut config = RedactionConfig::default();
+        config.redact_hostnames = true;
+        config.redact_home_paths = false;
+        config.redact_usernames = false;
+        let engine = RedactionEngine::new(config);
+        let input = "/home/alice/project/main.rs";
+        let result = engine.redact_text(input);
+        assert_eq!(result.output, input);
     }
 
     #[test]
