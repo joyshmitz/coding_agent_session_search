@@ -67,8 +67,9 @@ impl ResourceMonitor {
     /// Get system page size in bytes.
     #[cfg(target_os = "linux")]
     fn page_size() -> u64 {
-        // sysconf(_SC_PAGESIZE) is typically 4096
-        4096
+        // SAFETY: sysconf has no pointer arguments and is thread-safe for this key.
+        let raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if raw > 0 { raw as u64 } else { 4096 }
     }
 
     /// Apply a nice value to the current process.
@@ -78,24 +79,31 @@ impl ResourceMonitor {
     pub fn apply_nice(&self, nice_value: i32) -> bool {
         #[cfg(target_os = "linux")]
         {
-            // Use libc::nice() for the current process
-            // Note: nice() only returns -1 on error, and -1 is also a valid nice value
-            // So we need to check errno
-            unsafe {
-                // Reset errno
-                *libc::__errno_location() = 0;
-
-                let result = libc::nice(nice_value);
-
-                let errno = *libc::__errno_location();
-                if errno != 0 {
-                    warn!(nice = nice_value, errno = errno, "Failed to set nice value");
-                    return false;
-                }
-
-                debug!(nice = result, "Applied nice value");
-                true
+            if !(-20..=19).contains(&nice_value) {
+                warn!(
+                    nice = nice_value,
+                    "Refusing out-of-range nice value (valid range: -20..=19)"
+                );
+                return false;
             }
+
+            // SAFETY: setpriority operates on the current process id and does not
+            // retain pointers. We pass scalar values only.
+            let result = unsafe {
+                libc::setpriority(libc::PRIO_PROCESS, self.pid as libc::id_t, nice_value)
+            };
+            if result != 0 {
+                let err = std::io::Error::last_os_error();
+                warn!(nice = nice_value, error = %err, "Failed to set nice value");
+                return false;
+            }
+
+            debug!(
+                nice = nice_value,
+                pid = self.pid,
+                "Applied absolute nice value"
+            );
+            true
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -267,10 +275,15 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             let size = ResourceMonitor::page_size();
-            // Page size is typically 4096 on most systems
-            assert!(size >= 4096);
-            // Should be a power of 2
-            assert!(size.is_power_of_two() || size == 4096);
+            assert!(size > 0);
+            assert!(size.is_power_of_two());
         }
+    }
+
+    #[test]
+    fn test_apply_nice_rejects_out_of_range() {
+        let monitor = ResourceMonitor::new();
+        assert!(!monitor.apply_nice(20));
+        assert!(!monitor.apply_nice(-21));
     }
 }

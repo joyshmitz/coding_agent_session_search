@@ -93,7 +93,10 @@ enum WorkerEmbedderKind {
     FastEmbed,
 }
 
-fn resolve_embedder_kind(model_name: &str, use_semantic: bool) -> anyhow::Result<WorkerEmbedderKind> {
+fn resolve_embedder_kind(
+    model_name: &str,
+    use_semantic: bool,
+) -> anyhow::Result<WorkerEmbedderKind> {
     if !use_semantic
         || model_name.eq_ignore_ascii_case("hash")
         || model_name.eq_ignore_ascii_case("fnv1a-384")
@@ -505,5 +508,40 @@ mod tests {
         assert_eq!(saturating_u32_from_i64(0), 0);
         assert_eq!(saturating_u32_from_i64(7), 7);
         assert_eq!(saturating_u32_from_i64(i64::from(u32::MAX) + 123), u32::MAX);
+    }
+
+    #[test]
+    fn test_resolve_embedder_kind_hash_aliases() {
+        assert_eq!(
+            resolve_embedder_kind("hash", false).unwrap(),
+            WorkerEmbedderKind::Hash
+        );
+        assert_eq!(
+            resolve_embedder_kind("FNV1A-384", true).unwrap(),
+            WorkerEmbedderKind::Hash
+        );
+    }
+
+    #[test]
+    fn test_resolve_embedder_kind_semantic_aliases() {
+        assert_eq!(
+            resolve_embedder_kind("minilm", true).unwrap(),
+            WorkerEmbedderKind::FastEmbed
+        );
+        assert_eq!(
+            resolve_embedder_kind("MINILM-384", true).unwrap(),
+            WorkerEmbedderKind::FastEmbed
+        );
+        assert_eq!(
+            resolve_embedder_kind("fastembed", true).unwrap(),
+            WorkerEmbedderKind::FastEmbed
+        );
+    }
+
+    #[test]
+    fn test_resolve_embedder_kind_rejects_unknown_semantic_model() {
+        let err = resolve_embedder_kind("e5-large", true).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unsupported semantic model"));
     }
 }

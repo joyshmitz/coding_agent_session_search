@@ -694,6 +694,9 @@ pub fn parse_timestamp(val: &serde_json::Value) -> Option<i64> {
             return Some(ts);
         }
         if let Ok(num) = s.parse::<f64>() {
+            if !num.is_finite() {
+                return None;
+            }
             let ts = if (0.0..100_000_000_000.0).contains(&num) {
                 (num * 1000.0).round() as i64
             } else {
