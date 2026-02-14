@@ -6631,6 +6631,8 @@ fn output_robot_results(
     search_ms: u64,
     rerank_ms: u64,
 ) -> CliResult<()> {
+    use std::io::{BufWriter, Write};
+
     if matches!(format, RobotFormat::Sessions) {
         // Output unique session paths only, one per line.
         // This format is designed for chained searches via --sessions-from.
@@ -6806,16 +6808,34 @@ fn output_robot_results(
                 }
             }
 
-            let out = serde_json::to_string_pretty(&payload).map_err(|e| CliError {
+            let stdout = std::io::stdout();
+            let mut out = BufWriter::new(stdout.lock());
+            serde_json::to_writer_pretty(&mut out, &payload).map_err(|e| CliError {
                 code: 9,
                 kind: "encode-json",
                 message: format!("failed to encode json: {e}"),
                 hint: None,
                 retryable: false,
             })?;
-            println!("{out}");
+            writeln!(&mut out).map_err(|e| CliError {
+                code: 9,
+                kind: "encode-json",
+                message: format!("failed to write trailing newline: {e}"),
+                hint: None,
+                retryable: false,
+            })?;
+            out.flush().map_err(|e| CliError {
+                code: 9,
+                kind: "encode-json",
+                message: format!("failed to flush buffered json output: {e}"),
+                hint: None,
+                retryable: false,
+            })?;
         }
         RobotFormat::Jsonl => {
+            let stdout = std::io::stdout();
+            let mut out = BufWriter::new(stdout.lock());
+
             // JSONL: one object per line, optional _meta header
             if include_meta
                 || agg_json.is_some()
@@ -6907,12 +6927,45 @@ fn output_robot_results(
                         }),
                     );
                 }
-                println!("{}", serde_json::to_string(&meta).unwrap_or_default());
+                serde_json::to_writer(&mut out, &meta).map_err(|e| CliError {
+                    code: 9,
+                    kind: "encode-json",
+                    message: format!("failed to encode jsonl metadata: {e}"),
+                    hint: None,
+                    retryable: false,
+                })?;
+                writeln!(&mut out).map_err(|e| CliError {
+                    code: 9,
+                    kind: "encode-json",
+                    message: format!("failed to write jsonl metadata newline: {e}"),
+                    hint: None,
+                    retryable: false,
+                })?;
             }
             // One hit per line (with field filtering applied)
             for hit in &filtered_hits {
-                println!("{}", serde_json::to_string(hit).unwrap_or_default());
+                serde_json::to_writer(&mut out, hit).map_err(|e| CliError {
+                    code: 9,
+                    kind: "encode-json",
+                    message: format!("failed to encode jsonl hit: {e}"),
+                    hint: None,
+                    retryable: false,
+                })?;
+                writeln!(&mut out).map_err(|e| CliError {
+                    code: 9,
+                    kind: "encode-json",
+                    message: format!("failed to write jsonl newline: {e}"),
+                    hint: None,
+                    retryable: false,
+                })?;
             }
+            out.flush().map_err(|e| CliError {
+                code: 9,
+                kind: "encode-json",
+                message: format!("failed to flush buffered jsonl output: {e}"),
+                hint: None,
+                retryable: false,
+            })?;
         }
         RobotFormat::Compact => {
             // Single-line compact JSON

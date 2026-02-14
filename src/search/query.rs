@@ -2146,8 +2146,11 @@ fn snippet_from_content(content: &str) -> String {
 ///
 /// Also filters out tool invocation noise that isn't useful for search results.
 pub(crate) fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
-    // Key: (source_id, content_hash) -> index in deduped
-    let mut seen: HashMap<(String, u64), usize> = HashMap::new();
+    // Key: (source_numeric_id, content_hash) -> index in deduped.
+    // Intern source IDs to avoid cloning source_id for every hit.
+    let mut source_ids: HashMap<String, u32> = HashMap::new();
+    let mut next_source_id: u32 = 0;
+    let mut seen: HashMap<(u32, u64), usize> = HashMap::new();
     let mut deduped: Vec<SearchHit> = Vec::new();
 
     for hit in hits {
@@ -2156,8 +2159,16 @@ pub(crate) fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
             continue;
         }
 
-        // Include source_id in the key so different sources keep their results
-        let key = (hit.source_id.clone(), hit.content_hash);
+        // Include source_id in the key so different sources keep their results.
+        let source_key = if let Some(id) = source_ids.get(hit.source_id.as_str()) {
+            *id
+        } else {
+            let id = next_source_id;
+            next_source_id = next_source_id.saturating_add(1);
+            source_ids.insert(hit.source_id.clone(), id);
+            id
+        };
+        let key = (source_key, hit.content_hash);
 
         if let Some(&existing_idx) = seen.get(&key) {
             // If existing hit has lower score, replace it
@@ -3441,6 +3452,12 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                 in_or_sequence = true;
             }
             QueryToken::Not => {
+                // FTS5 supports binary `A NOT B` but not unary leading `NOT`
+                // and not `OR NOT` groupings.
+                if (fts_clauses.is_empty() && pending_or_group.is_empty()) || in_or_sequence {
+                    return None;
+                }
+
                 if !pending_or_group.is_empty() {
                     let group = if pending_or_group.len() > 1 {
                         format!("({})", pending_or_group.join(" OR "))
@@ -3481,11 +3498,14 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                 };
 
                 if in_or_sequence {
-                    if pending_or_group.is_empty()
-                        && let Some((op, _)) = fts_clauses.last()
-                        && *op == "AND"
-                    {
-                        let (_, val) = fts_clauses.pop().unwrap();
+                    if pending_or_group.is_empty() {
+                        let (op, _) = fts_clauses.last()?;
+                        if *op != "AND" {
+                            // `(... NOT ...) OR ...` cannot be represented
+                            // with our FTS5 fallback transpilation.
+                            return None;
+                        }
+                        let (_, val) = fts_clauses.pop()?;
                         pending_or_group.push(val);
                     }
                     pending_or_group.push(fts_term);
@@ -3503,11 +3523,14 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                 let fts_phrase = format!("\"{}\"", phrase_parts.join(" "));
 
                 if in_or_sequence {
-                    if pending_or_group.is_empty()
-                        && let Some((op, _)) = fts_clauses.last()
-                        && *op == "AND"
-                    {
-                        let (_, val) = fts_clauses.pop().unwrap();
+                    if pending_or_group.is_empty() {
+                        let (op, _) = fts_clauses.last()?;
+                        if *op != "AND" {
+                            // `(... NOT ...) OR ...` cannot be represented
+                            // with our FTS5 fallback transpilation.
+                            return None;
+                        }
+                        let (_, val) = fts_clauses.pop()?;
                         pending_or_group.push(val);
                     }
                     pending_or_group.push(fts_phrase);
@@ -3533,14 +3556,16 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
         return Some("".to_string());
     }
 
+    // Safety guard: unary leading NOT is not valid FTS5 syntax.
+    if fts_clauses.first().is_some_and(|(op, _)| *op == "NOT") {
+        return None;
+    }
+
     // Join clauses. The first operator is ignored (start of query).
     let mut query = String::new();
     for (i, (op, text)) in fts_clauses.into_iter().enumerate() {
         if i > 0 {
             query.push_str(&format!(" {} ", op));
-        } else if op == "NOT" {
-            // Leading NOT
-            query.push_str("NOT ");
         }
         query.push_str(&text);
     }
@@ -7230,6 +7255,26 @@ mod tests {
         let expected: QueryTokenList =
             SmallVec::from_vec(vec![QueryToken::Phrase("hello world".into())]);
         assert_eq!(tokens, expected);
+    }
+
+    #[test]
+    fn transpile_to_fts5_rejects_unary_not_queries() {
+        assert_eq!(transpile_to_fts5("NOT foo"), None);
+        assert_eq!(transpile_to_fts5("-foo"), None);
+    }
+
+    #[test]
+    fn transpile_to_fts5_rejects_or_not_forms_it_cannot_represent() {
+        assert_eq!(transpile_to_fts5("foo OR NOT bar"), None);
+        assert_eq!(transpile_to_fts5("foo NOT bar OR baz"), None);
+    }
+
+    #[test]
+    fn transpile_to_fts5_preserves_supported_binary_not() {
+        assert_eq!(
+            transpile_to_fts5("foo NOT bar").as_deref(),
+            Some("foo NOT bar")
+        );
     }
 
     // --- levenshtein_distance tests ---
