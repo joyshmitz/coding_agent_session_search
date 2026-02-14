@@ -112,13 +112,9 @@ impl Drop for RecoverySecret {
     fn drop(&mut self) {
         // Use zeroize crate for secure erasure (prevents compiler optimization)
         self.bytes.zeroize();
-        // SAFETY: Zeroize encoded string by replacing with zeros then clearing
-        // This ensures the base64-encoded secret doesn't linger in memory
-        unsafe {
-            let encoded_bytes = self.encoded.as_bytes_mut();
-            encoded_bytes.zeroize();
-        }
-        self.encoded.clear();
+        // Move encoded bytes out, zeroize, then drop without unsafe string mutation.
+        let mut encoded_bytes = std::mem::take(&mut self.encoded).into_bytes();
+        encoded_bytes.zeroize();
     }
 }
 
@@ -136,15 +132,13 @@ pub struct RecoveryArtifacts {
 
 impl Drop for RecoveryArtifacts {
     fn drop(&mut self) {
-        // Zeroize secret_text which contains the encoded secret
-        // SAFETY: Same as RecoverySecret::drop - zeroize string contents
-        unsafe {
-            let text_bytes = self.secret_text.as_bytes_mut();
-            text_bytes.zeroize();
-        }
-        self.secret_text.clear();
+        // Zeroize all secret-bearing payloads before drop.
+        let mut text_bytes = std::mem::take(&mut self.secret_text).into_bytes();
+        text_bytes.zeroize();
+        self.qr_png.zeroize();
+        let mut svg_bytes = std::mem::take(&mut self.qr_svg).into_bytes();
+        svg_bytes.zeroize();
         // Note: secret field has its own Drop impl that zeroizes it
-        // qr_png and qr_svg don't contain plaintext secret (encoded in QR)
     }
 }
 

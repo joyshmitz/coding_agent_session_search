@@ -6371,15 +6371,45 @@ fn resolve_field_mask(
 }
 
 /// Filter a search hit to only include the requested fields
+fn projected_hit_field_value(
+    hit: &crate::search::query::SearchHit,
+    field: &str,
+) -> Option<serde_json::Value> {
+    match field {
+        "score" => serde_json::to_value(hit.score).ok(),
+        "agent" => Some(serde_json::Value::String(hit.agent.clone())),
+        "workspace" => Some(serde_json::Value::String(hit.workspace.clone())),
+        "source_path" => Some(serde_json::Value::String(hit.source_path.clone())),
+        "snippet" => Some(serde_json::Value::String(hit.snippet.clone())),
+        "content" => Some(serde_json::Value::String(hit.content.clone())),
+        "title" => Some(serde_json::Value::String(hit.title.clone())),
+        "created_at" => serde_json::to_value(hit.created_at).ok(),
+        "line_number" => serde_json::to_value(hit.line_number).ok(),
+        "match_type" => serde_json::to_value(hit.match_type).ok(),
+        // Provenance fields (P3.4)
+        "source_id" => Some(serde_json::Value::String(hit.source_id.clone())),
+        "origin_kind" => Some(serde_json::Value::String(hit.origin_kind.clone())),
+        // Preserve SearchHit serialization semantics:
+        // origin_host/workspace_original are omitted entirely when None.
+        "origin_host" => hit
+            .origin_host
+            .as_ref()
+            .map(|value| serde_json::Value::String(value.clone())),
+        "workspace_original" => hit
+            .workspace_original
+            .as_ref()
+            .map(|value| serde_json::Value::String(value.clone())),
+        _ => None,
+    }
+}
+
 fn filter_hit_fields(
     hit: &crate::search::query::SearchHit,
     fields: &Option<Vec<String>>,
 ) -> serde_json::Value {
-    let all_fields = serde_json::to_value(hit).unwrap_or_default();
-
     match fields {
-        None => all_fields,                                      // No filtering
-        Some(field_list) if field_list.is_empty() => all_fields, // "all" or "*" preset
+        None => serde_json::to_value(hit).unwrap_or_default(), // No filtering
+        Some(field_list) if field_list.is_empty() => serde_json::to_value(hit).unwrap_or_default(), // "all" or "*" preset
         Some(field_list) => {
             let mut filtered = serde_json::Map::new();
             let known_fields = [
@@ -6400,10 +6430,10 @@ fn filter_hit_fields(
             ];
 
             for field in field_list {
-                if let Some(value) = all_fields.get(field) {
-                    filtered.insert(field.clone(), value.clone());
+                if let Some(value) = projected_hit_field_value(hit, field) {
+                    filtered.insert(field.clone(), value);
                 } else if !known_fields.contains(&field.as_str()) {
-                    // Warn about unknown fields (only once per unknown field)
+                    // Warn about unknown fields.
                     warn!(unknown_field = %field, "Unknown field in --fields, ignoring");
                 }
             }
@@ -6462,12 +6492,17 @@ fn apply_content_truncation(hit: serde_json::Value, budgets: FieldBudgets) -> se
 fn clamp_hits_to_budget(
     hits: Vec<serde_json::Value>,
     max_tokens: Option<usize>,
+    estimate_tokens: bool,
 ) -> (Vec<serde_json::Value>, Option<usize>, bool) {
     let input_len = hits.len();
     let Some(tokens) = max_tokens else {
-        let est = serde_json::to_string(&hits)
-            .map(|s| s.chars().count() / 4)
-            .ok();
+        let est = if estimate_tokens {
+            serde_json::to_string(&hits)
+                .map(|s| s.chars().count() / 4)
+                .ok()
+        } else {
+            None
+        };
         return (hits, est, false);
     };
 
@@ -6642,8 +6677,14 @@ fn output_robot_results(
     };
 
     // Clamp hits to token budget if provided (approx 4 chars per token)
+    let jsonl_meta_emitted = matches!(format, RobotFormat::Jsonl)
+        && (include_meta
+            || !aggregations.is_empty()
+            || !result.suggestions.is_empty()
+            || explanation.is_some());
+    let estimate_tokens = max_tokens.is_some() || include_meta || jsonl_meta_emitted;
     let (filtered_hits, tokens_estimated, hits_clamped) =
-        clamp_hits_to_budget(filtered_hits, max_tokens);
+        clamp_hits_to_budget(filtered_hits, max_tokens, estimate_tokens);
 
     // Serialize aggregations if present
     let agg_json = if aggregations.is_empty() {

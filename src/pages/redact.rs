@@ -489,8 +489,10 @@ mod tests {
 
     #[test]
     fn test_email_redaction_disabled() {
-        let mut config = RedactionConfig::default();
-        config.redact_emails = false;
+        let config = RedactionConfig {
+            redact_emails: false,
+            ..Default::default()
+        };
         let engine = RedactionEngine::new(config);
         let result = engine.redact_text("Email bob@example.com");
         assert!(result.output.contains("bob@example.com"));
@@ -498,9 +500,11 @@ mod tests {
 
     #[test]
     fn test_hostname_redaction_in_urls() {
-        let mut config = RedactionConfig::default();
-        config.redact_hostnames = true;
-        config.redact_emails = false;
+        let config = RedactionConfig {
+            redact_hostnames: true,
+            redact_emails: false,
+            ..Default::default()
+        };
         let engine = RedactionEngine::new(config);
         let result = engine.redact_text("Fetch https://internal.example.corp:8443/api now");
         assert!(result.output.contains("https://[HOST_REDACTED]:8443/api"));
@@ -514,10 +518,12 @@ mod tests {
 
     #[test]
     fn test_hostname_redaction_preserves_non_url_paths() {
-        let mut config = RedactionConfig::default();
-        config.redact_hostnames = true;
-        config.redact_home_paths = false;
-        config.redact_usernames = false;
+        let config = RedactionConfig {
+            redact_hostnames: true,
+            redact_home_paths: false,
+            redact_usernames: false,
+            ..Default::default()
+        };
         let engine = RedactionEngine::new(config);
         let input = "/home/alice/project/main.rs";
         let result = engine.redact_text(input);

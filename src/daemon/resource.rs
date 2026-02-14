@@ -126,6 +126,13 @@ impl ResourceMonitor {
     pub fn apply_ionice(&self, class: u32) -> bool {
         #[cfg(target_os = "linux")]
         {
+            if class > 3 {
+                warn!(
+                    class = class,
+                    "Refusing unsupported ionice class (valid classes: 0..=3)"
+                );
+                return false;
+            }
             let class_str = class.to_string();
 
             // Use ionice command to set I/O scheduling class
@@ -285,5 +292,11 @@ mod tests {
         let monitor = ResourceMonitor::new();
         assert!(!monitor.apply_nice(20));
         assert!(!monitor.apply_nice(-21));
+    }
+
+    #[test]
+    fn test_apply_ionice_rejects_invalid_class() {
+        let monitor = ResourceMonitor::new();
+        assert!(!monitor.apply_ionice(4));
     }
 }
