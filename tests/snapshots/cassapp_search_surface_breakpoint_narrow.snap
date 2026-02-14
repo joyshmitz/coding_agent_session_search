@@ -18,7 +18,7 @@
 │                                                                             │
 │                                                                             │
 │                                                                             │
-│1 hits                                                                       │
+│1 sessions │ 1 msgs │ 43 tok │ est <$0.001                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
  hits:1 | view:narrow/compact | query:HYB / PFX | perf:lat:— cache:cold        
                                                                                

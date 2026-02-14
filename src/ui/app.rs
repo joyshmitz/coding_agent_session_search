@@ -26732,10 +26732,9 @@ mod tests {
     fn app_with_cached_conversation() -> CassApp {
         use crate::model::types::{Message, MessageRole};
         let mut app = app_with_hits(3);
-        // Keep the selected hit source path aligned with cached_detail so
-        // DetailOpened follows the cache-hit path in this regression fixture.
-        let selected = app.panes[app.active_pane].selected;
-        app.panes[app.active_pane].hits[selected].source_path = "test-session".to_string();
+        // selected hit[0].source_path is "/path/0" from app_with_hits —
+        // cached_detail below uses the same key so DetailOpened takes the
+        // cache-hit branch.
 
         fn msg(role: MessageRole, content: &str, ts: Option<i64>) -> Message {
             Message {
@@ -26789,8 +26788,8 @@ mod tests {
     #[test]
     fn regression_detail_open_cache_hit_uses_cached_conversation_without_reload() {
         let mut app = app_with_cached_conversation();
-        let selected = app.panes[app.active_pane].selected;
-        app.panes[app.active_pane].hits[selected].source_path = "test-session".to_string();
+        // app_with_cached_conversation already aligns hit[0].source_path ("/path/0")
+        // with cached_detail key ("/path/0"), so no override needed.
 
         let cmd = app.update(CassMsg::DetailOpened);
 
@@ -26808,7 +26807,7 @@ mod tests {
             .cached_detail
             .as_ref()
             .expect("cached detail should remain loaded");
-        assert_eq!(cached_path, "test-session");
+        assert_eq!(cached_path, "/path/0");
         assert_eq!(cached_view.messages.len(), 6);
         assert!(
             cached_view.messages[0].content.contains("fix a bug"),
@@ -26946,8 +26945,8 @@ mod tests {
     #[test]
     fn regression_detail_find_navigation_uses_rendered_match_cache() {
         let mut app = app_with_cached_conversation();
-        let selected = app.panes[app.active_pane].selected;
-        app.panes[app.active_pane].hits[selected].source_path = "test-session".to_string();
+        // app_with_cached_conversation already aligns hit[0] and cached_detail
+        // to "/path/0" so DetailOpened takes the cache-hit branch.
 
         let _ = app.update(CassMsg::DetailOpened);
         let _ = app.update(CassMsg::DetailFindToggled);
