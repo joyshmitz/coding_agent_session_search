@@ -18,7 +18,7 @@
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │
 │                                                                                  ││                                  │
-│1 hits                                                                            ││                                  │
+│0 sessions │ 0 msgs │ 0 tok │ est $0.000                                          ││                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────│╰──────────────────────────────────╯
  hits:1 | view:med/cozy | query:HYB / PFX | perf:lat:— cache:cold | runtime:stable                                      
   | Enter=open Ctrl+M/Ctrl+X=select Tab=focus F1=help                                                                   
