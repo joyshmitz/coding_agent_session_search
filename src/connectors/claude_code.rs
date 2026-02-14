@@ -253,10 +253,10 @@ impl Connector for ClaudeCodeConnector {
                             // File-level check is sufficient for incremental indexing.
 
                             started_at = match (started_at, created) {
-                            (Some(curr), Some(ts)) => Some(curr.min(ts)),
-                            (None, Some(ts)) => Some(ts),
-                            (other, None) => other,
-                        };
+                                (Some(curr), Some(ts)) => Some(curr.min(ts)),
+                                (None, Some(ts)) => Some(ts),
+                                (other, None) => other,
+                            };
                             // Track the latest timestamp seen
                             ended_at = match (ended_at, created) {
                                 (Some(curr), Some(ts)) => Some(curr.max(ts)),

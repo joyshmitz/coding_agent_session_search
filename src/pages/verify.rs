@@ -162,8 +162,7 @@ pub fn verify_bundle(path: &Path, verbose: bool) -> Result<VerifyResult> {
     let integrity = if site_dir.join("integrity.json").exists() {
         check_integrity(&site_dir, verbose)
     } else {
-        warnings.push("integrity.json not present - skipping integrity check".to_string());
-        CheckResult::pass()
+        CheckResult::fail("integrity.json missing — bundle integrity cannot be verified")
     };
 
     // Check 6: No secrets in site/

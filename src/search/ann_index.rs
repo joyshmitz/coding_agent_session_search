@@ -316,35 +316,37 @@ impl HnswIndex {
 
         // Serialize HNSW graph using hnsw_rs's file_dump.
         // It creates multiple files: basename.hnsw.graph and basename.hnsw.data
-        let temp_dir = parent.join(".hnsw_tmp");
-        std::fs::create_dir_all(&temp_dir)?;
+        // Use tempfile::tempdir() to avoid collisions from concurrent saves and
+        // ensure automatic cleanup on error paths (TempDir drops on scope exit).
+        let dump_dir = tempfile::tempdir()
+            .with_context(|| "create temp dir for HNSW graph serialization")?;
         let basename = "hnsw_graph";
-        self.with_hnsw(|hnsw| hnsw.file_dump(&temp_dir, basename))
+        self.with_hnsw(|hnsw| hnsw.file_dump(dump_dir.path(), basename))
             .with_context(|| "serialize HNSW graph")?;
 
         // Read the generated files and append to our file.
-        let graph_file = temp_dir.join(format!("{basename}.hnsw.graph"));
-        let data_file = temp_dir.join(format!("{basename}.hnsw.data"));
+        let graph_file = dump_dir.path().join(format!("{basename}.hnsw.graph"));
+        let data_file = dump_dir.path().join(format!("{basename}.hnsw.data"));
 
         // Read graph file.
         let graph_data = std::fs::read(&graph_file)
             .with_context(|| format!("read HNSW graph {graph_file:?}"))?;
-        writer.write_all(&(graph_data.len() as u64).to_le_bytes())?;
+        let graph_len = u64::try_from(graph_data.len())
+            .map_err(|_| anyhow::anyhow!("HNSW graph data length exceeds u64"))?;
+        writer.write_all(&graph_len.to_le_bytes())?;
         writer.write_all(&graph_data)?;
 
         // Read data file.
         let data_data =
             std::fs::read(&data_file).with_context(|| format!("read HNSW data {data_file:?}"))?;
-        writer.write_all(&(data_data.len() as u64).to_le_bytes())?;
+        let data_len = u64::try_from(data_data.len())
+            .map_err(|_| anyhow::anyhow!("HNSW data length exceeds u64"))?;
+        writer.write_all(&data_len.to_le_bytes())?;
         writer.write_all(&data_data)?;
 
         writer.flush()?;
         drop(writer);
-
-        // Clean up temp files.
-        let _ = std::fs::remove_file(&graph_file);
-        let _ = std::fs::remove_file(&data_file);
-        let _ = std::fs::remove_dir(&temp_dir);
+        // dump_dir is automatically cleaned up when dropped.
 
         // Atomic rename.
         std::fs::rename(&temp_path, path)?;
@@ -420,7 +422,7 @@ impl HnswIndex {
         // Load HNSW from the temporary dump files using hnsw_rs loader.
         let mut reloader = HnswIo::new(temp_dir.path(), basename);
         let options = ReloadOptions::default().set_mmap(false);
-        debug_assert!(
+        assert!(
             !options.use_mmap().0,
             "HNSW mmap MUST be disabled — enabling it would cause use-after-free \
              because temp_dir is dropped at function exit"
