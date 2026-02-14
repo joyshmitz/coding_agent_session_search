@@ -72,6 +72,7 @@ wide = "*"  # Portable SIMD for P0 Opt 2: SIMD dot product
 arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
 bloomfilter = "*"  # Probabilistic membership testing for P2 Opt 3.3: Workspace Cache
 hnsw_rs = "*"  # Opt 9: Approximate Nearest Neighbor with HNSW
+ouroboros = "*"  # Safe self-referential wrapper for HNSW loader lifetime
 
 # Unix system calls for daemon resource management
 libc = "*"

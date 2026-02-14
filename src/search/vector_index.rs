@@ -1381,10 +1381,13 @@ fn bytes_as_f16(bytes: &[u8]) -> Result<&[f16]> {
 }
 
 fn f32_as_bytes(values: &[f32]) -> &[u8] {
+    // SAFETY: f32 has a well-defined 4-byte repr; u8 has alignment 1 so any
+    // f32 pointer is valid for a u8 read. Lifetime is tied to `values`.
     unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, values.len() * 4) }
 }
 
 fn f16_as_bytes(values: &[f16]) -> &[u8] {
+    // SAFETY: f16 has a well-defined 2-byte repr; same alignment reasoning as f32_as_bytes.
     unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, values.len() * 2) }
 }
 

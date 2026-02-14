@@ -38,6 +38,7 @@ use hnsw_rs::api::AnnT;
 use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::hnswio::{HnswIo, ReloadOptions};
 use hnsw_rs::prelude::{DistDot, Neighbour};
+use ouroboros::self_referencing;
 
 use crate::search::vector_index::{VECTOR_INDEX_DIR, VectorIndex};
 
@@ -98,10 +99,23 @@ pub struct AnnSearchStats {
 ///
 /// The index stores references to row indices in the corresponding VectorIndex,
 /// allowing fast approximate lookup followed by metadata retrieval.
+#[self_referencing]
+struct ReloadedHnsw {
+    reloader: HnswIo,
+    #[borrows(mut reloader)]
+    #[not_covariant]
+    hnsw: Hnsw<'this, f32, DistDot>,
+}
+
+enum HnswStorage {
+    Built(Hnsw<'static, f32, DistDot>),
+    Reloaded(ReloadedHnsw),
+}
+
 pub struct HnswIndex {
     /// The underlying HNSW graph structure.
     /// Uses DistDot for dot product similarity (converted to distance).
-    hnsw: Hnsw<'static, f32, DistDot>,
+    hnsw: HnswStorage,
     /// Number of vectors in the index.
     count: usize,
     /// Embedder ID this index was built for.
@@ -111,6 +125,13 @@ pub struct HnswIndex {
 }
 
 impl HnswIndex {
+    fn with_hnsw<R>(&self, f: impl for<'a> Fn(&Hnsw<'a, f32, DistDot>) -> R) -> R {
+        match &self.hnsw {
+            HnswStorage::Built(hnsw) => f(hnsw),
+            HnswStorage::Reloaded(reloaded) => reloaded.with_hnsw(f),
+        }
+    }
+
     /// Build a new HNSW index from an existing VectorIndex.
     ///
     /// This reads all vectors from the CVVI file and builds the HNSW graph.
@@ -153,7 +174,7 @@ impl HnswIndex {
         tracing::info!(count, "HNSW index built successfully");
 
         Ok(Self {
-            hnsw,
+            hnsw: HnswStorage::Built(hnsw),
             count,
             embedder_id,
             dimension,
@@ -205,7 +226,7 @@ impl HnswIndex {
         let start = std::time::Instant::now();
 
         // HNSW search returns neighbors sorted by distance (ascending).
-        let neighbors: Vec<Neighbour> = self.hnsw.search(query, k, ef);
+        let neighbors: Vec<Neighbour> = self.with_hnsw(|hnsw| hnsw.search(query, k, ef));
 
         let search_time_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
@@ -297,8 +318,7 @@ impl HnswIndex {
         let temp_dir = parent.join(".hnsw_tmp");
         std::fs::create_dir_all(&temp_dir)?;
         let basename = "hnsw_graph";
-        self.hnsw
-            .file_dump(&temp_dir, basename)
+        self.with_hnsw(|hnsw| hnsw.file_dump(&temp_dir, basename))
             .with_context(|| "serialize HNSW graph")?;
 
         // Read the generated files and append to our file.
@@ -394,16 +414,21 @@ impl HnswIndex {
 
         // Load HNSW from the temporary dump files using hnsw_rs loader.
         let mut reloader = HnswIo::new(temp_dir.path(), basename);
-        reloader.set_options(ReloadOptions::default().set_mmap(false));
-        let hnsw_loaded = reloader.load_hnsw::<f32, DistDot>()?;
-        // Safety: ReloadOptions disables mmap, so point data is owned by the HNSW structure.
-        // The lifetime is tied to HnswIo by API design, but no data is borrowed from it.
-        let hnsw: Hnsw<'static, f32, DistDot> = unsafe {
-            std::mem::transmute::<Hnsw<'_, f32, DistDot>, Hnsw<'static, f32, DistDot>>(hnsw_loaded)
-        };
+        let options = ReloadOptions::default().set_mmap(false);
+        debug_assert!(
+            !options.use_mmap().0,
+            "HNSW mmap MUST be disabled — enabling it would cause use-after-free \
+             because temp_dir is dropped at function exit"
+        );
+        reloader.set_options(options);
+        let hnsw = ReloadedHnswTryBuilder {
+            reloader,
+            hnsw_builder: |reloader| reloader.load_hnsw::<f32, DistDot>(),
+        }
+        .try_build()?;
 
         Ok(Self {
-            hnsw,
+            hnsw: HnswStorage::Reloaded(hnsw),
             count,
             embedder_id,
             dimension,
