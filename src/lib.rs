@@ -6464,6 +6464,16 @@ struct FieldBudgets {
     fallback: Option<usize>,
 }
 
+impl FieldBudgets {
+    #[inline]
+    fn has_any_limit(self) -> bool {
+        self.snippet.is_some()
+            || self.content.is_some()
+            || self.title.is_some()
+            || self.fallback.is_some()
+    }
+}
+
 fn apply_content_truncation(hit: serde_json::Value, budgets: FieldBudgets) -> serde_json::Value {
     let serde_json::Value::Object(mut obj) = hit else {
         return hit;
@@ -6651,13 +6661,18 @@ fn output_robot_results(
     // Expand presets (minimal, summary, provenance, all, *)
     let resolved_fields = expand_field_presets(fields);
 
-    // Filter hits to requested fields, then apply content truncation
-    let filtered_hits: Vec<serde_json::Value> = if resolved_fields.as_ref().is_some_and(|fields| {
+    // Filter hits to requested fields, and only apply truncation when limits are configured.
+    let minimal_projection = resolved_fields.as_ref().is_some_and(|fields| {
         fields.len() == 3
             && fields[0] == "source_path"
             && fields[1] == "line_number"
             && fields[2] == "agent"
-    }) {
+    });
+    let needs_truncation = truncation_budgets.has_any_limit();
+    let passthrough_all_fields = resolved_fields
+        .as_ref()
+        .is_none_or(|fields| fields.is_empty());
+    let filtered_hits: Vec<serde_json::Value> = if minimal_projection {
         result
             .hits
             .iter()
@@ -6669,12 +6684,23 @@ fn output_robot_results(
                 })
             })
             .collect()
-    } else {
+    } else if passthrough_all_fields && !needs_truncation {
+        match serde_json::to_value(&result.hits).unwrap_or_default() {
+            serde_json::Value::Array(values) => values,
+            _ => Vec::new(),
+        }
+    } else if needs_truncation {
         result
             .hits
             .iter()
             .map(|hit| filter_hit_fields(hit, &resolved_fields))
             .map(|hit| apply_content_truncation(hit, truncation_budgets))
+            .collect()
+    } else {
+        result
+            .hits
+            .iter()
+            .map(|hit| filter_hit_fields(hit, &resolved_fields))
             .collect()
     };
 
