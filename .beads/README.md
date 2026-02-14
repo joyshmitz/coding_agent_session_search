@@ -76,6 +76,32 @@ bd create "Try out Beads"
 - **Quick Start Guide**: Run `bd quickstart`
 - **Examples**: [github.com/steveyegge/beads/examples](https://github.com/steveyegge/beads/tree/main/examples)
 
+## Repo-Specific Agent Defaults
+
+This repository has legacy historical issue IDs mixed with current
+`coding_agent_session_search-*` IDs. To keep agent workflows stable:
+
+1. Start triage with `bv --robot-triage` or `bv --robot-next`.
+2. Use `br ready --json` to confirm actionable work.
+3. Prefer explicit stale-safe flags on `br` commands in multi-agent sessions.
+
+Workspace config (`.beads/config.yaml`) sets:
+
+- `issue_prefix: coding_agent_session_search`
+- `allow_legacy_ids: true`
+- `no-auto-import: true`
+
+Runtime note: even with `no-auto-import: true`, some `br` invocations can still
+hit prefix-mismatch checks in this mixed-ID workspace. Use explicit flags for
+reliable operation:
+
+- `br ready --json --no-auto-import --allow-stale`
+- `br show <id> --json --no-auto-import --allow-stale`
+- `br list --status=open --json --no-auto-import --allow-stale`
+
+This preserves access to legacy records while avoiding auto-import validation
+paths that can fail in shared sessions.
+
 ---
 
 *Beads: Issue tracking that moves at the speed of thought* ⚡
