@@ -54,6 +54,8 @@ impl CodexConnector {
                 }
             }
         }
+        // Keep connector traversal deterministic across filesystems/runs.
+        out.sort();
         out
     }
 
@@ -570,6 +572,29 @@ mod tests {
         let files = CodexConnector::rollout_files(dir.path());
         assert_eq!(files.len(), 1);
         assert!(files[0].to_str().unwrap().contains("rollout-nested.jsonl"));
+    }
+
+    #[test]
+    fn rollout_files_returns_sorted_order() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("rollout-z.jsonl"), "{}").unwrap();
+        fs::write(sessions.join("rollout-a.jsonl"), "{}").unwrap();
+
+        let files = CodexConnector::rollout_files(dir.path());
+        assert_eq!(files.len(), 2);
+
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["rollout-a.jsonl", "rollout-z.jsonl"]);
     }
 
     #[test]

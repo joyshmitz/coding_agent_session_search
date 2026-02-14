@@ -31,7 +31,7 @@
 //! - 16-byte authentication tag at the end
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
@@ -185,7 +185,26 @@ impl ChatGptConnector {
             }
         }
 
+        // Keep connector traversal deterministic across filesystems/runs.
+        dirs.sort_by(|a, b| a.0.cmp(&b.0));
         dirs
+    }
+
+    fn conversation_files(dir_path: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for entry in WalkDir::new(dir_path).max_depth(1).into_iter().flatten() {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let ext = path.extension().and_then(|s| s.to_str());
+            if ext == Some("json") || ext == Some("data") {
+                files.push(path.to_path_buf());
+            }
+        }
+        // Keep connector traversal deterministic across filesystems/runs.
+        files.sort();
+        files
     }
 
     /// Decrypt an encrypted conversation file
@@ -544,29 +563,13 @@ impl Connector for ChatGptConnector {
                 }
 
                 // Walk through conversation files
-                for entry in WalkDir::new(&dir_path).max_depth(1).into_iter().flatten() {
-                    if !entry.file_type().is_file() {
-                        continue;
-                    }
-
-                    let path = entry.path();
-                    let ext = path.extension().and_then(|s| s.to_str());
-
-                    // Look for JSON or data files
-                    if ext != Some("json") && ext != Some("data") {
-                        continue;
-                    }
-
+                for path in Self::conversation_files(&dir_path) {
                     // Skip files not modified since last scan
-                    if !crate::connectors::file_modified_since(path, ctx.since_ts) {
+                    if !crate::connectors::file_modified_since(&path, ctx.since_ts) {
                         continue;
                     }
 
-                    match self.parse_conversation_file(
-                        &path.to_path_buf(),
-                        ctx.since_ts,
-                        is_encrypted,
-                    ) {
+                    match self.parse_conversation_file(&path, ctx.since_ts, is_encrypted) {
                         Ok(Some(conv)) => {
                             tracing::debug!(
                                 path = %path.display(),
@@ -700,6 +703,49 @@ mod tests {
         let unencrypted_count = dirs.iter().filter(|(_, enc)| !*enc).count();
         assert_eq!(encrypted_count, 1);
         assert_eq!(unencrypted_count, 1);
+    }
+
+    #[test]
+    fn find_conversation_dirs_returns_sorted_order() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("conversations-zed")).unwrap();
+        fs::create_dir_all(dir.path().join("conversations-alpha")).unwrap();
+
+        let dirs = ChatGptConnector::find_conversation_dirs(&dir.path().to_path_buf());
+        assert_eq!(dirs.len(), 2);
+
+        let names: Vec<_> = dirs
+            .iter()
+            .map(|(path, _)| {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["conversations-alpha", "conversations-zed"]);
+    }
+
+    #[test]
+    fn conversation_files_returns_sorted_order() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("z.json"), "{}").unwrap();
+        fs::write(dir.path().join("a.json"), "{}").unwrap();
+        fs::write(dir.path().join("ignore.txt"), "x").unwrap();
+
+        let files = ChatGptConnector::conversation_files(dir.path());
+        assert_eq!(files.len(), 2);
+
+        let names: Vec<_> = files
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["a.json", "z.json"]);
     }
 
     // =========================================================================

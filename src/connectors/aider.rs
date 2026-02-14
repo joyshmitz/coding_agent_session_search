@@ -34,6 +34,8 @@ impl AiderConnector {
                 }
             }
         }
+        // Keep connector traversal deterministic across filesystems/runs.
+        files.sort();
         files
     }
 
@@ -365,6 +367,31 @@ mod tests {
 
         let files = AiderConnector::find_chat_files(&[dir1.path(), dir2.path()]);
         assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn find_chat_files_returns_sorted_order() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join("z")).unwrap();
+        fs::create_dir_all(project.join("a")).unwrap();
+        fs::write(project.join("z").join(".aider.chat.history.md"), "# z").unwrap();
+        fs::write(project.join("a").join(".aider.chat.history.md"), "# a").unwrap();
+
+        let files = AiderConnector::find_chat_files(&[dir.path()]);
+        assert_eq!(files.len(), 2);
+
+        let parents: Vec<_> = files
+            .iter()
+            .map(|p| {
+                p.parent()
+                    .and_then(|x| x.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(parents, vec!["a", "z"]);
     }
 
     // =====================================================
