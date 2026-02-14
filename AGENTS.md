@@ -1,10 +1,10 @@
-# AGENTS.md — Coding Agent Session Search (cass)
+# AGENTS.md — coding_agent_session_search (cass)
 
 > Guidelines for AI coding agents working in this Rust codebase.
 
 ---
 
-## RULE 0 - THE FUNDAMENTAL OVERRIDE PEROGATIVE
+## RULE 0 - THE FUNDAMENTAL OVERRIDE PREROGATIVE
 
 If I tell you to do something, even if it goes against what follows below, YOU MUST LISTEN TO ME. I AM IN CHARGE, NOT YOU.
 
@@ -28,15 +28,35 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## Git Branch: ONLY Use `main`, NEVER `master`
+
+**The default branch is `main`. The `master` branch exists only for legacy URL compatibility.**
+
+- **All work happens on `main`** — commits, PRs, feature branches all merge to `main`
+- **Never reference `master` in code or docs** — if you see `master` anywhere, it's a bug that needs fixing
+- **The `master` branch must stay synchronized with `main`** — after pushing to `main`, also push to `master`:
+  ```bash
+  git push origin main:master
+  ```
+
+**If you see `master` referenced anywhere:**
+1. Update it to `main`
+2. Ensure `master` is synchronized: `git push origin main:master`
+
+---
+
 ## Toolchain: Rust & Cargo
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
-- **Edition:** Rust 2024 (nightly)
+- **Edition:** Rust 2024 (stable — see `rust-toolchain.toml`)
 - **Dependency versions:** Wildcard constraints (`*`) for all crates
-- **Configuration:** Cargo.toml only
+- **Configuration:** Cargo.toml only (single-crate project, no workspace)
+- **Unsafe code:** Forbidden
 
-Follow best practices from `RUST_BEST_PRACTICES_GUIDE.md`.
+### Async Runtime: Tokio
+
+This project uses **tokio** as its async runtime (`rt-multi-thread`, `macros`, `fs`, `process`, `io-util`, `time`, `signal`).
 
 ### Environment Variables
 
@@ -56,25 +76,56 @@ let api_base_url = env::var("API_BASE_URL")
 
 The `.env` file exists and **MUST NEVER be overwritten**.
 
----
+### Key Dependencies
 
-## Database Guidelines (sqlx/rusqlite)
+| Crate | Purpose |
+|-------|---------|
+| `tokio` | Async runtime (multi-thread, fs, process, signals) |
+| `clap` | CLI argument parsing with derive macros |
+| `serde` + `serde_json` | Serialization |
+| `rusqlite` | SQLite database (bundled, modern) |
+| `tantivy` | Full-text BM25 search engine |
+| `fastembed` | ONNX-based text embeddings |
+| `hnsw_rs` | HNSW approximate nearest neighbors |
+| `half` + `wide` + `memmap2` | f16 quantized vectors, portable SIMD, memory-mapped I/O |
+| `ftui` + `ftui-extras` | FrankenTUI terminal interface |
+| `toon` | Terminal rendering library |
+| `reqwest` | HTTP client (rustls-tls, blocking + async) |
+| `rayon` | Data parallelism for CPU-bound work |
+| `crossterm` | Terminal input/output |
+| `colored` + `indicatif` + `console` | Colorful, informative console output |
+| `notify` | Filesystem watching |
+| `walkdir` + `glob` | Directory traversal and pattern matching |
+| `blake3` + `sha2` | Cryptographic hashing |
+| `aes-gcm` + `ring` + `pbkdf2` + `argon2` | Encryption (ChatGPT conversations, HTML export) |
+| `ssh2` | SFTP fallback for multi-machine sync |
+| `dialoguer` | Interactive terminal prompts (setup wizard) |
+| `syntect` | Syntax highlighting |
+| `thiserror` | Ergonomic error type derivation |
+| `tracing` | Structured logging and diagnostics |
+| `unicode-normalization` | NFC text canonicalization |
 
-**Do:**
-- Create connection pools with `sqlx::Pool::connect()` and reuse across the application
-- Use `?` placeholders for parameters (prevents SQL injection)
-- Use query macros (`query!`, `query_as!`) for compile-time verification
-- Keep one database transaction per logical operation
-- Use `fetch_one()`, `fetch_optional()`, or `fetch_all()` appropriately
-- Handle migrations with sqlx-cli: `sqlx migrate run`
-- Use strong typing with `sqlx::types` for custom database types
+### Release Profile
 
-**Don't:**
-- Share a single transaction across concurrent tasks
-- Use string concatenation to build SQL queries
-- Ignore `Option<T>` for nullable columns
-- Mix sync and async database operations
-- Use `unwrap()` on database results in production code
+The release build optimizes for binary size (this is a CLI tool):
+
+```toml
+[profile.release]
+lto = true          # Link-time optimization
+codegen-units = 1   # Single codegen unit for better optimization
+strip = true        # Remove debug symbols
+panic = "abort"     # Abort on panic (smaller binary)
+opt-level = "z"     # Optimize for size
+```
+
+A profiling profile is also available:
+
+```toml
+[profile.profiling]
+inherits = "release"
+debug = true        # Keep debug symbols for flamegraphs
+strip = false
+```
 
 ---
 
@@ -139,6 +190,24 @@ If you see errors, **carefully understand and resolve each issue**. Read suffici
 
 ---
 
+## Database Guidelines (rusqlite)
+
+**Do:**
+- Create connection pools and reuse across the application
+- Use `?` placeholders for parameters (prevents SQL injection)
+- Keep one database transaction per logical operation
+- Handle migrations properly
+- Use strong typing for database columns
+
+**Don't:**
+- Share a single transaction across concurrent tasks
+- Use string concatenation to build SQL queries
+- Ignore `Option<T>` for nullable columns
+- Mix sync and async database operations
+- Use `unwrap()` on database results in production code
+
+---
+
 ## E2E Browser Tests
 
 **IMPORTANT:** E2E browser tests (Playwright) should only be run on GitHub Actions CI, NOT locally.
@@ -157,9 +226,356 @@ If you need to debug a specific test, use `test.only()` and run a single spec fi
 
 ---
 
+## Testing
+
+### Testing Policy
+
+Tests must cover:
+- Happy path
+- Edge cases (empty input, max values, boundary conditions)
+- Error conditions
+
+Integration and E2E tests live in the `tests/` directory. Benchmarks live in `benches/`.
+
+### Unit Tests
+
+```bash
+# Run all tests
+cargo test
+
+# Run with output
+cargo test -- --nocapture
+
+# Run a specific test
+cargo test test_name
+
+# Run tests with all features enabled
+cargo test --all-features
+```
+
+### Test Categories
+
+| Directory / File | Focus Areas |
+|-----------------|-------------|
+| `tests/connector_*.rs` | Per-provider session parsing (Claude, Codex, Cursor, Gemini, Aider, Amp, Cline, OpenCode, Pi Agent, Copilot, OpenClaw, ClawdBot, Vibe) |
+| `tests/search_*.rs` | Search pipeline, caching, filters, wildcard fallback |
+| `tests/semantic_integration.rs` | Semantic search, embeddings, two-tier search |
+| `tests/e2e_*.rs` | End-to-end CLI flows, filters, search, sources, TUI, deploy |
+| `tests/cli_*.rs` | CLI dispatch coverage, robot mode, index, stats |
+| `tests/tui_*.rs` | TUI headless smoke tests, snapshot tests |
+| `tests/html_export*.rs` | HTML export pipeline, encryption |
+| `tests/storage*.rs` | SQLite storage, migration safety |
+| `tests/performance/` | Performance regression tests |
+| `benches/` | Criterion benchmarks (index, runtime, search, crypto, db, export, cache, regex) |
+
+### Test Fixtures
+
+Fixtures are in `tests/fixtures/` and cover multiple agent session formats for cross-connector validation.
+
+---
+
 ## Third-Party Library Usage
 
-If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and mid-2025 best practices.
+If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and current best practices.
+
+---
+
+## cass — Coding Agent Session Search
+
+**This is the project you're working on.** cass indexes conversations from Claude Code, Codex, Cursor, Gemini, Aider, Amp, Cline, OpenCode, Pi Agent, Copilot, OpenClaw, ClawdBot, Vibe, and more into a unified, searchable index with a TUI and robot-mode CLI.
+
+**NEVER run bare `cass`** — it launches an interactive TUI. Always use `--robot` or `--json`.
+
+### What It Does
+
+Provides unified full-text and semantic search across all local coding agent session histories, with a rich TUI, robot-mode JSON API, multi-machine sync, HTML export with optional encryption, and analytics.
+
+### Project Structure
+
+```
+coding_agent_session_search/
+├── Cargo.toml                    # Single-crate project
+├── src/
+│   ├── main.rs                   # Entry point (binary: cass)
+│   ├── lib.rs                    # Library root
+│   ├── connectors/               # Per-agent session parsers
+│   │   ├── mod.rs                # Connector trait + registry
+│   │   ├── claude_code.rs        # Claude Code sessions
+│   │   ├── codex.rs              # Codex sessions
+│   │   ├── cursor.rs             # Cursor sessions
+│   │   ├── gemini.rs             # Gemini sessions
+│   │   ├── aider.rs              # Aider sessions
+│   │   ├── amp.rs                # Amp sessions
+│   │   ├── chatgpt.rs            # ChatGPT sessions (encrypted)
+│   │   ├── cline.rs              # Cline sessions
+│   │   ├── opencode.rs           # OpenCode sessions
+│   │   ├── pi_agent.rs           # Pi Agent sessions
+│   │   ├── copilot.rs            # Copilot sessions
+│   │   ├── openclaw.rs           # OpenClaw sessions
+│   │   ├── clawdbot.rs           # ClawdBot sessions
+│   │   ├── vibe.rs               # Vibe sessions
+│   │   └── factory.rs            # Connector factory
+│   ├── search/                   # Search engine
+│   │   ├── query.rs              # Query parsing and execution
+│   │   ├── tantivy.rs            # BM25 full-text search (Tantivy)
+│   │   ├── vector_index.rs       # Vector similarity search
+│   │   ├── two_tier_search.rs    # Progressive 2-tier hybrid search
+│   │   ├── ann_index.rs          # HNSW approximate nearest neighbors
+│   │   ├── hash_embedder.rs      # FNV-1a hash embedder (fast, zero-dep)
+│   │   ├── fastembed_embedder.rs # ONNX-based quality embedder
+│   │   ├── embedder.rs           # Embedder trait
+│   │   ├── embedder_registry.rs  # Embedder auto-detection
+│   │   ├── reranker.rs           # Cross-encoder reranking
+│   │   ├── reranker_registry.rs  # Reranker management
+│   │   ├── model_download.rs     # Model download management
+│   │   ├── model_manager.rs      # Model lifecycle management
+│   │   ├── canonicalize.rs       # Query canonicalization
+│   │   └── daemon_client.rs      # Search daemon RPC client
+│   ├── indexer/                  # Session indexing pipeline
+│   ├── storage/                  # SQLite persistence
+│   ├── ui/                       # TUI components
+│   ├── pages/                    # Web pages generation
+│   ├── pages_assets/             # Static assets for pages
+│   ├── html_export/              # Self-contained HTML export
+│   ├── analytics/                # Usage analytics
+│   ├── daemon/                   # Background search daemon
+│   ├── sources/                  # Multi-machine source management
+│   ├── model/                    # Data models
+│   ├── bookmarks.rs              # Session bookmarking
+│   ├── bakeoff.rs                # Embedder comparison tool
+│   ├── encryption.rs             # AES-GCM encryption
+│   ├── export.rs                 # Export pipeline
+│   ├── update_check.rs           # Auto-update checking
+│   └── tui_asciicast.rs          # Terminal recording
+├── tests/                        # Integration + E2E tests
+├── benches/                      # Criterion benchmarks
+├── scripts/                      # Helper scripts
+├── web/                          # Web assets
+├── docs/                         # Documentation
+└── fuzz/                         # Fuzz testing
+```
+
+### Quick Start
+
+```bash
+# Check if index is healthy (exit 0=ok, 1=run index first)
+cass health
+
+# Search across all agent histories
+cass search "authentication error" --robot --limit 5
+
+# View a specific result (from search output)
+cass view /path/to/session.jsonl -n 42 --json
+
+# Expand context around a line
+cass expand /path/to/session.jsonl -n 42 -C 3 --json
+
+# Export session as self-contained HTML
+cass export-html /path/to/session.jsonl --json
+cass export-html session.jsonl --encrypt --password "secret" --json
+
+# Learn the full API
+cass capabilities --json      # Feature discovery
+cass robot-docs guide         # LLM-optimized docs
+```
+
+### Supported Providers
+
+| Provider | Connector | Session Format |
+|----------|-----------|----------------|
+| Claude Code | `claude_code.rs` | JSONL |
+| Codex | `codex.rs` | JSONL |
+| Cursor | `cursor.rs` | JSONL / SQLite |
+| Gemini | `gemini.rs` | JSONL |
+| Aider | `aider.rs` | Markdown / JSONL |
+| Amp | `amp.rs` | JSONL |
+| ChatGPT | `chatgpt.rs` | Encrypted JSON |
+| Cline | `cline.rs` | JSONL |
+| OpenCode | `opencode.rs` | JSONL |
+| Pi Agent | `pi_agent.rs` | JSONL |
+| Copilot | `copilot.rs` | JSONL |
+| OpenClaw | `openclaw.rs` | JSONL |
+| ClawdBot | `clawdbot.rs` | JSONL |
+| Vibe | `vibe.rs` | JSONL |
+
+### HTML Export (Robot Mode)
+
+Export conversations as self-contained HTML files with optional encryption:
+
+```bash
+# Basic export (outputs to Downloads folder)
+cass export-html /path/to/session.jsonl --json
+
+# With encryption
+cass export-html session.jsonl --encrypt --password "secret" --json
+
+# Password from stdin (secure)
+echo "secret" | cass export-html session.jsonl --encrypt --password-stdin --json
+
+# Custom output
+cass export-html session.jsonl --output-dir /tmp --filename "export" --json
+```
+
+**Robot mode JSON output:**
+```json
+{
+  "success": true,
+  "output_path": "/home/user/Downloads/claude_2026-01-25_session.html",
+  "file_size": 145623,
+  "encrypted": false,
+  "message_count": 42
+}
+```
+
+**Error codes:**
+| Code | Kind | Description |
+|------|------|-------------|
+| 3 | session_not_found | Session file doesn't exist |
+| 4 | output_not_writable | Cannot write to output directory |
+| 5 | encryption_error | Encryption failed |
+| 6 | password_required | --encrypt used without password |
+
+### Key Flags
+
+| Flag | Purpose |
+|------|---------|
+| `--robot` / `--json` | Machine-readable JSON output (required!) |
+| `--fields minimal` | Reduce payload: `source_path`, `line_number`, `agent` only |
+| `--limit N` | Cap result count |
+| `--agent NAME` | Filter to specific agent (claude, codex, cursor, etc.) |
+| `--days N` | Limit to recent N days |
+
+**stdout = data only, stderr = diagnostics. Exit 0 = success.**
+
+### Robot Mode Etiquette
+
+- Prefer `cass --robot-help` and `cass robot-docs <topic>` for machine-first docs
+- The CLI is forgiving: globals placed before/after subcommand are auto-normalized
+- If parsing fails, follow the actionable errors with examples
+- Use `--color=never` in non-TTY automation for ANSI-free output
+
+### Auto-Correction Features
+
+| Mistake | Correction | Note |
+|---------|------------|------|
+| `-robot` | `--robot` | Long flags need double-dash |
+| `--Robot`, `--LIMIT` | `--robot`, `--limit` | Flags are lowercase |
+| `find "query"` | `search "query"` | `find` is an alias |
+| `--robot-docs` | `robot-docs` | It's a subcommand |
+
+**Full alias list:**
+- **Search:** `find`, `query`, `q`, `lookup`, `grep` -> `search`
+- **Stats:** `ls`, `list`, `info`, `summary` -> `stats`
+- **Status:** `st`, `state` -> `status`
+- **Index:** `reindex`, `idx`, `rebuild` -> `index`
+- **View:** `show`, `get`, `read` -> `view`
+- **Robot-docs:** `docs`, `help-robot`, `robotdocs` -> `robot-docs`
+
+### Pre-Flight Health Check
+
+```bash
+cass health --json
+```
+
+Returns in <50ms:
+- **Exit 0:** Healthy — proceed with queries
+- **Exit 1:** Unhealthy — run `cass index --full` first
+
+### Exit Codes
+
+| Code | Meaning | Retryable |
+|------|---------|-----------|
+| 0 | Success | N/A |
+| 1 | Health check failed | Yes — run `cass index --full` |
+| 2 | Usage/parsing error | No — fix syntax |
+| 3 | Index/DB missing | Yes — run `cass index --full` |
+| 4 | Network error | Yes — check connectivity |
+| 5 | Data corruption | Yes — run `cass index --full --force-rebuild` |
+| 6 | Incompatible version | No — update cass |
+| 7 | Lock/busy | Yes — retry later |
+| 8 | Partial result | Yes — increase timeout |
+| 9 | Unknown error | Maybe |
+
+### Multi-Machine Search Setup
+
+cass can search across agent sessions from multiple machines. Use the interactive setup wizard for the easiest configuration:
+
+```bash
+cass sources setup
+```
+
+#### What the wizard does:
+1. **Discovers** SSH hosts from your ~/.ssh/config
+2. **Probes** each host to check for:
+   - Existing cass installation (and version)
+   - Agent session data (Claude, Codex, Cursor, Gemini)
+   - System resources (disk, memory)
+3. **Lets you select** which hosts to configure
+4. **Installs cass** on remotes if needed
+5. **Indexes** existing sessions on remotes
+6. **Configures** sources.toml with correct paths
+7. **Syncs** data to your local machine
+
+#### For scripting (non-interactive):
+```bash
+cass sources setup --non-interactive --hosts css,csd,yto
+cass sources setup --json --hosts css  # JSON output for parsing
+```
+
+#### Key flags:
+| Flag | Purpose |
+|------|---------|
+| `--hosts <names>` | Configure only these hosts (comma-separated) |
+| `--dry-run` | Preview without making changes |
+| `--resume` | Resume interrupted setup |
+| `--skip-install` | Don't install cass on remotes |
+| `--skip-index` | Don't run remote indexing |
+| `--skip-sync` | Don't sync after setup |
+| `--json` | Output progress as JSON |
+
+#### After setup:
+```bash
+# Search across all sources
+cass search "database migration"
+
+# Sync latest data
+cass sources sync --all
+
+# List configured sources
+cass sources list
+```
+
+#### Manual configuration:
+If you prefer manual setup, edit `~/.config/cass/sources.toml`:
+```toml
+[[sources]]
+name = "my-server"
+type = "ssh"
+host = "user@server.example.com"
+paths = ["~/.claude/projects"]
+
+[[sources.path_mappings]]
+from = "/home/user/projects"
+to = "/Users/me/projects"
+```
+
+#### Troubleshooting:
+- **Host unreachable**: Verify SSH config with `ssh <host>` manually
+- **Permission denied**: Load SSH key with `ssh-add ~/.ssh/id_rsa`
+- **cargo not found**: Use `--skip-install` and install manually
+- **Interrupted setup**: Resume with `cass sources setup --resume`
+
+For machine-readable docs: `cass robot-docs sources`
+
+### Feature Flags
+
+```toml
+[features]
+default = ["qr", "encryption"]
+qr = ["dep:qrcode", "dep:image"]         # QR code generation for recovery secret
+encryption = []                            # HTML export encryption (deps included for ChatGPT)
+backtrace = []                             # Enhanced backtraces
+```
 
 ---
 
@@ -214,9 +630,9 @@ A mail-like layer that lets coding agents coordinate asynchronously via MCP tool
 
 ## Beads (br) — Dependency-Aware Issue Tracking
 
-Beads provides a lightweight, dependency-aware issue database and CLI (`br`) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging and file reservations.
+Beads provides a lightweight, dependency-aware issue database and CLI (`br` - beads_rust) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging and file reservations.
 
-**Note:** `br` (beads_rust) is non-invasive and never executes git commands. You must run git commands manually after `br sync --flush-only`.
+**Important:** `br` is non-invasive—it NEVER runs git commands automatically. You must manually commit changes after `br sync --flush-only`.
 
 ### Conventions
 
@@ -245,7 +661,8 @@ Beads provides a lightweight, dependency-aware issue database and CLI (`br`) for
 
 5. **Complete and release:**
    ```bash
-   br close br-123 --reason "Completed"
+   br close 123 --reason "Completed"
+   br sync --flush-only  # Export to JSONL (no git operations)
    ```
    ```
    release_file_reservations(project_key, agent_name, paths=["src/**"])
@@ -352,207 +769,6 @@ bv --robot-insights | jq '.Cycles'                         # Circular deps (must
 
 ---
 
-## cass — Coding Agent Session Search
-
-**This is the project you're working on.** cass indexes conversations from Claude Code, Codex, Cursor, Gemini, Aider, ChatGPT, and more into a unified, searchable index.
-
-**NEVER run bare `cass`** — it launches an interactive TUI. Always use `--robot` or `--json`.
-
-### Quick Start
-
-```bash
-# Check if index is healthy (exit 0=ok, 1=run index first)
-cass health
-
-# Search across all agent histories
-cass search "authentication error" --robot --limit 5
-
-# View a specific result (from search output)
-cass view /path/to/session.jsonl -n 42 --json
-
-# Expand context around a line
-cass expand /path/to/session.jsonl -n 42 -C 3 --json
-
-# Export session as self-contained HTML
-cass export-html /path/to/session.jsonl --json
-cass export-html session.jsonl --encrypt --password "secret" --json
-
-# Learn the full API
-cass capabilities --json      # Feature discovery
-cass robot-docs guide         # LLM-optimized docs
-```
-
-### HTML Export (Robot Mode)
-
-Export conversations as self-contained HTML files with optional encryption:
-
-```bash
-# Basic export (outputs to Downloads folder)
-cass export-html /path/to/session.jsonl --json
-
-# With encryption
-cass export-html session.jsonl --encrypt --password "secret" --json
-
-# Password from stdin (secure)
-echo "secret" | cass export-html session.jsonl --encrypt --password-stdin --json
-
-# Custom output
-cass export-html session.jsonl --output-dir /tmp --filename "export" --json
-```
-
-**Robot mode JSON output:**
-```json
-{
-  "success": true,
-  "output_path": "/home/user/Downloads/claude_2026-01-25_session.html",
-  "file_size": 145623,
-  "encrypted": false,
-  "message_count": 42
-}
-```
-
-**Error codes:**
-| Code | Kind | Description |
-|------|------|-------------|
-| 3 | session_not_found | Session file doesn't exist |
-| 4 | output_not_writable | Cannot write to output directory |
-| 5 | encryption_error | Encryption failed |
-| 6 | password_required | --encrypt used without password |
-
-### Key Flags
-
-| Flag | Purpose |
-|------|---------|
-| `--robot` / `--json` | Machine-readable JSON output (required!) |
-| `--fields minimal` | Reduce payload: `source_path`, `line_number`, `agent` only |
-| `--limit N` | Cap result count |
-| `--agent NAME` | Filter to specific agent (claude, codex, cursor, etc.) |
-| `--days N` | Limit to recent N days |
-
-**stdout = data only, stderr = diagnostics. Exit 0 = success.**
-
-### Robot Mode Etiquette
-
-- Prefer `cass --robot-help` and `cass robot-docs <topic>` for machine-first docs
-- The CLI is forgiving: globals placed before/after subcommand are auto-normalized
-- If parsing fails, follow the actionable errors with examples
-- Use `--color=never` in non-TTY automation for ANSI-free output
-
-### Auto-Correction Features
-
-| Mistake | Correction | Note |
-|---------|------------|------|
-| `-robot` | `--robot` | Long flags need double-dash |
-| `--Robot`, `--LIMIT` | `--robot`, `--limit` | Flags are lowercase |
-| `find "query"` | `search "query"` | `find` is an alias |
-| `--robot-docs` | `robot-docs` | It's a subcommand |
-
-**Full alias list:**
-- **Search:** `find`, `query`, `q`, `lookup`, `grep` → `search`
-- **Stats:** `ls`, `list`, `info`, `summary` → `stats`
-- **Status:** `st`, `state` → `status`
-- **Index:** `reindex`, `idx`, `rebuild` → `index`
-- **View:** `show`, `get`, `read` → `view`
-- **Robot-docs:** `docs`, `help-robot`, `robotdocs` → `robot-docs`
-
-### Pre-Flight Health Check
-
-```bash
-cass health --json
-```
-
-Returns in <50ms:
-- **Exit 0:** Healthy—proceed with queries
-- **Exit 1:** Unhealthy—run `cass index --full` first
-
-### Exit Codes
-
-| Code | Meaning | Retryable |
-|------|---------|-----------|
-| 0 | Success | N/A |
-| 1 | Health check failed | Yes—run `cass index --full` |
-| 2 | Usage/parsing error | No—fix syntax |
-| 3 | Index/DB missing | Yes—run `cass index --full` |
-| 4 | Network error | Yes—check connectivity |
-| 5 | Data corruption | Yes—run `cass index --full --force-rebuild` |
-| 6 | Incompatible version | No—update cass |
-| 7 | Lock/busy | Yes—retry later |
-| 8 | Partial result | Yes—increase timeout |
-| 9 | Unknown error | Maybe |
-
-### Multi-Machine Search Setup
-
-cass can search across agent sessions from multiple machines. Use the interactive setup wizard for the easiest configuration:
-
-```bash
-cass sources setup
-```
-
-#### What the wizard does:
-1. **Discovers** SSH hosts from your ~/.ssh/config
-2. **Probes** each host to check for:
-   - Existing cass installation (and version)
-   - Agent session data (Claude, Codex, Cursor, Gemini)
-   - System resources (disk, memory)
-3. **Lets you select** which hosts to configure
-4. **Installs cass** on remotes if needed
-5. **Indexes** existing sessions on remotes
-6. **Configures** sources.toml with correct paths
-7. **Syncs** data to your local machine
-
-#### For scripting (non-interactive):
-```bash
-cass sources setup --non-interactive --hosts css,csd,yto
-cass sources setup --json --hosts css  # JSON output for parsing
-```
-
-#### Key flags:
-| Flag | Purpose |
-|------|---------|
-| `--hosts <names>` | Configure only these hosts (comma-separated) |
-| `--dry-run` | Preview without making changes |
-| `--resume` | Resume interrupted setup |
-| `--skip-install` | Don't install cass on remotes |
-| `--skip-index` | Don't run remote indexing |
-| `--skip-sync` | Don't sync after setup |
-| `--json` | Output progress as JSON |
-
-#### After setup:
-```bash
-# Search across all sources
-cass search "database migration"
-
-# Sync latest data
-cass sources sync --all
-
-# List configured sources
-cass sources list
-```
-
-#### Manual configuration:
-If you prefer manual setup, edit `~/.config/cass/sources.toml`:
-```toml
-[[sources]]
-name = "my-server"
-type = "ssh"
-host = "user@server.example.com"
-paths = ["~/.claude/projects"]
-
-[[sources.path_mappings]]
-from = "/home/user/projects"
-to = "/Users/me/projects"
-```
-
-#### Troubleshooting:
-- **Host unreachable**: Verify SSH config with `ssh <host>` manually
-- **Permission denied**: Load SSH key with `ssh-add ~/.ssh/id_rsa`
-- **cargo not found**: Use `--skip-install` and install manually
-- **Interrupted setup**: Resume with `cass sources setup --resume`
-
-For machine-readable docs: `cass robot-docs sources`
-
----
-
 ## UBS — Ultimate Bug Scanner
 
 **Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
@@ -570,21 +786,21 @@ ubs .                                   # Whole project (ignores target/, Cargo.
 ### Output Format
 
 ```
-⚠️  Category (N errors)
-    file.rs:42:5 – Issue description
-    💡 Suggested fix
+Warning  Category (N errors)
+    file.rs:42:5 - Issue description
+    Suggested fix
 Exit code: 1
 ```
 
-Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fail
+Parse: `file:line:col` -> location | Suggested fix -> how to fix | Exit 0/1 -> pass/fail
 
 ### Fix Workflow
 
-1. Read finding → category + fix suggestion
-2. Navigate `file:line:col` → view context
+1. Read finding -> category + fix suggestion
+2. Navigate `file:line:col` -> view context
 3. Verify real issue (not false positive)
 4. Fix root cause (not symptom)
-5. Re-run `ubs <file>` → exit 0
+5. Re-run `ubs <file>` -> exit 0
 6. Commit
 
 ### Bug Severity
@@ -592,6 +808,33 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 - **Critical (always fix):** Memory safety, use-after-free, data races, SQL injection
 - **Important (production):** Unwrap panics, resource leaks, overflow checks
 - **Contextual (judgment):** TODO/FIXME, println! debugging
+
+---
+
+## RCH — Remote Compilation Helper
+
+RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation commands to a fleet of 8 remote Contabo VPS workers instead of building locally. This prevents compilation storms from overwhelming csd when many agents run simultaneously.
+
+**RCH is installed at `~/.local/bin/rch` and is hooked into Claude Code's PreToolUse automatically.** Most of the time you don't need to do anything if you are Claude Code — builds are intercepted and offloaded transparently.
+
+To manually offload a build:
+```bash
+rch exec -- cargo build --release
+rch exec -- cargo test
+rch exec -- cargo clippy
+```
+
+Quick commands:
+```bash
+rch doctor                    # Health check
+rch workers probe --all       # Test connectivity to all 8 workers
+rch status                    # Overview of current state
+rch queue                     # See active/waiting builds
+```
+
+If rch or its workers are unavailable, it fails open — builds run locally as normal.
+
+**Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook, but you can (and should) still manually offload compute-intensive compilation commands using `rch exec -- <command>`. This avoids local resource contention when multiple agents are building simultaneously.
 
 ---
 
@@ -610,8 +853,8 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 
 ### Rule of Thumb
 
-- Need correctness or **applying changes** → `ast-grep`
-- Need raw speed or **hunting text** → `rg`
+- Need correctness or **applying changes** -> `ast-grep`
+- Need raw speed or **hunting text** -> `rg`
 - Often combine: `rg` to shortlist files, then `ast-grep` to match/modify
 
 ### Rust Examples
@@ -654,7 +897,7 @@ rg -l -t rust 'unwrap\(' | xargs ast-grep run -l Rust -p '$X.unwrap()' --json
 
 ```
 mcp__morph-mcp__warp_grep(
-  repoPath: "/path/to/cass",
+  repoPath: "/dp/coding_agent_session_search",
   query: "How is semantic search implemented?"
 )
 ```
@@ -663,9 +906,9 @@ Returns structured results with file paths, line ranges, and extracted code snip
 
 ### Anti-Patterns
 
-- **Don't** use `warp_grep` to find a specific function name → use `ripgrep`
-- **Don't** use `ripgrep` to understand "how does X work" → wastes time with manual reads
-- **Don't** use `ripgrep` for codemods → risks collateral edits
+- **Don't** use `warp_grep` to find a specific function name -> use `ripgrep`
+- **Don't** use `ripgrep` to understand "how does X work" -> wastes time with manual reads
+- **Don't** use `ripgrep` for codemods -> risks collateral edits
 
 <!-- bv-agent-instructions-v1 -->
 
@@ -673,7 +916,9 @@ Returns structured results with file paths, line ranges, and extracted code snip
 
 ## Beads Workflow Integration
 
-This project uses [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+
+**Important:** `br` is non-invasive—it NEVER executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
 
 ### Essential Commands
 
@@ -687,11 +932,9 @@ br list --status=open # All open issues
 br show <id>          # Full issue details with dependencies
 br create --title="..." --type=task --priority=2
 br update <id> --status=in_progress
-br close <id> --reason="Completed"
+br close <id> --reason "Completed"
 br close <id1> <id2>  # Close multiple issues at once
-br sync --flush-only  # Export to JSONL
-git add .beads/       # Stage beads changes
-git commit -m "..."   # Commit beads state
+br sync --flush-only  # Export to JSONL (NO git operations)
 ```
 
 ### Workflow Pattern
@@ -700,7 +943,7 @@ git commit -m "..."   # Commit beads state
 2. **Claim**: Use `br update <id> --status=in_progress`
 3. **Work**: Implement the task
 4. **Complete**: Use `br close <id>`
-5. **Sync**: Always run `br sync --flush-only` then `git add .beads/ && git commit` at session end
+5. **Sync**: Run `br sync --flush-only` then manually commit
 
 ### Key Concepts
 
@@ -718,23 +961,35 @@ git status              # Check what changed
 git add <files>         # Stage code changes
 br sync --flush-only    # Export beads to JSONL
 git add .beads/         # Stage beads changes
-git commit -m "..."     # Commit code and beads
+git commit -m "..."     # Commit everything together
 git push                # Push to remote
 ```
 
 ### Best Practices
 
 - Check `br ready` at session start to find available work
-- Update status as you work (in_progress → closed)
+- Update status as you work (in_progress -> closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
-- Always `br sync --flush-only` then commit `.beads/` before ending session
+- Always `br sync --flush-only && git add .beads/` before ending session
 
 <!-- end-bv-agent-instructions -->
 
+## Landing the Plane (Session Completion)
+
+**When ending a work session**, you MUST complete ALL steps below.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Sync beads** - `br sync --flush-only` to export to JSONL
+5. **Hand off** - Provide context for next session
+
 ---
 
-## Note for Codex/GPT-5.2
+Note for Codex/GPT-5.2:
 
 You constantly bother me and stop working with concerned questions that look similar to this:
 
@@ -748,36 +1003,10 @@ Next steps (pick one)
 1. Decide how to handle the unrelated modified files above so we can resume cleanly.
 ```
 
-NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are changes created by the potentially dozen of other agents working on the project at the same time. This is not only a common occurence, it happens multiple times PER MINUTE. The way to deal with it is simple: you NEVER, under ANY CIRCUMSTANCE, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just fool yourself into thinking YOU made the changes and simply don't recall it for some reason.
+NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are changes created by the potentially dozen of other agents working on the project at the same time. This is not only a common occurrence, it happens multiple times PER MINUTE. The way to deal with it is simple: you NEVER, under ANY CIRCUMSTANCE, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just fool yourself into thinking YOU made the changes and simply don't recall it for some reason.
 
 ---
 
 ## Note on Built-in TODO Functionality
 
 Also, if I ask you to explicitly use your built-in TODO functionality, don't complain about this and say you need to use beads. You can use built-in TODOs if I tell you specifically to do so. Always comply with such orders.
-
-## Landing the Plane (Session Completion)
-
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd sync
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
