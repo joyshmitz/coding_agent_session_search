@@ -159,7 +159,11 @@ impl Connector for ClaudeCodeConnector {
                         // Filtering messages would cause older messages to be lost when
                         // the file is re-indexed after new messages are added.
 
-                        started_at = started_at.or(created);
+                        started_at = match (started_at, created) {
+                            (Some(curr), Some(ts)) => Some(curr.min(ts)),
+                            (None, Some(ts)) => Some(ts),
+                            (other, None) => other,
+                        };
                         // Track the latest timestamp seen (robust against out-of-order logs)
                         ended_at = match (ended_at, created) {
                             (Some(curr), Some(ts)) => Some(curr.max(ts)),
@@ -248,7 +252,11 @@ impl Connector for ClaudeCodeConnector {
                             // NOTE: Do NOT filter individual messages by timestamp.
                             // File-level check is sufficient for incremental indexing.
 
-                            started_at = started_at.or(created);
+                            started_at = match (started_at, created) {
+                            (Some(curr), Some(ts)) => Some(curr.min(ts)),
+                            (None, Some(ts)) => Some(ts),
+                            (other, None) => other,
+                        };
                             // Track the latest timestamp seen
                             ended_at = match (ended_at, created) {
                                 (Some(curr), Some(ts)) => Some(curr.max(ts)),

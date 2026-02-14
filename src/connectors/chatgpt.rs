@@ -348,7 +348,11 @@ impl ChatGptConnector {
                 // Filtering messages would cause older messages to be lost when
                 // the file is re-indexed after new messages are added.
 
-                started_at = started_at.or(created_at);
+                started_at = match (started_at, created_at) {
+                    (Some(curr), Some(ts)) => Some(curr.min(ts)),
+                    (None, Some(ts)) => Some(ts),
+                    (other, None) => other,
+                };
                 ended_at = match (ended_at, created_at) {
                     (Some(curr), Some(ts)) => Some(curr.max(ts)),
                     (None, Some(ts)) => Some(ts),
@@ -403,7 +407,11 @@ impl ChatGptConnector {
                 // NOTE: Do NOT filter individual messages by timestamp here!
                 // File-level check is sufficient for incremental indexing.
 
-                started_at = started_at.or(created_at);
+                started_at = match (started_at, created_at) {
+                    (Some(curr), Some(ts)) => Some(curr.min(ts)),
+                    (None, Some(ts)) => Some(ts),
+                    (other, None) => other,
+                };
                 ended_at = match (ended_at, created_at) {
                     (Some(curr), Some(ts)) => Some(curr.max(ts)),
                     (None, Some(ts)) => Some(ts),
