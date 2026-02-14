@@ -289,7 +289,11 @@ impl Connector for PiAgentConnector {
                             if started_at.is_none() {
                                 started_at = created;
                             }
-                            ended_at = created.or(ended_at);
+                            ended_at = match (ended_at, created) {
+                                (Some(curr), Some(ts)) => Some(curr.max(ts)),
+                                (None, Some(ts)) => Some(ts),
+                                (other, None) => other,
+                            };
 
                             // Extract author (model) for assistant messages
                             // Check message.model first, fall back to tracked model_id
