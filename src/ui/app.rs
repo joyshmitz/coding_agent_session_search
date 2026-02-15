@@ -3635,11 +3635,7 @@ impl PaletteLatencyStats {
 
     /// Average latency in microseconds, or 0 if no queries.
     pub fn avg_us(&self) -> u64 {
-        if self.query_count == 0 {
-            0
-        } else {
-            self.total_us / self.query_count
-        }
+        self.total_us.checked_div(self.query_count).unwrap_or(0)
     }
 
     /// Queries per second throughput (only meaningful in bench mode).
@@ -7278,7 +7274,7 @@ impl CassApp {
             }
 
             let mut tool_list: Vec<(String, u32)> = tool_names.into_iter().collect();
-            tool_list.sort_by(|a, b| b.1.cmp(&a.1));
+            tool_list.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
             let tool_max = tool_list.iter().map(|(_, c)| *c).max().unwrap_or(1).max(1);
             for (name, count) in tool_list.iter().take(10) {
@@ -13371,11 +13367,11 @@ impl super::ftui_adapter::Model for CassApp {
                 ) {
                     return ftui::Cmd::none();
                 }
-                let progress_pct = if total == 0 {
-                    0
-                } else {
-                    ((bytes_downloaded.saturating_mul(100) / total).min(100)) as u8
-                };
+                let progress_pct = bytes_downloaded
+                    .saturating_mul(100)
+                    .checked_div(total)
+                    .map_or(0, |pct| pct.min(100));
+                let progress_pct = u8::try_from(progress_pct).unwrap_or(100);
                 self.semantic_availability = SemanticAvailability::Downloading {
                     progress_pct,
                     bytes_downloaded,

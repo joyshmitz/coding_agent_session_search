@@ -213,19 +213,17 @@ pub struct TwoTierIndex {
 
 impl TwoTierIndex {
     fn fast_dimension(&self) -> usize {
-        if self.metadata.doc_count == 0 {
-            0
-        } else {
-            self.fast_embeddings.len() / self.metadata.doc_count
-        }
+        self.fast_embeddings
+            .len()
+            .checked_div(self.metadata.doc_count)
+            .unwrap_or(0)
     }
 
     fn quality_dimension(&self) -> usize {
-        if self.metadata.doc_count == 0 {
-            0
-        } else {
-            self.quality_embeddings.len() / self.metadata.doc_count
-        }
+        self.quality_embeddings
+            .len()
+            .checked_div(self.metadata.doc_count)
+            .unwrap_or(0)
     }
 
     /// Build a two-tier index from entries.

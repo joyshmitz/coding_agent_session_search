@@ -1507,16 +1507,8 @@ pub fn render_heatmap(
     let skip_cols = cols.saturating_sub(visible_cols);
     let skip_days = (skip_cols * rows) as usize;
 
-    let cell_w = if visible_cols > 0 {
-        grid_inner.width / visible_cols
-    } else {
-        1
-    };
-    let cell_h = if rows > 0 {
-        grid_inner.height / rows
-    } else {
-        1
-    };
+    let cell_w = grid_inner.width.checked_div(visible_cols).unwrap_or(1);
+    let cell_h = grid_inner.height.checked_div(rows).unwrap_or(1);
     let cell_h = cell_h.max(1);
     let cell_w = cell_w.max(1);
 
