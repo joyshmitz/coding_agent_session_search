@@ -1465,6 +1465,23 @@ fn dot_product_f16_scalar(a: &[f16], b: &[f32]) -> f32 {
 /// Note: SIMD reorders FP operations, causing ~1e-6 relative error vs scalar.
 /// This is acceptable as it doesn't change ranking order.
 #[inline]
+#[cfg(feature = "frankensearch-migration")]
+fn dot_product_f16_simd(a: &[f16], b: &[f32]) -> f32 {
+    // Migration path: delegate f16 SIMD math to frankensearch-index.
+    // Fall back to the local scalar implementation if dimensions mismatch.
+    match frankensearch_index::dot_product_f16_f32(a, b) {
+        Ok(score) => score,
+        Err(_) => dot_product_f16_scalar(a, b),
+    }
+}
+
+/// Opt 1.1: SIMD-accelerated f16 dot product using wide crate.
+/// Batches f16→f32 conversion and uses 8-wide SIMD operations.
+/// Achieves 40-60% speedup over scalar implementation for typical embedding sizes.
+/// Note: SIMD reorders FP operations, causing ~1e-6 relative error vs scalar.
+/// This is acceptable as it doesn't change ranking order.
+#[inline]
+#[cfg(not(feature = "frankensearch-migration"))]
 fn dot_product_f16_simd(a: &[f16], b: &[f32]) -> f32 {
     use wide::f32x8;
 
