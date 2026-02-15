@@ -104,3 +104,8 @@ user_requests_output.txt
 
 # Beads daemon rotated logs
 .beads/daemon-*.log.gz
+
+# Ephemeral files (agent-generated, build artifacts, test detritus)
+ci-artifacts/
+proptest-regressions/
+test_meminfo
