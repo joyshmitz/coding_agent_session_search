@@ -33,11 +33,15 @@
 //! ```
 
 use super::embedder::{Embedder, EmbedderError, EmbedderResult};
+#[cfg(feature = "frankensearch-migration")]
+use frankensearch_embed::{HashAlgorithm as FsHashAlgorithm, HashEmbedder as FsHashEmbedder};
 
 /// FNV-1a offset basis (64-bit).
+#[cfg(not(feature = "frankensearch-migration"))]
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 
 /// FNV-1a prime (64-bit).
+#[cfg(not(feature = "frankensearch-migration"))]
 const FNV_PRIME: u64 = 0x100000001b3;
 
 /// Default embedding dimension (matches MiniLM for compatibility).
@@ -55,6 +59,8 @@ const MIN_TOKEN_LEN: usize = 2;
 pub struct HashEmbedder {
     dimension: usize,
     id: String,
+    #[cfg(feature = "frankensearch-migration")]
+    delegate: FsHashEmbedder,
 }
 
 impl HashEmbedder {
@@ -73,6 +79,8 @@ impl HashEmbedder {
         Self {
             dimension,
             id: format!("fnv1a-{dimension}"),
+            #[cfg(feature = "frankensearch-migration")]
+            delegate: FsHashEmbedder::new(dimension, FsHashAlgorithm::FnvModular),
         }
     }
 
@@ -98,6 +106,7 @@ impl HashEmbedder {
     ///
     /// FNV-1a is a fast, non-cryptographic hash with good distribution
     /// properties for feature hashing.
+    #[cfg(not(feature = "frankensearch-migration"))]
     fn fnv1a_hash(bytes: &[u8]) -> u64 {
         let mut hash = FNV_OFFSET_BASIS;
         for byte in bytes {
@@ -107,10 +116,17 @@ impl HashEmbedder {
         hash
     }
 
+    fn uniform_fallback(&self) -> Vec<f32> {
+        let mut embedding = vec![1.0f32; self.dimension];
+        let norm = (self.dimension as f32).sqrt();
+        for value in &mut embedding {
+            *value /= norm;
+        }
+        embedding
+    }
+
     /// L2 normalize a vector in place.
-    ///
-    /// After normalization, the vector has unit length (L2 norm ≈ 1.0),
-    /// which is required for cosine similarity to work correctly.
+    #[cfg(not(feature = "frankensearch-migration"))]
     fn l2_normalize(vec: &mut [f32]) {
         let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > f32::EPSILON {
@@ -120,17 +136,15 @@ impl HashEmbedder {
         }
     }
 
-    /// Generate embedding for tokenized input.
-    fn embed_tokens(&self, tokens: &[String]) -> Vec<f32> {
+    /// Generate embedding for tokenized input using the legacy cass path.
+    #[cfg(not(feature = "frankensearch-migration"))]
+    fn embed_tokens_legacy(&self, tokens: &[String]) -> Vec<f32> {
         let mut embedding = vec![0.0f32; self.dimension];
 
         for token in tokens {
             let hash = Self::fnv1a_hash(token.as_bytes());
-
-            // Use hash to determine dimension index and sign
             let idx = (hash as usize) % self.dimension;
             let sign = if (hash >> 63) == 0 { 1.0 } else { -1.0 };
-
             embedding[idx] += sign;
         }
 
@@ -153,15 +167,31 @@ impl Embedder for HashEmbedder {
 
         let tokens = Self::tokenize(text);
 
-        // If no valid tokens, return zero vector (normalized to avoid NaN)
+        // Preserve cass legacy behavior for low-signal inputs.
         if tokens.is_empty() {
-            // Single punctuation or short text - return uniform vector
-            let mut embedding = vec![1.0 / (self.dimension as f32).sqrt(); self.dimension];
-            Self::l2_normalize(&mut embedding);
-            return Ok(embedding);
+            return Ok(self.uniform_fallback());
         }
 
-        Ok(self.embed_tokens(&tokens))
+        #[cfg(feature = "frankensearch-migration")]
+        {
+            // Delegate core hashing/projection logic to frankensearch implementation.
+            // We pass canonicalized text to preserve cass's case-insensitive semantics.
+            let canonical = tokens.join(" ");
+            let embedding = self.delegate.embed_sync(&canonical);
+            if embedding.len() != self.dimension {
+                return Err(EmbedderError::EmbeddingFailed(format!(
+                    "delegate dimension mismatch: expected {}, got {}",
+                    self.dimension,
+                    embedding.len()
+                )));
+            }
+            Ok(embedding)
+        }
+
+        #[cfg(not(feature = "frankensearch-migration"))]
+        {
+            Ok(self.embed_tokens_legacy(&tokens))
+        }
     }
 
     fn embed_batch(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
@@ -326,6 +356,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "frankensearch-migration"))]
     fn test_fnv1a_hash_known_values() {
         // FNV-1a is a well-known algorithm, test against known values
         let hash_empty = HashEmbedder::fnv1a_hash(b"");
