@@ -1465,69 +1465,13 @@ fn dot_product_f16_scalar(a: &[f16], b: &[f32]) -> f32 {
 /// Note: SIMD reorders FP operations, causing ~1e-6 relative error vs scalar.
 /// This is acceptable as it doesn't change ranking order.
 #[inline]
-#[cfg(feature = "frankensearch-migration")]
 fn dot_product_f16_simd(a: &[f16], b: &[f32]) -> f32 {
-    // Migration path: delegate f16 SIMD math to frankensearch-index.
+    // Delegate f16 SIMD math to frankensearch-index.
     // Fall back to the local scalar implementation if dimensions mismatch.
     match frankensearch_index::dot_product_f16_f32(a, b) {
         Ok(score) => score,
         Err(_) => dot_product_f16_scalar(a, b),
     }
-}
-
-/// Opt 1.1: SIMD-accelerated f16 dot product using wide crate.
-/// Batches f16→f32 conversion and uses 8-wide SIMD operations.
-/// Achieves 40-60% speedup over scalar implementation for typical embedding sizes.
-/// Note: SIMD reorders FP operations, causing ~1e-6 relative error vs scalar.
-/// This is acceptable as it doesn't change ranking order.
-#[inline]
-#[cfg(not(feature = "frankensearch-migration"))]
-fn dot_product_f16_simd(a: &[f16], b: &[f32]) -> f32 {
-    use wide::f32x8;
-
-    let chunks = a.len() / 8;
-    let mut sum = f32x8::ZERO;
-
-    // Main SIMD loop - process 8 elements at a time
-    // Batch f16→f32 conversion for better cache utilization
-    for i in 0..chunks {
-        let base = i * 8;
-        // Convert 8 f16 values to f32 array
-        // Using explicit indexing for clarity and bounds check elision
-        let a_f32 = [
-            f32::from(a[base]),
-            f32::from(a[base + 1]),
-            f32::from(a[base + 2]),
-            f32::from(a[base + 3]),
-            f32::from(a[base + 4]),
-            f32::from(a[base + 5]),
-            f32::from(a[base + 6]),
-            f32::from(a[base + 7]),
-        ];
-        // b is already f32, just need to copy into array for SIMD
-        let b_f32 = [
-            b[base],
-            b[base + 1],
-            b[base + 2],
-            b[base + 3],
-            b[base + 4],
-            b[base + 5],
-            b[base + 6],
-            b[base + 7],
-        ];
-        sum += f32x8::from(a_f32) * f32x8::from(b_f32);
-    }
-
-    // Reduce SIMD accumulator to scalar
-    let mut scalar_sum = sum.reduce_add();
-
-    // Handle remainder (0-7 elements)
-    let remainder_start = chunks * 8;
-    for i in remainder_start..a.len() {
-        scalar_sum += f32::from(a[i]) * b[i];
-    }
-
-    scalar_sum
 }
 
 /// Bench-only wrapper for scalar f16 dot product.

@@ -69,8 +69,8 @@ half = { version = "*", features = ["bytemuck"] }
 memmap2 = "*"
 bytemuck = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries"] }
-frankensearch-embed = { path = "../frankensearch/crates/frankensearch-embed", default-features = false, features = ["hash"], optional = true }
-frankensearch-index = { path = "../frankensearch/crates/frankensearch-index", default-features = false, optional = true }
+frankensearch-embed = { path = "../frankensearch/crates/frankensearch-embed", default-features = false, features = ["hash"] }
+frankensearch-index = { path = "../frankensearch/crates/frankensearch-index", default-features = false }
 wide = "*"  # Portable SIMD for P0 Opt 2: SIMD dot product
 arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
 bloomfilter = "*"  # Probabilistic membership testing for P2 Opt 3.3: Workspace Cache
@@ -114,7 +114,6 @@ default = ["qr", "encryption"]
 qr = ["dep:qrcode", "dep:image"]
 encryption = []  # Enables HTML export encryption (deps already included for ChatGPT)
 backtrace = []
-frankensearch-migration = ["dep:frankensearch-embed", "dep:frankensearch-index"]
 
 [build-dependencies]
 vergen = { version = "*", default-features = false, features = ["build", "cargo"] }
