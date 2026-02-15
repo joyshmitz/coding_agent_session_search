@@ -45,9 +45,9 @@ reqwest = { version = "*", default-features = false, features = ["json", "rustls
 crossterm = "*"
 portable-pty = "*"
 # FrankenTUI migration foundation (bead 2noh9.2.1).
-# Strategy: pin a Git revision for reproducible CI builds while ftui tags are still in flux.
-ftui = { git = "https://github.com/Dicklesworthstone/frankentui", rev = "f0ad8a6d9b016ce6a000dc5e1461e1411aee1441", version = "*" }
-ftui-extras = { git = "https://github.com/Dicklesworthstone/frankentui", rev = "f0ad8a6d9b016ce6a000dc5e1461e1411aee1441", version = "*", default-features = false, features = ["markdown", "syntax", "charts", "canvas", "theme", "clipboard", "clipboard-fallback", "export", "visual-fx", "forms", "validation", "help"] }
+# Strategy: pin a Git revision for reproducible CI builds.
+ftui = { git = "https://github.com/Dicklesworthstone/frankentui", rev = "f0ad8a6d9b016ce6a000dc5e1461e1411aee1441", version = "0.2.0" }
+ftui-extras = { git = "https://github.com/Dicklesworthstone/frankentui", rev = "f0ad8a6d9b016ce6a000dc5e1461e1411aee1441", version = "0.2.0", default-features = false, features = ["markdown", "syntax", "charts", "canvas", "theme", "clipboard", "clipboard-fallback", "export", "visual-fx", "forms", "validation", "help"] }
 dirs = "*"
 walkdir = "*"
 glob = "*"
@@ -123,7 +123,7 @@ vergen = { version = "*", default-features = false, features = ["build", "cargo"
 assert_cmd = "*"
 predicates = "*"
 insta = { version = "*", features = ["yaml", "json"] }
-ftui-harness = { git = "https://github.com/Dicklesworthstone/frankentui", rev = "f0ad8a6d9b016ce6a000dc5e1461e1411aee1441", version = "*" }
+ftui-harness = { git = "https://github.com/Dicklesworthstone/frankentui", rev = "f0ad8a6d9b016ce6a000dc5e1461e1411aee1441", version = "0.2.0" }
 criterion = "*"
 once_cell = "*"
 serial_test = "*"
