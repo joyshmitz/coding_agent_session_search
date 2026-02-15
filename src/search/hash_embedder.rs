@@ -99,7 +99,6 @@ impl HashEmbedder {
         }
         embedding
     }
-
 }
 
 impl Default for HashEmbedder {

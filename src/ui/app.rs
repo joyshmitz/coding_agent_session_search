@@ -16505,6 +16505,7 @@ pub fn run_tui_ftui(
 ) -> anyhow::Result<()> {
     use ftui::ProgramConfig;
     use ftui::core::capability_override::{CapabilityOverride, push_override};
+    use ftui::runtime::MouseCapturePolicy;
 
     // Auto-upgrade obviously bad inherited terminal profiles in interactive
     // TUI sessions. This keeps UX consistent when wrapper shells export
@@ -16613,7 +16614,7 @@ pub fn run_tui_ftui(
         ProgramConfig::fullscreen()
     };
     config.budget = budget;
-    config.mouse = true;
+    config.mouse_capture_policy = MouseCapturePolicy::On;
     config.resize_coalescer = coalescer;
     config.evidence_sink = evidence_sink;
 
