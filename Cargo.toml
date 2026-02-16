@@ -46,7 +46,7 @@ crossterm = "*"
 portable-pty = "*"
 # FrankenTUI migration foundation (bead 2noh9.2.1).
 # Strategy: pin a Git revision for reproducible CI builds.
-ftui = { path = "../frankentui/crates/ftui" }
+ftui = { path = "../frankentui/crates/ftui", features = ["crossterm"] }
 ftui-extras = { path = "../frankentui/crates/ftui-extras", default-features = false, features = ["markdown", "syntax", "charts", "canvas", "theme", "clipboard", "clipboard-fallback", "export", "visual-fx", "forms", "validation", "help"] }
 dirs = "*"
 walkdir = "*"
