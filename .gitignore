@@ -105,6 +105,11 @@ user_requests_output.txt
 # Beads daemon rotated logs
 .beads/daemon-*.log.gz
 
+# Beads ephemeral files (locks, migration hints, backups)
+.beads/.bv.lock
+.beads/.migration-hint-ts
+.beads/*.bak_*
+
 # Ephemeral files (agent-generated, build artifacts, test detritus)
 ci-artifacts/
 proptest-regressions/
