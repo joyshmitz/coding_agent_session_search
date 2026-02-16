@@ -231,6 +231,7 @@ impl Embedder for FastEmbedder {
             return Err(EmbedderError::InvalidInput("empty text".to_string()));
         }
 
+        #[allow(unused_mut)]
         let mut model = self
             .model
             .lock()
@@ -269,6 +270,7 @@ impl Embedder for FastEmbedder {
             return Ok(Vec::new());
         }
 
+        #[allow(unused_mut)]
         let mut model = self
             .model
             .lock()

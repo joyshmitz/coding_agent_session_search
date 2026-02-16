@@ -147,6 +147,7 @@ impl Reranker for FastEmbedReranker {
             }
         }
 
+        #[allow(unused_mut)]
         let mut model = self
             .model
             .lock()
