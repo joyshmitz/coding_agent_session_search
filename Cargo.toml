@@ -23,7 +23,7 @@ console = "*"
 colored = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
-toon = { path = "../toon_rust", package = "tru" }
+toon = { version = "0.2.0", path = "../toon_rust", package = "tru" }
 tempfile = "*"
 rmp-serde = "*"  # MessagePack for binary metadata serialization (Opt 3.1)
 toml = "*"
@@ -46,8 +46,8 @@ crossterm = "*"
 portable-pty = "*"
 # FrankenTUI migration foundation (bead 2noh9.2.1).
 # Strategy: pin a Git revision for reproducible CI builds.
-ftui = { path = "../frankentui/crates/ftui", features = ["crossterm"] }
-ftui-extras = { path = "../frankentui/crates/ftui-extras", default-features = false, features = ["markdown", "syntax", "charts", "canvas", "theme", "clipboard", "clipboard-fallback", "export", "visual-fx", "forms", "validation", "help"] }
+ftui = { version = "0.2.0", path = "../frankentui/crates/ftui", features = ["crossterm"] }
+ftui-extras = { version = "0.2.0", path = "../frankentui/crates/ftui-extras", default-features = false, features = ["markdown", "syntax", "charts", "canvas", "theme", "clipboard", "clipboard-fallback", "export", "visual-fx", "forms", "validation", "help"] }
 dirs = "*"
 walkdir = "*"
 glob = "*"
@@ -69,8 +69,8 @@ half = { version = "*", features = ["bytemuck"] }
 memmap2 = "*"
 bytemuck = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries"] }
-frankensearch-embed = { path = "../frankensearch/crates/frankensearch-embed", default-features = false, features = ["hash"] }
-frankensearch-index = { path = "../frankensearch/crates/frankensearch-index", default-features = false }
+frankensearch-embed = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-embed", default-features = false, features = ["hash"] }
+frankensearch-index = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-index", default-features = false }
 wide = "*"  # Portable SIMD for P0 Opt 2: SIMD dot product
 arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
 bloomfilter = "*"  # Probabilistic membership testing for P2 Opt 3.3: Workspace Cache
@@ -122,7 +122,7 @@ vergen = { version = "*", default-features = false, features = ["build", "cargo"
 assert_cmd = "*"
 predicates = "*"
 insta = { version = "*", features = ["yaml", "json"] }
-ftui-harness = { path = "../frankentui/crates/ftui-harness" }
+ftui-harness = { version = "0.2.0", path = "../frankentui/crates/ftui-harness" }
 criterion = "*"
 once_cell = "*"
 serial_test = "*"
