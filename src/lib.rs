@@ -14816,7 +14816,7 @@ fn run_sources_add(
     println!("  Config: {config_path}");
     println!();
     println!("Next steps:");
-    println!("  cass sources sync {source_id}   # Fetch sessions from this source");
+    println!("  cass sources sync --source {source_id}   # Fetch sessions from this source");
     println!("  cass sources list               # View all configured sources");
 
     Ok(())
