@@ -767,6 +767,11 @@ impl CursorConnector {
 
 impl Connector for CursorConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("cursor")
+            && detected.detected
+        {
+            return detected;
+        }
         if let Some(base) = Self::app_support_dir()
             && base.exists()
             && Self::has_any_db_file(&base)

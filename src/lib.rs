@@ -6,6 +6,7 @@ pub mod connectors;
 pub mod daemon;
 pub mod encryption;
 pub mod export;
+pub mod ftui_harness;
 pub mod html_export;
 pub mod indexer;
 pub mod model;

@@ -1,8 +1,8 @@
 ╭Detail [Messages] ↩───────────────────────────────────────────────────────────────────╮
 │  ● Messages  │  Snippets  │  Raw  │  Json  │  Analytics                              │
-│✓ aider │ /workspace/cass │ ci-linux @ci-linux                                        │
-│1970-01-20 16:13 (0s) │ 0 msgs (u:0 a:0 t:0 s:0) │ 1.0K tok                           │
-│────────────────────────────────────────────────────────────────────────────────      │
+│ [agent:✓ aider] [ws:/workspace/cass] [src:⇄ ci-linux@ci-linux] [score:0.640 (6.4/10)]│
+│ [at:1970-01-20 16:13] [dur:0s] [msgs:0 msgs] [mix:u:0 a:0 t:0 s:0] [tok:1.0K tok]    │
+│────────────────────────────────────────────────────────────────────────────────────  │
 │Large-snippet rendering edge case                                                     │
 │agent=aider │ ws=/workspace/cass │ source=ci-linux (remote) │ score=0.640 (6.4/10) │ w│
 │────────────────────────────────────────────────────────────────────────────────────  │

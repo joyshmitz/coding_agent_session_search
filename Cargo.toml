@@ -72,6 +72,7 @@ bytemuck = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries"] }
 frankensearch-embed = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-embed", default-features = false, features = ["hash"] }
 frankensearch-index = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-index", default-features = false }
+franken-agent-detection = { version = "0.1.0", path = "../franken_agent_detection" }
 wide = "*"  # Portable SIMD for P0 Opt 2: SIMD dot product
 arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
 bloomfilter = "*"  # Probabilistic membership testing for P2 Opt 3.3: Workspace Cache
@@ -123,7 +124,6 @@ vergen = { version = "*", default-features = false, features = ["build", "cargo"
 assert_cmd = "*"
 predicates = "*"
 insta = { version = "*", features = ["yaml", "json"] }
-ftui-harness = { version = "0.2.0", path = "../frankentui/crates/ftui-harness" }
 criterion = "*"
 once_cell = "*"
 serial_test = "*"

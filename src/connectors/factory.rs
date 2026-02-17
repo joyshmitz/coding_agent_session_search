@@ -57,6 +57,11 @@ impl FactoryConnector {
 
 impl Connector for FactoryConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("factory")
+            && detected.detected
+        {
+            return detected;
+        }
         if let Some(root) = Self::sessions_root()
             && root.exists()
         {

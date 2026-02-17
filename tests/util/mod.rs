@@ -4,6 +4,7 @@ pub mod e2e_log;
 // Verbose Logging Support
 // =============================================================================
 
+use coding_agent_search::ftui_harness;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::Mutex;
