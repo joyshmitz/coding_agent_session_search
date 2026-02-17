@@ -9,7 +9,7 @@ pub use ftui::render::budget::{DegradationLevel, FrameBudgetConfig};
 pub use ftui::widgets::{StatefulWidget, Widget};
 pub use ftui::{
     App, Cmd, Event, Frame, KeyCode, KeyEvent, Model, Modifiers, Program, RuntimeDiffConfig,
-    ScreenMode, SessionOptions, Style, TerminalSession, TerminalWriter, Theme, UiAnchor,
+    ScreenMode, Style, TerminalWriter, Theme, UiAnchor,
 };
 
 // ---------------------------------------------------------------------------

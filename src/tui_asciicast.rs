@@ -32,7 +32,7 @@ pub fn run_tui_with_asciicast(recording_path: &Path, interactive: bool) -> Resul
         .to_str()
         .ok_or_else(|| anyhow!("executable path is not valid UTF-8"))?;
 
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
+    let (cols, rows) = detect_terminal_size();
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -167,6 +167,46 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn detect_terminal_size() -> (u16, u16) {
+    fn env_dim(key: &str) -> Option<u16> {
+        std::env::var(key)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u16>().ok())
+            .filter(|value| *value > 0)
+    }
+
+    let env_cols = env_dim("COLUMNS");
+    let env_rows = env_dim("LINES");
+    if let (Some(cols), Some(rows)) = (env_cols, env_rows) {
+        return (cols, rows);
+    }
+
+    #[cfg(unix)]
+    {
+        if io::stdin().is_terminal() {
+            let output = std::process::Command::new("stty")
+                .arg("size")
+                .output()
+                .ok();
+            if let Some(output) = output
+                && output.status.success()
+                && let Ok(text) = String::from_utf8(output.stdout)
+            {
+                let mut parts = text.split_whitespace();
+                if let (Some(rows), Some(cols)) = (parts.next(), parts.next())
+                    && let (Ok(rows), Ok(cols)) = (rows.parse::<u16>(), cols.parse::<u16>())
+                    && rows > 0
+                    && cols > 0
+                {
+                    return (cols, rows);
+                }
+            }
+        }
+    }
+
+    (120, 40)
+}
+
 fn forward_stdin(mut child_writer: Box<dyn Write + Send>, stop_requested: Arc<AtomicBool>) {
     let stdin = io::stdin();
     let mut stdin_lock = stdin.lock();
@@ -234,23 +274,28 @@ fn is_pty_eof_error(err: &io::Error) -> bool {
 }
 
 struct RawModeGuard {
-    enabled: bool,
+    #[cfg(unix)]
+    inner: Option<ftui_tty::RawModeGuard>,
 }
 
 impl RawModeGuard {
     fn new(enabled: bool) -> Result<Self> {
-        if enabled {
-            crossterm::terminal::enable_raw_mode()
-                .context("enable raw mode for input passthrough")?;
+        #[cfg(unix)]
+        {
+            let inner = if enabled {
+                Some(
+                    ftui_tty::RawModeGuard::enter()
+                        .context("enable raw mode for input passthrough")?,
+                )
+            } else {
+                None
+            };
+            Ok(Self { inner })
         }
-        Ok(Self { enabled })
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        if self.enabled {
-            let _ = crossterm::terminal::disable_raw_mode();
+        #[cfg(not(unix))]
+        {
+            let _ = enabled;
+            Ok(Self {})
         }
     }
 }

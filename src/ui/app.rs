@@ -3507,6 +3507,73 @@ fn context_window_token(window: ContextWindow) -> &'static str {
     }
 }
 
+fn compact_i64_for_analytics(value: i64) -> String {
+    let value_f = value as f64;
+    let abs = value_f.abs();
+    if abs >= 1_000_000_000.0 {
+        format!("{:.1}B", value_f / 1_000_000_000.0)
+    } else if abs >= 1_000_000.0 {
+        format!("{:.1}M", value_f / 1_000_000.0)
+    } else if abs >= 1_000.0 {
+        format!("{:.1}K", value_f / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn sparkline_from_values(values: &[f64], max_width: usize) -> String {
+    const BLOCKS: &[char] = &[
+        '\u{2581}',
+        '\u{2582}',
+        '\u{2583}',
+        '\u{2584}',
+        '\u{2585}',
+        '\u{2586}',
+        '\u{2587}',
+        '\u{2588}',
+    ];
+
+    if values.is_empty() || max_width == 0 {
+        return String::new();
+    }
+
+    let width = max_width.clamp(6, 32);
+    let sampled: Vec<f64> = if values.len() <= width {
+        values.to_vec()
+    } else {
+        let stride = (values.len() - 1) as f64 / (width - 1) as f64;
+        (0..width)
+            .map(|idx| {
+                let src = (idx as f64 * stride).round() as usize;
+                values[src.min(values.len().saturating_sub(1))]
+            })
+            .collect()
+    };
+
+    let mut min_v = f64::INFINITY;
+    let mut max_v = f64::NEG_INFINITY;
+    for value in &sampled {
+        min_v = min_v.min(*value);
+        max_v = max_v.max(*value);
+    }
+    if !min_v.is_finite() || !max_v.is_finite() {
+        return String::new();
+    }
+    if (max_v - min_v).abs() <= f64::EPSILON {
+        return std::iter::repeat(BLOCKS[3]).take(sampled.len()).collect();
+    }
+
+    let range = max_v - min_v;
+    sampled
+        .iter()
+        .map(|value| {
+            let t = ((*value - min_v) / range).clamp(0.0, 1.0);
+            let idx = (t * (BLOCKS.len() - 1) as f64).round() as usize;
+            BLOCKS[idx.min(BLOCKS.len() - 1)]
+        })
+        .collect()
+}
+
 /// Persisted filters+ranking for a saved-view slot.
 #[derive(Clone, Debug)]
 pub struct SavedView {
@@ -3878,6 +3945,8 @@ pub struct CassApp {
     // -- Terminal focus tracking -------------------------------------------
     /// Whether the terminal window has focus (for dim-on-blur).
     pub terminal_focused: bool,
+    /// Last known terminal size `(width, height)` for macro metadata and fallbacks.
+    pub last_terminal_size: Cell<(u16, u16)>,
 
     // -- Animation & timing -----------------------------------------------
     /// Spring-based animation state (focus flash, reveal, modal, panel).
@@ -4108,6 +4177,7 @@ impl Default for CassApp {
             toast_manager: ToastManager::default(),
             undo_history: UndoHistory::default(),
             terminal_focused: true,
+            last_terminal_size: Cell::new((80, 24)),
             anim: AnimationState::from_env(),
             view_transition: None,
             view_transition_snapshot: RefCell::new(None),
@@ -9204,6 +9274,134 @@ impl CassApp {
         }
     }
 
+    fn analytics_filter_count(&self) -> usize {
+        let f = &self.analytics_filters;
+        let mut count = 0;
+        if f.since_ms.is_some() || f.until_ms.is_some() {
+            count += 1;
+        }
+        if !f.agents.is_empty() {
+            count += 1;
+        }
+        if !f.workspaces.is_empty() {
+            count += 1;
+        }
+        if !matches!(f.source_filter, SourceFilter::All) {
+            count += 1;
+        }
+        count
+    }
+
+    fn analytics_tabs_line(
+        &self,
+        show_tab_bar: bool,
+        active_style: ftui::Style,
+        inactive_style: ftui::Style,
+        meta_style: ftui::Style,
+    ) -> ftui::text::Line {
+        let mut spans: Vec<ftui::text::Span> = Vec::new();
+        if show_tab_bar {
+            for (idx, view) in AnalyticsView::all().iter().enumerate() {
+                if idx > 0 {
+                    spans.push(ftui::text::Span::styled(" ", meta_style));
+                }
+                if *view == self.analytics_view {
+                    spans.push(ftui::text::Span::styled(
+                        format!("[{}]", view.label()),
+                        active_style,
+                    ));
+                } else {
+                    spans.push(ftui::text::Span::styled(
+                        format!(" {} ", view.label()),
+                        inactive_style,
+                    ));
+                }
+            }
+        } else {
+            spans.push(ftui::text::Span::styled("view ", meta_style));
+            spans.push(ftui::text::Span::styled(
+                self.analytics_view.label(),
+                active_style,
+            ));
+            spans.push(ftui::text::Span::styled("  \u{2190}/\u{2192} switch", meta_style));
+        }
+        ftui::text::Line::from_spans(spans)
+    }
+
+    fn analytics_metrics_line(
+        &self,
+        data: &super::analytics_charts::AnalyticsChartData,
+        width: u16,
+        value_style: ftui::Style,
+        meta_style: ftui::Style,
+    ) -> ftui::text::Line {
+        let mut spans: Vec<ftui::text::Span> = Vec::new();
+        let push_metric =
+            |spans: &mut Vec<ftui::text::Span>, label: &str, value: String, sep_style: ftui::Style| {
+                if !spans.is_empty() {
+                    spans.push(ftui::text::Span::styled(" \u{2502} ", sep_style));
+                }
+                spans.push(ftui::text::Span::styled(format!("{label}:"), sep_style));
+                spans.push(ftui::text::Span::styled(value, value_style));
+            };
+
+        push_metric(
+            &mut spans,
+            "msgs",
+            compact_i64_for_analytics(data.total_messages),
+            meta_style,
+        );
+        push_metric(
+            &mut spans,
+            "api",
+            compact_i64_for_analytics(data.total_api_tokens),
+            meta_style,
+        );
+        push_metric(
+            &mut spans,
+            "tools",
+            compact_i64_for_analytics(data.total_tool_calls),
+            meta_style,
+        );
+        push_metric(
+            &mut spans,
+            "cost",
+            format!("${:.2}", data.total_cost_usd),
+            meta_style,
+        );
+        push_metric(
+            &mut spans,
+            "cov",
+            format!("{:.0}%", data.coverage_pct),
+            meta_style,
+        );
+        let filter_count = self.analytics_filter_count();
+        if filter_count > 0 {
+            push_metric(
+                &mut spans,
+                "filters",
+                filter_count.to_string(),
+                meta_style,
+            );
+        }
+
+        if width >= 72 {
+            let spark_width = (width as usize / 5).clamp(8, 28);
+            let values: Vec<f64> = if data.daily_tokens.is_empty() {
+                data.daily_messages.iter().map(|(_, v)| *v).collect()
+            } else {
+                data.daily_tokens.iter().map(|(_, v)| *v).collect()
+            };
+            let spark = sparkline_from_values(&values, spark_width);
+            if !spark.is_empty() {
+                spans.push(ftui::text::Span::styled(" \u{2502} trend:", meta_style));
+                spans.push(ftui::text::Span::styled(spark, value_style));
+            }
+        }
+
+        ftui::text::Line::from_spans(spans)
+    }
+
     /// Build a one-line summary of active analytics filters for the header bar.
     fn analytics_filter_summary(&self) -> String {
         let f = &self.analytics_filters;
@@ -13989,9 +14187,11 @@ impl super::ftui_adapter::Model for CassApp {
             }
 
             // -- Window & terminal --------------------------------------------
-            CassMsg::Resized { .. } => {
+            CassMsg::Resized { width, height } => {
                 // Frame dimensions update automatically via ftui runtime
                 self.pane_split_drag = None;
+                self.last_terminal_size
+                    .set((width.max(1), height.max(1)));
                 // Capture latest resize evidence after coalescer processes the event.
                 self.evidence.refresh();
                 ftui::Cmd::none()
@@ -15119,10 +15319,9 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     // Start recording.
                     let mut recorder = MacroRecorder::new("cass-interactive");
-                    // Try to capture terminal size for metadata.
-                    if let Ok((w, h)) = crossterm::terminal::size() {
-                        recorder = recorder.with_terminal_size(w, h);
-                    }
+                    // Use the most recently observed terminal size for metadata.
+                    let (w, h) = self.last_terminal_size.get();
+                    recorder = recorder.with_terminal_size(w, h);
                     self.macro_recorder = Some(recorder);
                     self.toast_manager
                         .push(crate::ui::components::toast::Toast::info(
@@ -15150,6 +15349,8 @@ impl super::ftui_adapter::Model for CassApp {
 
     fn view(&self, frame: &mut super::ftui_adapter::Frame) {
         let area = Rect::from_size(frame.buffer.width(), frame.buffer.height());
+        self.last_terminal_size
+            .set((area.width.max(1), area.height.max(1)));
         if area.is_empty() {
             return;
         }
@@ -15814,36 +16015,77 @@ impl super::ftui_adapter::Model for CassApp {
                     ])
                     .split(layout_area);
 
-                // ── Analytics header with view tabs ──────────────────────
-                let header_title = if atopo.show_tab_bar {
-                    let view_tabs: String = AnalyticsView::all()
-                        .iter()
-                        .map(|v| {
-                            if *v == self.analytics_view {
-                                format!("[{}]", v.label())
-                            } else {
-                                v.label().to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-                    format!("cass analytics | {view_tabs}")
-                } else {
-                    format!("cass analytics | {}", self.analytics_view.label())
+                let empty_data = super::analytics_charts::AnalyticsChartData::default();
+                let chart_data = self.analytics_cache.as_ref().unwrap_or(&empty_data);
+                let analytics_accent = match self.analytics_view {
+                    AnalyticsView::Dashboard => ftui::PackedRgba::rgb(90, 180, 255),
+                    AnalyticsView::Explorer => ftui::PackedRgba::rgb(120, 220, 140),
+                    AnalyticsView::Heatmap => ftui::PackedRgba::rgb(255, 180, 90),
+                    AnalyticsView::Breakdowns => ftui::PackedRgba::rgb(210, 140, 255),
+                    AnalyticsView::Tools => ftui::PackedRgba::rgb(255, 120, 160),
+                    AnalyticsView::Cost => ftui::PackedRgba::rgb(255, 210, 110),
+                    AnalyticsView::Plans => ftui::PackedRgba::rgb(140, 220, 220),
+                    AnalyticsView::Coverage => ftui::PackedRgba::rgb(190, 220, 130),
                 };
+
+                // ── Analytics header with tab strip + KPI ribbon ──────────
                 let header_block = Block::new()
                     .borders(adaptive_borders)
                     .border_type(border_type)
-                    .title(&header_title)
+                    .title("cass analytics")
                     .title_alignment(Alignment::Left)
-                    .style(pane_focused_style);
+                    .border_style(pane_focused_style.fg(analytics_accent).bold())
+                    .style(pane_focused_style.bg(dim_packed_color(analytics_accent, 0.08)));
                 let header_inner = header_block.inner(vertical[0]);
                 header_block.render(vertical[0], frame);
-                if render_content && !header_inner.is_empty() && atopo.show_filter_summary {
-                    let filter_desc = self.analytics_filter_summary();
-                    Paragraph::new(&*filter_desc)
+                if render_content && !header_inner.is_empty() {
+                    let header_rows = if header_inner.height >= 3 {
+                        Flex::vertical()
+                            .constraints([
+                                Constraint::Fixed(1),
+                                Constraint::Fixed(1),
+                                Constraint::Min(1),
+                            ])
+                            .split(header_inner)
+                    } else if header_inner.height == 2 {
+                        Flex::vertical()
+                            .constraints([Constraint::Fixed(1), Constraint::Min(1)])
+                            .split(header_inner)
+                    } else {
+                        vec![header_inner]
+                    };
+
+                    let tab_line = self.analytics_tabs_line(
+                        atopo.show_tab_bar,
+                        ftui::Style::new()
+                            .fg(analytics_accent)
+                            .bg(dim_packed_color(analytics_accent, 0.20))
+                            .bold(),
+                        ftui::Style::new().fg(dim_packed_color(analytics_accent, 0.70)),
+                        text_muted_style,
+                    );
+                    Paragraph::new(tab_line)
                         .style(text_muted_style)
-                        .render(header_inner, frame);
+                        .render(header_rows[0], frame);
+
+                    if header_rows.len() > 1 {
+                        let metrics_line = self.analytics_metrics_line(
+                            chart_data,
+                            header_rows[1].width,
+                            ftui::Style::new().fg(analytics_accent).bold(),
+                            text_muted_style,
+                        );
+                        Paragraph::new(metrics_line)
+                            .style(text_muted_style)
+                            .render(header_rows[1], frame);
+                    }
+
+                    if header_rows.len() > 2 && atopo.show_filter_summary {
+                        let filter_desc = self.analytics_filter_summary();
+                        Paragraph::new(&*filter_desc)
+                            .style(text_muted_style)
+                            .render(header_rows[2], frame);
+                    }
                 }
 
                 // ── Analytics content placeholder ────────────────────────
@@ -15852,7 +16094,8 @@ impl super::ftui_adapter::Model for CassApp {
                     .border_type(border_type)
                     .title(self.analytics_view.label())
                     .title_alignment(Alignment::Left)
-                    .style(pane_style);
+                    .border_style(pane_focused_style.fg(analytics_accent).bold())
+                    .style(pane_style.bg(dim_packed_color(analytics_accent, 0.04)));
                 let content_inner = content_block.inner(vertical[1]);
                 content_block.render(vertical[1], frame);
                 if render_content && !content_inner.is_empty() {
@@ -15863,8 +16106,6 @@ impl super::ftui_adapter::Model for CassApp {
                             .style(text_muted_style)
                             .render(content_inner, frame);
                     } else {
-                        let empty_data = AnalyticsChartData::default();
-                        let chart_data = self.analytics_cache.as_ref().unwrap_or(&empty_data);
                         let explorer_state = super::analytics_charts::ExplorerState {
                             metric: self.explorer_metric,
                             overlay: self.explorer_overlay,
@@ -15885,43 +16126,61 @@ impl super::ftui_adapter::Model for CassApp {
                 }
 
                 // ── Analytics status footer ──────────────────────────────
-                let analytics_deg_tag = if degradation.is_full() {
-                    String::new()
-                } else {
-                    format!(" | deg:{}", degradation.as_str())
-                };
-                let analytics_loading_tag =
-                    if self.loading_context == Some(LoadingContext::Analytics) {
-                        format!(" | {} loading", self.loading_spinner_glyph())
-                    } else {
-                        String::new()
-                    };
-                let drilldown_hint = if self.analytics_selectable_count() > 0 {
-                    format!(
-                        " | [{}/{}] Enter=drilldown",
-                        self.analytics_selection + 1,
-                        self.analytics_selectable_count()
-                    )
-                } else {
-                    String::new()
-                };
-                let nav_hints = if atopo.show_footer_hints {
-                    format!(
-                        " | \u{2190}\u{2192}=views \u{2191}\u{2193}=select{} Esc=back",
-                        drilldown_hint
-                    )
-                } else {
-                    // Narrow: omit hints to save space, keep essentials only.
-                    format!("{} Esc=back", drilldown_hint)
-                };
-                let analytics_status = format!(
-                    " Analytics: {} | {}{nav_hints}{analytics_deg_tag}{analytics_loading_tag}",
-                    self.analytics_view.label(),
-                    breakpoint.footer_label(),
+                let mut footer_spans: Vec<ftui::text::Span> = Vec::new();
+                footer_spans.push(ftui::text::Span::styled("analytics ", text_muted_style));
+                footer_spans.push(
+                    ftui::text::Span::styled(
+                        self.analytics_view.label(),
+                        ftui::Style::new().fg(analytics_accent).bold(),
+                    ),
                 );
-                Paragraph::new(&*analytics_status)
-                    .style(text_muted_style)
-                    .render(vertical[2], frame);
+                footer_spans.push(ftui::text::Span::styled(
+                    format!("  [{}]", breakpoint.footer_label()),
+                    text_muted_style,
+                ));
+
+                if self.analytics_selectable_count() > 0 {
+                    footer_spans.push(ftui::text::Span::styled("  \u{2502} ", text_muted_style));
+                    footer_spans.push(ftui::text::Span::styled(
+                        format!(
+                            "row {}/{}",
+                            self.analytics_selection + 1,
+                            self.analytics_selectable_count()
+                        ),
+                        ftui::Style::new().fg(dim_packed_color(analytics_accent, 0.85)),
+                    ));
+                }
+
+                if atopo.show_footer_hints {
+                    footer_spans.push(ftui::text::Span::styled("  \u{2502} ", text_muted_style));
+                    footer_spans.push(ftui::text::Span::styled(
+                        "\u{2190}\u{2192} views  \u{2191}\u{2193} select  Enter drilldown  Esc back",
+                        text_muted_style,
+                    ));
+                } else {
+                    footer_spans.push(ftui::text::Span::styled("  \u{2502} Esc back", text_muted_style));
+                }
+
+                if !degradation.is_full() {
+                    footer_spans.push(ftui::text::Span::styled("  \u{2502} ", text_muted_style));
+                    footer_spans.push(ftui::text::Span::styled(
+                        format!("deg:{}", degradation.as_str()),
+                        ftui::Style::new().fg(ftui::PackedRgba::rgb(255, 190, 90)),
+                    ));
+                }
+                if self.loading_context == Some(LoadingContext::Analytics) {
+                    footer_spans.push(ftui::text::Span::styled("  \u{2502} ", text_muted_style));
+                    footer_spans.push(ftui::text::Span::styled(
+                        format!("{} loading", self.loading_spinner_glyph()),
+                        ftui::Style::new().fg(analytics_accent).bold(),
+                    ));
+                }
+
+                Paragraph::new(ftui::text::Text::from_lines(vec![ftui::text::Line::from_spans(
+                    footer_spans,
+                )]))
+                .style(text_muted_style)
+                .render(vertical[2], frame);
             }
 
             AppSurface::Sources => {
@@ -16630,8 +16889,8 @@ pub fn run_tui_ftui(
         model.macro_playback = Some(MacroPlayback::new(macro_data));
     }
 
-    // All paths use the same Program::with_config entry point.
-    let mut program = ftui::Program::with_config(model, config)
+    // All paths use the native ftui backend (no crossterm compat).
+    let mut program = ftui::Program::with_native_backend(model, config)
         .map_err(|e| anyhow::anyhow!("ftui program creation error: {e}"))?;
 
     if macro_config.record_path.is_some() {

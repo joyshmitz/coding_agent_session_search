@@ -42,11 +42,11 @@ rustc-hash = "*"  # Fast non-cryptographic hashing for cache keys (P1 Opt 1.3), 
 smallvec = "*"  # Stack-allocated small vectors for hot paths (Opt 4.4)
 regex = "*"
 reqwest = { version = "*", default-features = false, features = ["json", "rustls-tls", "blocking", "multipart"] }
-crossterm = "*"
 portable-pty = "*"
 # FrankenTUI migration foundation (bead 2noh9.2.1).
 # Strategy: pin a Git revision for reproducible CI builds.
-ftui = { version = "0.2.0", path = "../frankentui/crates/ftui", features = ["crossterm"] }
+ftui = { version = "0.2.0", path = "../frankentui/crates/ftui" }
+ftui-runtime = { version = "0.2.0", path = "../frankentui/crates/ftui-runtime", features = ["native-backend"] }
 ftui-extras = { version = "0.2.0", path = "../frankentui/crates/ftui-extras", default-features = false, features = ["markdown", "syntax", "charts", "canvas", "theme", "clipboard", "clipboard-fallback", "export", "visual-fx", "forms", "validation", "help"] }
 dirs = "*"
 walkdir = "*"

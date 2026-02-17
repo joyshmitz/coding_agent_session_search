@@ -698,7 +698,6 @@ dependencies = [
  "crc32fast",
  "criterion",
  "crossbeam-channel",
- "crossterm",
  "dialoguer",
  "directories",
  "dirs",
@@ -710,6 +709,7 @@ dependencies = [
  "ftui",
  "ftui-extras",
  "ftui-harness",
+ "ftui-runtime",
  "glob",
  "half",
  "hex",
@@ -1689,6 +1689,7 @@ dependencies = [
  "ftui-text",
  "ftui-widgets",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -1729,6 +1730,7 @@ dependencies = [
  "ftui-render",
  "ftui-style",
  "ftui-text",
+ "ftui-tty",
  "tracing",
  "unicode-segmentation",
  "unicode-width",
@@ -1759,6 +1761,19 @@ dependencies = [
  "smallvec",
  "tracing",
  "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "ftui-tty"
+version = "0.2.0"
+dependencies = [
+ "ftui-backend",
+ "ftui-core",
+ "ftui-render",
+ "nix 0.31.1",
+ "rustix",
+ "signal-hook 0.4.3",
 ]
 
 [[package]]
