@@ -184,10 +184,7 @@ fn detect_terminal_size() -> (u16, u16) {
     #[cfg(unix)]
     {
         if io::stdin().is_terminal() {
-            let output = std::process::Command::new("stty")
-                .arg("size")
-                .output()
-                .ok();
+            let output = std::process::Command::new("stty").arg("size").output().ok();
             if let Some(output) = output
                 && output.status.success()
                 && let Ok(text) = String::from_utf8(output.stdout)
@@ -297,6 +294,13 @@ impl RawModeGuard {
             let _ = enabled;
             Ok(Self {})
         }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = self.inner.take();
     }
 }
 

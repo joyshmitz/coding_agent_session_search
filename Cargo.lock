@@ -710,6 +710,7 @@ dependencies = [
  "ftui-extras",
  "ftui-harness",
  "ftui-runtime",
+ "ftui-tty",
  "glob",
  "half",
  "hex",

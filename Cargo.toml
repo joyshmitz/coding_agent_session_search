@@ -47,6 +47,7 @@ portable-pty = "*"
 # Strategy: pin a Git revision for reproducible CI builds.
 ftui = { version = "0.2.0", path = "../frankentui/crates/ftui" }
 ftui-runtime = { version = "0.2.0", path = "../frankentui/crates/ftui-runtime", features = ["native-backend"] }
+ftui-tty = { version = "0.2.0", path = "../frankentui/crates/ftui-tty" }
 ftui-extras = { version = "0.2.0", path = "../frankentui/crates/ftui-extras", default-features = false, features = ["markdown", "syntax", "charts", "canvas", "theme", "clipboard", "clipboard-fallback", "export", "visual-fx", "forms", "validation", "help"] }
 dirs = "*"
 walkdir = "*"

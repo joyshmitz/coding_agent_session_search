@@ -3523,13 +3523,7 @@ fn compact_i64_for_analytics(value: i64) -> String {
 
 fn sparkline_from_values(values: &[f64], max_width: usize) -> String {
     const BLOCKS: &[char] = &[
-        '\u{2581}',
-        '\u{2582}',
-        '\u{2583}',
-        '\u{2584}',
-        '\u{2585}',
-        '\u{2586}',
-        '\u{2587}',
+        '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
         '\u{2588}',
     ];
 
@@ -3560,7 +3554,7 @@ fn sparkline_from_values(values: &[f64], max_width: usize) -> String {
         return String::new();
     }
     if (max_v - min_v).abs() <= f64::EPSILON {
-        return std::iter::repeat(BLOCKS[3]).take(sampled.len()).collect();
+        return std::iter::repeat_n(BLOCKS[3], sampled.len()).collect();
     }
 
     let range = max_v - min_v;
@@ -9323,7 +9317,10 @@ impl CassApp {
                 self.analytics_view.label(),
                 active_style,
             ));
-            spans.push(ftui::text::Span::styled("  \u{2190}/\u{2192} switch", meta_style));
+            spans.push(ftui::text::Span::styled(
+                "  \u{2190}/\u{2192} switch",
+                meta_style,
+            ));
         }
         ftui::text::Line::from_spans(spans)
     }
@@ -9336,14 +9333,16 @@ impl CassApp {
         meta_style: ftui::Style,
     ) -> ftui::text::Line {
         let mut spans: Vec<ftui::text::Span> = Vec::new();
-        let push_metric =
-            |spans: &mut Vec<ftui::text::Span>, label: &str, value: String, sep_style: ftui::Style| {
-                if !spans.is_empty() {
-                    spans.push(ftui::text::Span::styled(" \u{2502} ", sep_style));
-                }
-                spans.push(ftui::text::Span::styled(format!("{label}:"), sep_style));
-                spans.push(ftui::text::Span::styled(value, value_style));
-            };
+        let push_metric = |spans: &mut Vec<ftui::text::Span>,
+                           label: &str,
+                           value: String,
+                           sep_style: ftui::Style| {
+            if !spans.is_empty() {
+                spans.push(ftui::text::Span::styled(" \u{2502} ", sep_style));
+            }
+            spans.push(ftui::text::Span::styled(format!("{label}:"), sep_style));
+            spans.push(ftui::text::Span::styled(value, value_style));
+        };
 
         push_metric(
             &mut spans,
@@ -9377,12 +9376,7 @@ impl CassApp {
         );
         let filter_count = self.analytics_filter_count();
         if filter_count > 0 {
-            push_metric(
-                &mut spans,
-                "filters",
-                filter_count.to_string(),
-                meta_style,
-            );
+            push_metric(&mut spans, "filters", filter_count.to_string(), meta_style);
         }
 
         if width >= 72 {
@@ -14190,8 +14184,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::Resized { width, height } => {
                 // Frame dimensions update automatically via ftui runtime
                 self.pane_split_drag = None;
-                self.last_terminal_size
-                    .set((width.max(1), height.max(1)));
+                self.last_terminal_size.set((width.max(1), height.max(1)));
                 // Capture latest resize evidence after coalescer processes the event.
                 self.evidence.refresh();
                 ftui::Cmd::none()
@@ -16128,12 +16121,10 @@ impl super::ftui_adapter::Model for CassApp {
                 // ── Analytics status footer ──────────────────────────────
                 let mut footer_spans: Vec<ftui::text::Span> = Vec::new();
                 footer_spans.push(ftui::text::Span::styled("analytics ", text_muted_style));
-                footer_spans.push(
-                    ftui::text::Span::styled(
-                        self.analytics_view.label(),
-                        ftui::Style::new().fg(analytics_accent).bold(),
-                    ),
-                );
+                footer_spans.push(ftui::text::Span::styled(
+                    self.analytics_view.label(),
+                    ftui::Style::new().fg(analytics_accent).bold(),
+                ));
                 footer_spans.push(ftui::text::Span::styled(
                     format!("  [{}]", breakpoint.footer_label()),
                     text_muted_style,
@@ -16158,7 +16149,10 @@ impl super::ftui_adapter::Model for CassApp {
                         text_muted_style,
                     ));
                 } else {
-                    footer_spans.push(ftui::text::Span::styled("  \u{2502} Esc back", text_muted_style));
+                    footer_spans.push(ftui::text::Span::styled(
+                        "  \u{2502} Esc back",
+                        text_muted_style,
+                    ));
                 }
 
                 if !degradation.is_full() {
@@ -16176,9 +16170,9 @@ impl super::ftui_adapter::Model for CassApp {
                     ));
                 }
 
-                Paragraph::new(ftui::text::Text::from_lines(vec![ftui::text::Line::from_spans(
-                    footer_spans,
-                )]))
+                Paragraph::new(ftui::text::Text::from_lines(vec![
+                    ftui::text::Line::from_spans(footer_spans),
+                ]))
                 .style(text_muted_style)
                 .render(vertical[2], frame);
             }
