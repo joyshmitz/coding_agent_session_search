@@ -95,6 +95,11 @@ impl ClineConnector {
 
 impl Connector for ClineConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("cline")
+            && detected.detected
+        {
+            return detected;
+        }
         let roots = Self::storage_roots();
         if !roots.is_empty() {
             DetectionResult {

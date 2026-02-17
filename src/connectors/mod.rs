@@ -3,6 +3,8 @@
 use crate::sources::config::{PathMapping, Platform};
 use crate::sources::provenance::Origin;
 use bloomfilter::Bloom;
+#[cfg(not(test))]
+use franken_agent_detection::{AgentDetectOptions, detect_installed_agents};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -420,6 +422,78 @@ impl DetectionResult {
             root_paths: Vec::new(),
         }
     }
+}
+
+#[cfg(not(test))]
+fn connector_to_franken_slug(connector_slug: &str) -> Option<&'static str> {
+    match connector_slug {
+        "claude_code" | "claude" => Some("claude"),
+        "cline" => Some("cline"),
+        "codex" => Some("codex"),
+        "cursor" => Some("cursor"),
+        "factory" => Some("factory"),
+        "gemini" => Some("gemini"),
+        "copilot" | "github-copilot" => Some("github-copilot"),
+        "opencode" => Some("opencode"),
+        _ => None,
+    }
+}
+
+#[cfg(not(test))]
+fn franken_detection_map() -> &'static HashMap<String, DetectionResult> {
+    static CACHE: std::sync::OnceLock<HashMap<String, DetectionResult>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let opts = AgentDetectOptions {
+            only_connectors: None,
+            include_undetected: true,
+            root_overrides: Vec::new(),
+        };
+        match detect_installed_agents(&opts) {
+            Ok(report) => report
+                .installed_agents
+                .into_iter()
+                .map(|entry| {
+                    let mut evidence = entry.evidence;
+                    if evidence.is_empty() {
+                        evidence.push(format!("franken detect slug={}", entry.slug));
+                    }
+                    (
+                        entry.slug,
+                        DetectionResult {
+                            detected: entry.detected,
+                            evidence,
+                            root_paths: entry.root_paths.into_iter().map(PathBuf::from).collect(),
+                        },
+                    )
+                })
+                .collect(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "franken-agent-detection unavailable; falling back to connector-local detection"
+                );
+                HashMap::new()
+            }
+        }
+    })
+}
+
+/// Best-effort detection from `franken-agent-detection` for supported connectors.
+///
+/// Returns `None` when a connector is not mapped to the franken slug set.
+/// Returns `Some(DetectionResult)` (including `detected=false`) for mapped
+/// connectors when the franken report is available.
+#[cfg(test)]
+pub fn franken_detection_for_connector(connector_slug: &str) -> Option<DetectionResult> {
+    let _ = connector_slug;
+    None
+}
+
+#[cfg(not(test))]
+pub fn franken_detection_for_connector(connector_slug: &str) -> Option<DetectionResult> {
+    let slug = connector_to_franken_slug(connector_slug)?;
+    franken_detection_map().get(slug).cloned()
 }
 
 /// A root directory to scan with associated provenance.

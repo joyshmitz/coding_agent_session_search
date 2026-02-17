@@ -35,6 +35,7 @@
 
 mod util;
 
+use coding_agent_search::ftui_harness;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

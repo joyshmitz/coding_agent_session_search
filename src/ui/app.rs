@@ -241,7 +241,6 @@ const PANEL_RATIO_MAX: f64 = 0.75;
 const FOOTER_HINT_ROOT_ID: HelpId = HelpId(1_000_000);
 const RESULTS_REVEAL_MIN_HITS: usize = 6;
 const RESULTS_REVEAL_MAX_HITS: usize = 400;
-const SEARCH_STATS_EST_COST_PER_MILLION_TOKENS: f64 = 9.0;
 const SURFACE_TRANSITION_DURATION: Duration = Duration::from_millis(160);
 const ANALYTICS_VIEW_TRANSITION_DURATION: Duration = Duration::from_millis(120);
 
@@ -2405,8 +2404,6 @@ pub struct RowMiniAnalytics {
     pub matched_messages: usize,
     /// Estimated total API tokens (chars/4 heuristic) for matched messages.
     pub estimated_tokens: i64,
-    /// Estimated cost in USD from estimated tokens.
-    pub estimated_cost_usd: f64,
 }
 
 fn source_display_label(source_id: &str, origin_host: Option<&str>) -> String {
@@ -2545,22 +2542,6 @@ fn format_compact_metric(n: i64) -> String {
     }
 }
 
-fn format_estimated_cost_usd(cost_usd: f64) -> String {
-    if cost_usd <= 0.0 {
-        "$0.000".to_string()
-    } else if cost_usd < 0.001 {
-        "<$0.001".to_string()
-    } else if cost_usd < 1.0 {
-        format!("${cost_usd:.3}")
-    } else if cost_usd < 10.0 {
-        format!("${cost_usd:.2}")
-    } else if cost_usd < 100.0 {
-        format!("${cost_usd:.1}")
-    } else {
-        format!("${cost_usd:.0}")
-    }
-}
-
 fn estimate_tokens_from_hit_for_stats(hit: &SearchHit) -> i64 {
     let text = if !hit.content.is_empty() {
         hit.content.as_str()
@@ -2650,6 +2631,22 @@ impl ResultItem {
             "[{}]",
             source_display_label(&self.hit.source_id, self.hit.origin_host.as_deref())
         )
+    }
+
+    fn source_kind(&self) -> &'static str {
+        if self.hit.source_id == "local" || self.hit.origin_kind.eq_ignore_ascii_case("local") {
+            "local"
+        } else {
+            "remote"
+        }
+    }
+
+    fn source_kind_icon(&self) -> &'static str {
+        if self.source_kind() == "remote" {
+            "\u{21c4}"
+        } else {
+            "\u{2302}"
+        }
     }
 
     fn location_label(&self) -> String {
@@ -2822,13 +2819,6 @@ impl ResultItem {
                     ftui::text::Span::styled("● ", self.agent_accent_style),
                     ftui::text::Span::styled(token_text, self.text_primary_style),
                 ];
-                if analytics.estimated_cost_usd >= 0.001 {
-                    spans.push(ftui::text::Span::styled(" · ", self.text_subtle_style));
-                    spans.push(ftui::text::Span::styled(
-                        format_estimated_cost_usd(analytics.estimated_cost_usd),
-                        self.success_style,
-                    ));
-                }
                 spans.push(ftui::text::Span::styled(" · ", self.text_subtle_style));
                 spans.push(ftui::text::Span::styled(msg_text, self.text_subtle_style));
                 spans
@@ -2932,7 +2922,16 @@ impl RenderItem for ResultItem {
         let score_bar_chars = score_bar.chars().count();
         let source_badge = self.source_badge();
         let source_badge_chars = source_badge.chars().count();
-        let source_is_remote = hit.source_id != "local";
+        let source_is_remote = self.source_kind() == "remote";
+        let match_chip_style = match hit.match_type {
+            MatchType::Exact => self.success_style.bold(),
+            MatchType::Prefix => self.score_style.bold(),
+            MatchType::ImplicitWildcard
+            | MatchType::Wildcard
+            | MatchType::Suffix
+            | MatchType::Substring => self.text_subtle_style.bold(),
+        };
+        let match_chip = format!("mt {}", self.match_type_label());
         let mut meta_spans = vec![
             ftui::text::Span::styled("      ", bg_style),
             ftui::text::Span::styled(score_bar, self.score_style),
@@ -2955,8 +2954,8 @@ impl RenderItem for ResultItem {
         if let Some(snippet_preview) = compact_preview {
             meta_spans.push(ftui::text::Span::styled(" ", bg_style));
             meta_spans.push(ftui::text::Span::styled(
-                format!("mt {}", self.match_type_label()),
-                self.text_subtle_style,
+                match_chip.clone(),
+                match_chip_style,
             ));
             let analytics_spans = self.mini_analytics_spans();
             if !analytics_spans.is_empty() {
@@ -2973,10 +2972,7 @@ impl RenderItem for ResultItem {
             let hit = &self.hit;
             let ws_label = elide_path_for_metadata(&hit.workspace, 32);
             meta_spans.push(ftui::text::Span::styled(" ", bg_style));
-            meta_spans.push(ftui::text::Span::styled(
-                format!("mt {}", self.match_type_label()),
-                self.text_subtle_style,
-            ));
+            meta_spans.push(ftui::text::Span::styled(match_chip, match_chip_style));
             meta_spans.push(ftui::text::Span::styled(
                 " \u{2502} ",
                 self.text_subtle_style,
@@ -3017,8 +3013,38 @@ impl RenderItem for ResultItem {
             ]));
         }
 
+        if self.row_height >= 5 {
+            let mut signal_spans = vec![
+                ftui::text::Span::styled("    \u{2570}\u{2500} ", self.text_subtle_style),
+                ftui::text::Span::styled(
+                    format!("{} {}", self.source_kind_icon(), self.source_kind()),
+                    if source_is_remote {
+                        self.source_remote_style.bold()
+                    } else {
+                        self.source_local_style.bold()
+                    },
+                ),
+                ftui::text::Span::styled(" · ", self.text_subtle_style),
+                ftui::text::Span::styled(
+                    format!("score {}", score_display_label(hit.score)),
+                    self.score_style,
+                ),
+                ftui::text::Span::styled(" · ", self.text_subtle_style),
+                ftui::text::Span::styled(format!("idx {}", self.index), self.text_muted_style),
+            ];
+            let analytics_spans = self.mini_analytics_spans();
+            if !analytics_spans.is_empty() {
+                signal_spans.push(ftui::text::Span::styled(" · ", self.text_subtle_style));
+                signal_spans.extend(analytics_spans);
+            }
+            lines.push(ftui::text::Line::from_spans(signal_spans));
+        }
+
         if self.row_height >= 4 {
-            let snippet_budget = self.snippet_line_budget(content_width.saturating_sub(8));
+            let mut snippet_budget = self.snippet_line_budget(content_width.saturating_sub(8));
+            if self.row_height >= 5 {
+                snippet_budget = snippet_budget.saturating_sub(1);
+            }
             let snippet_lines = self.snippet_lines(content_width.saturating_sub(8), snippet_budget);
             for snippet in snippet_lines {
                 let mut snippet_spans = vec![ftui::text::Span::styled(
@@ -3252,19 +3278,21 @@ fn build_footer_hud_line(
     let mut spans = Vec::new();
 
     for lane in lanes {
-        let lane_chars = lane.key.chars().count() + 1 + lane.value.chars().count();
-        let prefix = if rendered == 0 { 1 } else { 3 };
+        let lane_chars = lane.key.chars().count() + 3 + lane.value.chars().count();
+        let prefix = 1;
 
         if rendered == 0 && used + prefix + lane_chars > max_chars {
-            let max_value = max_chars.saturating_sub(prefix + lane.key.chars().count() + 1);
+            let max_value = max_chars.saturating_sub(prefix + lane.key.chars().count() + 3);
             if max_value == 0 {
                 continue;
             }
             let truncated = elide_text(&lane.value, max_value);
             spans.push(ftui::text::Span::styled(" ", sep_style));
+            spans.push(ftui::text::Span::styled("[", sep_style));
             spans.push(ftui::text::Span::styled(lane.key.to_string(), key_style));
             spans.push(ftui::text::Span::styled(":", sep_style));
             spans.push(ftui::text::Span::styled(truncated, lane.value_style));
+            spans.push(ftui::text::Span::styled("]", sep_style));
             break;
         }
 
@@ -3272,19 +3300,16 @@ fn build_footer_hud_line(
             continue;
         }
 
-        if rendered == 0 {
-            spans.push(ftui::text::Span::styled(" ", sep_style));
-            used += 1;
-        } else {
-            spans.push(ftui::text::Span::styled(" | ", sep_style));
-            used += 3;
-        }
+        spans.push(ftui::text::Span::styled(" ", sep_style));
+        used += 1;
+        spans.push(ftui::text::Span::styled("[", sep_style));
         spans.push(ftui::text::Span::styled(lane.key.to_string(), key_style));
         spans.push(ftui::text::Span::styled(":", sep_style));
         spans.push(ftui::text::Span::styled(
             lane.value.clone(),
             lane.value_style,
         ));
+        spans.push(ftui::text::Span::styled("]", sep_style));
         used += lane_chars;
         rendered += 1;
     }
@@ -5892,10 +5917,6 @@ impl CassApp {
                 .estimated_tokens
                 .saturating_add(estimate_tokens_from_hit_for_stats(hit));
         }
-        for analytics in by_session.values_mut() {
-            analytics.estimated_cost_usd = (analytics.estimated_tokens as f64 / 1_000_000.0)
-                * SEARCH_STATS_EST_COST_PER_MILLION_TOKENS;
-        }
         by_session
     }
 
@@ -5918,9 +5939,6 @@ impl CassApp {
                 timestamps.push(ts);
             }
         }
-        let estimated_cost_usd =
-            (estimated_api_tokens as f64 / 1_000_000.0) * SEARCH_STATS_EST_COST_PER_MILLION_TOKENS;
-
         let mut spans: Vec<ftui::text::Span> = vec![
             ftui::text::Span::styled(format_compact_metric(session_keys.len() as i64), value_s),
             ftui::text::Span::styled(" sessions", label_s),
@@ -5930,9 +5948,6 @@ impl CassApp {
             sep.clone(),
             ftui::text::Span::styled(format_compact_metric(estimated_api_tokens), value_s),
             ftui::text::Span::styled(" tok", label_s),
-            sep.clone(),
-            ftui::text::Span::styled("est ", label_s),
-            ftui::text::Span::styled(format_estimated_cost_usd(estimated_cost_usd), value_s),
         ];
 
         if !timestamps.is_empty() {
@@ -5985,6 +6000,89 @@ impl CassApp {
         ftui::text::Line::from_spans(spans)
     }
 
+    /// Build a compact "overview strip" for the top of the results pane.
+    ///
+    /// This complements the bottom stats bar with at-a-glance routing signals:
+    /// active pane, hit/selection totals, match-quality mix, and source scope.
+    fn build_results_overview_line(
+        &self,
+        width: u16,
+        total_hits: usize,
+        pane_count: usize,
+        styles: &StyleContext,
+    ) -> ftui::text::Line {
+        if width == 0 {
+            return ftui::text::Line::raw(String::new());
+        }
+
+        let label_s = styles.style(style_system::STYLE_TEXT_SUBTLE);
+        let value_s = styles.style(style_system::STYLE_TEXT_PRIMARY);
+        let success_s = styles.style(style_system::STYLE_STATUS_SUCCESS);
+        let info_s = styles.style(style_system::STYLE_STATUS_INFO);
+        let warn_s = styles.style(style_system::STYLE_STATUS_WARNING);
+
+        let mut exact = 0usize;
+        let mut prefix = 0usize;
+        let mut fuzzy = 0usize;
+        for hit in self.filtered_result_hits_for_stats() {
+            match hit.match_type {
+                MatchType::Exact => exact += 1,
+                MatchType::Prefix => prefix += 1,
+                MatchType::ImplicitWildcard
+                | MatchType::Wildcard
+                | MatchType::Suffix
+                | MatchType::Substring => fuzzy += 1,
+            }
+        }
+
+        let active_pane_label = if pane_count > 1 {
+            self.panes
+                .get(self.active_pane)
+                .map(|pane| display_group_name(&pane.agent))
+                .unwrap_or_else(|| "Mixed".to_string())
+        } else {
+            "Mixed".to_string()
+        };
+        let source_scope = if self.filters.source_filter.is_all() {
+            "all".to_string()
+        } else {
+            self.filters.source_filter.to_string()
+        };
+
+        let lanes = vec![
+            ("pane", active_pane_label, value_s),
+            ("hits", total_hits.to_string(), value_s),
+            ("sel", self.selected.len().to_string(), info_s),
+            ("exact", exact.to_string(), success_s),
+            ("prefix", prefix.to_string(), info_s),
+            ("fuzzy", fuzzy.to_string(), warn_s),
+            ("src", source_scope, value_s),
+        ];
+
+        let max_chars = width as usize;
+        let mut used = 0usize;
+        let mut spans: Vec<ftui::text::Span<'static>> = Vec::new();
+        for (key, value, style) in lanes {
+            let lane_chars = key.chars().count() + value.chars().count() + 3; // [k:v]
+            let prefix = 1;
+            if used + prefix + lane_chars > max_chars {
+                break;
+            }
+            spans.push(ftui::text::Span::styled(" ", label_s));
+            spans.push(ftui::text::Span::styled("[", label_s));
+            spans.push(ftui::text::Span::styled(key.to_string(), label_s));
+            spans.push(ftui::text::Span::styled(":", label_s));
+            spans.push(ftui::text::Span::styled(value, style));
+            spans.push(ftui::text::Span::styled("]", label_s));
+            used += prefix + lane_chars;
+        }
+
+        if spans.is_empty() {
+            spans.push(ftui::text::Span::styled(" ", label_s));
+        }
+        ftui::text::Line::from_spans(spans)
+    }
+
     /// Render the results list pane using VirtualizedList for O(visible) rendering.
     #[allow(clippy::too_many_arguments)]
     fn render_results_pane(
@@ -6031,21 +6129,61 @@ impl CassApp {
             )
         };
         let focused = self.focused_region() == FocusRegion::Results;
+        let styleful = title_focused_style.fg.is_some()
+            || title_unfocused_style.fg.is_some()
+            || pane_focused_style.bg.is_some()
+            || pane_style.bg.is_some();
+        let focus_pulse = if focused {
+            focus_flash_intensity.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let pane_accent = self
+            .panes
+            .get(self.active_pane)
+            .map(|pane| legacy_agent_color(&pane.agent));
+        let mut results_border_style = if focused {
+            title_focused_style
+        } else {
+            title_unfocused_style
+        };
+        let mut results_surface_style = if focused {
+            pane_focused_style
+        } else {
+            pane_style
+        };
+        if styleful && let Some(accent) = pane_accent {
+            let focused_accent = if focus_pulse > 0.01 {
+                let t = (0.10 + focus_pulse * 0.32).clamp(0.0, 0.45);
+                ftui::PackedRgba::rgb(
+                    lerp_u8(accent.r(), 255, t),
+                    lerp_u8(accent.g(), 255, t),
+                    lerp_u8(accent.b(), 255, t),
+                )
+            } else {
+                accent
+            };
+            results_border_style = if focused {
+                results_border_style.fg(focused_accent).bold()
+            } else {
+                results_border_style.fg(dim_packed_color(accent, 0.62))
+            };
+            results_surface_style = results_surface_style.bg(dim_packed_color(
+                accent,
+                if focused {
+                    (0.10 + focus_pulse * 0.08).clamp(0.0, 0.22)
+                } else {
+                    0.05
+                },
+            ));
+        }
         let results_block = Block::new()
             .borders(borders)
             .border_type(border_type)
             .title(&results_title)
             .title_alignment(Alignment::Left)
-            .border_style(if focused {
-                title_focused_style
-            } else {
-                title_unfocused_style
-            })
-            .style(if focused {
-                pane_focused_style
-            } else {
-                pane_style
-            });
+            .border_style(results_border_style)
+            .style(results_surface_style);
         let inner = results_block.inner(area);
         results_block.render(area, frame);
 
@@ -6065,6 +6203,17 @@ impl CassApp {
                 .style(styles.style(style_system::STYLE_TEXT_MUTED))
                 .render(stats_row, frame);
             Rect::new(inner.x, inner.y, inner.width, inner.height - 1)
+        } else {
+            inner
+        };
+        let inner = if !self.panes.is_empty() && inner.height >= 5 {
+            let overview_row = Rect::new(inner.x, inner.y, inner.width, 1);
+            let overview =
+                self.build_results_overview_line(inner.width, total_hits, pane_count, styles);
+            Paragraph::new(ftui::text::Text::from_lines(vec![overview]))
+                .style(styles.style(style_system::STYLE_TEXT_MUTED))
+                .render(overview_row, frame);
+            Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1)
         } else {
             inner
         };
@@ -6191,13 +6340,31 @@ impl CassApp {
             let dimmed_pane_color = dim_packed_color(pane_color, 0.52);
             let is_active = pane_idx == self.active_pane;
             let is_focused = focused && is_active;
-            let accent_color = if is_focused {
+            let pane_focus_pulse = if is_focused {
+                focus_flash_intensity.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let focused_accent = if pane_focus_pulse > 0.01 {
+                let t = (0.08 + pane_focus_pulse * 0.30).clamp(0.0, 0.42);
+                ftui::PackedRgba::rgb(
+                    lerp_u8(pane_color.r(), 255, t),
+                    lerp_u8(pane_color.g(), 255, t),
+                    lerp_u8(pane_color.b(), 255, t),
+                )
+            } else {
                 pane_color
+            };
+            let accent_color = if is_focused {
+                focused_accent
             } else {
                 dimmed_pane_color
             };
             let pane_bg = if is_focused {
-                dim_packed_color(pane_color, 0.12)
+                dim_packed_color(
+                    pane_color,
+                    (0.10 + pane_focus_pulse * 0.08).clamp(0.0, 0.20),
+                )
             } else {
                 dim_packed_color(pane_color, 0.06)
             };
@@ -6380,37 +6547,89 @@ impl CassApp {
         let label_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
         let value_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
         let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
+        let info_style = styles.style(style_system::STYLE_STATUS_INFO);
+        let success_style = styles.style(style_system::STYLE_STATUS_SUCCESS);
+        let warning_style = styles.style(style_system::STYLE_STATUS_WARNING);
         let agent_style = styles.agent_accent_style(&hit.agent);
-        let sep = ftui::text::Span::styled(" \u{2502} ", label_style);
         let mut lines: Vec<ftui::text::Line> = Vec::new();
-
-        // Line 1: agent, workspace, source
+        let source_kind = normalized_source_kind(Some(hit.origin_kind.as_str()), &hit.source_id);
+        let source_style = if source_kind == "remote" {
+            styles.style(style_system::STYLE_SOURCE_REMOTE).bold()
+        } else {
+            styles.style(style_system::STYLE_SOURCE_LOCAL).bold()
+        };
+        let source_icon = if source_kind == "remote" {
+            "\u{21c4}"
+        } else {
+            "\u{2302}"
+        };
         let source_label = source_display_label(&hit.source_id, hit.origin_host.as_deref());
-        let mut spans1 = vec![
-            ftui::text::Span::styled("\u{2713} ", agent_style),
-            ftui::text::Span::styled(&hit.agent, agent_style),
-            sep.clone(),
-            ftui::text::Span::styled(&hit.workspace, value_style),
-            sep.clone(),
-            ftui::text::Span::styled(source_label, muted_style),
+        let source_chip = if let Some(host) = hit.origin_host.as_deref() {
+            format!("{source_icon} {source_label}@{host}")
+        } else {
+            format!("{source_icon} {source_label}")
+        };
+        let workspace_room = inner_width.saturating_sub(44).clamp(16, 56) as usize;
+        let workspace_chip = elide_path_for_metadata(&hit.workspace, workspace_room);
+        let score_style = styles.score_style(normalize_score_for_visuals(hit.score));
+        let (match_label, match_style) = match hit.match_type {
+            MatchType::Exact => ("exact", success_style.bold()),
+            MatchType::Prefix => ("prefix", info_style.bold()),
+            MatchType::ImplicitWildcard => ("auto", warning_style.bold()),
+            MatchType::Wildcard => ("wildcard", warning_style),
+            MatchType::Suffix => ("suffix", muted_style),
+            MatchType::Substring => ("substring", muted_style),
+        };
+        let top_lanes = vec![
+            FooterHudLane {
+                key: "agent",
+                value: format!("\u{2713} {}", hit.agent),
+                value_style: agent_style.bold(),
+            },
+            FooterHudLane {
+                key: "ws",
+                value: workspace_chip,
+                value_style,
+            },
+            FooterHudLane {
+                key: "src",
+                value: source_chip,
+                value_style: source_style,
+            },
+            FooterHudLane {
+                key: "score",
+                value: score_display_label(hit.score),
+                value_style: score_style,
+            },
+            FooterHudLane {
+                key: "mt",
+                value: match_label.to_string(),
+                value_style: match_style,
+            },
         ];
-        if let Some(host) = hit.origin_host.as_deref() {
-            spans1.push(ftui::text::Span::styled(format!(" @{host}"), muted_style));
-        }
-        lines.push(ftui::text::Line::from_spans(spans1));
+        lines.push(build_footer_hud_line(
+            &top_lanes,
+            inner_width,
+            label_style,
+            label_style,
+        ));
 
-        // Line 2: timestamps, duration, message counts, tokens
-        let mut spans2: Vec<ftui::text::Span> = Vec::new();
+        let mut line2_spans: Vec<ftui::text::Span> =
+            vec![ftui::text::Span::styled(" ", label_style)];
+        let mut push_chip = |key: &str, value: String, value_style_chip: ftui::Style| {
+            line2_spans.push(ftui::text::Span::styled("[", label_style));
+            line2_spans.push(ftui::text::Span::styled(key.to_string(), label_style));
+            line2_spans.push(ftui::text::Span::styled(":", label_style));
+            line2_spans.push(ftui::text::Span::styled(value, value_style_chip));
+            line2_spans.push(ftui::text::Span::styled("] ", label_style));
+        };
 
-        // Timestamps & duration from cached_detail if available
+        let mut sparkline_data: Option<(String, usize)> = None;
         if let Some((_, ref cv)) = self.cached_detail {
             if let Some(started) = cv.convo.started_at {
                 let ts_s = started / 1000; // ms → s
                 if let Some(dt) = chrono::DateTime::from_timestamp(ts_s, 0) {
-                    spans2.push(ftui::text::Span::styled(
-                        dt.format("%Y-%m-%d %H:%M").to_string(),
-                        value_style,
-                    ));
+                    push_chip("at", dt.format("%Y-%m-%d %H:%M").to_string(), value_style);
                 }
                 if let Some(ended) = cv.convo.ended_at {
                     let dur_secs = (ended.saturating_sub(started)) / 1000;
@@ -6421,14 +6640,14 @@ impl CassApp {
                     } else {
                         format!("{dur_secs}s")
                     };
-                    spans2.push(ftui::text::Span::styled(
-                        format!(" ({dur_str})"),
-                        muted_style,
-                    ));
+                    push_chip("dur", dur_str, muted_style);
                 }
+            } else if let Some(ts) = hit.created_at
+                && let Some(dt) = chrono::DateTime::from_timestamp(ts, 0)
+            {
+                push_chip("at", dt.format("%Y-%m-%d %H:%M").to_string(), value_style);
             }
 
-            // Message count breakdown
             let (mut n_user, mut n_agent, mut n_tool, mut n_sys) = (0u32, 0, 0, 0);
             for m in &cv.messages {
                 match m.role {
@@ -6440,21 +6659,13 @@ impl CassApp {
                 }
             }
             let total = cv.messages.len();
-            if !spans2.is_empty() {
-                spans2.push(sep.clone());
-            }
-            spans2.push(ftui::text::Span::styled(
-                format!("{total} msgs"),
-                value_style,
-            ));
-            spans2.push(ftui::text::Span::styled(
-                format!(" (u:{n_user} a:{n_agent} t:{n_tool} s:{n_sys})"),
+            push_chip("msgs", format!("{total} msgs"), value_style);
+            push_chip(
+                "mix",
+                format!("u:{n_user} a:{n_agent} t:{n_tool} s:{n_sys}"),
                 muted_style,
-            ));
-
-            // Tokens
+            );
             if let Some(tokens) = cv.convo.approx_tokens {
-                spans2.push(sep.clone());
                 let tok_str = if tokens >= 1_000_000 {
                     format!("{:.1}M tok", tokens as f64 / 1_000_000.0)
                 } else if tokens >= 1_000 {
@@ -6462,37 +6673,41 @@ impl CassApp {
                 } else {
                     format!("{tokens} tok")
                 };
-                spans2.push(ftui::text::Span::styled(tok_str, value_style));
+                push_chip("tok", tok_str, success_style);
             }
-        } else if let Some(ts) = hit.created_at {
-            // Fallback: use SearchHit timestamp
-            if let Some(dt) = chrono::DateTime::from_timestamp(ts, 0) {
-                spans2.push(ftui::text::Span::styled(
-                    dt.format("%Y-%m-%d %H:%M").to_string(),
-                    value_style,
-                ));
+
+            if cv.messages.len() >= 2 {
+                let sparkline = Self::build_text_sparkline(
+                    &cv.messages,
+                    inner_width.saturating_sub(18) as usize,
+                );
+                if !sparkline.is_empty() {
+                    sparkline_data = Some((sparkline, total));
+                }
             }
-        }
-
-        if !spans2.is_empty() {
-            lines.push(ftui::text::Line::from_spans(spans2));
-        }
-
-        // Line 3: mini text sparkline of message activity (if we have messages)
-        if let Some((_, ref cv)) = self.cached_detail
-            && cv.messages.len() >= 2
+        } else if let Some(ts) = hit.created_at
+            && let Some(dt) = chrono::DateTime::from_timestamp(ts, 0)
         {
-            let sparkline =
-                Self::build_text_sparkline(&cv.messages, inner_width.saturating_sub(4) as usize);
-            if !sparkline.is_empty() {
-                lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled(sparkline, muted_style),
-                ]));
-            }
+            push_chip("at", dt.format("%Y-%m-%d %H:%M").to_string(), value_style);
+            push_chip("score", score_display_label(hit.score), score_style);
+            push_chip("mt", match_label.to_string(), match_style);
         }
 
-        // Thin separator after header
-        let sep_line = "\u{2500}".repeat((inner_width.saturating_sub(2) as usize).min(80));
+        if line2_spans.len() > 1 {
+            lines.push(ftui::text::Line::from_spans(line2_spans));
+        }
+
+        if let Some((sparkline, total)) = sparkline_data {
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(" ", label_style),
+                ftui::text::Span::styled("activity ", label_style),
+                ftui::text::Span::styled(sparkline, info_style),
+                ftui::text::Span::styled(format!("  {total} msgs"), muted_style),
+            ]));
+        }
+
+        let sep_len = (inner_width.saturating_sub(2) as usize).clamp(20, 96);
+        let sep_line = "\u{2500}".repeat(sep_len);
         lines.push(ftui::text::Line::from_spans(vec![
             ftui::text::Span::styled(sep_line, label_style),
         ]));
@@ -7057,56 +7272,115 @@ impl CassApp {
             ftui::Style::default().underline().bold().italic()
         };
 
-        if query.is_empty() {
+        let mut query_terms = extract_query_terms(query);
+        if query_terms.is_empty() {
+            let fallback = query.trim();
+            if !fallback.is_empty() {
+                query_terms.push(fallback.to_string());
+            }
+        }
+        if query_terms.is_empty() {
             return Vec::new();
         }
 
-        let query_lower = query.to_lowercase();
+        let mut query_terms_lower: Vec<String> = query_terms
+            .into_iter()
+            .map(|t| t.to_ascii_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if query_terms_lower.is_empty() {
+            return Vec::new();
+        }
+        // Prefer longer matches first so specific terms win over overlaps.
+        query_terms_lower.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        query_terms_lower.dedup();
+
         let mut match_positions: Vec<u16> = Vec::new();
         let mut match_idx = 0usize;
 
         for (line_no, line) in lines.iter_mut().enumerate() {
-            let plain: String = line.spans().iter().map(|s| s.content.as_ref()).collect();
-            let plain_lower = plain.to_lowercase();
+            let spans: Vec<ftui::text::Span<'static>> = line.spans().to_vec();
+            let mut rebuilt: Vec<ftui::text::Span<'static>> = Vec::with_capacity(spans.len() + 4);
 
-            if plain_lower.contains(&query_lower) {
-                // Re-build the line with highlighted matches
-                let mut new_spans: Vec<ftui::text::Span<'static>> = Vec::new();
+            for span in spans {
+                let text = span.content.to_string();
+                let base_style = span.style;
+                if text.is_empty() {
+                    rebuilt.push(span);
+                    continue;
+                }
+
+                let lower = text.to_ascii_lowercase();
+                let lower_bytes = lower.as_bytes();
                 let mut pos = 0usize;
-                let bytes = plain.as_bytes();
-                let lower_bytes = plain_lower.as_bytes();
-                let q_bytes = query_lower.as_bytes();
 
-                while pos < bytes.len() {
-                    if pos + q_bytes.len() <= lower_bytes.len()
-                        && &lower_bytes[pos..pos + q_bytes.len()] == q_bytes
-                    {
+                while pos < text.len() {
+                    let mut matched_len: Option<usize> = None;
+                    for term in &query_terms_lower {
+                        let term_bytes = term.as_bytes();
+                        if term_bytes.is_empty() {
+                            continue;
+                        }
+                        if pos + term_bytes.len() <= lower_bytes.len()
+                            && &lower_bytes[pos..pos + term_bytes.len()] == term_bytes
+                        {
+                            matched_len = Some(term_bytes.len());
+                            break;
+                        }
+                    }
+
+                    if let Some(len) = matched_len {
+                        let end = pos + len;
                         let style = if match_idx == current_match {
                             current_style
                         } else {
                             highlight_style
                         };
-                        let matched =
-                            String::from_utf8_lossy(&bytes[pos..pos + q_bytes.len()]).to_string();
-                        new_spans.push(ftui::text::Span::styled(matched, style));
+                        rebuilt.push(ftui::text::Span::styled(text[pos..end].to_string(), style));
                         match_positions.push(line_no as u16);
                         match_idx += 1;
-                        pos += q_bytes.len();
-                    } else {
-                        // Gather non-matching chars
-                        let start = pos;
-                        while pos < bytes.len()
-                            && (pos + q_bytes.len() > lower_bytes.len()
-                                || &lower_bytes[pos..pos + q_bytes.len()] != q_bytes)
-                        {
-                            pos += 1;
-                        }
-                        let chunk = String::from_utf8_lossy(&bytes[start..pos]).to_string();
-                        new_spans.push(ftui::text::Span::raw(chunk));
+                        pos = end;
+                        continue;
                     }
+
+                    let start = pos;
+                    let mut cursor = pos;
+                    while cursor < text.len() {
+                        let mut starts_match = false;
+                        for term in &query_terms_lower {
+                            let term_bytes = term.as_bytes();
+                            if term_bytes.is_empty() {
+                                continue;
+                            }
+                            if cursor + term_bytes.len() <= lower_bytes.len()
+                                && &lower_bytes[cursor..cursor + term_bytes.len()] == term_bytes
+                            {
+                                starts_match = true;
+                                break;
+                            }
+                        }
+                        if starts_match {
+                            break;
+                        }
+                        if let Some(ch) = text[cursor..].chars().next() {
+                            cursor += ch.len_utf8();
+                        } else {
+                            break;
+                        }
+                    }
+                    if cursor > start {
+                        let chunk = text[start..cursor].to_string();
+                        if let Some(style) = base_style {
+                            rebuilt.push(ftui::text::Span::styled(chunk, style));
+                        } else {
+                            rebuilt.push(ftui::text::Span::raw(chunk));
+                        }
+                    }
+                    pos = cursor.max(start + 1).min(text.len());
                 }
-                *line = ftui::text::Line::from_spans(new_spans);
             }
+
+            *line = ftui::text::Line::from_spans(rebuilt);
         }
 
         match_positions
@@ -7187,16 +7461,6 @@ impl CassApp {
                 ftui::text::Span::styled("  Tokens:   ", label_style),
                 ftui::text::Span::styled(tok_str, value_style),
             ]));
-
-            // Cost estimate (rough: $3/M input + $15/M output, assume 50/50 split)
-            let est_cost = tokens as f64 / 1_000_000.0 * 9.0;
-            if est_cost >= 0.001 {
-                lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("  Est cost: ", label_style),
-                    ftui::text::Span::styled(format!("${est_cost:.3}"), value_style),
-                    ftui::text::Span::styled(" (approx)", muted_style),
-                ]));
-            }
         }
 
         lines.push(ftui::text::Line::from(""));
@@ -7445,21 +7709,88 @@ impl CassApp {
         let title = format!("Detail [{tab_label}]{wrap_indicator}");
 
         let detail_focused = self.focused_region() == FocusRegion::Detail;
-        let block_style = if detail_focused {
+        let styleful = title_focused_style.fg.is_some()
+            || title_unfocused_style.fg.is_some()
+            || pane_focused_style.bg.is_some()
+            || pane_style.bg.is_some();
+        let detail_focus_pulse = if detail_focused && self.anim.enabled {
+            (1.0 - self.anim.focus_flash_progress()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let tab_semantic_accent = match self.detail_tab {
+            DetailTab::Messages => styles
+                .style(style_system::STYLE_STATUS_INFO)
+                .fg
+                .unwrap_or(ftui::PackedRgba::rgb(90, 180, 255)),
+            DetailTab::Snippets => styles
+                .style(style_system::STYLE_STATUS_SUCCESS)
+                .fg
+                .unwrap_or(ftui::PackedRgba::rgb(120, 220, 160)),
+            DetailTab::Raw => styles
+                .style(style_system::STYLE_STATUS_WARNING)
+                .fg
+                .unwrap_or(ftui::PackedRgba::rgb(255, 195, 110)),
+            DetailTab::Json => styles
+                .style(style_system::STYLE_ROLE_TOOL)
+                .fg
+                .unwrap_or(ftui::PackedRgba::rgb(190, 175, 255)),
+            DetailTab::Analytics => styles
+                .style(style_system::STYLE_ROLE_ASSISTANT)
+                .fg
+                .unwrap_or(ftui::PackedRgba::rgb(120, 220, 220)),
+        };
+        let detail_accent = if let Some(hit) = self.selected_hit() {
+            let agent_accent = legacy_agent_color(&hit.agent);
+            ftui::PackedRgba::rgb(
+                lerp_u8(agent_accent.r(), tab_semantic_accent.r(), 0.42),
+                lerp_u8(agent_accent.g(), tab_semantic_accent.g(), 0.42),
+                lerp_u8(agent_accent.b(), tab_semantic_accent.b(), 0.42),
+            )
+        } else {
+            tab_semantic_accent
+        };
+        let mut block_style = if detail_focused {
             pane_focused_style
         } else {
             pane_style
         };
+        let mut detail_border_style = if detail_focused {
+            title_focused_style
+        } else {
+            title_unfocused_style
+        };
+        if styleful {
+            let border_accent = if detail_focus_pulse > 0.01 {
+                let t = (0.08 + detail_focus_pulse * 0.30).clamp(0.0, 0.42);
+                ftui::PackedRgba::rgb(
+                    lerp_u8(detail_accent.r(), 255, t),
+                    lerp_u8(detail_accent.g(), 255, t),
+                    lerp_u8(detail_accent.b(), 255, t),
+                )
+            } else {
+                detail_accent
+            };
+            block_style = block_style.bg(dim_packed_color(
+                detail_accent,
+                if detail_focused {
+                    (0.11 + detail_focus_pulse * 0.07).clamp(0.0, 0.22)
+                } else {
+                    0.06
+                },
+            ));
+            detail_border_style = if detail_focused {
+                detail_border_style.fg(border_accent).bold()
+            } else {
+                detail_border_style.fg(dim_packed_color(detail_accent, 0.60))
+            };
+        }
         let detail_block = Block::new()
             .borders(borders)
             .border_type(border_type)
             .title(&title)
             .title_alignment(Alignment::Left)
-            .border_style(if detail_focused {
-                title_focused_style
-            } else {
-                title_unfocused_style
-            })
+            .border_style(detail_border_style)
             .style(block_style);
         let full_inner = detail_block.inner(area);
         detail_block.render(area, frame);
@@ -7472,8 +7803,41 @@ impl CassApp {
 
         // Render styled tab bar inside the pane (first row).
         let inner = if full_inner.height >= 3 {
-            let tab_active_s = styles.style(style_system::STYLE_TAB_ACTIVE);
-            let tab_inactive_s = styles.style(style_system::STYLE_TAB_INACTIVE);
+            let mut tab_active_s = styles.style(style_system::STYLE_TAB_ACTIVE);
+            let mut tab_inactive_s = styles.style(style_system::STYLE_TAB_INACTIVE);
+            let mut tab_divider_s = text_muted_style;
+            let mut tab_row_style = block_style;
+            if styleful {
+                tab_active_s = tab_active_s
+                    .fg(detail_accent)
+                    .bg(dim_packed_color(
+                        detail_accent,
+                        if detail_focused {
+                            (0.22 + detail_focus_pulse * 0.10).clamp(0.0, 0.34)
+                        } else {
+                            0.16
+                        },
+                    ))
+                    .bold()
+                    .underline();
+                tab_inactive_s = tab_inactive_s.fg(dim_packed_color(detail_accent, 0.72));
+                tab_divider_s = text_muted_style.fg(dim_packed_color(
+                    detail_accent,
+                    if detail_focused {
+                        (0.52 + detail_focus_pulse * 0.14).clamp(0.0, 0.72)
+                    } else {
+                        0.52
+                    },
+                ));
+                tab_row_style = tab_row_style.bg(dim_packed_color(
+                    detail_accent,
+                    if detail_focused {
+                        (0.13 + detail_focus_pulse * 0.07).clamp(0.0, 0.24)
+                    } else {
+                        0.08
+                    },
+                ));
+            }
             let tab_items = [
                 ("Messages", DetailTab::Messages),
                 ("Snippets", DetailTab::Snippets),
@@ -7485,7 +7849,7 @@ impl CassApp {
                 vec![ftui::text::Span::styled(" ", block_style)];
             for (i, (lbl, variant)) in tab_items.iter().enumerate() {
                 if i > 0 {
-                    tab_spans.push(ftui::text::Span::styled(" \u{2502} ", text_muted_style));
+                    tab_spans.push(ftui::text::Span::styled(" \u{2502} ", tab_divider_s));
                 }
                 if self.detail_tab == *variant {
                     tab_spans.push(ftui::text::Span::styled(
@@ -7500,7 +7864,7 @@ impl CassApp {
             Paragraph::new(ftui::text::Text::from_lines(vec![
                 ftui::text::Line::from_spans(tab_spans),
             ]))
-            .style(block_style)
+            .style(tab_row_style)
             .render(tab_row, frame);
             Rect::new(
                 full_inner.x,
@@ -7516,8 +7880,11 @@ impl CassApp {
             return;
         }
 
-        // Reserve space for find bar if active
-        let (content_area, find_area) = if self.detail_find.is_some() {
+        // Reserve space for the interactive find bar only while editing find.
+        // Query-hit highlighting/navigation can stay active while the bar is hidden.
+        let find_bar_active =
+            self.detail_find.is_some() && self.input_mode == InputMode::DetailFind;
+        let (content_area, find_area) = if find_bar_active {
             let find_h = if inner.height >= 4 { 2u16 } else { 1u16 };
             if inner.height <= find_h + 1 {
                 (inner, None)
@@ -7638,7 +8005,7 @@ impl CassApp {
                 .render(content_area, frame);
         }
 
-        // Render find bar if active
+        // Render find bar only while actively editing find text.
         if let (Some(find), Some(find_rect)) = (&self.detail_find, find_area) {
             let container_style = styles.style(style_system::STYLE_DETAIL_FIND_CONTAINER);
             let query_style = styles.style(style_system::STYLE_DETAIL_FIND_QUERY);
@@ -9364,12 +9731,6 @@ impl CassApp {
         );
         push_metric(
             &mut spans,
-            "cost",
-            format!("${:.2}", data.total_cost_usd),
-            meta_style,
-        );
-        push_metric(
-            &mut spans,
             "cov",
             format!("{:.0}%", data.coverage_pct),
             meta_style,
@@ -10768,7 +11129,11 @@ impl SearchService for TantivySearchService {
         use crate::search::query::{FieldMask, SearchResult as BackendSearchResult};
 
         let started = Instant::now();
-        let limit = params.limit.max(1);
+        let limit = if params.limit == 0 {
+            self.client.total_docs().max(1)
+        } else {
+            params.limit.max(1)
+        };
         let sparse_threshold = 3;
         let field_mask = FieldMask::new(true, true, true, true);
 
@@ -11496,7 +11861,7 @@ impl super::ftui_adapter::Model for CassApp {
         // provide find-in-detail text search (Ctrl+F or /).
         if self.show_detail_modal {
             // Sub-intercept: when find bar is active, route text input there.
-            if self.detail_find.is_some() {
+            if self.detail_find.is_some() && self.input_mode == InputMode::DetailFind {
                 match &msg {
                     CassMsg::QueryChanged(text) => {
                         if let Some(ref mut find) = self.detail_find {
@@ -11515,10 +11880,8 @@ impl super::ftui_adapter::Model for CassApp {
                         return self.update(CassMsg::DetailFindNavigated { forward: true });
                     }
                     CassMsg::QuitRequested => {
-                        // Esc → close find bar (detail modal stays open)
-                        self.detail_find = None;
-                        self.input_mode = InputMode::Query;
-                        return ftui::Cmd::none();
+                        // Esc closes the detail modal in one keypress.
+                        return self.update(CassMsg::DetailClosed);
                     }
                     // Let detail-specific messages through
                     CassMsg::DetailFindToggled
@@ -11540,6 +11903,10 @@ impl super::ftui_adapter::Model for CassApp {
                     // Slash or Ctrl+F opens find
                     CassMsg::PaneFilterOpened | CassMsg::WildcardFallbackToggled => {
                         return self.update(CassMsg::DetailFindToggled);
+                    }
+                    // Enter navigates highlighted matches while modal is open.
+                    CassMsg::QuerySubmitted | CassMsg::DetailOpened => {
+                        return self.update(CassMsg::DetailFindNavigated { forward: true });
                     }
                     // j/k scroll the detail view
                     CassMsg::QueryChanged(text) if text == "j" => {
@@ -11638,7 +12005,6 @@ impl super::ftui_adapter::Model for CassApp {
                     // Let these through unchanged
                     CassMsg::DetailClosed
                     | CassMsg::DetailLoadRequested { .. }
-                    | CassMsg::DetailOpened
                     | CassMsg::DetailTabChanged(_)
                     | CassMsg::DetailScrolled { .. }
                     | CassMsg::DetailWrapToggled
@@ -12059,7 +12425,8 @@ impl super::ftui_adapter::Model for CassApp {
                     match_mode: self.match_mode,
                     ranking: self.ranking_mode,
                     context_window: self.context_window,
-                    limit: self.per_pane_limit * 10, // fetch enough for pane grouping
+                    // 0 => unlimited in TUI (do not silently cap at 100).
+                    limit: 0,
                 };
                 // Skip empty queries.
                 if params.query.trim().is_empty() {
@@ -12474,6 +12841,28 @@ impl super::ftui_adapter::Model for CassApp {
                 self.show_detail_modal = true;
                 self.detail_scroll = 0;
                 self.modal_scroll = 0;
+                // Seed modal-highlight terms from the active search query so
+                // matches are visible immediately in full conversation context.
+                let mut highlight_terms = extract_query_terms(&self.query);
+                highlight_terms.retain(|term| {
+                    !matches!(term.to_ascii_lowercase().as_str(), "and" | "or" | "not")
+                });
+                let highlight_query = if highlight_terms.is_empty() {
+                    self.query.trim().to_string()
+                } else {
+                    highlight_terms.join(" ")
+                };
+                self.detail_find = if highlight_query.is_empty() {
+                    None
+                } else {
+                    Some(DetailFindState {
+                        query: highlight_query,
+                        matches: Vec::new(),
+                        current: 0,
+                    })
+                };
+                self.detail_find_matches_cache.borrow_mut().clear();
+                self.input_mode = InputMode::Query;
                 // Auto-collapse tool/system messages on open for a compact
                 // initial view; user can expand with Enter or 'e'.
                 self.collapsed_tools.clear();
@@ -12526,6 +12915,9 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::DetailClosed => {
                 self.show_detail_modal = false;
+                self.input_mode = InputMode::Query;
+                self.detail_find = None;
+                self.detail_find_matches_cache.borrow_mut().clear();
                 self.focus_manager.pop_trap();
                 self.focus_manager.focus(focus_ids::RESULTS_LIST);
                 self.clear_loading_context(LoadingContext::DetailModal);
@@ -12629,10 +13021,13 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::DetailFindToggled => {
-                if self.detail_find.is_some() {
-                    self.detail_find = None;
+                if self.input_mode == InputMode::DetailFind {
+                    self.input_mode = InputMode::Query;
                 } else {
-                    self.detail_find = Some(DetailFindState::default());
+                    self.input_mode = InputMode::DetailFind;
+                    if self.detail_find.is_none() {
+                        self.detail_find = Some(DetailFindState::default());
+                    }
                 }
                 ftui::Cmd::none()
             }
@@ -15746,9 +16141,57 @@ impl super::ftui_adapter::Model for CassApp {
                     );
                     // Render split handle as a subtle vertical divider.
                     if let Some(handle) = split_handle {
+                        let mut handle_style = split_handle_style;
+                        if apply_style {
+                            let accent = self
+                                .panes
+                                .get(self.active_pane)
+                                .map(|pane| legacy_agent_color(&pane.agent))
+                                .or_else(|| styles.style(style_system::STYLE_STATUS_INFO).fg)
+                                .unwrap_or(ftui::PackedRgba::rgb(100, 170, 240));
+                            let handle_focused = matches!(
+                                self.focused_region(),
+                                FocusRegion::Results | FocusRegion::Detail
+                            );
+                            let pulse = if self.anim.enabled && handle_focused {
+                                (1.0 - self.anim.focus_flash_progress()).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let base_fg = split_handle_style
+                                .fg
+                                .unwrap_or(ftui::PackedRgba::rgb(90, 96, 118));
+                            let base_bg = split_handle_style
+                                .bg
+                                .unwrap_or(ftui::PackedRgba::rgb(14, 18, 28));
+                            let fg_mix = if handle_focused {
+                                (0.38 + pulse * 0.24).clamp(0.0, 0.75)
+                            } else {
+                                0.20
+                            };
+                            let bg_mix = if handle_focused {
+                                (0.06 + pulse * 0.08).clamp(0.0, 0.22)
+                            } else {
+                                0.03
+                            };
+                            let rail_fg = ftui::PackedRgba::rgb(
+                                lerp_u8(base_fg.r(), accent.r(), fg_mix),
+                                lerp_u8(base_fg.g(), accent.g(), fg_mix),
+                                lerp_u8(base_fg.b(), accent.b(), fg_mix),
+                            );
+                            let rail_bg = ftui::PackedRgba::rgb(
+                                lerp_u8(base_bg.r(), accent.r(), bg_mix),
+                                lerp_u8(base_bg.g(), accent.g(), bg_mix),
+                                lerp_u8(base_bg.b(), accent.b(), bg_mix),
+                            );
+                            handle_style = handle_style.fg(rail_fg).bg(rail_bg);
+                            if pulse > 0.08 {
+                                handle_style = handle_style.bold();
+                            }
+                        }
                         let divider: String = (0..handle.height).map(|_| "\u{2502}\n").collect();
                         Paragraph::new(divider.trim_end())
-                            .style(split_handle_style)
+                            .style(handle_style)
                             .render(handle, frame);
                     }
                 } else {
@@ -16335,6 +16778,29 @@ impl super::ftui_adapter::Model for CassApp {
                     .style(ftui::Style::new().bg(blended))
                     .render(area, frame);
             }
+        }
+
+        // ── Detail modal overlay ─────────────────────────────────────
+        if self.show_detail_modal {
+            // Render as a large near-fullscreen overlay.
+            let margin_x = if area.width > 8 { 2 } else { 0 };
+            let margin_y = if area.height > 6 { 1 } else { 0 };
+            let modal_w = area.width.saturating_sub(margin_x * 2).max(1);
+            let modal_h = area.height.saturating_sub(margin_y * 2).max(1);
+            let modal_area = Rect::new(area.x + margin_x, area.y + margin_y, modal_w, modal_h);
+            Block::new().style(root_style).render(modal_area, frame);
+            self.render_detail_pane(
+                frame,
+                modal_area,
+                border_type,
+                adaptive_borders,
+                &styles,
+                pane_style,
+                pane_focused_style,
+                pane_title_focused_style,
+                pane_title_unfocused_style,
+                text_muted_style,
+            );
         }
 
         // ── Export modal overlay ─────────────────────────────────────
@@ -17501,6 +17967,7 @@ fn open_hits_in_editor(hits: &[SearchHit], editor_cmd: &str) -> Result<(usize, S
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    use crate::ftui_harness;
     use crate::model::types::Message;
     use crate::search::query::MatchType;
     use crate::ui::components::palette::PaletteAction;
@@ -20231,7 +20698,6 @@ mod tests {
         item.mini_analytics = Some(RowMiniAnalytics {
             matched_messages: 5,
             estimated_tokens: 2_500,
-            estimated_cost_usd: 0.018,
         });
 
         let text: String = item
@@ -20249,7 +20715,6 @@ mod tests {
         item.mini_analytics = Some(RowMiniAnalytics {
             matched_messages: 5,
             estimated_tokens: 2_500,
-            estimated_cost_usd: 0.018,
         });
 
         let text: String = item
@@ -20264,18 +20729,17 @@ mod tests {
         );
         assert!(
             !text.contains('$'),
-            "medium-narrow should omit cost badge, got: {text}"
+            "should not show cost badge, got: {text}"
         );
     }
 
     #[test]
-    fn result_item_mini_analytics_medium_shows_full_badges() {
+    fn result_item_mini_analytics_medium_shows_tokens_and_messages_only() {
         let mut item = make_result_item(make_test_hit(), DensityMode::Cozy.row_height());
         item.max_width = 140; // Medium breakpoint
         item.mini_analytics = Some(RowMiniAnalytics {
             matched_messages: 5,
             estimated_tokens: 2_500,
-            estimated_cost_usd: 0.018,
         });
 
         let text: String = item
@@ -20285,7 +20749,10 @@ mod tests {
             .collect();
         assert!(text.contains("tok"), "expected token badge, got: {text}");
         assert!(text.contains("msgs"), "expected message badge, got: {text}");
-        assert!(text.contains('$'), "expected cost badge, got: {text}");
+        assert!(
+            !text.contains('$'),
+            "should not show cost badge, got: {text}"
+        );
     }
 
     #[test]
@@ -21689,18 +22156,15 @@ mod tests {
     }
 
     #[test]
-    fn detail_modal_intercept_esc_closes_find_first() {
+    fn detail_modal_intercept_esc_closes_modal_in_one_press() {
         let mut app = CassApp::default();
         app.show_detail_modal = true;
         let _ = app.update(CassMsg::DetailFindToggled);
         assert!(app.detail_find.is_some());
-        // Esc should close find bar, NOT the detail modal
+        // Esc closes the detail modal directly, even when find mode is active.
         let _ = app.update(CassMsg::QuitRequested);
-        assert!(app.detail_find.is_none(), "find should close");
-        assert!(app.show_detail_modal, "detail modal should stay open");
-        // Second Esc closes the detail modal
-        let _ = app.update(CassMsg::QuitRequested);
-        assert!(!app.show_detail_modal, "detail modal should close now");
+        assert!(app.detail_find.is_none(), "detail find state should be cleared");
+        assert!(!app.show_detail_modal, "detail modal should close");
     }
 
     #[test]
@@ -26893,7 +27357,7 @@ mod tests {
             text.contains("tok"),
             "stats line should show token estimate"
         );
-        assert!(text.contains("$"), "stats line should show estimated cost");
+        assert!(!text.contains("$"), "stats line should not show token cost");
     }
 
     #[test]
@@ -26909,11 +27373,11 @@ mod tests {
         assert!(text.contains("0"), "empty panes should show zeroed metrics");
         assert!(text.contains("sessions"));
         assert!(text.contains("msgs"));
-        assert!(text.contains("$0.000"));
+        assert!(!text.contains('$'));
     }
 
     #[test]
-    fn build_results_stats_line_estimates_tokens_and_cost_from_content() {
+    fn build_results_stats_line_estimates_tokens_from_content() {
         let mut app = CassApp::default();
         let mut hit = make_hit(1, "/path/1");
         hit.content = "x".repeat(8_000); // ~2,000 tokens by chars/4 heuristic
@@ -26934,8 +27398,8 @@ mod tests {
             "expected token estimate, got: {text}"
         );
         assert!(
-            text.contains("$0.018"),
-            "expected estimated cost, got: {text}"
+            !text.contains('$'),
+            "should not show estimated cost, got: {text}"
         );
     }
 
@@ -26967,14 +27431,12 @@ mod tests {
             .expect("missing session a metrics");
         assert_eq!(a_metrics.matched_messages, 2);
         assert_eq!(a_metrics.estimated_tokens, 1_500);
-        assert!(a_metrics.estimated_cost_usd > 0.0);
 
         let b_metrics = by_session
             .get(&(String::from("remote-ci"), String::from("/session/b")))
             .expect("missing session b metrics");
         assert_eq!(b_metrics.matched_messages, 1);
         assert_eq!(b_metrics.estimated_tokens, 200);
-        assert!(b_metrics.estimated_cost_usd > 0.0);
     }
 
     // -- End stats bar tests --------------------------------------------------

@@ -46,6 +46,11 @@ impl ClaudeCodeConnector {
 
 impl Connector for ClaudeCodeConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("claude_code")
+            && detected.detected
+        {
+            return detected;
+        }
         let root = Self::projects_root();
         if root.exists() {
             DetectionResult {

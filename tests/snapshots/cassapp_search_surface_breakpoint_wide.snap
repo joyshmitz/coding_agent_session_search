@@ -4,12 +4,12 @@
 │All agents › All workspaces › Any time › Balanced › all sources                                                                                               │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭Results (1)───────────────────────────────────────────────────────────────────────────────────────────────────│╭Detail [Messages] ↩───────────────────────────╮
-│▶   1. ▼ @aider Large-snippet rendering edge case                                                             ││  ● Messages  │  Snippets  │  Raw  │  Json  │ │
-│      M█▇ 6.4 [ci-linux] mt suffix │ ws /workspace/cass │ ● 43 tok                                            ││✓ aider │ /workspace/cass │ ci-linux @ci-linux│
-│      /workspace/cass/tests/regression/long_snippet.md:9                                                      ││────────────────────────────────────────────  │
-│    │ The following snippet intentionally exceeds normal row budgets to exercise truncation, striping,        ││Large-snippet rendering edge case             │
-│    │ selection, and horizontal clipping behavior under compact and spacious densities.                       ││agent=aider │ ws=/workspace/cass │ source=ci-l│
-│                                                                                                              ││────────────────────────────────────────────  │
+│ [pane:Mixed] [hits:1] [sel:0] [exact:0] [prefix:0] [fuzzy:1] [src:all]                                       ││  ● Messages  │  Snippets  │  Raw  │  Json  │ │
+│▶   1. ▼ @aider Large-snippet rendering edge case                                                             ││ [agent:✓ aider] [ws:/workspace/cass]         │
+│      M█▇ 6.4 [ci-linux] mt suffix │ ws /workspace/cass │ ● 43 tok                                            ││────────────────────────────────────────────  │
+│      /workspace/cass/tests/regression/long_snippet.md:9                                                      ││Large-snippet rendering edge case             │
+│    ╰─ ⇄ remote · score 0.640 (6.4/10) · idx 1 · ● 43 tok                                                     ││agent=aider │ ws=/workspace/cass │ source=ci-l│
+│    │ The following snippet intentionally exceeds normal row budgets to exercise truncation, striping, ...    ││────────────────────────────────────────────  │
 │                                                                                                              ││  This is a deliberately long snippet line tha│
 │                                                                                                              ││                                              │
 │                                                                                                              ││                                              │
@@ -20,5 +20,5 @@
 │                                                                                                              ││                                              │
 │1 sessions │ 1 msgs │ 43 tok │ est <$0.001                                                                    ││                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────│╰──────────────────────────────────────────────╯
- hits:1 | view:wide/cozy | query:HYB / PFX | perf:lat:— cache:cold | runtime:stable | scope:rank:balanced ctx:M src:all                                         
+ [hits:1] [view:wide/cozy] [query:HYB / PFX] [perf:lat:— cache:cold] [runtime:stable] [scope:rank:balanced ctx:M src:all]                                       
   | Enter=open Ctrl+M/Ctrl+X=select Tab=focus F1=help                                                                                                           

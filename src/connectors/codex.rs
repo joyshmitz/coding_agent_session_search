@@ -137,6 +137,11 @@ fn update_time_bounds(started_at: &mut Option<i64>, ended_at: &mut Option<i64>, 
 
 impl Connector for CodexConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("codex")
+            && detected.detected
+        {
+            return detected;
+        }
         let home = Self::home();
         // Check for actual sessions directory, not just home existing
         let sessions = home.join("sessions");

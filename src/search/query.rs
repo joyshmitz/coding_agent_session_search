@@ -3958,6 +3958,14 @@ fn filters_fingerprint(filters: &SearchFilters) -> String {
 }
 
 impl SearchClient {
+    /// Return the total number of indexed Tantivy documents.
+    pub fn total_docs(&self) -> usize {
+        self.reader
+            .as_ref()
+            .map(|(reader, _)| reader.searcher().num_docs() as usize)
+            .unwrap_or(0)
+    }
+
     fn maybe_reload_reader(&self, reader: &IndexReader) -> Result<()> {
         if !self.reload_on_search {
             return Ok(());

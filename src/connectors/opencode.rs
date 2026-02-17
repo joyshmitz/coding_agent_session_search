@@ -138,6 +138,11 @@ struct ToolState {
 
 impl Connector for OpenCodeConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("opencode")
+            && detected.detected
+        {
+            return detected;
+        }
         if let Some(storage) = Self::storage_root() {
             DetectionResult {
                 detected: true,

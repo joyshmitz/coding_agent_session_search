@@ -465,6 +465,11 @@ impl CopilotConnector {
 
 impl Connector for CopilotConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("copilot")
+            && detected.detected
+        {
+            return detected;
+        }
         let mut evidence = Vec::new();
         let mut root_paths = Vec::new();
 
