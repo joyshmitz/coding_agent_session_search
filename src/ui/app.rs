@@ -3800,7 +3800,7 @@ pub struct CassApp {
     pub active_pane: usize,
     /// Scroll offset within the pane list.
     pub pane_scroll_offset: usize,
-    /// Items shown per pane.
+    /// Items shown per pane. `0` means unlimited.
     pub per_pane_limit: usize,
     /// Virtualized list state for the active results pane (RefCell for view-time mutation).
     pub results_list_state: RefCell<VirtualizedListState>,
@@ -4104,7 +4104,7 @@ impl Default for CassApp {
             panes: Vec::new(),
             active_pane: 0,
             pane_scroll_offset: 0,
-            per_pane_limit: 10,
+            per_pane_limit: 0,
             results_list_state: RefCell::new(VirtualizedListState::new()),
             wildcard_fallback: false,
             suggestions: Vec::new(),
@@ -5109,7 +5109,7 @@ impl CassApp {
             .into_iter()
             .map(|(key, mut hits)| {
                 let total = hits.len();
-                if hits.len() > self.per_pane_limit {
+                if self.per_pane_limit > 0 && hits.len() > self.per_pane_limit {
                     hits.truncate(self.per_pane_limit);
                 }
                 AgentPane {
@@ -10857,7 +10857,7 @@ fn persisted_state_defaults() -> PersistedState {
         context_window: ContextWindow::default(),
         theme_dark: true,
         density_mode: DensityMode::default(),
-        per_pane_limit: 10,
+        per_pane_limit: 0,
         query_history: VecDeque::with_capacity(QUERY_HISTORY_CAP),
         saved_views: Vec::new(),
         fancy_borders: true,
@@ -10980,10 +10980,7 @@ fn persisted_state_from_file(file: PersistedStateFile) -> PersistedState {
             .as_deref()
             .and_then(parse_density_mode)
             .unwrap_or(defaults.density_mode),
-        per_pane_limit: file
-            .per_pane_limit
-            .unwrap_or(defaults.per_pane_limit)
-            .clamp(4, 50),
+        per_pane_limit: file.per_pane_limit.unwrap_or(defaults.per_pane_limit),
         query_history,
         saved_views,
         fancy_borders: file.fancy_borders.unwrap_or(defaults.fancy_borders),
@@ -14214,13 +14211,19 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::PaneGrew => {
-                self.per_pane_limit = (self.per_pane_limit + 2).min(50);
+                if self.per_pane_limit > 0 {
+                    self.per_pane_limit = self.per_pane_limit.saturating_add(10);
+                }
                 self.regroup_panes();
                 self.dirty_since = Some(Instant::now());
                 ftui::Cmd::none()
             }
             CassMsg::PaneShrunk => {
-                self.per_pane_limit = self.per_pane_limit.saturating_sub(2).max(4);
+                self.per_pane_limit = if self.per_pane_limit == 0 {
+                    50
+                } else {
+                    self.per_pane_limit.saturating_sub(10).max(1)
+                };
                 self.regroup_panes();
                 self.dirty_since = Some(Instant::now());
                 ftui::Cmd::none()
@@ -18015,7 +18018,7 @@ mod tests {
         assert!(app.panes.is_empty());
         assert!(app.results.is_empty());
         assert_eq!(app.active_pane, 0);
-        assert_eq!(app.per_pane_limit, 10);
+        assert_eq!(app.per_pane_limit, 0);
         assert_eq!(app.input_mode, InputMode::Query);
         assert_eq!(app.focused_region(), FocusRegion::Results);
         assert_eq!(app.search_mode, SearchMode::Lexical);
@@ -18334,7 +18337,7 @@ mod tests {
             context_window: ContextWindow::Medium,
             theme_dark: true,
             density_mode: DensityMode::Cozy,
-            per_pane_limit: 10,
+            per_pane_limit: 0,
             query_history: VecDeque::new(),
             saved_views: Vec::new(),
             fancy_borders: true,
@@ -18434,7 +18437,7 @@ mod tests {
         let loaded = load_persisted_state_from_path(&state_path)
             .expect("load should succeed")
             .expect("state exists");
-        assert_eq!(loaded.per_pane_limit, 4);
+        assert_eq!(loaded.per_pane_limit, 0);
         assert_eq!(loaded.saved_views.len(), 1);
         assert!(matches!(
             loaded.saved_views[0].source_filter,
@@ -22163,7 +22166,10 @@ mod tests {
         assert!(app.detail_find.is_some());
         // Esc closes the detail modal directly, even when find mode is active.
         let _ = app.update(CassMsg::QuitRequested);
-        assert!(app.detail_find.is_none(), "detail find state should be cleared");
+        assert!(
+            app.detail_find.is_none(),
+            "detail find state should be cleared"
+        );
         assert!(!app.show_detail_modal, "detail modal should close");
     }
 

@@ -46,7 +46,7 @@ portable-pty = "*"
 # FrankenTUI migration foundation (bead 2noh9.2.1).
 # Strategy: pin a Git revision for reproducible CI builds.
 ftui = { version = "0.2.0", path = "../frankentui/crates/ftui" }
-ftui-runtime = { version = "0.2.0", path = "../frankentui/crates/ftui-runtime", features = ["native-backend"] }
+ftui-runtime = { version = "0.2.0", path = "../frankentui/crates/ftui-runtime", features = ["native-backend", "crossterm-compat"] }
 ftui-tty = { version = "0.2.0", path = "../frankentui/crates/ftui-tty" }
 ftui-extras = { version = "0.2.0", path = "../frankentui/crates/ftui-extras", default-features = false, features = ["markdown", "syntax", "charts", "canvas", "theme", "clipboard", "clipboard-fallback", "export", "visual-fx", "forms", "validation", "help"] }
 dirs = "*"
@@ -71,6 +71,8 @@ memmap2 = "*"
 bytemuck = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries"] }
 frankensearch-embed = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-embed", default-features = false, features = ["hash"] }
+frankensearch-core = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-core" }
+frankensearch-fusion = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-fusion", default-features = false }
 frankensearch-index = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-index", default-features = false }
 franken-agent-detection = { version = "0.1.0", path = "../franken_agent_detection" }
 wide = "*"  # Portable SIMD for P0 Opt 2: SIMD dot product

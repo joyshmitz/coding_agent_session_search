@@ -1,4 +1,8 @@
 use anyhow::{Result, anyhow, bail};
+use frankensearch_core::{
+    ScoreSource as FsScoreSource, ScoredResult as FsScoredResult, VectorHit as FsVectorHit,
+};
+use frankensearch_fusion::{RrfConfig as FsRrfConfig, rrf_fuse as fs_rrf_fuse};
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -180,7 +184,6 @@ impl SearchMode {
     }
 }
 
-const RRF_K: f32 = 60.0;
 const HYBRID_CANDIDATE_MULTIPLIER: usize = 3;
 const ANN_CANDIDATE_MULTIPLIER: usize = 4;
 
@@ -895,6 +898,8 @@ impl PartialOrd for SearchHitKey {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 struct HybridScore {
     rrf: f32,
@@ -904,6 +909,8 @@ struct HybridScore {
     semantic_score: Option<f32>,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct FusedHit {
     key: SearchHitKey,
@@ -957,7 +964,25 @@ fn stable_hit_hash(
     hash
 }
 
+fn search_hit_key_doc_id(key: &SearchHitKey) -> String {
+    // Unit Separator (0x1F) is extremely unlikely in filesystem paths/ids.
+    let sep = '\u{1f}';
+    format!(
+        "{}{sep}{}{sep}{}{sep}{}{sep}{}",
+        key.source_id,
+        key.source_path,
+        key.line_number.map(|v| v.to_string()).unwrap_or_default(),
+        key.created_at.map(|v| v.to_string()).unwrap_or_default(),
+        key.content_hash,
+    )
+}
+
+fn search_hit_doc_id(hit: &SearchHit) -> String {
+    search_hit_key_doc_id(&SearchHitKey::from_hit(hit))
+}
+
 /// Comparator for FusedHit: descending RRF score, prefer dual-source, then key for determinism.
+#[cfg(test)]
 fn cmp_fused_hit_desc(a: &FusedHit, b: &FusedHit) -> CmpOrdering {
     b.score
         .rrf
@@ -1031,83 +1056,87 @@ pub fn rrf_fuse_hits(
     if limit == 0 {
         return Vec::new();
     }
+    let total_candidates = lexical.len().saturating_add(semantic.len());
+    if total_candidates == 0 {
+        return Vec::new();
+    }
 
-    // Pre-allocate capacity to avoid rehashing. Worst case: no overlap between lists.
-    let capacity = lexical.len() + semantic.len();
-    let mut scores: HashMap<SearchHitKey, HybridScore> = HashMap::with_capacity(capacity);
-    let mut hits: HashMap<SearchHitKey, SearchHit> = HashMap::with_capacity(capacity);
+    let mut lexical_scored = Vec::with_capacity(lexical.len());
+    let mut semantic_scored = Vec::with_capacity(semantic.len());
+    let mut hit_by_doc_id: HashMap<String, SearchHit> = HashMap::with_capacity(total_candidates);
 
-    for (rank, hit) in lexical.iter().enumerate() {
-        let key = SearchHitKey::from_hit(hit);
-        let entry = scores.entry(key.clone()).or_default();
-        entry.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
-        entry.lexical_rank = Some(rank);
-        entry.lexical_score = Some(hit.score);
+    for hit in lexical {
+        let doc_id = search_hit_doc_id(hit);
         // Prefer lexical hit details (snippets highlight query terms).
-        hits.insert(key, hit.clone());
+        hit_by_doc_id.insert(doc_id.clone(), hit.clone());
+        lexical_scored.push(FsScoredResult {
+            doc_id,
+            score: hit.score,
+            source: FsScoreSource::Lexical,
+            index: None,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(hit.score),
+            rerank_score: None,
+            explanation: None,
+            metadata: None,
+        });
     }
 
-    for (rank, hit) in semantic.iter().enumerate() {
-        let key = SearchHitKey::from_hit(hit);
-        let entry = scores.entry(key.clone()).or_default();
-        entry.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
-        entry.semantic_rank = Some(rank);
-        entry.semantic_score = Some(hit.score);
-        hits.entry(key).or_insert_with(|| hit.clone());
+    for (idx, hit) in semantic.iter().enumerate() {
+        let doc_id = search_hit_doc_id(hit);
+        hit_by_doc_id
+            .entry(doc_id.clone())
+            .or_insert_with(|| hit.clone());
+        semantic_scored.push(FsVectorHit {
+            index: u32::try_from(idx).unwrap_or(u32::MAX),
+            score: hit.score,
+            doc_id,
+        });
     }
 
-    let mut fused: Vec<FusedHit> = Vec::with_capacity(scores.len());
-    for (key, score) in scores {
-        if let Some(hit) = hits.remove(&key) {
-            fused.push(FusedHit { key, score, hit });
-        }
-    }
-
-    // Use quickselect to get top-(offset+limit) elements in O(N + k log k)
-    // instead of sorting all N elements in O(N log N)
-    //
-    // UPDATE: We must sort fully to apply content deduplication correctly.
-    // If we only quickselect top K, we might pick a lower-scored duplicate
-    // that happened to fall into top K while the higher-scored version (if any)
-    // is processed. But actually, RRF score is unique per Key.
-    // The issue is: different Keys (messages) can have same Content.
-    // We want to return unique Content.
-    // So we must sort by Score, then Deduplicate by Content, then Slice.
-
-    fused.sort_by(cmp_fused_hit_desc);
+    // Ask frankensearch for full fused ordering so we can preserve cass's
+    // content-level deduplication/pagination semantics afterward.
+    let fused = fs_rrf_fuse(
+        &lexical_scored,
+        &semantic_scored,
+        total_candidates,
+        0,
+        &FsRrfConfig::default(),
+    );
 
     // Deduplicate by content hash to ensure diversity
     // Key: (source_id, source_path, content_hash) -> seen
     // We include source_path to allow the same content to appear if it's in different files/sessions,
     // but collapse identical messages within the same file (e.g. repeated logs).
     let mut seen_content: HashSet<(String, String, u64)> = HashSet::with_capacity(fused.len());
-    let mut unique_fused = Vec::with_capacity(fused.len());
+    let mut unique_hits = Vec::with_capacity(fused.len());
 
-    for entry in fused {
+    for fused_hit in fused {
+        let mut hit = match hit_by_doc_id.remove(&fused_hit.doc_id) {
+            Some(hit) => hit,
+            None => continue,
+        };
         // Skip tool noise if present (though inputs should be clean)
-        if !entry.hit.content.is_empty() && is_tool_invocation_noise(&entry.hit.content) {
+        if !hit.content.is_empty() && is_tool_invocation_noise(&hit.content) {
             continue;
         }
 
         let key = (
-            entry.hit.source_id.clone(),
-            entry.hit.source_path.clone(),
-            entry.hit.content_hash,
+            hit.source_id.clone(),
+            hit.source_path.clone(),
+            hit.content_hash,
         );
         if !seen_content.contains(&key) {
             seen_content.insert(key);
-            unique_fused.push(entry);
+            hit.score = fused_hit.rrf_score as f32;
+            unique_hits.push(hit);
         }
     }
 
     // Take the slice from offset to offset+limit
-    let start = offset.min(unique_fused.len());
-    let mut results = Vec::with_capacity(limit.min(unique_fused.len().saturating_sub(start)));
-    for mut entry in unique_fused.into_iter().skip(start).take(limit) {
-        entry.hit.score = entry.score.rrf;
-        results.push(entry.hit);
-    }
-    results
+    let start = offset.min(unique_hits.len());
+    unique_hits.into_iter().skip(start).take(limit).collect()
 }
 
 struct QueryCache {
@@ -2295,6 +2324,11 @@ impl SearchClient {
     ) -> Result<Vec<SearchHit>> {
         let sanitized = sanitize_query(query);
         let field_mask = effective_field_mask(field_mask);
+        let limit = if limit == 0 {
+            self.total_docs().max(1)
+        } else {
+            limit
+        };
         let can_use_cache = field_mask.allows_cache() && field_mask.needs_content();
 
         // Schedule warmup for likely prefixes when user pauses typing.
@@ -2570,6 +2604,11 @@ impl SearchClient {
             semantic_filter = semantic_filter.with_roles(Some(roles));
         }
 
+        let limit = if limit == 0 {
+            self.total_docs().max(1)
+        } else {
+            limit
+        };
         let fetch = limit.saturating_add(offset);
         if fetch == 0 {
             return Ok((Vec::new(), None));
@@ -2901,6 +2940,11 @@ impl SearchClient {
         field_mask: FieldMask,
         approximate: bool,
     ) -> Result<SearchResult> {
+        let limit = if limit == 0 {
+            self.total_docs().max(1)
+        } else {
+            limit
+        };
         let fetch = limit.saturating_add(offset);
         if fetch == 0 {
             return Ok(SearchResult {
