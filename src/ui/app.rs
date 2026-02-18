@@ -652,6 +652,14 @@ impl AnalyticsView {
     fn nav_order(self) -> i16 {
         Self::all().iter().position(|v| *v == self).unwrap_or(0) as i16
     }
+
+    /// Canonicalize legacy views that should no longer be shown in normal UX.
+    fn canonical(self) -> Self {
+        match self {
+            Self::Cost => Self::Coverage,
+            other => other,
+        }
+    }
 }
 
 /// Metric to display in the Explorer view.
@@ -4627,7 +4635,7 @@ impl CassApp {
                 AnalyticsView::Heatmap => "analytics:heatmap",
                 AnalyticsView::Breakdowns => "analytics:breakdowns",
                 AnalyticsView::Tools => "analytics:tools",
-                AnalyticsView::Cost => "analytics:cost",
+                AnalyticsView::Cost => "analytics:coverage",
                 AnalyticsView::Plans => "analytics:plans",
                 AnalyticsView::Coverage => "analytics:coverage",
             };
@@ -4711,7 +4719,7 @@ impl CassApp {
                     AnalyticsTarget::Heatmap => AnalyticsView::Heatmap,
                     AnalyticsTarget::Breakdowns => AnalyticsView::Breakdowns,
                     AnalyticsTarget::Tools => AnalyticsView::Tools,
-                    AnalyticsTarget::Cost => AnalyticsView::Cost,
+                    AnalyticsTarget::Cost => AnalyticsView::Coverage,
                     AnalyticsTarget::Plans => AnalyticsView::Plans,
                     AnalyticsTarget::Coverage => AnalyticsView::Coverage,
                 };
@@ -4817,10 +4825,13 @@ impl CassApp {
                             push(shortcuts::DETAIL_OPEN, "drill", contextual.clone(), 4);
                         }
                     }
-                    AnalyticsView::Tools
-                    | AnalyticsView::Cost
-                    | AnalyticsView::Plans
-                    | AnalyticsView::Coverage => {
+                    AnalyticsView::Tools | AnalyticsView::Plans | AnalyticsView::Coverage => {
+                        if self.analytics_selectable_count() > 0 {
+                            push("↑/↓", "select", contextual.clone(), 2);
+                            push(shortcuts::DETAIL_OPEN, "drill", contextual.clone(), 3);
+                        }
+                    }
+                    AnalyticsView::Cost => {
                         if self.analytics_selectable_count() > 0 {
                             push("↑/↓", "select", contextual.clone(), 2);
                             push(shortcuts::DETAIL_OPEN, "drill", contextual.clone(), 3);
@@ -15212,6 +15223,7 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsViewChanged(view) => {
+                let view = view.canonical();
                 let previous_view = self.analytics_view;
                 if previous_view != view {
                     self.analytics_view = view;
@@ -16538,7 +16550,7 @@ impl super::ftui_adapter::Model for CassApp {
                     AnalyticsView::Heatmap => ftui::PackedRgba::rgb(255, 180, 90),
                     AnalyticsView::Breakdowns => ftui::PackedRgba::rgb(210, 140, 255),
                     AnalyticsView::Tools => ftui::PackedRgba::rgb(255, 120, 160),
-                    AnalyticsView::Cost => ftui::PackedRgba::rgb(255, 210, 110),
+                    AnalyticsView::Cost => ftui::PackedRgba::rgb(190, 220, 130),
                     AnalyticsView::Plans => ftui::PackedRgba::rgb(140, 220, 220),
                     AnalyticsView::Coverage => ftui::PackedRgba::rgb(190, 220, 130),
                 };
@@ -23583,7 +23595,7 @@ mod tests {
         );
 
         let _ = app.update(CassMsg::AnalyticsViewChanged(AnalyticsView::Cost));
-        assert_eq!(app.analytics_view, AnalyticsView::Cost);
+        assert_eq!(app.analytics_view, AnalyticsView::Coverage);
     }
 
     #[test]
@@ -25166,7 +25178,7 @@ mod tests {
             (AnalyticsView::Heatmap, "analytics:heatmap"),
             (AnalyticsView::Breakdowns, "analytics:breakdowns"),
             (AnalyticsView::Tools, "analytics:tools"),
-            (AnalyticsView::Cost, "analytics:cost"),
+            (AnalyticsView::Cost, "analytics:coverage"),
             (AnalyticsView::Plans, "analytics:plans"),
             (AnalyticsView::Coverage, "analytics:coverage"),
         ] {

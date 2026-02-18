@@ -1287,14 +1287,10 @@ fn parse_fs_semantic_doc_id(doc_id: &str) -> Option<FsSemanticDocId> {
 
 struct FsSemanticFilterAdapter<'a> {
     filter: &'a SemanticFilter,
-    allowed_doc_id_hashes: Option<HashSet<u64>>,
 }
 
 impl FsSearchFilter for FsSemanticFilterAdapter<'_> {
     fn matches(&self, doc_id: &str, _metadata: Option<&serde_json::Value>) -> bool {
-        if let Some(allowed) = &self.allowed_doc_id_hashes {
-            return allowed.contains(&fs_doc_id_hash(doc_id.as_bytes()));
-        }
         let Some(parsed) = parse_fs_semantic_doc_id(doc_id) else {
             return false;
         };
@@ -1334,12 +1330,10 @@ impl FsSearchFilter for FsSemanticFilterAdapter<'_> {
 
     fn matches_doc_id_hash(
         &self,
-        doc_id_hash: u64,
+        _doc_id_hash: u64,
         _metadata: Option<&serde_json::Value>,
     ) -> Option<bool> {
-        self.allowed_doc_id_hashes
-            .as_ref()
-            .map(|allowed| allowed.contains(&doc_id_hash))
+        None
     }
 
     fn name(&self) -> &str {
@@ -1356,37 +1350,13 @@ fn semantic_filter_is_unrestricted(filter: &SemanticFilter) -> bool {
         && filter.created_to.is_none()
 }
 
-fn fs_doc_id_hash(bytes: &[u8]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut hash = FNV_OFFSET;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
 fn build_fs_semantic_filter_adapter<'a>(
-    index: &'a VectorIndex,
     filter: &'a SemanticFilter,
 ) -> Option<FsSemanticFilterAdapter<'a>> {
     if semantic_filter_is_unrestricted(filter) {
         return None;
     }
-
-    let mut allowed_doc_id_hashes = HashSet::new();
-    for row in index.rows() {
-        if filter.matches(row) {
-            let doc_id = encode_fs_semantic_doc_id(row);
-            allowed_doc_id_hashes.insert(fs_doc_id_hash(doc_id.as_bytes()));
-        }
-    }
-
-    Some(FsSemanticFilterAdapter {
-        filter,
-        allowed_doc_id_hashes: Some(allowed_doc_id_hashes),
-    })
+    Some(FsSemanticFilterAdapter { filter })
 }
 
 fn sanitize_embedder_id_for_filename(embedder_id: &str) -> String {
@@ -1500,7 +1470,6 @@ fn open_fs_semantic_ann_index(fs_index: &FsVectorIndex, ann_path: &Path) -> Resu
 
 struct SemanticSearchState {
     embedder: Arc<dyn Embedder>,
-    index: VectorIndex,
     fs_semantic_index: FsVectorIndex,
     fs_ann_index: Option<FsHnswIndex>,
     ann_path: Option<PathBuf>,
@@ -2886,7 +2855,6 @@ impl SearchClient {
             .map_err(|_| anyhow!("semantic lock poisoned"))?;
         *state_guard = Some(SemanticSearchState {
             embedder,
-            index,
             fs_semantic_index,
             fs_ann_index: None,
             ann_path,
@@ -2987,7 +2955,7 @@ impl SearchClient {
                 is_approximate: search_stats.is_approximate,
             });
 
-            let filter_adapter = build_fs_semantic_filter_adapter(&state.index, &semantic_filter);
+            let filter_adapter = build_fs_semantic_filter_adapter(&semantic_filter);
             let fs_filter: Option<&dyn FsSearchFilter> = filter_adapter
                 .as_ref()
                 .map(|filter| filter as &dyn FsSearchFilter);
@@ -3029,7 +2997,7 @@ impl SearchClient {
             ann_hits
         } else {
             let fs_index = &state.fs_semantic_index;
-            let filter_adapter = build_fs_semantic_filter_adapter(&state.index, &semantic_filter);
+            let filter_adapter = build_fs_semantic_filter_adapter(&semantic_filter);
             let fs_filter: Option<&dyn FsSearchFilter> = filter_adapter
                 .as_ref()
                 .map(|filter| filter as &dyn FsSearchFilter);
@@ -10955,10 +10923,7 @@ mod tests {
             created_to: Some(1_700_000_000_100),
         };
 
-        let adapter = FsSemanticFilterAdapter {
-            filter: &filter,
-            allowed_doc_id_hashes: None,
-        };
+        let adapter = FsSemanticFilterAdapter { filter: &filter };
         assert!(adapter.matches("m|42|2|3|7|11|1|1700000000001", None));
         assert!(!adapter.matches("m|42|2|99|7|11|1|1700000000001", None));
         assert!(!adapter.matches("m|42|2|3|7|11|1|1699999999999", None));
@@ -11017,8 +10982,7 @@ mod tests {
             created_from: None,
             created_to: None,
         };
-        let adapter =
-            build_fs_semantic_filter_adapter(&index, &filter).expect("expected active filter");
+        let adapter = build_fs_semantic_filter_adapter(&filter).expect("expected active filter");
         let hits = fs_index
             .search_top_k(&[1.0, 0.0], 5, Some(&adapter))
             .map_err(|err| anyhow!("frankensearch bridge search failed: {err}"))?;

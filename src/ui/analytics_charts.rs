@@ -534,7 +534,7 @@ fn render_kpi_tiles(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         frame,
     );
 
-    // Row 2: Content Tokens | Plan Messages | Cost / Coverage
+    // Row 2: Content Tokens | Plan Messages | Coverage
     let cols2 = Flex::horizontal()
         .constraints([
             Constraint::Percentage(33.0),
@@ -562,28 +562,15 @@ fn render_kpi_tiles(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         frame,
     );
 
-    // Cost tile or coverage fallback
-    if data.total_cost_usd > 0.001 {
-        render_kpi_tile(
-            "Cost (USD)",
-            &format!("${:.2}", data.total_cost_usd),
-            &data.daily_cost,
-            PackedRgba::rgb(255, 80, 80), // red
-            PackedRgba::rgb(180, 40, 40), // dark red
-            cols2[2],
-            frame,
-        );
-    } else {
-        render_kpi_tile(
-            "API Cvg",
-            &format!("{:.0}%", data.coverage_pct),
-            &[],                            // no sparkline for coverage
-            PackedRgba::rgb(150, 200, 255), // light blue
-            PackedRgba::rgb(80, 120, 180),  // muted blue
-            cols2[2],
-            frame,
-        );
-    }
+    render_kpi_tile(
+        "API Cvg",
+        &format!("{:.0}%", data.coverage_pct),
+        &[],                            // no sparkline for coverage
+        PackedRgba::rgb(150, 200, 255), // light blue
+        PackedRgba::rgb(80, 120, 180),  // muted blue
+        cols2[2],
+        frame,
+    );
 }
 
 /// Render a single KPI tile: label (dim) + value (bright) + mini sparkline.
