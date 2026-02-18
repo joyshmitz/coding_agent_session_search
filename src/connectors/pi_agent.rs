@@ -144,6 +144,18 @@ impl PiAgentConnector {
 
 impl Connector for PiAgentConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("pi_agent") {
+            return if detected.detected {
+                DetectionResult {
+                    detected: true,
+                    evidence: detected.evidence,
+                    root_paths: detected.root_paths,
+                }
+            } else {
+                DetectionResult::not_found()
+            };
+        }
+
         let home = Self::home();
         if home.join("sessions").exists() {
             DetectionResult {

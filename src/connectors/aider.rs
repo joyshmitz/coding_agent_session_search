@@ -141,6 +141,18 @@ impl AiderConnector {
 
 impl Connector for AiderConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("aider") {
+            return if detected.detected {
+                DetectionResult {
+                    detected: true,
+                    evidence: detected.evidence,
+                    root_paths: detected.root_paths,
+                }
+            } else {
+                DetectionResult::not_found()
+            };
+        }
+
         // Fast detection: only check for .aider.chat.history.md in CWD (no recursive scan).
         // The expensive WalkDir scan is deferred to scan() where it's actually needed.
         // Also check for CASS_AIDER_DATA_ROOT env var as a signal.
