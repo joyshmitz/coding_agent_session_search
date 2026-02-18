@@ -465,30 +465,8 @@ impl CopilotConnector {
 
 impl Connector for CopilotConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("copilot")
-            && detected.detected
-        {
-            return detected;
-        }
-        let mut evidence = Vec::new();
-        let mut root_paths = Vec::new();
-
-        for path in Self::all_candidate_paths() {
-            if path.exists() && path.is_dir() {
-                evidence.push(format!("found {}", path.display()));
-                root_paths.push(path);
-            }
-        }
-
-        if root_paths.is_empty() {
-            DetectionResult::not_found()
-        } else {
-            DetectionResult {
-                detected: true,
-                evidence,
-                root_paths,
-            }
-        }
+        crate::connectors::franken_detection_for_connector("copilot")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
@@ -607,8 +585,12 @@ mod tests {
         // On most test systems Copilot dirs won't exist.
         // This test just ensures detect() doesn't panic.
         let result = connector.detect();
-        // Result depends on system — just verify it returns a valid struct.
-        assert!(result.evidence.len() == result.root_paths.len());
+        // Result depends on system — franken detection includes positive and
+        // negative probe evidence. Just assert basic structural invariants.
+        assert!(!result.evidence.is_empty());
+        if result.detected {
+            assert!(!result.root_paths.is_empty());
+        }
     }
 
     #[test]

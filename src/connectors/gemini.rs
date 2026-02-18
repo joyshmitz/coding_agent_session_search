@@ -193,21 +193,8 @@ impl GeminiConnector {
 
 impl Connector for GeminiConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("gemini")
-            && detected.detected
-        {
-            return detected;
-        }
-        let root = Self::root();
-        if root.exists() {
-            DetectionResult {
-                detected: true,
-                evidence: vec![format!("found {}", root.display())],
-                root_paths: vec![root],
-            }
-        } else {
-            DetectionResult::not_found()
-        }
+        crate::connectors::franken_detection_for_connector("gemini")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {

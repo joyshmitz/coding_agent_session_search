@@ -3,7 +3,6 @@
 use crate::sources::config::{PathMapping, Platform};
 use crate::sources::provenance::Origin;
 use bloomfilter::Bloom;
-#[cfg(not(test))]
 use franken_agent_detection::{AgentDetectOptions, detect_installed_agents};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
@@ -424,7 +423,6 @@ impl DetectionResult {
     }
 }
 
-#[cfg(not(test))]
 fn connector_to_franken_slug(connector_slug: &str) -> String {
     match connector_slug.trim().to_ascii_lowercase().as_str() {
         "claude_code" | "claude-code" => "claude".to_string(),
@@ -436,7 +434,6 @@ fn connector_to_franken_slug(connector_slug: &str) -> String {
     }
 }
 
-#[cfg(not(test))]
 fn franken_detection_map() -> &'static HashMap<String, DetectionResult> {
     static CACHE: std::sync::OnceLock<HashMap<String, DetectionResult>> =
         std::sync::OnceLock::new();
@@ -468,7 +465,7 @@ fn franken_detection_map() -> &'static HashMap<String, DetectionResult> {
             Err(err) => {
                 tracing::warn!(
                     error = %err,
-                    "franken-agent-detection unavailable; falling back to connector-local detection"
+                    "franken-agent-detection unavailable; connector detection will report not found"
                 );
                 HashMap::new()
             }
@@ -481,13 +478,6 @@ fn franken_detection_map() -> &'static HashMap<String, DetectionResult> {
 /// Returns `None` when a connector is not mapped to the franken slug set.
 /// Returns `Some(DetectionResult)` (including `detected=false`) for mapped
 /// connectors when the franken report is available.
-#[cfg(test)]
-pub fn franken_detection_for_connector(connector_slug: &str) -> Option<DetectionResult> {
-    let _ = connector_slug;
-    None
-}
-
-#[cfg(not(test))]
 pub fn franken_detection_for_connector(connector_slug: &str) -> Option<DetectionResult> {
     let slug = connector_to_franken_slug(connector_slug);
     let map = franken_detection_map();

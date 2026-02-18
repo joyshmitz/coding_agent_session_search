@@ -138,20 +138,8 @@ struct ToolState {
 
 impl Connector for OpenCodeConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("opencode")
-            && detected.detected
-        {
-            return detected;
-        }
-        if let Some(storage) = Self::storage_root() {
-            DetectionResult {
-                detected: true,
-                evidence: vec![format!("found {}", storage.display())],
-                root_paths: vec![storage],
-            }
-        } else {
-            DetectionResult::not_found()
-        }
+        crate::connectors::franken_detection_for_connector("opencode")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {

@@ -474,56 +474,8 @@ impl ChatGptConnector {
 
 impl Connector for ChatGptConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("chatgpt") {
-            return if detected.detected {
-                DetectionResult {
-                    detected: true,
-                    evidence: detected.evidence,
-                    root_paths: detected.root_paths,
-                }
-            } else {
-                DetectionResult::not_found()
-            };
-        }
-
-        if let Some(base) = Self::app_support_dir()
-            && base.exists()
-        {
-            let conv_dirs = Self::find_conversation_dirs(&base);
-            if !conv_dirs.is_empty() {
-                let encrypted_count = conv_dirs.iter().filter(|(_, enc)| *enc).count();
-                let unencrypted_count = conv_dirs.len() - encrypted_count;
-
-                let mut evidence = vec![format!("found ChatGPT at {}", base.display())];
-
-                if unencrypted_count > 0 {
-                    evidence.push(format!(
-                        "{} unencrypted conversation dir(s) (readable)",
-                        unencrypted_count
-                    ));
-                }
-                if encrypted_count > 0 {
-                    if self.encryption_key.is_some() {
-                        evidence.push(format!(
-                            "{} encrypted conversation dir(s) (decryption key available)",
-                            encrypted_count
-                        ));
-                    } else {
-                        evidence.push(format!(
-                            "{} encrypted conversation dir(s) (set CHATGPT_ENCRYPTION_KEY to decrypt)",
-                            encrypted_count
-                        ));
-                    }
-                }
-
-                return DetectionResult {
-                    detected: true,
-                    evidence,
-                    root_paths: vec![base],
-                };
-            }
-        }
-        DetectionResult::not_found()
+        crate::connectors::franken_detection_for_connector("chatgpt")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {

@@ -141,58 +141,8 @@ impl AiderConnector {
 
 impl Connector for AiderConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("aider") {
-            return if detected.detected {
-                DetectionResult {
-                    detected: true,
-                    evidence: detected.evidence,
-                    root_paths: detected.root_paths,
-                }
-            } else {
-                DetectionResult::not_found()
-            };
-        }
-
-        // Fast detection: only check for .aider.chat.history.md in CWD (no recursive scan).
-        // The expensive WalkDir scan is deferred to scan() where it's actually needed.
-        // Also check for CASS_AIDER_DATA_ROOT env var as a signal.
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let cwd_history = cwd.join(".aider.chat.history.md");
-
-        if cwd_history.exists() {
-            return DetectionResult {
-                detected: true,
-                evidence: vec![format!("found {}", cwd_history.display())],
-                root_paths: vec![cwd],
-            };
-        }
-
-        if let Ok(override_root) = dotenvy::var("CASS_AIDER_DATA_ROOT") {
-            // Treat empty string as unset to avoid surprising behavior and test flakiness.
-            if override_root.trim().is_empty() {
-                return DetectionResult::not_found();
-            }
-            let override_path = std::path::PathBuf::from(&override_root);
-            let override_history = override_path.join(".aider.chat.history.md");
-            if override_history.exists() {
-                return DetectionResult {
-                    detected: true,
-                    evidence: vec![format!("found {}", override_history.display())],
-                    root_paths: vec![override_path],
-                };
-            }
-            // Even if file not found, user explicitly set the env var
-            return DetectionResult {
-                detected: true,
-                evidence: vec![format!(
-                    "CASS_AIDER_DATA_ROOT set to {}",
-                    override_path.display()
-                )],
-                root_paths: vec![override_path],
-            };
-        }
-
-        DetectionResult::not_found()
+        crate::connectors::franken_detection_for_connector("aider")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {

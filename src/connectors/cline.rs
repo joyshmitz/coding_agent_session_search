@@ -95,24 +95,8 @@ impl ClineConnector {
 
 impl Connector for ClineConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("cline")
-            && detected.detected
-        {
-            return detected;
-        }
-        let roots = Self::storage_roots();
-        if !roots.is_empty() {
-            DetectionResult {
-                detected: true,
-                evidence: roots
-                    .iter()
-                    .map(|r| format!("found {}", r.display()))
-                    .collect(),
-                root_paths: roots,
-            }
-        } else {
-            DetectionResult::not_found()
-        }
+        crate::connectors::franken_detection_for_connector("cline")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {

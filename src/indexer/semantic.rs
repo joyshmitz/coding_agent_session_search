@@ -2,15 +2,19 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use frankensearch::index::{
+    HNSW_DEFAULT_EF_CONSTRUCTION as FS_HNSW_DEFAULT_EF_CONSTRUCTION,
+    HNSW_DEFAULT_M as FS_HNSW_DEFAULT_M, HnswConfig as FsHnswConfig, HnswIndex as FsHnswIndex,
+    VectorIndex as FsVectorIndex,
+};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-use crate::search::ann_index::{DEFAULT_EF_CONSTRUCTION, DEFAULT_M, HnswIndex, hnsw_index_path};
 use crate::search::canonicalize::{canonicalize_for_embedding, content_hash};
 use crate::search::embedder::Embedder;
 use crate::search::fastembed_embedder::FastEmbedder;
 use crate::search::hash_embedder::HashEmbedder;
 use crate::search::vector_index::{
-    Quantization, ROLE_USER, VectorEntry, VectorIndex, vector_index_path,
+    Quantization, ROLE_USER, VECTOR_INDEX_DIR, VectorEntry, VectorIndex, vector_index_path,
 };
 
 #[derive(Debug, Clone)]
@@ -67,6 +71,103 @@ impl EmbeddedMessage {
             vector: self.embedding,
         }
     }
+}
+
+fn encode_fs_semantic_doc_id(row: &crate::search::vector_index::VectorRow) -> String {
+    format!(
+        "m|{}|{}|{}|{}|{}|{}|{}",
+        row.message_id,
+        row.chunk_idx,
+        row.agent_id,
+        row.workspace_id,
+        row.source_id,
+        row.role,
+        row.created_at_ms,
+    )
+}
+
+fn sanitize_embedder_id_for_filename(embedder_id: &str) -> String {
+    let slug: String = embedder_id
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect();
+    if slug.is_empty() {
+        "unknown".to_string()
+    } else {
+        slug
+    }
+}
+
+fn fs_semantic_bridge_path(data_dir: &Path, embedder_id: &str) -> PathBuf {
+    let slug = sanitize_embedder_id_for_filename(embedder_id);
+    data_dir
+        .join(VECTOR_INDEX_DIR)
+        .join(format!("frankensearch-bridge-{slug}.fsvi"))
+}
+
+fn fs_semantic_source_cvvi_path(data_dir: &Path, embedder_id: &str) -> PathBuf {
+    data_dir
+        .join(VECTOR_INDEX_DIR)
+        .join(format!("index-{embedder_id}.cvvi"))
+}
+
+fn fs_semantic_bridge_is_fresh(bridge_path: &Path, source_cvvi_path: &Path) -> bool {
+    let Ok(bridge_meta) = std::fs::metadata(bridge_path) else {
+        return false;
+    };
+    let Ok(source_meta) = std::fs::metadata(source_cvvi_path) else {
+        return false;
+    };
+    let Ok(bridge_modified) = bridge_meta.modified() else {
+        return false;
+    };
+    let Ok(source_modified) = source_meta.modified() else {
+        return false;
+    };
+    bridge_modified >= source_modified
+}
+
+fn open_or_build_fs_semantic_index(index: &VectorIndex, data_dir: &Path) -> Result<FsVectorIndex> {
+    let embedder_id = index.header().embedder_id.as_str();
+    let bridge_path = fs_semantic_bridge_path(data_dir, embedder_id);
+    let source_cvvi_path = fs_semantic_source_cvvi_path(data_dir, embedder_id);
+
+    if bridge_path.exists()
+        && fs_semantic_bridge_is_fresh(&bridge_path, &source_cvvi_path)
+        && let Ok(existing) = FsVectorIndex::open(&bridge_path)
+        && existing.dimension() == index.header().dimension as usize
+        && existing.record_count() == index.rows().len()
+    {
+        return Ok(existing);
+    }
+
+    if let Some(parent) = bridge_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut writer =
+        FsVectorIndex::create(&bridge_path, embedder_id, index.header().dimension as usize)
+            .map_err(|err| anyhow::anyhow!("create semantic bridge index failed: {err}"))?;
+
+    for row in index.rows() {
+        let doc_id = encode_fs_semantic_doc_id(row);
+        let vector = index.vector_at_f32(row)?;
+        writer
+            .write_record(&doc_id, &vector)
+            .map_err(|err| anyhow::anyhow!("write semantic bridge record failed: {err}"))?;
+    }
+
+    writer
+        .finish()
+        .map_err(|err| anyhow::anyhow!("finish semantic bridge index failed: {err}"))?;
+    FsVectorIndex::open(&bridge_path)
+        .map_err(|err| anyhow::anyhow!("open semantic bridge index failed: {err}"))
+}
+
+fn hnsw_index_path(data_dir: &Path, embedder_id: &str) -> PathBuf {
+    data_dir
+        .join(VECTOR_INDEX_DIR)
+        .join(format!("hnsw-{embedder_id}.chsw"))
 }
 
 pub struct SemanticIndexer {
@@ -278,8 +379,8 @@ impl SemanticIndexer {
         m: Option<usize>,
         ef_construction: Option<usize>,
     ) -> Result<PathBuf> {
-        let m = m.unwrap_or(DEFAULT_M);
-        let ef_construction = ef_construction.unwrap_or(DEFAULT_EF_CONSTRUCTION);
+        let m = m.unwrap_or(FS_HNSW_DEFAULT_M);
+        let ef_construction = ef_construction.unwrap_or(FS_HNSW_DEFAULT_EF_CONSTRUCTION);
 
         tracing::info!(
             embedder = self.embedder_id(),
@@ -289,13 +390,21 @@ impl SemanticIndexer {
             "Building HNSW index for approximate nearest neighbor search"
         );
 
-        let hnsw = HnswIndex::build_from_vector_index(vector_index, m, ef_construction)?;
+        let fs_index = open_or_build_fs_semantic_index(vector_index, data_dir)?;
+        let config = FsHnswConfig {
+            m,
+            ef_construction,
+            ..FsHnswConfig::default()
+        };
+        let hnsw = FsHnswIndex::build_from_vector_index(&fs_index, config)
+            .map_err(|err| anyhow::anyhow!("build HNSW index failed: {err}"))?;
 
         let hnsw_path = hnsw_index_path(data_dir, self.embedder_id());
         if let Some(parent) = hnsw_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        hnsw.save(&hnsw_path)?;
+        hnsw.save(&hnsw_path)
+            .map_err(|err| anyhow::anyhow!("save HNSW index failed: {err}"))?;
 
         tracing::info!(?hnsw_path, "Saved HNSW index");
         Ok(hnsw_path)

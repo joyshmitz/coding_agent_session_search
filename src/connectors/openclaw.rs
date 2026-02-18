@@ -123,6 +123,7 @@ impl OpenClawConnector {
         session_dirs
     }
 
+    #[allow(dead_code)]
     fn detect_from_agents_root(agents_root: &Path) -> DetectionResult {
         let roots = Self::find_agent_session_dirs_at(agents_root);
         let mut evidence = vec![
@@ -273,39 +274,8 @@ impl OpenClawConnector {
 
 impl Connector for OpenClawConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("openclaw") {
-            return if detected.detected {
-                DetectionResult {
-                    detected: true,
-                    evidence: detected.evidence,
-                    root_paths: detected.root_paths,
-                }
-            } else {
-                DetectionResult::not_found()
-            };
-        }
-
-        if let Some(agents_root) = Self::agents_root()
-            && agents_root.exists()
-            && agents_root.is_dir()
-        {
-            return Self::detect_from_agents_root(&agents_root);
-        }
-
-        if let Some(parent) = Self::openclaw_home()
-            && parent.exists()
-        {
-            return DetectionResult {
-                detected: true,
-                evidence: vec![
-                    format!("found {}", parent.display()),
-                    "discovered 0 agent session dirs".to_string(),
-                ],
-                root_paths: Vec::new(),
-            };
-        }
-
-        DetectionResult::not_found()
+        crate::connectors::franken_detection_for_connector("openclaw")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
