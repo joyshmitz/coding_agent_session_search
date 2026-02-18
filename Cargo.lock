@@ -753,11 +753,7 @@ dependencies = [
  "fastembed",
  "flate2",
  "franken-agent-detection",
- "frankensearch-core",
- "frankensearch-embed",
- "frankensearch-fusion",
- "frankensearch-index",
- "frankensearch-lexical",
+ "frankensearch",
  "ftui",
  "ftui-extras",
  "ftui-runtime",
@@ -1629,6 +1625,19 @@ name = "franken-kernel"
 version = "0.2.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "frankensearch"
+version = "0.1.0"
+dependencies = [
+ "asupersync",
+ "frankensearch-core",
+ "frankensearch-embed",
+ "frankensearch-fusion",
+ "frankensearch-index",
+ "frankensearch-lexical",
+ "tracing",
 ]
 
 [[package]]
