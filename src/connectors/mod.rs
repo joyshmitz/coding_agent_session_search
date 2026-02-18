@@ -425,17 +425,14 @@ impl DetectionResult {
 }
 
 #[cfg(not(test))]
-fn connector_to_franken_slug(connector_slug: &str) -> Option<&'static str> {
-    match connector_slug {
-        "claude_code" | "claude" => Some("claude"),
-        "cline" => Some("cline"),
-        "codex" => Some("codex"),
-        "cursor" => Some("cursor"),
-        "factory" => Some("factory"),
-        "gemini" => Some("gemini"),
-        "copilot" | "github-copilot" => Some("github-copilot"),
-        "opencode" => Some("opencode"),
-        _ => None,
+fn connector_to_franken_slug(connector_slug: &str) -> String {
+    match connector_slug.trim().to_ascii_lowercase().as_str() {
+        "claude_code" | "claude-code" => "claude".to_string(),
+        "copilot" => "github-copilot".to_string(),
+        // For all other connectors, pass through the normalized slug.
+        // This keeps cass forward-compatible with new connectors added to
+        // franken-agent-detection without requiring another mapping patch.
+        other => other.to_string(),
     }
 }
 
@@ -492,8 +489,16 @@ pub fn franken_detection_for_connector(connector_slug: &str) -> Option<Detection
 
 #[cfg(not(test))]
 pub fn franken_detection_for_connector(connector_slug: &str) -> Option<DetectionResult> {
-    let slug = connector_to_franken_slug(connector_slug)?;
-    franken_detection_map().get(slug).cloned()
+    let slug = connector_to_franken_slug(connector_slug);
+    let map = franken_detection_map();
+    if let Some(found) = map.get(slug.as_str()) {
+        return Some(found.clone());
+    }
+    let dashed = slug.replace('_', "-");
+    if dashed != slug {
+        return map.get(dashed.as_str()).cloned();
+    }
+    None
 }
 
 /// A root directory to scan with associated provenance.

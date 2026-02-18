@@ -191,7 +191,6 @@ impl SearchMode {
     }
 }
 
-const HYBRID_CANDIDATE_MULTIPLIER: usize = 3;
 const ANN_CANDIDATE_MULTIPLIER: usize = 4;
 const HYBRID_NO_LIMIT_PLANNING_WINDOW: usize = 64;
 const HYBRID_NO_LIMIT_SEMANTIC_CAP: usize = 2048;
@@ -242,20 +241,12 @@ fn hybrid_candidate_budget(
         };
     }
 
-    let lexical = fs_candidate_count(
-        requested_limit,
-        offset,
-        lex_mult.max(HYBRID_CANDIDATE_MULTIPLIER),
-    )
-    .max(requested_limit.saturating_add(offset))
-    .min(total_docs);
-    let semantic = fs_candidate_count(
-        requested_limit,
-        offset,
-        sem_mult.max(HYBRID_CANDIDATE_MULTIPLIER),
-    )
-    .max(requested_limit.saturating_add(offset))
-    .min(total_docs);
+    let lexical = fs_candidate_count(requested_limit, offset, lex_mult.max(1))
+        .max(requested_limit.saturating_add(offset))
+        .min(total_docs);
+    let semantic = fs_candidate_count(requested_limit, offset, sem_mult.max(1))
+        .max(requested_limit.saturating_add(offset))
+        .min(total_docs);
 
     HybridCandidateBudget {
         lexical_candidates: lexical,
@@ -8567,6 +8558,21 @@ mod tests {
             "identifier queries should allocate more lexical than semantic fanout"
         );
         assert!(budget.lexical_candidates >= 25);
+    }
+
+    #[test]
+    fn hybrid_budget_natural_language_biases_semantic() {
+        let budget = hybrid_candidate_budget(
+            "how do we fix authentication middleware latency",
+            20,
+            20,
+            5,
+            10_000,
+        );
+        assert!(
+            budget.semantic_candidates > budget.lexical_candidates,
+            "natural language queries should allocate more semantic than lexical fanout"
+        );
     }
 
     #[test]

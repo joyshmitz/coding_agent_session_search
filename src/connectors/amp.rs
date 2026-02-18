@@ -52,6 +52,18 @@ impl AmpConnector {
 
 impl Connector for AmpConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("amp") {
+            return if detected.detected {
+                DetectionResult {
+                    detected: true,
+                    evidence: detected.evidence,
+                    root_paths: detected.root_paths,
+                }
+            } else {
+                DetectionResult::not_found()
+            };
+        }
+
         let existing_roots: Vec<PathBuf> = Self::candidate_roots()
             .into_iter()
             .filter(|r| r.exists())

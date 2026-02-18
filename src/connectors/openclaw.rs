@@ -273,6 +273,18 @@ impl OpenClawConnector {
 
 impl Connector for OpenClawConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("openclaw") {
+            return if detected.detected {
+                DetectionResult {
+                    detected: true,
+                    evidence: detected.evidence,
+                    root_paths: detected.root_paths,
+                }
+            } else {
+                DetectionResult::not_found()
+            };
+        }
+
         if let Some(agents_root) = Self::agents_root()
             && agents_root.exists()
             && agents_root.is_dir()

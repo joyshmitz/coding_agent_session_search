@@ -115,6 +115,18 @@ impl VibeConnector {
 
 impl Connector for VibeConnector {
     fn detect(&self) -> DetectionResult {
+        if let Some(detected) = crate::connectors::franken_detection_for_connector("vibe") {
+            return if detected.detected {
+                DetectionResult {
+                    detected: true,
+                    evidence: detected.evidence,
+                    root_paths: detected.root_paths,
+                }
+            } else {
+                DetectionResult::not_found()
+            };
+        }
+
         let root = Self::sessions_root();
         if root.exists() && root.is_dir() {
             DetectionResult {

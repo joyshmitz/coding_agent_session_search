@@ -3865,6 +3865,13 @@ pub struct CassApp {
     pub detail_find: Option<DetailFindState>,
     /// Cache for find-in-detail match line numbers (written during rendering).
     pub detail_find_matches_cache: RefCell<Vec<u16>>,
+    /// Message line numbers (1-indexed) for search hits in the active session.
+    /// Used to highlight context and drive hit-to-hit navigation in detail modal.
+    pub detail_session_hit_lines: Vec<usize>,
+    /// Rendered line offsets for session hits in the Messages tab.
+    pub detail_session_hit_offsets_cache: RefCell<Vec<u16>>,
+    /// Active index in `detail_session_hit_lines`.
+    pub detail_session_hit_current: usize,
     /// Whether the detail drill-in modal is open.
     pub show_detail_modal: bool,
     /// Scroll position within the detail modal.
@@ -4133,6 +4140,9 @@ impl Default for CassApp {
             detail_tab: DetailTab::default(),
             detail_find: None,
             detail_find_matches_cache: RefCell::new(Vec::new()),
+            detail_session_hit_lines: Vec::new(),
+            detail_session_hit_offsets_cache: RefCell::new(Vec::new()),
+            detail_session_hit_current: 0,
             show_detail_modal: false,
             modal_scroll: 0,
             cached_detail: None,
@@ -4448,6 +4458,43 @@ impl CassApp {
 
     fn active_hit_key(&self) -> Option<SelectedHitKey> {
         self.selected_hit().map(SelectedHitKey::from_hit)
+    }
+
+    fn collect_session_hit_lines(&self, selected_hit: &SearchHit) -> Vec<usize> {
+        let iter = if self.panes.is_empty() {
+            self.results.iter().collect::<Vec<_>>()
+        } else {
+            self.panes
+                .iter()
+                .flat_map(|pane| pane.hits.iter())
+                .collect::<Vec<_>>()
+        };
+
+        let mut lines: Vec<usize> = iter
+            .into_iter()
+            .filter(|hit| {
+                hit.source_path == selected_hit.source_path
+                    && hit.source_id == selected_hit.source_id
+            })
+            .filter_map(|hit| hit.line_number)
+            .filter(|line| *line > 0)
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
+    }
+
+    fn sync_detail_session_hit_state(&mut self, selected_hit: &SearchHit) {
+        self.detail_session_hit_lines = self.collect_session_hit_lines(selected_hit);
+        self.detail_session_hit_current = selected_hit
+            .line_number
+            .and_then(|line| {
+                self.detail_session_hit_lines
+                    .iter()
+                    .position(|n| *n == line)
+            })
+            .unwrap_or(0);
+        self.detail_session_hit_offsets_cache.borrow_mut().clear();
     }
 
     fn selected_hits(&self) -> Vec<SearchHit> {
@@ -6766,6 +6813,16 @@ impl CassApp {
         styles: &StyleContext,
     ) -> Vec<ftui::text::Line> {
         let mut lines: Vec<ftui::text::Line> = Vec::new();
+        let session_hit_lines = &self.detail_session_hit_lines;
+        let session_hit_total = session_hit_lines.len();
+        let session_hit_lookup: HashSet<usize> = session_hit_lines.iter().copied().collect();
+        let session_hit_rank: HashMap<usize, usize> = session_hit_lines
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| (*line, idx + 1))
+            .collect();
+        let mut session_hit_offsets: Vec<u16> = Vec::with_capacity(session_hit_total);
+        let session_hit_badge_style = styles.style(style_system::STYLE_QUERY_HIGHLIGHT).bold();
 
         // Header: title + metadata
         let title = if hit.title.is_empty() {
@@ -6843,6 +6900,14 @@ impl CassApp {
             for (msg_idx, msg) in cv.messages.iter().enumerate() {
                 // Record line offset for message-level navigation
                 msg_offsets.push((lines.len() as u16, msg.role.clone()));
+                let msg_line_from_idx = (msg.idx >= 0).then_some((msg.idx as usize) + 1);
+                let msg_line_from_pos = msg_idx + 1;
+                let msg_is_session_hit = msg_line_from_idx
+                    .is_some_and(|line| session_hit_lookup.contains(&line))
+                    || session_hit_lookup.contains(&msg_line_from_pos);
+                let msg_hit_rank = msg_line_from_idx
+                    .and_then(|line| session_hit_rank.get(&line).copied())
+                    .or_else(|| session_hit_rank.get(&msg_line_from_pos).copied());
                 let role_s = Self::role_style(&msg.role, styles);
                 let gutter_s = Self::role_gutter_style(&msg.role, styles);
                 let prefix = Self::role_prefix(&msg.role);
@@ -6886,15 +6951,33 @@ impl CassApp {
                 } else {
                     ""
                 };
-                lines.push(ftui::text::Line::from_spans(vec![
+                if msg_is_session_hit {
+                    session_hit_offsets.push(lines.len() as u16);
+                }
+                let mut header_spans = vec![
                     ftui::text::Span::styled("\u{258c} ", gutter_s),
                     ftui::text::Span::styled(
                         format!("{role_label}{author_suffix}{ts_label}"),
-                        role_s.bold(),
+                        if msg_is_session_hit {
+                            role_s.bold().underline()
+                        } else {
+                            role_s.bold()
+                        },
                     ),
                     ftui::text::Span::styled(counter, subtle_style),
                     ftui::text::Span::styled(collapse_indicator, subtle_style),
-                ]));
+                ];
+                if let Some(rank) = msg_hit_rank {
+                    header_spans.push(ftui::text::Span::styled(
+                        "  \u{25ce} ",
+                        session_hit_badge_style,
+                    ));
+                    header_spans.push(ftui::text::Span::styled(
+                        format!("search hit {rank}/{session_hit_total}"),
+                        session_hit_badge_style,
+                    ));
+                }
+                lines.push(ftui::text::Line::from_spans(header_spans));
 
                 if is_collapsed {
                     // Collapsed: show truncated first-line summary
@@ -6957,9 +7040,11 @@ impl CassApp {
                 lines.push(ftui::text::Line::from(""));
             }
             *self.detail_message_offsets.borrow_mut() = msg_offsets;
+            *self.detail_session_hit_offsets_cache.borrow_mut() = session_hit_offsets;
         } else {
             // No cached conversation: show the hit's content directly
             self.detail_message_offsets.borrow_mut().clear();
+            self.detail_session_hit_offsets_cache.borrow_mut().clear();
             let content = if hit.content.is_empty() {
                 &hit.snippet
             } else {
@@ -8969,7 +9054,7 @@ impl CassApp {
                 "Wildcards: foo* (prefix), *foo (suffix), *foo* (contains)".into(),
                 "Auto-fuzzy: searches with few results try *term* fallback".into(),
                 format!("{} refresh search (re-query index)", shortcuts::REFRESH),
-                "/ detail-find in preview; n/N to jump matches".into(),
+                "/ detail-find in preview; n/N to jump session hits in context".into(),
             ],
         );
 
@@ -9081,7 +9166,7 @@ impl CassApp {
                     shortcuts::STATS_BAR
                 ),
                 format!(
-                    "{} detail-find within messages; n/N cycle matches",
+                    "{} detail-find within messages; n/N cycle session hits",
                     shortcuts::PANE_FILTER
                 ),
                 format!(
@@ -10194,6 +10279,8 @@ pub enum CassMsg {
     DetailFindQueryChanged(String),
     /// Move to next/previous find match.
     DetailFindNavigated { forward: bool },
+    /// Move to next/previous session search hit in contextual Messages view.
+    DetailSessionHitNavigated { forward: bool },
     /// Toggle JSON viewer tab (syntax-highlighted tree view).
     ToggleJsonView,
     /// Toggle collapse for a tool/system message at the given index.
@@ -11883,6 +11970,7 @@ impl super::ftui_adapter::Model for CassApp {
                     CassMsg::DetailFindToggled
                     | CassMsg::DetailFindQueryChanged(_)
                     | CassMsg::DetailFindNavigated { .. }
+                    | CassMsg::DetailSessionHitNavigated { .. }
                     | CassMsg::DetailClosed
                     | CassMsg::DetailLoadRequested { .. }
                     | CassMsg::DetailTabChanged(_)
@@ -11900,9 +11988,9 @@ impl super::ftui_adapter::Model for CassApp {
                     CassMsg::PaneFilterOpened | CassMsg::WildcardFallbackToggled => {
                         return self.update(CassMsg::DetailFindToggled);
                     }
-                    // Enter navigates highlighted matches while modal is open.
+                    // Enter moves to the next contextual search hit while modal is open.
                     CassMsg::QuerySubmitted | CassMsg::DetailOpened => {
-                        return self.update(CassMsg::DetailFindNavigated { forward: true });
+                        return self.update(CassMsg::DetailSessionHitNavigated { forward: true });
                     }
                     // j/k scroll the detail view
                     CassMsg::QueryChanged(text) if text == "j" => {
@@ -11911,12 +11999,12 @@ impl super::ftui_adapter::Model for CassApp {
                     CassMsg::QueryChanged(text) if text == "k" => {
                         return self.update(CassMsg::DetailScrolled { delta: -3 });
                     }
-                    // n/N navigate find matches (if any remain from a previous find)
+                    // n/N navigate contextual search hits for this session.
                     CassMsg::QueryChanged(text) if text == "n" => {
-                        return self.update(CassMsg::DetailFindNavigated { forward: true });
+                        return self.update(CassMsg::DetailSessionHitNavigated { forward: true });
                     }
                     CassMsg::QueryChanged(text) if text == "N" => {
-                        return self.update(CassMsg::DetailFindNavigated { forward: false });
+                        return self.update(CassMsg::DetailSessionHitNavigated { forward: false });
                     }
                     // w toggles wrap
                     CassMsg::QueryChanged(text) if text == "w" => {
@@ -12007,6 +12095,7 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::DetailFindToggled
                     | CassMsg::DetailFindQueryChanged(_)
                     | CassMsg::DetailFindNavigated { .. }
+                    | CassMsg::DetailSessionHitNavigated { .. }
                     | CassMsg::ToggleJsonView
                     | CassMsg::ToolCollapseToggled(_)
                     | CassMsg::ToolExpandAll
@@ -12797,7 +12886,7 @@ impl super::ftui_adapter::Model for CassApp {
             // -- Detail view --------------------------------------------------
             CassMsg::DetailOpened => {
                 let focus_id = self.focus_manager.current();
-                let has_selected_hit = self.selected_hit().is_some();
+                let selected_hit = self.selected_hit().cloned();
 
                 // Re-entrant Enter while detail is already open should be a no-op.
                 // This avoids stacking duplicate focus traps on rapid key repeats.
@@ -12814,7 +12903,7 @@ impl super::ftui_adapter::Model for CassApp {
 
                 // Enter should prioritize opening the selected hit in context.
                 // If there is no active hit, fall back to query submit behavior.
-                if !has_selected_hit {
+                let Some(selected_hit) = selected_hit else {
                     tracing::debug!(
                         route = "query_submit_fallback",
                         reason = "no_selected_hit",
@@ -12823,7 +12912,7 @@ impl super::ftui_adapter::Model for CassApp {
                         "enter routing decision"
                     );
                     return self.update(CassMsg::QuerySubmitted);
-                }
+                };
                 // Ensure Enter lands on the contextual conversation view.
                 self.detail_tab = DetailTab::Messages;
                 tracing::debug!(
@@ -12837,6 +12926,7 @@ impl super::ftui_adapter::Model for CassApp {
                 self.show_detail_modal = true;
                 self.detail_scroll = 0;
                 self.modal_scroll = 0;
+                self.sync_detail_session_hit_state(&selected_hit);
                 // Seed modal-highlight terms from the active search query so
                 // matches are visible immediately in full conversation context.
                 let mut highlight_terms = extract_query_terms(&self.query);
@@ -12875,11 +12965,7 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 self.focus_manager.push_trap(focus_ids::GROUP_DETAIL_MODAL);
                 self.focus_manager.focus(focus_ids::DETAIL_MODAL);
-                let Some(hit) = self.selected_hit() else {
-                    self.clear_loading_context(LoadingContext::DetailModal);
-                    return ftui::Cmd::none();
-                };
-                let source_path = hit.source_path.clone();
+                let source_path = selected_hit.source_path.clone();
                 let needs_reload = self
                     .cached_detail
                     .as_ref()
@@ -12914,6 +13000,9 @@ impl super::ftui_adapter::Model for CassApp {
                 self.input_mode = InputMode::Query;
                 self.detail_find = None;
                 self.detail_find_matches_cache.borrow_mut().clear();
+                self.detail_session_hit_lines.clear();
+                self.detail_session_hit_offsets_cache.borrow_mut().clear();
+                self.detail_session_hit_current = 0;
                 self.focus_manager.pop_trap();
                 self.focus_manager.focus(focus_ids::RESULTS_LIST);
                 self.clear_loading_context(LoadingContext::DetailModal);
@@ -12922,6 +13011,9 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::DetailTabChanged(tab) => {
                 self.detail_tab = tab;
                 self.detail_scroll = 0;
+                if tab != DetailTab::Messages {
+                    self.detail_session_hit_offsets_cache.borrow_mut().clear();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::ToggleJsonView => {
@@ -13061,6 +13153,34 @@ impl super::ftui_adapter::Model for CassApp {
                     let target_line = find.matches[find.current];
                     self.detail_scroll = target_line.saturating_sub(3);
                 }
+                ftui::Cmd::none()
+            }
+            CassMsg::DetailSessionHitNavigated { forward } => {
+                if self.detail_tab != DetailTab::Messages {
+                    self.detail_tab = DetailTab::Messages;
+                    self.detail_scroll = 0;
+                    return ftui::Cmd::none();
+                }
+
+                let cached_offsets = self.detail_session_hit_offsets_cache.borrow().clone();
+                if cached_offsets.is_empty() {
+                    if self.detail_session_hit_lines.is_empty() {
+                        return self.update(CassMsg::DetailFindNavigated { forward });
+                    }
+                    self.status = "Render pending: session hit anchors not ready yet".to_string();
+                    return ftui::Cmd::none();
+                }
+
+                let total = cached_offsets.len();
+                let mut current = self.detail_session_hit_current.min(total.saturating_sub(1));
+                if forward {
+                    current = (current + 1) % total;
+                } else {
+                    current = current.checked_sub(1).unwrap_or(total - 1);
+                }
+                self.detail_session_hit_current = current;
+                let target_line = cached_offsets[current];
+                self.detail_scroll = target_line.saturating_sub(3);
                 ftui::Cmd::none()
             }
 
@@ -15644,9 +15764,7 @@ impl super::ftui_adapter::Model for CassApp {
                     return ftui::Cmd::none();
                 }
                 if self.show_detail_modal {
-                    self.show_detail_modal = false;
-                    self.focus_manager.pop_trap();
-                    return ftui::Cmd::none();
+                    return self.update(CassMsg::DetailClosed);
                 }
                 if self.detail_find.is_some() {
                     self.detail_find = None;
@@ -27456,10 +27574,10 @@ mod tests {
         // cached_detail below uses the same key so DetailOpened takes the
         // cache-hit branch.
 
-        fn msg(role: MessageRole, content: &str, ts: Option<i64>) -> Message {
+        fn msg(idx: i64, role: MessageRole, content: &str, ts: Option<i64>) -> Message {
             Message {
                 id: None,
-                idx: 0,
+                idx,
                 role,
                 author: None,
                 created_at: ts,
@@ -27471,24 +27589,32 @@ mod tests {
 
         let mut cv = make_test_conversation_view();
         cv.messages = vec![
-            msg(MessageRole::User, "Please help me fix a bug", Some(1_000)),
             msg(
+                0,
+                MessageRole::User,
+                "Please help me fix a bug",
+                Some(1_000),
+            ),
+            msg(
+                1,
                 MessageRole::Agent,
                 "# Analysis\n\nI'll look at the code:\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nLet me check.",
                 Some(2_000),
             ),
             msg(
+                2,
                 MessageRole::Tool,
                 "File contents: some tool output that is quite long and should be truncated when collapsed",
                 Some(3_000),
             ),
             msg(
+                3,
                 MessageRole::Agent,
                 "Found the bug. Here's the fix.",
                 Some(4_000),
             ),
-            msg(MessageRole::System, "System context note", Some(5_000)),
-            msg(MessageRole::User, "Thanks!", Some(6_000)),
+            msg(4, MessageRole::System, "System context note", Some(5_000)),
+            msg(5, MessageRole::User, "Thanks!", Some(6_000)),
         ];
         cv.convo.started_at = Some(1_000_000);
         cv.convo.ended_at = Some(1_060_000);
@@ -27503,6 +27629,124 @@ mod tests {
         let _ = app.update(CassMsg::DetailOpened);
         assert!(app.show_detail_modal);
         assert_eq!(app.detail_tab, DetailTab::Messages);
+    }
+
+    #[test]
+    fn regression_detail_open_collects_session_hit_lines_for_selected_source() {
+        let mut app = CassApp::default();
+        let hits = vec![
+            SearchHit {
+                title: "first".into(),
+                snippet: String::new(),
+                content: String::new(),
+                content_hash: 1,
+                score: 0.9,
+                agent: "claude_code".into(),
+                source_path: "/sessions/shared.jsonl".into(),
+                workspace: "/w".into(),
+                workspace_original: None,
+                created_at: None,
+                line_number: Some(2),
+                match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+            },
+            SearchHit {
+                title: "second".into(),
+                snippet: String::new(),
+                content: String::new(),
+                content_hash: 2,
+                score: 0.8,
+                agent: "claude_code".into(),
+                source_path: "/sessions/shared.jsonl".into(),
+                workspace: "/w".into(),
+                workspace_original: None,
+                created_at: None,
+                line_number: Some(5),
+                match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+            },
+            SearchHit {
+                title: "other".into(),
+                snippet: String::new(),
+                content: String::new(),
+                content_hash: 3,
+                score: 0.4,
+                agent: "claude_code".into(),
+                source_path: "/sessions/other.jsonl".into(),
+                workspace: "/w".into(),
+                workspace_original: None,
+                created_at: None,
+                line_number: Some(1),
+                match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+            },
+        ];
+        app.panes.push(AgentPane {
+            agent: "claude_code".into(),
+            hits,
+            selected: 0,
+            total_count: 3,
+        });
+        app.active_pane = 0;
+
+        let _ = app.update(CassMsg::DetailOpened);
+
+        assert_eq!(app.detail_session_hit_lines, vec![2, 5]);
+        assert_eq!(app.detail_session_hit_current, 0);
+    }
+
+    #[test]
+    fn regression_build_messages_marks_session_hits_and_caches_offsets() {
+        let mut app = app_with_cached_conversation();
+        app.detail_session_hit_lines = vec![1, 4, 6];
+        let hit = make_test_hit();
+        let styles = StyleContext::from_options(StyleOptions::default());
+        let lines = app.build_messages_lines(&hit, 120, &styles);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans().iter().map(|s| s.content.as_ref().to_string()))
+            .collect();
+
+        assert!(
+            text.contains("search hit 1/3"),
+            "first contextual hit badge should render"
+        );
+        assert!(
+            text.contains("search hit 2/3"),
+            "second contextual hit badge should render"
+        );
+        assert!(
+            text.contains("search hit 3/3"),
+            "third contextual hit badge should render"
+        );
+        assert_eq!(
+            app.detail_session_hit_offsets_cache.borrow().len(),
+            3,
+            "render should capture one offset per contextual hit"
+        );
+    }
+
+    #[test]
+    fn regression_detail_session_hit_navigation_cycles_offsets() {
+        let mut app = app_with_cached_conversation();
+        app.show_detail_modal = true;
+        app.detail_tab = DetailTab::Messages;
+        app.detail_session_hit_current = 0;
+        *app.detail_session_hit_offsets_cache.borrow_mut() = vec![10, 30, 50];
+
+        let _ = app.update(CassMsg::DetailSessionHitNavigated { forward: true });
+        assert_eq!(app.detail_session_hit_current, 1);
+        assert_eq!(app.detail_scroll, 27);
+
+        let _ = app.update(CassMsg::DetailSessionHitNavigated { forward: false });
+        assert_eq!(app.detail_session_hit_current, 0);
+        assert_eq!(app.detail_scroll, 7);
     }
 
     #[test]
