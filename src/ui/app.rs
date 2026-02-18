@@ -6682,17 +6682,6 @@ impl CassApp {
                 format!("u:{n_user} a:{n_agent} t:{n_tool} s:{n_sys}"),
                 muted_style,
             );
-            if let Some(tokens) = cv.convo.approx_tokens {
-                let tok_str = if tokens >= 1_000_000 {
-                    format!("{:.1}M tok", tokens as f64 / 1_000_000.0)
-                } else if tokens >= 1_000 {
-                    format!("{:.1}K tok", tokens as f64 / 1_000.0)
-                } else {
-                    format!("{tokens} tok")
-                };
-                push_chip("tok", tok_str, success_style);
-            }
-
             if cv.messages.len() >= 2 {
                 let sparkline = Self::build_text_sparkline(
                     &cv.messages,
@@ -27903,7 +27892,7 @@ mod tests {
     }
 
     #[test]
-    fn regression_metadata_header_shows_tokens() {
+    fn regression_metadata_header_omits_token_metrics() {
         let app = app_with_cached_conversation();
         let hit = make_test_hit();
         let styles = StyleContext::from_options(StyleOptions::default());
@@ -27913,8 +27902,8 @@ mod tests {
             .flat_map(|l| l.spans().iter().map(|s| s.content.as_ref().to_string()))
             .collect();
         assert!(
-            text.contains("15.0K tok") || text.contains("15K tok"),
-            "header should show token count, got: {text}"
+            !text.contains("tok"),
+            "header should omit token metrics, got: {text}"
         );
     }
 
