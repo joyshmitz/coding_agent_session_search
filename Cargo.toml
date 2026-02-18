@@ -70,11 +70,7 @@ half = { version = "*", features = ["bytemuck"] }
 memmap2 = "*"
 bytemuck = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries"] }
-frankensearch-embed = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-embed", default-features = false, features = ["hash"] }
-frankensearch-core = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-core" }
-frankensearch-fusion = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-fusion", default-features = false }
-frankensearch-index = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-index", default-features = false }
-frankensearch-lexical = { version = "0.1.0", path = "../frankensearch/crates/frankensearch-lexical", default-features = false }
+frankensearch = { version = "0.1.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "lexical"] }
 franken-agent-detection = { version = "0.1.0", path = "../franken_agent_detection" }
 wide = "*"  # Portable SIMD for P0 Opt 2: SIMD dot product
 arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization

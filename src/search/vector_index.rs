@@ -1468,7 +1468,7 @@ fn dot_product_f16_scalar(a: &[f16], b: &[f32]) -> f32 {
 fn dot_product_f16_simd(a: &[f16], b: &[f32]) -> f32 {
     // Delegate f16 SIMD math to frankensearch-index.
     // Fall back to the local scalar implementation if dimensions mismatch.
-    match frankensearch_index::dot_product_f16_f32(a, b) {
+    match frankensearch::index::dot_product_f16_f32(a, b) {
         Ok(score) => score,
         Err(_) => dot_product_f16_scalar(a, b),
     }

@@ -1,15 +1,13 @@
 use anyhow::{Result, anyhow, bail};
-use frankensearch_core::{
-    ScoreSource as FsScoreSource, ScoredResult as FsScoredResult, VectorHit as FsVectorHit,
-    query_class::QueryClass as FsQueryClass,
-};
-use frankensearch_fusion::{
-    RrfConfig as FsRrfConfig, candidate_count as fs_candidate_count, rrf_fuse as fs_rrf_fuse,
-};
-use frankensearch_lexical::{
+use frankensearch::lexical::{
     SnippetConfig as FsSnippetConfig, execute_query_with_offset as fs_execute_query_with_offset,
     load_doc as fs_load_doc, render_snippet_html as fs_render_snippet_html,
     try_build_snippet_generator as fs_try_build_snippet_generator,
+};
+use frankensearch::{
+    QueryClass as FsQueryClass, RrfConfig as FsRrfConfig, ScoreSource as FsScoreSource,
+    ScoredResult as FsScoredResult, VectorHit as FsVectorHit,
+    candidate_count as fs_candidate_count, rrf_fuse as fs_rrf_fuse,
 };
 use lru::LruCache;
 use once_cell::sync::Lazy;

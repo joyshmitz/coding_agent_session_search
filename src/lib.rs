@@ -10001,7 +10001,7 @@ fn run_capabilities(json: bool) -> CliResult<()> {
         ],
         connectors: capabilities_connector_names(),
         limits: CapabilitiesLimits {
-            max_limit: 10000,
+            max_limit: 0,          // 0 = no hard cap
             max_content_length: 0, // 0 = unlimited
             max_fields: 50,
             max_agg_buckets: 10,

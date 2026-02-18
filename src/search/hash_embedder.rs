@@ -33,7 +33,7 @@
 //! ```
 
 use super::embedder::{Embedder, EmbedderError, EmbedderResult};
-use frankensearch_embed::{HashAlgorithm as FsHashAlgorithm, HashEmbedder as FsHashEmbedder};
+use frankensearch::{HashAlgorithm as FsHashAlgorithm, HashEmbedder as FsHashEmbedder};
 
 /// Default embedding dimension (matches MiniLM for compatibility).
 pub const DEFAULT_DIMENSION: usize = 384;
