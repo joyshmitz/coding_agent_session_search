@@ -3238,10 +3238,7 @@ fn introspect_search_limit_default() {
     let limit = find_arg(search, "limit");
 
     assert_eq!(limit["value_type"], "integer");
-    assert_eq!(
-        limit["default"], "10",
-        "search --limit should default to 10"
-    );
+    assert_eq!(limit["default"], "0", "search --limit should default to 0");
 }
 
 /// Search offset flag should have correct default in introspect

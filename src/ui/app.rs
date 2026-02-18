@@ -11126,11 +11126,10 @@ impl SearchService for TantivySearchService {
         use crate::search::query::{FieldMask, SearchResult as BackendSearchResult};
 
         let started = Instant::now();
-        let limit = if params.limit == 0 {
-            self.client.total_docs().max(1)
-        } else {
-            params.limit.max(1)
-        };
+        // Preserve `0 = no limit` semantics for backend search paths.
+        // Hybrid mode now uses this to keep lexical completeness while
+        // bounding semantic fanout for responsive staged behavior.
+        let limit = params.limit;
         let sparse_threshold = 3;
         let field_mask = FieldMask::new(true, true, true, true);
 

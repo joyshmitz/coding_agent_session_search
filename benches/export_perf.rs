@@ -21,7 +21,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use flate2::Compression;
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
-use rand::Rng;
+use rand::RngExt;
 use std::hint::black_box;
 use std::io::{Read, Write};
 
@@ -44,7 +44,7 @@ fn generate_compressible_data(size: usize) -> Vec<u8> {
 
 /// Generate random (incompressible) test data.
 fn generate_random_data(size: usize) -> Vec<u8> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut data = vec![0u8; size];
     rng.fill(&mut data[..]);
     data
@@ -53,7 +53,7 @@ fn generate_random_data(size: usize) -> Vec<u8> {
 /// Generate mixed test data (some compressible, some random).
 fn generate_mixed_data(size: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(size);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // Alternate between compressible and random blocks
     let block_size = 4096;

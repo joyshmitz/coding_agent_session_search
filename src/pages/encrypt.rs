@@ -12,11 +12,14 @@ use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
 };
 use anyhow::{Context, Result, bail};
-use argon2::{Algorithm, Argon2, Params, Version, password_hash::SaltString};
+use argon2::{
+    Algorithm, Argon2, Params, Version,
+    password_hash::{SaltString, rand_core::OsRng as PasswordHashOsRng},
+};
 use base64::prelude::*;
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use hkdf::Hkdf;
-use rand::{RngCore, rngs::OsRng};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::fs::File;
@@ -45,7 +48,8 @@ pub struct SecretKey([u8; 32]);
 impl SecretKey {
     pub fn random() -> Self {
         let mut key = [0u8; 32];
-        OsRng.fill_bytes(&mut key);
+        let mut rng = rand::rng();
+        rng.fill_bytes(&mut key);
         Self(key)
     }
 
@@ -148,8 +152,9 @@ impl EncryptionEngine {
         let chunk_size = chunk_size.min(MAX_CHUNK_SIZE);
         let mut export_id = [0u8; 16];
         let mut base_nonce = [0u8; 12];
-        OsRng.fill_bytes(&mut export_id);
-        OsRng.fill_bytes(&mut base_nonce);
+        let mut rng = rand::rng();
+        rng.fill_bytes(&mut export_id);
+        rng.fill_bytes(&mut base_nonce);
 
         Self {
             dek: SecretKey::random(),
@@ -174,7 +179,7 @@ impl EncryptionEngine {
             .map_err(|_| anyhow::anyhow!("maximum of 256 key slots exceeded"))?;
 
         // Generate salt
-        let salt = SaltString::generate(&mut OsRng);
+        let salt = SaltString::generate(&mut PasswordHashOsRng);
         let salt_bytes = salt.as_str().as_bytes();
 
         // Derive KEK from password
@@ -203,7 +208,8 @@ impl EncryptionEngine {
 
         // Generate salt
         let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
+        let mut rng = rand::rng();
+        rng.fill_bytes(&mut salt);
 
         // Derive KEK from recovery secret
         let kek = derive_kek_hkdf(secret, &salt)?;
@@ -508,7 +514,8 @@ fn wrap_key(
     let cipher = Aes256Gcm::new_from_slice(kek.as_bytes()).expect("Invalid key length");
 
     let mut nonce = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce);
+    let mut rng = rand::rng();
+    rng.fill_bytes(&mut nonce);
 
     // AAD: export_id || slot_id
     let mut aad = Vec::with_capacity(17);
