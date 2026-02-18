@@ -2402,8 +2402,6 @@ pub struct ResultItem {
 pub struct RowMiniAnalytics {
     /// Number of matched messages in the current result set for this session.
     pub matched_messages: usize,
-    /// Estimated total API tokens (chars/4 heuristic) for matched messages.
-    pub estimated_tokens: i64,
 }
 
 fn source_display_label(source_id: &str, origin_host: Option<&str>) -> String {
@@ -2539,19 +2537,6 @@ fn format_compact_metric(n: i64) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         format_number_with_grouping(n)
-    }
-}
-
-fn estimate_tokens_from_hit_for_stats(hit: &SearchHit) -> i64 {
-    let text = if !hit.content.is_empty() {
-        hit.content.as_str()
-    } else {
-        hit.snippet.as_str()
-    };
-    if text.is_empty() {
-        0
-    } else {
-        ((text.chars().count() as i64) / 4).max(1)
     }
 }
 
@@ -2798,7 +2783,6 @@ impl ResultItem {
             return Vec::new();
         }
 
-        let token_text = format!("{} tok", format_compact_metric(analytics.estimated_tokens));
         let msg_text = if analytics.matched_messages == 1 {
             "1 msg".to_string()
         } else {
@@ -2812,17 +2796,12 @@ impl ResultItem {
             LayoutBreakpoint::Narrow => Vec::new(),
             LayoutBreakpoint::MediumNarrow => vec![
                 ftui::text::Span::styled("● ", self.agent_accent_style),
-                ftui::text::Span::styled(token_text, self.text_primary_style),
+                ftui::text::Span::styled(msg_text.clone(), self.text_primary_style),
             ],
-            LayoutBreakpoint::Medium | LayoutBreakpoint::Wide => {
-                let mut spans = vec![
-                    ftui::text::Span::styled("● ", self.agent_accent_style),
-                    ftui::text::Span::styled(token_text, self.text_primary_style),
-                ];
-                spans.push(ftui::text::Span::styled(" · ", self.text_subtle_style));
-                spans.push(ftui::text::Span::styled(msg_text, self.text_subtle_style));
-                spans
-            }
+            LayoutBreakpoint::Medium | LayoutBreakpoint::Wide => vec![
+                ftui::text::Span::styled("● ", self.agent_accent_style),
+                ftui::text::Span::styled(msg_text, self.text_primary_style),
+            ],
         }
     }
 }
@@ -5960,9 +5939,6 @@ impl CassApp {
             let key = (hit.source_id.clone(), hit.source_path.clone());
             let entry = by_session.entry(key).or_default();
             entry.matched_messages += 1;
-            entry.estimated_tokens = entry
-                .estimated_tokens
-                .saturating_add(estimate_tokens_from_hit_for_stats(hit));
         }
         by_session
     }
@@ -5977,11 +5953,8 @@ impl CassApp {
         let total_messages: usize = stats_hits.len();
         let mut session_keys: HashSet<(String, String)> = HashSet::new();
         let mut timestamps: Vec<i64> = Vec::new();
-        let mut estimated_api_tokens = 0i64;
         for hit in &stats_hits {
             session_keys.insert((hit.source_id.clone(), hit.source_path.clone()));
-            estimated_api_tokens =
-                estimated_api_tokens.saturating_add(estimate_tokens_from_hit_for_stats(hit));
             if let Some(ts) = hit.created_at {
                 timestamps.push(ts);
             }
@@ -5992,9 +5965,6 @@ impl CassApp {
             sep.clone(),
             ftui::text::Span::styled(format_compact_metric(total_messages as i64), value_s),
             ftui::text::Span::styled(" msgs", label_s),
-            sep.clone(),
-            ftui::text::Span::styled(format_compact_metric(estimated_api_tokens), value_s),
-            ftui::text::Span::styled(" tok", label_s),
         ];
 
         if !timestamps.is_empty() {
@@ -20817,7 +20787,6 @@ mod tests {
         item.max_width = 72; // Narrow breakpoint
         item.mini_analytics = Some(RowMiniAnalytics {
             matched_messages: 5,
-            estimated_tokens: 2_500,
         });
 
         let text: String = item
@@ -20829,12 +20798,11 @@ mod tests {
     }
 
     #[test]
-    fn result_item_mini_analytics_medium_narrow_shows_token_only() {
+    fn result_item_mini_analytics_medium_narrow_shows_message_only() {
         let mut item = make_result_item(make_test_hit(), DensityMode::Cozy.row_height());
         item.max_width = 100; // MediumNarrow breakpoint
         item.mini_analytics = Some(RowMiniAnalytics {
             matched_messages: 5,
-            estimated_tokens: 2_500,
         });
 
         let text: String = item
@@ -20842,11 +20810,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref().to_string())
             .collect();
-        assert!(text.contains("tok"), "expected token badge, got: {text}");
-        assert!(
-            !text.contains("msg"),
-            "medium-narrow should omit message badge, got: {text}"
-        );
+        assert!(text.contains("msgs"), "expected message badge, got: {text}");
         assert!(
             !text.contains('$'),
             "should not show cost badge, got: {text}"
@@ -20854,12 +20818,11 @@ mod tests {
     }
 
     #[test]
-    fn result_item_mini_analytics_medium_shows_tokens_and_messages_only() {
+    fn result_item_mini_analytics_medium_shows_messages_only() {
         let mut item = make_result_item(make_test_hit(), DensityMode::Cozy.row_height());
         item.max_width = 140; // Medium breakpoint
         item.mini_analytics = Some(RowMiniAnalytics {
             matched_messages: 5,
-            estimated_tokens: 2_500,
         });
 
         let text: String = item
@@ -20867,7 +20830,6 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref().to_string())
             .collect();
-        assert!(text.contains("tok"), "expected token badge, got: {text}");
         assert!(text.contains("msgs"), "expected message badge, got: {text}");
         assert!(
             !text.contains('$'),
@@ -27476,11 +27438,11 @@ mod tests {
             text.contains("msgs"),
             "stats line should show message count"
         );
-        assert!(
-            text.contains("tok"),
-            "stats line should show token estimate"
-        );
         assert!(!text.contains("$"), "stats line should not show token cost");
+        assert!(
+            !text.contains("tok"),
+            "stats line should not show token metrics"
+        );
     }
 
     #[test]
@@ -27500,7 +27462,7 @@ mod tests {
     }
 
     #[test]
-    fn build_results_stats_line_estimates_tokens_from_content() {
+    fn build_results_stats_line_omits_token_estimate_from_content() {
         let mut app = CassApp::default();
         let mut hit = make_hit(1, "/path/1");
         hit.content = "x".repeat(8_000); // ~2,000 tokens by chars/4 heuristic
@@ -27516,10 +27478,8 @@ mod tests {
             .map(|s| s.content.as_ref().to_string())
             .collect();
 
-        assert!(
-            text.contains("2,000"),
-            "expected token estimate, got: {text}"
-        );
+        assert!(!text.contains("2,000"), "token estimate should be omitted");
+        assert!(!text.contains("tok"), "token metrics should be omitted");
         assert!(
             !text.contains('$'),
             "should not show estimated cost, got: {text}"
@@ -27553,13 +27513,11 @@ mod tests {
             .get(&(String::from("local"), String::from("/session/a")))
             .expect("missing session a metrics");
         assert_eq!(a_metrics.matched_messages, 2);
-        assert_eq!(a_metrics.estimated_tokens, 1_500);
 
         let b_metrics = by_session
             .get(&(String::from("remote-ci"), String::from("/session/b")))
             .expect("missing session b metrics");
         assert_eq!(b_metrics.matched_messages, 1);
-        assert_eq!(b_metrics.estimated_tokens, 200);
     }
 
     // -- End stats bar tests --------------------------------------------------
