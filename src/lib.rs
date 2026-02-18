@@ -205,8 +205,8 @@ pub enum Commands {
         /// Filter by workspace path (can be specified multiple times)
         #[arg(long)]
         workspace: Vec<String>,
-        /// Max results
-        #[arg(long, default_value_t = 10)]
+        /// Max results (0 = no limit)
+        #[arg(long, default_value_t = 0)]
         limit: usize,
         /// Offset for pagination (start at Nth result)
         #[arg(long, default_value_t = 0)]
@@ -4865,7 +4865,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass search <query> [OPTIONS]".to_string(),
             "    --agent A         Filter by agent (codex, claude_code, gemini, vibe, opencode, amp, cline)".to_string(),
             "    --workspace W     Filter by workspace path".to_string(),
-            "    --limit N         Max results (default: 10)".to_string(),
+            "    --limit N         Max results (default: 0 = no limit)".to_string(),
             "    --offset N        Pagination offset (default: 0)".to_string(),
             "    --json | --robot  JSON output for automation".to_string(),
             "    --fields F1,F2    Select specific fields in hits (reduces token usage)".to_string(),
@@ -10175,7 +10175,7 @@ fn run_config_based_export(
     _verbose: bool,
 ) -> anyhow::Result<()> {
     use chrono::DateTime;
-    use rand::RngCore;
+    use rand::Rng;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -10241,7 +10241,8 @@ fn run_config_based_export(
         // Add recovery slot if requested
         if wizard_state.generate_recovery {
             let mut recovery_bytes = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut recovery_bytes);
+            let mut rng = rand::rng();
+            rng.fill_bytes(&mut recovery_bytes);
             enc_engine.add_recovery_slot(&recovery_bytes)?;
             recovery_secret = Some(recovery_bytes.to_vec());
         }

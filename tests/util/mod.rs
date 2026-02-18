@@ -241,7 +241,7 @@ use coding_agent_search::connectors::{
 use coding_agent_search::model::types::{Conversation, Message, MessageRole, Snippet};
 use coding_agent_search::search::query::{MatchType, SearchHit};
 use coding_agent_search::sources::probe::HostProbeResult;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde_json::json;
 use std::path::PathBuf;
@@ -1065,14 +1065,14 @@ impl SeededRng {
 
     /// Generate a random f32 in the range [0, 1).
     pub fn f32(&mut self) -> f32 {
-        self.rng.r#gen::<f32>()
+        self.rng.random::<f32>()
     }
 
     /// Generate a random f32 in the given range [min, max).
     /// If min > max, they are swapped.
     pub fn f32_range(&mut self, min: f32, max: f32) -> f32 {
         let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
-        lo + self.rng.r#gen::<f32>() * (hi - lo)
+        lo + self.rng.random::<f32>() * (hi - lo)
     }
 
     /// Generate a random i64 in the given range [min, max).
@@ -1081,7 +1081,7 @@ impl SeededRng {
         if min >= max {
             return min;
         }
-        self.rng.r#gen_range(min..max)
+        self.rng.random_range(min..max)
     }
 
     /// Generate a random usize in the given range [min, max).
@@ -1090,7 +1090,7 @@ impl SeededRng {
         if min >= max {
             return min;
         }
-        self.rng.r#gen_range(min..max)
+        self.rng.random_range(min..max)
     }
 
     /// Generate a random alphanumeric string of the given length.
@@ -1098,7 +1098,7 @@ impl SeededRng {
         const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         (0..len)
             .map(|_| {
-                let idx = self.rng.r#gen_range(0..CHARSET.len());
+                let idx = self.rng.random_range(0..CHARSET.len());
                 CHARSET[idx] as char
             })
             .collect()

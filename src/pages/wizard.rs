@@ -1649,8 +1649,9 @@ impl PagesWizard {
             // Generate and add recovery secret if requested
             if self.state.generate_recovery {
                 let mut recovery_bytes = [0u8; 32];
-                use rand::RngCore;
-                rand::rngs::OsRng.fill_bytes(&mut recovery_bytes);
+                use rand::Rng;
+                let mut rng = rand::rng();
+                rng.fill_bytes(&mut recovery_bytes);
                 enc_engine.add_recovery_slot(&recovery_bytes)?;
                 self.state.recovery_secret = Some(recovery_bytes.to_vec());
             }

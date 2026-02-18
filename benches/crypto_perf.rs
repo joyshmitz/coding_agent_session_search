@@ -22,7 +22,7 @@ use coding_agent_search::encryption::{
     hkdf_extract_expand,
 };
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use rand::Rng;
+use rand::RngExt;
 use std::hint::black_box;
 
 // =============================================================================
@@ -99,7 +99,7 @@ fn bench_argon2id_memory_scaling(c: &mut Criterion) {
 
 /// Generate random bytes for benchmarks.
 fn random_bytes(len: usize) -> Vec<u8> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut data = vec![0u8; len];
     rng.fill(&mut data[..]);
     data

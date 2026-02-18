@@ -29,7 +29,7 @@ use base64::prelude::*;
 use chrono::{DateTime, Utc};
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use hkdf::Hkdf;
-use rand::{RngCore, rngs::OsRng};
+use rand::Rng;
 use serde::Serialize;
 use sha2::Sha256;
 use std::fs::File;
@@ -267,9 +267,10 @@ pub fn key_rotate(
     let mut new_dek = [0u8; 32];
     let mut new_export_id = [0u8; 16];
     let mut new_base_nonce = [0u8; 12];
-    OsRng.fill_bytes(&mut new_dek);
-    OsRng.fill_bytes(&mut new_export_id);
-    OsRng.fill_bytes(&mut new_base_nonce);
+    let mut rng = rand::rng();
+    rng.fill_bytes(&mut new_dek);
+    rng.fill_bytes(&mut new_export_id);
+    rng.fill_bytes(&mut new_base_nonce);
 
     // 3. Re-encrypt payload with new DEK
     let chunk_count = encrypt_all_chunks(
@@ -462,7 +463,8 @@ fn create_password_slot(
 
     // Generate salt
     let mut salt = [0u8; 32];
-    OsRng.fill_bytes(&mut salt);
+    let mut rng = rand::rng();
+    rng.fill_bytes(&mut salt);
 
     // Derive KEK from password
     let mut kek = derive_kek_argon2id(password, &salt)?;
@@ -497,7 +499,8 @@ fn create_recovery_slot(
 
     // Generate salt
     let mut salt = [0u8; 16];
-    OsRng.fill_bytes(&mut salt);
+    let mut rng = rand::rng();
+    rng.fill_bytes(&mut salt);
 
     // Derive KEK from recovery secret
     let mut kek = derive_kek_hkdf(secret, &salt)?;
@@ -531,7 +534,8 @@ fn wrap_key(
     let cipher = Aes256Gcm::new_from_slice(kek).expect("Invalid key length");
 
     let mut nonce = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce);
+    let mut rng = rand::rng();
+    rng.fill_bytes(&mut nonce);
 
     // AAD: export_id || slot_id
     let mut aad = Vec::with_capacity(export_id.len() + 1);

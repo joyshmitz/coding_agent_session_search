@@ -1,152 +1,52 @@
 # Dependency Upgrade Log
 
-**Date:** 2026-01-26
-**Project:** coding-agent-search
+**Date:** 2026-02-17  
+**Project:** coding_agent_session_search (`cass`)  
 **Language:** Rust
-**Manifest:** Cargo.toml
-
----
 
 ## Summary
+- **Updated:** 3 direct dependency lines in `Cargo.toml` (`reqwest`, `rand`, `rand_chacha`)
+- **Migrated code:** rand 0.10 API updates across runtime/test/bench callsites
+- **Validated:** `cargo check --all-targets`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
+- **Remaining behind latest:** 3 transitive crates (`generic-array`, `hnsw_rs`, `libc`)
 
-| Metric | Count |
-|--------|-------|
-| **Total dependencies reviewed** | 11 |
-| **Updated** | 0 |
-| **Skipped** | 8 |
-| **Failed (blocked by constraints)** | 3 |
-| **Requires attention** | 0 |
+## Direct Dependency Updates
 
----
+### reqwest: 0.12.28 -> 0.13.2
+- **Manifest change:** `features = ["json", "rustls-tls", "blocking", "multipart"]` -> `features = ["json", "rustls", "blocking", "multipart"]`
+- **Reason:** reqwest 0.13 removed `rustls-tls` feature name
+- **Status:** ✅ Compiles and passes strict clippy
 
-## Failed / Blocked Updates
+### rand: 0.8.5 -> 0.10.0
+- **Manifest change:** `rand = "0.8"` -> `rand = "0.10"`
+- **Code migration:** replaced old APIs (`thread_rng`, `gen`, `gen_range`) with rand 0.10 APIs (`rng`, `random`, `random_range`) and updated RNG callsites used by export/encryption helpers
+- **Status:** ✅ Compiles and passes strict clippy
 
-### thiserror: 1.0.69 → 2.0.18
+### rand_chacha: 0.3.1 -> 0.10.0
+- **Manifest change:** dev dependency `rand_chacha = "0.3"` -> `rand_chacha = "0.10"`
+- **Code migration:** updated deterministic test RNG usage in `tests/util/mod.rs`
+- **Status:** ✅ Compiles and passes strict clippy
 
-**Changelog:** https://github.com/dtolnay/thiserror/releases/tag/2.0.0
+## Cargo Resolution Notes
+- `cargo update --verbose` now reports only these unresolved transitive updates:
+  - `generic-array v0.14.7` (available `0.14.9`)
+  - `hnsw_rs v0.3.2` (available `0.3.3`)
+  - `libc v0.2.180` (available `0.2.182`)
 
-**Breaking changes (2.0.0):**
-- `{r#field}` raw identifiers in format strings are no longer accepted
-- Trait bounds no longer inferred when explicit named args shadow fields
-- Tuple field indices cannot be mixed with extra positional args
-
-**Attempted update:**
-```
-cargo update -p thiserror@1.0.69 --precise 2.0.18
-```
-
-**Blocked by:** `termwiz v0.23.3` (via `ratatui-termwiz v0.1.0` → `ratatui 0.30.0`) requiring `thiserror ^1.0`.
-
-**Action:** Skipped (no lockfile change).
-
----
-
-### rand: 0.8.5 → 0.9.2
-
-**Changelog:** https://github.com/rust-random/rand/blob/master/CHANGELOG.md
-
-**Breaking changes (0.9.0):**
-- `Rng::gen` → `random`, `Rng::gen_range` → `random_range`
-- `rand::thread_rng()` → `rand::rng()`
-- `rand::distributions` → `rand::distr`
-
-**Attempted update:**
-```
-cargo update -p rand@0.8.5 --precise 0.9.2
-```
-
-**Blocked by:** `rand_distr v0.4.3` (via `tantivy-stacker v0.6.0` → `tantivy 0.25.0`) requiring `rand ^0.8`.
-
-**Action:** Skipped (no lockfile change).
-
----
-
-### security-framework: 2.11.1 → 3.5.1
-
-**Attempted update:**
-```
-cargo update -p security-framework@2.11.1 --precise 3.5.1
-```
-
-**Blocked by:** `native-tls v0.2.14` (via `ureq 3.1.4` → `ort 2.0.0-rc.11` → `fastembed 5.8.1`) requiring `security-framework ^2.0`.
-
-**Action:** Skipped (no lockfile change).
-
----
-
-## Skipped (Blocked or Already Latest)
-
-### rand_chacha: 0.3.1 → 0.9.0
-**Reason:** Blocked by `rand` staying on 0.8.x; upgrading would cause rand_core trait mismatches.
-
-### rand_core: 0.6.4 → 0.9.5
-**Reason:** Blocked by `rand` staying on 0.8.x.
-
-### getrandom: 0.2.17 → 0.3.4
-**Reason:** Blocked by `rand_core 0.6.x` in `rand 0.8.x`.
-
-### core-foundation: 0.9.4 → 0.10.1
-**Reason:** Blocked by `security-framework 2.x` dependency chain.
-
-### thiserror-impl: 1.0.69 → 2.0.18
-**Reason:** Blocked by `thiserror` staying on 1.0.x.
-
-### libc: 0.2.180 → Removed
-**Reason:** Reported as Removed by `cargo outdated`; transitive dependency with no update path.
-
-### wasi: 0.11.1+wasi-snapshot-preview1 → Removed
-**Reason:** Reported as Removed by `cargo outdated`; transitive dependency with no update path.
-
-### reqwest: 0.13.1 → 0.13.1
-**Reason:** Already on latest stable (not listed by `cargo outdated`).
-
----
-
-## Tests
-
+## Validation Run
+- `cargo check --all-targets` ✅
 - `cargo fmt --check` ✅
-- `CARGO_TARGET_DIR=target_upgrade_checks cargo check --all-targets` ✅ (initial run surfaced unused `ExportTaskEvent`; removed enum + unused import)
-- `CARGO_TARGET_DIR=target_upgrade_checks_2 cargo check --all-targets -q` ⏳ still running (build load from other cargo jobs)
-- `cargo clippy --all-targets -- -D warnings` ⏳ pending
-- `cargo test --all-targets` ⏳ pending
+- `cargo clippy --all-targets -- -D warnings` ✅
 
----
-
-## Commands Used
-
-```bash
-cargo outdated -w
-cargo update -p thiserror@1.0.69 --precise 2.0.18
-cargo update -p rand@0.8.5 --precise 0.9.2
-cargo update -p security-framework@2.11.1 --precise 3.5.1
-cargo fmt --check
-CARGO_TARGET_DIR=target_upgrade_checks cargo check --all-targets
-CARGO_TARGET_DIR=target_upgrade_checks_2 cargo check --all-targets -q
-cargo audit
-```
-
----
-
-## Notes
-
-- Upgrades are blocked by upstream dependencies that already appear to be at their latest stable versions.
-- Revisit when `ratatui`/`termwiz`, `tantivy`, or `native-tls` move to newer major versions that lift these constraints.
-
-## Security Notes
-
-`cargo audit` reported advisory warnings:
-- RUSTSEC-2025-0141: `bincode 1.3.3` (unmaintained) via `syntect`
-- RUSTSEC-2025-0057: `fxhash 0.2.1` (unmaintained)
-- RUSTSEC-2024-0436: `paste 1.0.15` (unmaintained) via `tokenizers`/`macro_rules_attribute`
-- RUSTSEC-2024-0320: `yaml-rust 0.4.5` (unmaintained) via `syntect`
-- RUSTSEC-2026-0002: `lru 0.12.5` (unsound) via `tantivy`
-
----
-
-## Revalidation (2026-01-26)
-
-- Re-ran `cargo outdated -w`: same outdated list as above (all blocked or removed).
-- No dependency updates applied (constraints unchanged).
-- `cargo fmt --check` ✅
-- `CARGO_TARGET_DIR=target_bd1lps_check3 cargo check --all-targets` ✅
-- `CARGO_TARGET_DIR=target_bd1lps_clippy2 cargo clippy --all-targets -- -D warnings` ✅
+## Files Touched for rand/reqwest Migration
+- `Cargo.toml`
+- `Cargo.lock`
+- `src/lib.rs`
+- `src/pages/encrypt.rs`
+- `src/pages/key_management.rs`
+- `src/pages/qr.rs`
+- `src/pages/wizard.rs`
+- `src/html_export/encryption.rs`
+- `tests/util/mod.rs`
+- `benches/crypto_perf.rs`
+- `benches/export_perf.rs`

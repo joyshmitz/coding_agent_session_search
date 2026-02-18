@@ -1,8 +1,16 @@
 use anyhow::{Result, anyhow, bail};
 use frankensearch_core::{
     ScoreSource as FsScoreSource, ScoredResult as FsScoredResult, VectorHit as FsVectorHit,
+    query_class::QueryClass as FsQueryClass,
 };
-use frankensearch_fusion::{RrfConfig as FsRrfConfig, rrf_fuse as fs_rrf_fuse};
+use frankensearch_fusion::{
+    RrfConfig as FsRrfConfig, candidate_count as fs_candidate_count, rrf_fuse as fs_rrf_fuse,
+};
+use frankensearch_lexical::{
+    SnippetConfig as FsSnippetConfig, execute_query_with_offset as fs_execute_query_with_offset,
+    load_doc as fs_load_doc, render_snippet_html as fs_render_snippet_html,
+    try_build_snippet_generator as fs_try_build_snippet_generator,
+};
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -20,7 +28,6 @@ use tantivy::query::{
     AllQuery, BooleanQuery, Occur, PhraseQuery, Query, RangeQuery, RegexQuery, TermQuery,
 };
 use tantivy::schema::{Field, IndexRecordOption, Term, Value};
-use tantivy::snippet::SnippetGenerator;
 use tantivy::{Index, IndexReader, ReloadPolicy, Searcher, TantivyDocument};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -186,6 +193,75 @@ impl SearchMode {
 
 const HYBRID_CANDIDATE_MULTIPLIER: usize = 3;
 const ANN_CANDIDATE_MULTIPLIER: usize = 4;
+const HYBRID_NO_LIMIT_PLANNING_WINDOW: usize = 64;
+const HYBRID_NO_LIMIT_SEMANTIC_CAP: usize = 2048;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HybridCandidateBudget {
+    lexical_candidates: usize,
+    semantic_candidates: usize,
+}
+
+#[inline]
+const fn hybrid_stage_multipliers(query_class: FsQueryClass) -> (usize, usize) {
+    match query_class {
+        // Identifier-heavy queries: prioritize lexical precision.
+        FsQueryClass::Identifier => (6, 2),
+        // Keyword queries: balanced lexical/semantic retrieval.
+        FsQueryClass::ShortKeyword => (4, 4),
+        // Natural language queries: prioritize semantic retrieval.
+        FsQueryClass::NaturalLanguage => (2, 8),
+        // Empty query should short-circuit before budgeting.
+        FsQueryClass::Empty => (0, 0),
+    }
+}
+
+#[inline]
+fn hybrid_candidate_budget(
+    query: &str,
+    requested_limit: usize,
+    effective_limit: usize,
+    offset: usize,
+    total_docs: usize,
+) -> HybridCandidateBudget {
+    let query_class = FsQueryClass::classify(query);
+    let (lex_mult, sem_mult) = hybrid_stage_multipliers(query_class);
+    let total_docs = total_docs.max(1);
+
+    // When no explicit limit is requested, keep "no limit" output semantics,
+    // but bound semantic fanout so hybrid doesn't try to score the entire corpus.
+    if requested_limit == 0 {
+        let planning_window = HYBRID_NO_LIMIT_PLANNING_WINDOW.max(offset.saturating_add(1));
+        let semantic = fs_candidate_count(planning_window, 0, sem_mult)
+            .max(planning_window)
+            .min(HYBRID_NO_LIMIT_SEMANTIC_CAP.max(offset.saturating_add(planning_window)))
+            .min(total_docs);
+        return HybridCandidateBudget {
+            lexical_candidates: effective_limit.min(total_docs),
+            semantic_candidates: semantic,
+        };
+    }
+
+    let lexical = fs_candidate_count(
+        requested_limit,
+        offset,
+        lex_mult.max(HYBRID_CANDIDATE_MULTIPLIER),
+    )
+    .max(requested_limit.saturating_add(offset))
+    .min(total_docs);
+    let semantic = fs_candidate_count(
+        requested_limit,
+        offset,
+        sem_mult.max(HYBRID_CANDIDATE_MULTIPLIER),
+    )
+    .max(requested_limit.saturating_add(offset))
+    .min(total_docs);
+
+    HybridCandidateBudget {
+        lexical_candidates: lexical,
+        semantic_candidates: semantic,
+    }
+}
 
 // ============================================================================
 // Query Explanation types (--explain flag support)
@@ -2940,10 +3016,12 @@ impl SearchClient {
         field_mask: FieldMask,
         approximate: bool,
     ) -> Result<SearchResult> {
-        let limit = if limit == 0 {
-            self.total_docs().max(1)
+        let requested_limit = limit;
+        let total_docs = self.total_docs().max(1);
+        let limit = if requested_limit == 0 {
+            total_docs
         } else {
-            limit
+            requested_limit
         };
         let fetch = limit.saturating_add(offset);
         if fetch == 0 {
@@ -2967,11 +3045,12 @@ impl SearchClient {
             );
         }
 
-        let candidate = fetch.saturating_mul(HYBRID_CANDIDATE_MULTIPLIER);
+        let budget =
+            hybrid_candidate_budget(semantic_query, requested_limit, limit, offset, total_docs);
         let lexical = self.search_with_fallback(
             lexical_query,
             filters.clone(),
-            candidate,
+            budget.lexical_candidates,
             0,
             sparse_threshold,
             field_mask,
@@ -2979,7 +3058,7 @@ impl SearchClient {
         let (semantic_hits, semantic_ann_stats) = self.search_semantic(
             semantic_query,
             filters,
-            candidate,
+            budget.semantic_candidates,
             0,
             field_mask,
             approximate,
@@ -3242,15 +3321,21 @@ impl SearchClient {
         let snippet_generator = if prefix_only || !field_mask.wants_snippet() {
             None
         } else {
-            Some(SnippetGenerator::create(&searcher, &*q, fields.content)?)
+            let snippet_cfg = FsSnippetConfig {
+                max_chars: 160,
+                highlight_prefix: "<b>".to_string(),
+                highlight_postfix: "</b>".to_string(),
+            };
+            fs_try_build_snippet_generator(&searcher, &*q, fields.content, &snippet_cfg)
         };
 
-        let top_docs = searcher.search(&q, &TopDocs::with_limit(limit).and_offset(offset))?;
+        let top_docs = fs_execute_query_with_offset(&searcher, &*q, limit, offset)?;
         // Compute match type once for all results (not per-hit)
         let query_match_type = dominant_match_type(sanitized_query);
         let mut hits = Vec::new();
-        for (score, addr) in top_docs {
-            let doc: TantivyDocument = searcher.doc(addr)?;
+        for ranked_hit in top_docs {
+            let score = ranked_hit.bm25_score;
+            let doc: TantivyDocument = fs_load_doc(&searcher, ranked_hit.doc_address)?;
             let title = if field_mask.wants_title() {
                 doc.get_first(fields.title)
                     .and_then(|v| v.as_str())
@@ -3275,11 +3360,9 @@ impl SearchClient {
                 .to_string();
             let snippet = if field_mask.wants_snippet() {
                 if let Some(r#gen) = &snippet_generator {
-                    r#gen
-                        .snippet_from_doc(&doc)
-                        .to_html()
-                        .replace("<b>", "**")
-                        .replace("</b>", "**")
+                    fs_render_snippet_html(r#gen, &doc, "<b>", "</b>")
+                        .map(|html| html.replace("<b>", "**").replace("</b>", "**"))
+                        .unwrap_or_default()
                 } else if let Some(sn) = cached_prefix_snippet(&content, sanitized_query, 160) {
                     sn
                 } else {
@@ -8474,6 +8557,26 @@ mod tests {
         assert_eq!(result.len(), 199); // 100 "?" + 99 ","
         assert_eq!(result.chars().filter(|c| *c == '?').count(), 100);
         assert_eq!(result.chars().filter(|c| *c == ',').count(), 99);
+    }
+
+    #[test]
+    fn hybrid_budget_identifier_biases_lexical() {
+        let budget = hybrid_candidate_budget("src/main.rs", 20, 20, 5, 10_000);
+        assert!(
+            budget.lexical_candidates > budget.semantic_candidates,
+            "identifier queries should allocate more lexical than semantic fanout"
+        );
+        assert!(budget.lexical_candidates >= 25);
+    }
+
+    #[test]
+    fn hybrid_budget_no_limit_caps_semantic_without_capping_lexical() {
+        let total_docs = 30_000;
+        let budget =
+            hybrid_candidate_budget("authentication middleware", 0, total_docs, 0, total_docs);
+        assert_eq!(budget.lexical_candidates, total_docs);
+        assert!(budget.semantic_candidates <= HYBRID_NO_LIMIT_SEMANTIC_CAP);
+        assert!(budget.semantic_candidates < budget.lexical_candidates);
     }
 
     // =============================================================================

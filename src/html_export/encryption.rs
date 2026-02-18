@@ -93,12 +93,12 @@ pub fn encrypt_content(
     password: &str,
     params: &EncryptionParams,
 ) -> Result<EncryptedContent, EncryptionError> {
+    use aes_gcm::aead::rand_core::RngCore;
     use aes_gcm::{
         Aes256Gcm, Nonce,
         aead::{Aead, KeyInit, OsRng},
     };
     use pbkdf2::pbkdf2_hmac;
-    use rand::RngCore;
     use sha2::Sha256;
 
     if password.is_empty() {

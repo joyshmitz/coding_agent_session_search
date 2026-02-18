@@ -25,7 +25,7 @@
 use anyhow::{Context, Result, bail};
 use base64::prelude::*;
 use chrono::Utc;
-use rand::{RngCore, rngs::OsRng};
+use rand::Rng;
 use std::path::Path;
 use tracing::info;
 use zeroize::Zeroize;
@@ -61,7 +61,8 @@ impl RecoverySecret {
     /// Uses the system's cryptographically secure random number generator.
     pub fn generate() -> Self {
         let mut bytes = vec![0u8; RECOVERY_SECRET_BYTES];
-        OsRng.fill_bytes(&mut bytes);
+        let mut rng = rand::rng();
+        rng.fill_bytes(&mut bytes);
         let encoded = BASE64_URL_SAFE_NO_PAD.encode(&bytes);
         Self { bytes, encoded }
     }
