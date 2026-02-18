@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "asupersync-macros",
  "base64 0.22.1",
@@ -1690,9 +1690,11 @@ dependencies = [
  "crc32fast",
  "frankensearch-core",
  "half",
+ "hnsw_rs",
  "memmap2",
  "rayon",
  "serde",
+ "serde_json",
  "tracing",
  "wide 0.7.33",
 ]

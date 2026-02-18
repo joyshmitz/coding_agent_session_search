@@ -57,21 +57,8 @@ impl FactoryConnector {
 
 impl Connector for FactoryConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("factory")
-            && detected.detected
-        {
-            return detected;
-        }
-        if let Some(root) = Self::sessions_root()
-            && root.exists()
-        {
-            return DetectionResult {
-                detected: true,
-                evidence: vec![format!("found {}", root.display())],
-                root_paths: vec![root],
-            };
-        }
-        DetectionResult::not_found()
+        crate::connectors::franken_detection_for_connector("factory")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {

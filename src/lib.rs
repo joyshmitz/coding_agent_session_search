@@ -5522,7 +5522,6 @@ fn run_cli_search(
     mode: Option<crate::search::query::SearchMode>,
     semantic_opts: SemanticSearchOptions,
 ) -> CliResult<()> {
-    use crate::search::ann_index::hnsw_index_path;
     use crate::search::model_manager::{load_hash_semantic_context, load_semantic_context};
     use crate::search::query::{
         QueryExplanation, SearchClient, SearchClientOptions, SearchFilters, SearchMode,
@@ -5632,7 +5631,11 @@ fn run_cli_search(
                 embedder
             };
 
-            let ann_path = Some(hnsw_index_path(&data_dir, embedder.id()));
+            let ann_path = Some(
+                data_dir
+                    .join(crate::search::vector_index::VECTOR_INDEX_DIR)
+                    .join(format!("hnsw-{}.chsw", embedder.id())),
+            );
             if let Err(err) =
                 client.set_semantic_context(embedder, index, filter_maps, roles, ann_path)
             {

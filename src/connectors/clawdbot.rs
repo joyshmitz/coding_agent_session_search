@@ -67,28 +67,8 @@ impl ClawdbotConnector {
 
 impl Connector for ClawdbotConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("clawdbot") {
-            return if detected.detected {
-                DetectionResult {
-                    detected: true,
-                    evidence: detected.evidence,
-                    root_paths: detected.root_paths,
-                }
-            } else {
-                DetectionResult::not_found()
-            };
-        }
-
-        let root = Self::sessions_root();
-        if root.exists() && root.is_dir() {
-            DetectionResult {
-                detected: true,
-                evidence: vec![format!("found {}", root.display())],
-                root_paths: vec![root],
-            }
-        } else {
-            DetectionResult::not_found()
-        }
+        crate::connectors::franken_detection_for_connector("clawdbot")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {

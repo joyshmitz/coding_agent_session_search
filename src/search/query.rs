@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use frankensearch::lexical::{
     SnippetConfig as FsSnippetConfig, execute_query_with_offset as fs_execute_query_with_offset,
     load_doc as fs_load_doc, render_snippet_html as fs_render_snippet_html,
@@ -7,7 +7,13 @@ use frankensearch::lexical::{
 use frankensearch::{
     QueryClass as FsQueryClass, RrfConfig as FsRrfConfig, ScoreSource as FsScoreSource,
     ScoredResult as FsScoredResult, VectorHit as FsVectorHit,
-    candidate_count as fs_candidate_count, rrf_fuse as fs_rrf_fuse,
+    candidate_count as fs_candidate_count,
+    core::filter::SearchFilter as FsSearchFilter,
+    index::{
+        HNSW_DEFAULT_EF_SEARCH as FS_HNSW_DEFAULT_EF_SEARCH, HnswIndex as FsHnswIndex,
+        VectorIndex as FsVectorIndex,
+    },
+    rrf_fuse as fs_rrf_fuse,
 };
 use lru::LruCache;
 use once_cell::sync::Lazy;
@@ -33,7 +39,6 @@ use tokio::task::JoinHandle;
 
 use rusqlite::Connection;
 
-use crate::search::ann_index::{DEFAULT_EF_SEARCH, HnswIndex};
 use crate::search::canonicalize::canonicalize_for_embedding;
 use crate::search::embedder::Embedder;
 use crate::search::tantivy::fields_from_schema;
@@ -1236,10 +1241,268 @@ impl QueryCache {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FsSemanticDocId {
+    message_id: u64,
+    chunk_idx: u8,
+    agent_id: u32,
+    workspace_id: u32,
+    source_id: u32,
+    role: u8,
+    created_at_ms: i64,
+}
+
+fn encode_fs_semantic_doc_id(row: &crate::search::vector_index::VectorRow) -> String {
+    format!(
+        "m|{}|{}|{}|{}|{}|{}|{}",
+        row.message_id,
+        row.chunk_idx,
+        row.agent_id,
+        row.workspace_id,
+        row.source_id,
+        row.role,
+        row.created_at_ms,
+    )
+}
+
+fn parse_fs_semantic_doc_id(doc_id: &str) -> Option<FsSemanticDocId> {
+    let mut parts = doc_id.split('|');
+    if parts.next()? != "m" {
+        return None;
+    }
+    let parsed = FsSemanticDocId {
+        message_id: parts.next()?.parse().ok()?,
+        chunk_idx: parts.next()?.parse().ok()?,
+        agent_id: parts.next()?.parse().ok()?,
+        workspace_id: parts.next()?.parse().ok()?,
+        source_id: parts.next()?.parse().ok()?,
+        role: parts.next()?.parse().ok()?,
+        created_at_ms: parts.next()?.parse().ok()?,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(parsed)
+}
+
+struct FsSemanticFilterAdapter<'a> {
+    filter: &'a SemanticFilter,
+    allowed_doc_id_hashes: Option<HashSet<u64>>,
+}
+
+impl FsSearchFilter for FsSemanticFilterAdapter<'_> {
+    fn matches(&self, doc_id: &str, _metadata: Option<&serde_json::Value>) -> bool {
+        if let Some(allowed) = &self.allowed_doc_id_hashes {
+            return allowed.contains(&fs_doc_id_hash(doc_id.as_bytes()));
+        }
+        let Some(parsed) = parse_fs_semantic_doc_id(doc_id) else {
+            return false;
+        };
+
+        if let Some(agents) = &self.filter.agents
+            && !agents.contains(&parsed.agent_id)
+        {
+            return false;
+        }
+        if let Some(workspaces) = &self.filter.workspaces
+            && !workspaces.contains(&parsed.workspace_id)
+        {
+            return false;
+        }
+        if let Some(sources) = &self.filter.sources
+            && !sources.contains(&parsed.source_id)
+        {
+            return false;
+        }
+        if let Some(roles) = &self.filter.roles
+            && !roles.contains(&parsed.role)
+        {
+            return false;
+        }
+        if let Some(from) = self.filter.created_from
+            && parsed.created_at_ms < from
+        {
+            return false;
+        }
+        if let Some(to) = self.filter.created_to
+            && parsed.created_at_ms > to
+        {
+            return false;
+        }
+        true
+    }
+
+    fn matches_doc_id_hash(
+        &self,
+        doc_id_hash: u64,
+        _metadata: Option<&serde_json::Value>,
+    ) -> Option<bool> {
+        self.allowed_doc_id_hashes
+            .as_ref()
+            .map(|allowed| allowed.contains(&doc_id_hash))
+    }
+
+    fn name(&self) -> &str {
+        "cass_semantic_filter"
+    }
+}
+
+fn semantic_filter_is_unrestricted(filter: &SemanticFilter) -> bool {
+    filter.agents.is_none()
+        && filter.workspaces.is_none()
+        && filter.sources.is_none()
+        && filter.roles.is_none()
+        && filter.created_from.is_none()
+        && filter.created_to.is_none()
+}
+
+fn fs_doc_id_hash(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn build_fs_semantic_filter_adapter<'a>(
+    index: &'a VectorIndex,
+    filter: &'a SemanticFilter,
+) -> Option<FsSemanticFilterAdapter<'a>> {
+    if semantic_filter_is_unrestricted(filter) {
+        return None;
+    }
+
+    let mut allowed_doc_id_hashes = HashSet::new();
+    for row in index.rows() {
+        if filter.matches(row) {
+            let doc_id = encode_fs_semantic_doc_id(row);
+            allowed_doc_id_hashes.insert(fs_doc_id_hash(doc_id.as_bytes()));
+        }
+    }
+
+    Some(FsSemanticFilterAdapter {
+        filter,
+        allowed_doc_id_hashes: Some(allowed_doc_id_hashes),
+    })
+}
+
+fn sanitize_embedder_id_for_filename(embedder_id: &str) -> String {
+    let slug: String = embedder_id
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect();
+    if slug.is_empty() {
+        "unknown".to_string()
+    } else {
+        slug
+    }
+}
+
+fn fs_semantic_bridge_path(ann_path: Option<&Path>, embedder_id: &str) -> Option<PathBuf> {
+    let parent = ann_path?.parent()?;
+    let slug = sanitize_embedder_id_for_filename(embedder_id);
+    Some(parent.join(format!("frankensearch-bridge-{slug}.fsvi")))
+}
+
+fn fs_semantic_source_cvvi_path(ann_path: Option<&Path>, embedder_id: &str) -> Option<PathBuf> {
+    let parent = ann_path?.parent()?;
+    Some(parent.join(format!("index-{embedder_id}.cvvi")))
+}
+
+fn fs_semantic_bridge_is_fresh(bridge_path: &Path, source_cvvi_path: Option<&Path>) -> bool {
+    let Ok(bridge_meta) = std::fs::metadata(bridge_path) else {
+        return false;
+    };
+    let Some(source_path) = source_cvvi_path else {
+        return true;
+    };
+    let Ok(source_meta) = std::fs::metadata(source_path) else {
+        return false;
+    };
+    let Ok(bridge_modified) = bridge_meta.modified() else {
+        return false;
+    };
+    let Ok(source_modified) = source_meta.modified() else {
+        return false;
+    };
+    bridge_modified >= source_modified
+}
+
+fn open_or_build_fs_semantic_index(
+    index: &VectorIndex,
+    ann_path: Option<&Path>,
+) -> Result<Option<FsVectorIndex>> {
+    let embedder_id = index.header().embedder_id.as_str();
+    let Some(bridge_path) = fs_semantic_bridge_path(ann_path, embedder_id) else {
+        return Ok(None);
+    };
+    let source_cvvi_path = fs_semantic_source_cvvi_path(ann_path, embedder_id);
+
+    if bridge_path.exists()
+        && fs_semantic_bridge_is_fresh(&bridge_path, source_cvvi_path.as_deref())
+        && let Ok(existing) = FsVectorIndex::open(&bridge_path)
+        && existing.dimension() == index.header().dimension as usize
+        && existing.record_count() == index.rows().len()
+    {
+        return Ok(Some(existing));
+    }
+
+    if let Some(parent) = bridge_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create semantic bridge dir {}", parent.display()))?;
+    }
+
+    let mut writer =
+        FsVectorIndex::create(&bridge_path, embedder_id, index.header().dimension as usize)
+            .map_err(|err| anyhow!("create semantic bridge index failed: {err}"))?;
+
+    for row in index.rows() {
+        let doc_id = encode_fs_semantic_doc_id(row);
+        let vector = index.vector_at_f32(row)?;
+        writer
+            .write_record(&doc_id, &vector)
+            .map_err(|err| anyhow!("write semantic bridge record failed: {err}"))?;
+    }
+
+    writer
+        .finish()
+        .map_err(|err| anyhow!("finish semantic bridge index failed: {err}"))?;
+    let opened = FsVectorIndex::open(&bridge_path)
+        .map_err(|err| anyhow!("open bridge index failed: {err}"))?;
+    Ok(Some(opened))
+}
+
+fn open_fs_semantic_ann_index(fs_index: &FsVectorIndex, ann_path: &Path) -> Result<FsHnswIndex> {
+    if !ann_path.is_file() {
+        bail!(
+            "approximate search unavailable: HNSW index not found at {}",
+            ann_path.display()
+        );
+    }
+
+    let ann = FsHnswIndex::load(ann_path, fs_index)
+        .map_err(|err| anyhow!("open HNSW index failed: {err}"))?;
+    let matches = ann
+        .matches_vector_index(fs_index)
+        .map_err(|err| anyhow!("validate HNSW index failed: {err}"))?;
+    if !matches {
+        bail!(
+            "approximate search unavailable: HNSW index at {} is stale for current semantic index (run 'cass index --semantic --build-hnsw')",
+            ann_path.display()
+        );
+    }
+
+    Ok(ann)
+}
+
 struct SemanticSearchState {
     embedder: Arc<dyn Embedder>,
     index: VectorIndex,
-    ann_index: Option<HnswIndex>,
+    fs_semantic_index: FsVectorIndex,
+    fs_ann_index: Option<FsHnswIndex>,
     ann_path: Option<PathBuf>,
     filter_maps: SemanticFilterMaps,
     roles: Option<HashSet<u8>>,
@@ -2608,6 +2871,14 @@ impl SearchClient {
             );
         }
 
+        let fs_semantic_index = open_or_build_fs_semantic_index(&index, ann_path.as_deref())
+            .map_err(|err| anyhow!("failed to initialize frankensearch semantic bridge index: {err}"))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "semantic bridge path unavailable; set ann_path to vector_index/hnsw-<embedder>.chsw and run 'cass index --semantic'"
+                )
+            })?;
+
         let capacity = NonZeroUsize::new(100).ok_or_else(|| anyhow!("invalid cache size"))?;
         let mut state_guard = self
             .semantic
@@ -2616,7 +2887,8 @@ impl SearchClient {
         *state_guard = Some(SemanticSearchState {
             embedder,
             index,
-            ann_index: None,
+            fs_semantic_index,
+            fs_ann_index: None,
             ann_path,
             filter_maps,
             roles,
@@ -2683,68 +2955,65 @@ impl SearchClient {
         let mut ann_stats: Option<crate::search::ann_index::AnnSearchStats> = None;
 
         let mut results = if approximate {
-            if state.ann_index.is_none() {
+            let fs_index = &state.fs_semantic_index;
+
+            if state.fs_ann_index.is_none() {
                 let ann_path = state.ann_path.as_ref().ok_or_else(|| {
                     anyhow!(
                         "approximate search unavailable: HNSW index missing (run 'cass index --semantic --build-hnsw')"
                     )
                 })?;
-                if !ann_path.is_file() {
-                    bail!(
-                        "approximate search unavailable: HNSW index not found at {}",
-                        ann_path.display()
-                    );
-                }
-                let ann = HnswIndex::load(ann_path)?;
-                let header = state.index.header();
-                if ann.embedder_id() != header.embedder_id {
-                    bail!(
-                        "HNSW index embedder mismatch: expected {}, got {}",
-                        header.embedder_id,
-                        ann.embedder_id()
-                    );
-                }
-                if ann.dimension() != header.dimension as usize {
-                    bail!(
-                        "HNSW index dimension mismatch: expected {}, got {}",
-                        header.dimension,
-                        ann.dimension()
-                    );
-                }
-                state.ann_index = Some(ann);
+                let ann = open_fs_semantic_ann_index(fs_index, ann_path)?;
+                state.fs_ann_index = Some(ann);
             }
 
             let ann = state
-                .ann_index
+                .fs_ann_index
                 .as_ref()
                 .ok_or_else(|| anyhow!("HNSW index failed to initialize"))?;
             let candidate = fetch.saturating_mul(ANN_CANDIDATE_MULTIPLIER).max(fetch);
-            let ef = DEFAULT_EF_SEARCH.max(candidate);
-            let (ann_results, search_stats) = ann.search_with_stats(&embedding, candidate, ef)?;
-            ann_stats = Some(search_stats);
+            let ef = FS_HNSW_DEFAULT_EF_SEARCH.max(candidate);
+            let (ann_results, search_stats) = ann
+                .knn_search_with_stats(&embedding, candidate, ef)
+                .map_err(|err| anyhow!("frankensearch approximate search failed: {err}"))?;
+            ann_stats = Some(crate::search::ann_index::AnnSearchStats {
+                index_size: search_stats.index_size,
+                dimension: search_stats.dimension,
+                ef_search: search_stats.ef_search,
+                k_requested: search_stats.k_requested,
+                k_returned: search_stats.k_returned,
+                search_time_us: search_stats.search_time_us,
+                estimated_recall: search_stats.estimated_recall as f32,
+                is_approximate: search_stats.is_approximate,
+            });
+
+            let filter_adapter = build_fs_semantic_filter_adapter(&state.index, &semantic_filter);
+            let fs_filter: Option<&dyn FsSearchFilter> = filter_adapter
+                .as_ref()
+                .map(|filter| filter as &dyn FsSearchFilter);
 
             let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
-            for ann_hit in ann_results {
-                let row = match state.index.rows().get(ann_hit.row_idx) {
-                    Some(row) => row,
-                    None => continue,
-                };
-                if !semantic_filter.matches(row) {
+            for hit in ann_results {
+                if let Some(filter) = fs_filter
+                    && !filter.matches(&hit.doc_id, None)
+                {
                     continue;
                 }
-                let score = state.index.dot_product_row(row, &embedding)?;
+                let Some(parsed) = parse_fs_semantic_doc_id(&hit.doc_id) else {
+                    continue;
+                };
                 best_by_message
-                    .entry(row.message_id)
+                    .entry(parsed.message_id)
                     .and_modify(|entry| {
-                        if score > entry.score {
-                            entry.score = score;
-                            entry.chunk_idx = row.chunk_idx;
+                        if hit.score > entry.score {
+                            entry.score = hit.score;
+                            entry.chunk_idx = parsed.chunk_idx;
                         }
                     })
                     .or_insert(VectorSearchResult {
-                        message_id: row.message_id,
-                        chunk_idx: row.chunk_idx,
-                        score,
+                        message_id: parsed.message_id,
+                        chunk_idx: parsed.chunk_idx,
+                        score: hit.score,
                     });
             }
 
@@ -2759,9 +3028,45 @@ impl SearchClient {
             }
             ann_hits
         } else {
-            state
-                .index
-                .search_top_k_collapsed(&embedding, fetch, Some(&semantic_filter))?
+            let fs_index = &state.fs_semantic_index;
+            let filter_adapter = build_fs_semantic_filter_adapter(&state.index, &semantic_filter);
+            let fs_filter: Option<&dyn FsSearchFilter> = filter_adapter
+                .as_ref()
+                .map(|filter| filter as &dyn FsSearchFilter);
+            let fs_hits = fs_index
+                .search_top_k(&embedding, fetch, fs_filter)
+                .map_err(|err| anyhow!("frankensearch semantic search failed: {err}"))?;
+
+            let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
+            for hit in fs_hits {
+                let Some(parsed) = parse_fs_semantic_doc_id(&hit.doc_id) else {
+                    continue;
+                };
+                best_by_message
+                    .entry(parsed.message_id)
+                    .and_modify(|entry| {
+                        if hit.score > entry.score {
+                            entry.score = hit.score;
+                            entry.chunk_idx = parsed.chunk_idx;
+                        }
+                    })
+                    .or_insert(VectorSearchResult {
+                        message_id: parsed.message_id,
+                        chunk_idx: parsed.chunk_idx,
+                        score: hit.score,
+                    });
+            }
+
+            let mut collapsed: Vec<VectorSearchResult> = best_by_message.into_values().collect();
+            collapsed.sort_by(|a, b| {
+                b.score
+                    .total_cmp(&a.score)
+                    .then_with(|| a.message_id.cmp(&b.message_id))
+            });
+            if collapsed.len() > fetch {
+                collapsed.truncate(fetch);
+            }
+            collapsed
         };
         if offset > 0 {
             results = results.into_iter().skip(offset).collect();
@@ -10613,5 +10918,114 @@ mod tests {
             transpile_to_fts5("NOT A OR B"),
             Some("NOT A AND B".to_string())
         );
+    }
+
+    #[test]
+    fn fs_semantic_doc_id_roundtrip() {
+        let row = crate::search::vector_index::VectorRow {
+            message_id: 42,
+            created_at_ms: 1_700_000_000_000,
+            agent_id: 3,
+            workspace_id: 7,
+            source_id: 11,
+            role: 1,
+            chunk_idx: 2,
+            vec_offset: 0,
+            content_hash: [0u8; 32],
+        };
+        let encoded = encode_fs_semantic_doc_id(&row);
+        let parsed = parse_fs_semantic_doc_id(&encoded).expect("roundtrip parse");
+        assert_eq!(parsed.message_id, row.message_id);
+        assert_eq!(parsed.chunk_idx, row.chunk_idx);
+        assert_eq!(parsed.agent_id, row.agent_id);
+        assert_eq!(parsed.workspace_id, row.workspace_id);
+        assert_eq!(parsed.source_id, row.source_id);
+        assert_eq!(parsed.role, row.role);
+        assert_eq!(parsed.created_at_ms, row.created_at_ms);
+    }
+
+    #[test]
+    fn fs_semantic_filter_adapter_applies_all_constraints() {
+        let filter = SemanticFilter {
+            agents: Some(HashSet::from([3])),
+            workspaces: Some(HashSet::from([7])),
+            sources: Some(HashSet::from([11])),
+            roles: Some(HashSet::from([1])),
+            created_from: Some(1_700_000_000_000),
+            created_to: Some(1_700_000_000_100),
+        };
+
+        let adapter = FsSemanticFilterAdapter {
+            filter: &filter,
+            allowed_doc_id_hashes: None,
+        };
+        assert!(adapter.matches("m|42|2|3|7|11|1|1700000000001", None));
+        assert!(!adapter.matches("m|42|2|99|7|11|1|1700000000001", None));
+        assert!(!adapter.matches("m|42|2|3|7|11|1|1699999999999", None));
+        assert!(!adapter.matches("not-a-doc-id", None));
+    }
+
+    #[test]
+    fn fs_semantic_bridge_builds_and_runs_filtered_search() -> Result<()> {
+        use crate::search::vector_index::{Quantization, VectorEntry};
+
+        let temp = TempDir::new()?;
+        let vector_dir = temp.path().join("vector_index");
+        std::fs::create_dir_all(&vector_dir)?;
+        // Source CVVI marker path used by freshness checks.
+        std::fs::write(vector_dir.join("index-embed-fast.cvvi"), b"stub")?;
+        let ann_path = vector_dir.join("hnsw-embed-fast.chsw");
+
+        let index = VectorIndex::build(
+            "embed-fast",
+            "rev-1",
+            2,
+            Quantization::F32,
+            vec![
+                VectorEntry {
+                    message_id: 101,
+                    created_at_ms: 1_700_000_000_001,
+                    agent_id: 1,
+                    workspace_id: 10,
+                    source_id: 100,
+                    role: 1,
+                    chunk_idx: 0,
+                    content_hash: [0u8; 32],
+                    vector: vec![1.0, 0.0],
+                },
+                VectorEntry {
+                    message_id: 202,
+                    created_at_ms: 1_700_000_000_002,
+                    agent_id: 2,
+                    workspace_id: 20,
+                    source_id: 200,
+                    role: 1,
+                    chunk_idx: 0,
+                    content_hash: [0u8; 32],
+                    vector: vec![0.0, 1.0],
+                },
+            ],
+        )?;
+
+        let fs_index = open_or_build_fs_semantic_index(&index, Some(&ann_path))?
+            .expect("bridge should be created");
+        let filter = SemanticFilter {
+            agents: Some(HashSet::from([1])),
+            workspaces: None,
+            sources: None,
+            roles: None,
+            created_from: None,
+            created_to: None,
+        };
+        let adapter =
+            build_fs_semantic_filter_adapter(&index, &filter).expect("expected active filter");
+        let hits = fs_index
+            .search_top_k(&[1.0, 0.0], 5, Some(&adapter))
+            .map_err(|err| anyhow!("frankensearch bridge search failed: {err}"))?;
+        assert_eq!(hits.len(), 1);
+        let parsed = parse_fs_semantic_doc_id(&hits[0].doc_id).expect("parse bridged doc_id");
+        assert_eq!(parsed.message_id, 101);
+        assert_eq!(parsed.agent_id, 1);
+        Ok(())
     }
 }

@@ -59,8 +59,8 @@
 //!
 //! ## Analytics Explorer
 //!
-//! Eight views under [`AnalyticsView`]: Dashboard, Explorer, Heatmap, Breakdowns,
-//! Tools, Cost, Plans, Coverage. The Explorer view supports interactive cycling of:
+//! Seven views under [`AnalyticsView`]: Dashboard, Explorer, Heatmap, Breakdowns,
+//! Tools, Plans, Coverage. The Explorer view supports interactive cycling of:
 //! - [`ExplorerMetric`] (m/M): ApiTokens, ContentTokens, Messages, ToolCalls, etc.
 //! - [`ExplorerOverlay`] (o): None, ByAgent, ByWorkspace, BySource
 //! - [`ExplorerZoom`] (z/Z): All, 24h, 7d, 30d, 90d
@@ -612,7 +612,8 @@ pub enum AnalyticsView {
     Breakdowns,
     /// Per-tool usage analytics.
     Tools,
-    /// Cost estimation (USD) by model/provider.
+    /// Legacy cost estimation (USD) by model/provider.
+    /// Hidden from the default analytics navigation surface.
     Cost,
     /// Plan frequency + plan token share + trends.
     Plans,
@@ -643,7 +644,6 @@ impl AnalyticsView {
             Self::Heatmap,
             Self::Breakdowns,
             Self::Tools,
-            Self::Cost,
             Self::Plans,
             Self::Coverage,
         ]
@@ -684,14 +684,14 @@ impl ExplorerMetric {
             Self::ContentTokens => Self::Messages,
             Self::Messages => Self::ToolCalls,
             Self::ToolCalls => Self::PlanMessages,
-            Self::PlanMessages => Self::Cost,
+            Self::PlanMessages => Self::ApiTokens,
             Self::Cost => Self::ApiTokens,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::ApiTokens => Self::Cost,
+            Self::ApiTokens => Self::PlanMessages,
             Self::ContentTokens => Self::ApiTokens,
             Self::Messages => Self::ContentTokens,
             Self::ToolCalls => Self::Messages,
@@ -858,7 +858,7 @@ impl HeatmapMetric {
             Self::ApiTokens => Self::Messages,
             Self::Messages => Self::ContentTokens,
             Self::ContentTokens => Self::ToolCalls,
-            Self::ToolCalls => Self::Cost,
+            Self::ToolCalls => Self::Coverage,
             Self::Cost => Self::Coverage,
             Self::Coverage => Self::ApiTokens,
         }
@@ -871,7 +871,7 @@ impl HeatmapMetric {
             Self::ContentTokens => Self::Messages,
             Self::ToolCalls => Self::ContentTokens,
             Self::Cost => Self::ToolCalls,
-            Self::Coverage => Self::Cost,
+            Self::Coverage => Self::ToolCalls,
         }
     }
 }
@@ -23966,8 +23966,8 @@ mod tests {
     }
 
     #[test]
-    fn analytics_view_all_has_eight_entries() {
-        assert_eq!(AnalyticsView::all().len(), 8);
+    fn analytics_view_all_has_seven_entries() {
+        assert_eq!(AnalyticsView::all().len(), 7);
     }
 
     #[test]
@@ -23995,7 +23995,7 @@ mod tests {
         assert!(labels.contains(&"Analytics: Heatmap"));
         assert!(labels.contains(&"Analytics: Breakdowns"));
         assert!(labels.contains(&"Analytics: Tools"));
-        assert!(labels.contains(&"Analytics: Cost"));
+        assert!(!labels.contains(&"Analytics: Cost"));
         assert!(labels.contains(&"Analytics: Coverage"));
     }
 
@@ -29094,9 +29094,9 @@ mod tests {
         app.analytics_view = AnalyticsView::Explorer;
         assert_eq!(app.explorer_metric, ExplorerMetric::ApiTokens);
 
-        // M (shift+m) cycles backward — should wrap to Cost.
+        // M (shift+m) cycles backward — should wrap to PlanMessages.
         let _ = app.update(CassMsg::QueryChanged("M".to_string()));
-        assert_eq!(app.explorer_metric, ExplorerMetric::Cost);
+        assert_eq!(app.explorer_metric, ExplorerMetric::PlanMessages);
     }
 
     #[test]
@@ -29570,7 +29570,7 @@ mod tests {
 
     #[test]
     fn analytics_render_perf_guard() {
-        // All 8 subviews rendering at 120x40 should complete within a generous budget.
+        // All analytics subviews rendering at 120x40 should complete within a generous budget.
         // This is a catastrophic regression detector, not a micro-benchmark.
         let start = std::time::Instant::now();
         for &view in AnalyticsView::all() {
@@ -29579,10 +29579,10 @@ mod tests {
                 render_at_degradation(&app, 120, 40, ftui::render::budget::DegradationLevel::Full);
         }
         let elapsed = start.elapsed();
-        // All 8 views should render within 2 seconds total (very generous).
+        // All views should render within 2 seconds total (very generous).
         assert!(
             elapsed.as_millis() < 2000,
-            "rendering all 8 analytics views took {:?} — exceeds 2s budget",
+            "rendering all analytics views took {:?} — exceeds 2s budget",
             elapsed
         );
     }
@@ -29594,13 +29594,12 @@ mod tests {
         assert_eq!(app.surface, AppSurface::Analytics);
         assert_eq!(app.analytics_view, AnalyticsView::Dashboard);
 
-        // Cycle forward through all 8 views using CursorMoved (← → keys)
+        // Cycle forward through all visible views using CursorMoved (← → keys)
         let expected = [
             AnalyticsView::Explorer,
             AnalyticsView::Heatmap,
             AnalyticsView::Breakdowns,
             AnalyticsView::Tools,
-            AnalyticsView::Cost,
             AnalyticsView::Plans,
             AnalyticsView::Coverage,
             AnalyticsView::Dashboard, // wraps around

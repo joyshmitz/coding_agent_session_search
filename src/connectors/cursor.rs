@@ -204,6 +204,7 @@ impl CursorConnector {
 
     /// Fast existence probe for detect(): return true on the first matching
     /// Cursor DB path instead of collecting all DB files.
+    #[allow(dead_code)]
     fn has_any_db_file(base: &Path) -> bool {
         if base.is_file() && base.file_name().is_some_and(|n| n == "state.vscdb") {
             return true;
@@ -767,25 +768,8 @@ impl CursorConnector {
 
 impl Connector for CursorConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("cursor")
-            && detected.detected
-        {
-            return detected;
-        }
-        if let Some(base) = Self::app_support_dir()
-            && base.exists()
-            && Self::has_any_db_file(&base)
-        {
-            return DetectionResult {
-                detected: true,
-                evidence: vec![
-                    format!("found Cursor at {}", base.display()),
-                    "found Cursor database file(s)".to_string(),
-                ],
-                root_paths: vec![base],
-            };
-        }
-        DetectionResult::not_found()
+        crate::connectors::franken_detection_for_connector("cursor")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {

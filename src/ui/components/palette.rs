@@ -24,7 +24,7 @@
 //! | Chrome      | ToggleTheme, ToggleDensity, ToggleHelpStrip, OpenUpdate    |
 //! | Filter      | FilterAgent, FilterWorkspace, FilterToday/Week/CustomDate  |
 //! | View        | OpenSavedViews, SaveViewSlot, LoadViewSlot, BulkActions, ReloadIndex |
-//! | Analytics   | AnalyticsDashboard..AnalyticsCoverage (8 variants)         |
+//! | Analytics   | AnalyticsDashboard..AnalyticsCoverage (legacy Cost hidden)  |
 //! | Export      | ScreenshotHtml, ScreenshotSvg, ScreenshotText             |
 //! | Recording   | MacroRecordingToggle                                       |
 //! | Sources     | Sources                                                    |
@@ -558,11 +558,6 @@ pub fn default_actions() -> Vec<PaletteItem> {
         PaletteAction::AnalyticsTools,
         "Analytics: Tools",
         "Per-tool usage",
-    ));
-    items.push(item(
-        PaletteAction::AnalyticsCost,
-        "Analytics: Cost",
-        "USD cost estimation",
     ));
     items.push(item(
         PaletteAction::AnalyticsPlans,

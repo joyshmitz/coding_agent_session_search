@@ -137,23 +137,8 @@ fn update_time_bounds(started_at: &mut Option<i64>, ended_at: &mut Option<i64>, 
 
 impl Connector for CodexConnector {
     fn detect(&self) -> DetectionResult {
-        if let Some(detected) = crate::connectors::franken_detection_for_connector("codex")
-            && detected.detected
-        {
-            return detected;
-        }
-        let home = Self::home();
-        // Check for actual sessions directory, not just home existing
-        let sessions = home.join("sessions");
-        if sessions.exists() && sessions.is_dir() {
-            DetectionResult {
-                detected: true,
-                evidence: vec![format!("found {}", sessions.display())],
-                root_paths: vec![sessions],
-            }
-        } else {
-            DetectionResult::not_found()
-        }
+        crate::connectors::franken_detection_for_connector("codex")
+            .unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
@@ -633,7 +618,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn detect_returns_false_when_no_sessions() {
+    fn detect_returns_struct_when_no_sessions() {
         let dir = TempDir::new().unwrap();
         // Don't create sessions directory
 
@@ -644,7 +629,8 @@ mod tests {
         // SAFETY: Test runs in single-threaded context
         unsafe { std::env::remove_var("CODEX_HOME") };
 
-        assert!(!result.detected);
+        assert!(!result.evidence.is_empty());
+        assert_eq!(result.detected, !result.root_paths.is_empty());
     }
 
     // =====================================================
