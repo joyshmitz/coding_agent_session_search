@@ -4,7 +4,7 @@ class CodingAgentSearch < Formula
   version "0.1.27"
   url "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v0.1.27/coding-agent-search-v0.1.27-linux-x86_64.tar.gz"
   sha256 "2a442a1fbff0f25841b2768e2578a66f5e1ea901a774443cf44742048e57d564"
-  license "MIT"
+  license :cannot_represent
 
   def verify_checksum_placeholder!
     if stable.checksum.to_s.include?("REPLACE_WITH_REAL_SHA256")
