@@ -801,7 +801,7 @@ impl PagesWizard {
                     .take(2)
                     .map(|t| {
                         if t.len() > 30 {
-                            format!("{}...", &t[..27])
+                            format!("{}...", &t[..t.floor_char_boundary(27)])
                         } else {
                             t.clone()
                         }

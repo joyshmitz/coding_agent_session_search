@@ -10050,7 +10050,9 @@ impl CassApp {
             };
             let max_len = w.saturating_sub(14) as usize;
             let truncated = if display_path.len() > max_len && max_len > 6 {
-                let tail = &display_path[display_path.len().saturating_sub(max_len - 3)..];
+                let start =
+                    display_path.ceil_char_boundary(display_path.len().saturating_sub(max_len - 3));
+                let tail = &display_path[start..];
                 format!("...{tail}")
             } else {
                 display_path.to_string()
@@ -12230,15 +12232,17 @@ impl super::ftui_adapter::Model for CassApp {
         // - Shift+N: open release notes
         // - Shift+S: skip version
         // - Esc: dismiss banner for this session
+        // Only intercept when the query is empty so that typing a capital
+        // letter during active query editing is not stolen by the banner.
         if self.can_handle_update_shortcuts() {
             match &msg {
-                CassMsg::QueryChanged(text) if text == "U" => {
+                CassMsg::QueryChanged(text) if text == "U" && self.query.is_empty() => {
                     return self.update(CassMsg::UpdateUpgradeRequested);
                 }
-                CassMsg::QueryChanged(text) if text == "N" => {
+                CassMsg::QueryChanged(text) if text == "N" && self.query.is_empty() => {
                     return self.update(CassMsg::UpdateReleaseNotesRequested);
                 }
-                CassMsg::QueryChanged(text) if text == "S" => {
+                CassMsg::QueryChanged(text) if text == "S" && self.query.is_empty() => {
                     return self.update(CassMsg::UpdateSkipped);
                 }
                 CassMsg::QuitRequested => {
@@ -12346,15 +12350,28 @@ impl super::ftui_adapter::Model for CassApp {
                     self.cockpit.mode = self.cockpit.mode.cycle();
                     return ftui::Cmd::none();
                 }
-                // Redirect single-char keys to inspector actions when overlay is open
-                CassMsg::QueryChanged(text) if text == "m" => {
+                // Redirect single-char keys to inspector actions when overlay is open,
+                // but NOT when the user is typing a search query on the Search surface.
+                CassMsg::QueryChanged(text)
+                    if text == "m"
+                        && !(self.surface == AppSurface::Search
+                            && self.input_mode == InputMode::Query) =>
+                {
                     self.inspector_state.cycle_mode();
                     return ftui::Cmd::none();
                 }
-                CassMsg::QueryChanged(text) if text == "c" => {
+                CassMsg::QueryChanged(text)
+                    if text == "c"
+                        && !(self.surface == AppSurface::Search
+                            && self.input_mode == InputMode::Query) =>
+                {
                     return self.update(CassMsg::CockpitModeToggled);
                 }
-                CassMsg::QueryChanged(text) if text == "e" => {
+                CassMsg::QueryChanged(text)
+                    if text == "e"
+                        && !(self.surface == AppSurface::Search
+                            && self.input_mode == InputMode::Query) =>
+                {
                     return self.update(CassMsg::CockpitExpandToggled);
                 }
                 _ => {}
@@ -12676,6 +12693,18 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::Tick
                     | CassMsg::MouseEvent { .. }
                     | CassMsg::ForceQuit => {}
+                    // Typing a non-navigation letter while the detail modal
+                    // is open: close the modal, focus the search bar, and
+                    // forward the keystroke so it reaches the query input.
+                    // This prevents bare-letter keypresses from being
+                    // silently consumed while the user tries to type a
+                    // new search query.
+                    CassMsg::QueryChanged(text) if !text.is_empty() => {
+                        let text = text.clone();
+                        let _ = self.update(CassMsg::DetailClosed);
+                        self.focus_manager.focus(focus_ids::SEARCH_BAR);
+                        return self.update(CassMsg::QueryChanged(text));
+                    }
                     _ => return ftui::Cmd::none(),
                 }
             }
@@ -17357,10 +17386,9 @@ impl super::ftui_adapter::Model for CassApp {
                     text_muted_style
                 };
                 let query_lane = format!(
-                    "{} / {} ({})",
+                    "{} / {}",
                     search_mode_token(self.search_mode),
-                    match_mode_token(self.match_mode),
-                    shortcuts::SEARCH_MODE
+                    match_mode_token(self.match_mode)
                 );
                 let source_scope = if self.filters.source_filter.is_all() {
                     "all".to_string()
@@ -20817,6 +20845,21 @@ mod tests {
     }
 
     #[test]
+    fn query_changed_backspace_removes_full_unicode_scalar() {
+        let mut app = CassApp::default();
+        app.query = "é🙂".to_string();
+        app.cursor_pos = app.query.len();
+
+        let _ = app.update(CassMsg::QueryChanged(String::new()));
+        assert_eq!(app.query, "é");
+        assert_eq!(app.cursor_pos, "é".len());
+
+        let _ = app.update(CassMsg::QueryChanged(String::new()));
+        assert!(app.query.is_empty());
+        assert_eq!(app.cursor_pos, 0);
+    }
+
+    #[test]
     fn non_query_input_mode_routes_typing_to_input_buffer() {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::InputModeEntered(InputMode::Agent));
@@ -21421,6 +21464,26 @@ mod tests {
         assert_eq!(app.cursor_pos, 1);
         let _ = app.update(CassMsg::CursorMoved { delta: 10 });
         assert_eq!(app.cursor_pos, 3, "should clamp at query length");
+    }
+
+    #[test]
+    fn cursor_moved_advances_by_unicode_boundaries() {
+        let mut app = CassApp::default();
+        app.query = "a🙂b".to_string();
+        app.cursor_pos = 0;
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        let _ = app.update(CassMsg::CursorMoved { delta: 1 });
+        assert_eq!(app.cursor_pos, "a".len());
+
+        let _ = app.update(CassMsg::CursorMoved { delta: 1 });
+        assert_eq!(app.cursor_pos, "a🙂".len());
+
+        let _ = app.update(CassMsg::CursorMoved { delta: 1 });
+        assert_eq!(app.cursor_pos, app.query.len());
+
+        let _ = app.update(CassMsg::CursorMoved { delta: -1 });
+        assert_eq!(app.cursor_pos, "a🙂".len());
     }
 
     #[test]
@@ -23532,6 +23595,47 @@ mod tests {
         assert_eq!(app.detail_scroll, 3, "j should scroll down 3");
         let _ = app.update(CassMsg::QueryChanged("k".to_string()));
         assert_eq!(app.detail_scroll, 0, "k should scroll up 3");
+    }
+
+    #[test]
+    fn detail_modal_unrecognized_letter_closes_modal_and_forwards_to_query() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        app.query.clear();
+        app.detail_content_lines.set(100);
+        app.detail_visible_height.set(20);
+        // Push a focus trap to mirror real open-modal flow.
+        app.focus_manager.push_trap(focus_ids::GROUP_DETAIL_MODAL);
+        app.focus_manager.focus(focus_ids::DETAIL_MODAL);
+        // 'r' is not a navigation shortcut in the detail modal.
+        let _ = app.update(CassMsg::QueryChanged("r".to_string()));
+        assert!(
+            !app.show_detail_modal,
+            "typing an unrecognized letter should close the detail modal"
+        );
+        assert_eq!(
+            app.query, "r",
+            "the typed letter should be forwarded to the search query"
+        );
+        assert_eq!(
+            app.focus_manager.current(),
+            Some(focus_ids::SEARCH_BAR),
+            "focus should move to the search bar"
+        );
+    }
+
+    #[test]
+    fn detail_modal_backspace_does_not_close_modal() {
+        let mut app = CassApp::default();
+        app.show_detail_modal = true;
+        app.focus_manager.push_trap(focus_ids::GROUP_DETAIL_MODAL);
+        app.focus_manager.focus(focus_ids::DETAIL_MODAL);
+        // Backspace = QueryChanged("")
+        let _ = app.update(CassMsg::QueryChanged(String::new()));
+        assert!(
+            app.show_detail_modal,
+            "backspace should not close the detail modal"
+        );
     }
 
     #[test]
@@ -34414,6 +34518,9 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     fn cockpit_c_key_toggles_when_inspector_visible() {
         let mut app = CassApp::default();
         app.show_inspector = true;
+        // Use Analytics surface so the Search-surface typing guard
+        // does not prevent inspector shortcuts from firing.
+        app.surface = AppSurface::Analytics;
         // Simulate 'c' keypress (which generates QueryChanged("c"))
         let _ = app.update(CassMsg::QueryChanged("c".to_string()));
         assert!(app.cockpit.enabled);
@@ -34424,6 +34531,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     fn cockpit_m_key_cycles_mode_when_inspector_visible() {
         let mut app = CassApp::default();
         app.show_inspector = true;
+        app.surface = AppSurface::Analytics;
         let before = format!("{:?}", app.inspector_state);
         let _ = app.update(CassMsg::QueryChanged("m".to_string()));
         // inspector_state should have changed (mode cycled)
@@ -34540,6 +34648,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         use crate::ui::data::CockpitMode;
         let mut app = CassApp::default();
         app.show_inspector = true;
+        app.surface = AppSurface::Analytics;
         app.cockpit.enabled = true;
         let _ = app.update(CassMsg::QueryChanged("e".to_string()));
         assert_eq!(app.cockpit.mode, CockpitMode::Expanded);

@@ -1550,8 +1550,8 @@ pub fn render_heatmap(
         let px = (col * cell_w) as i32;
         let py = (row * cell_h) as i32;
         let color = ftui_extras::charts::heatmap_gradient(*value);
-        let fw = (cell_w.max(1) as i32).saturating_sub(1).max(1);
-        let fh = (cell_h.max(1) as i32).saturating_sub(0).max(1);
+        let fw = (cell_w.max(1) as i32).saturating_sub(1).max(1); // 1px column gap
+        let fh = cell_h.max(1) as i32; // no row gap
         for dy in 0..fh {
             for dx in 0..fw {
                 painter.point_colored(px + dx, py + dy, color);
