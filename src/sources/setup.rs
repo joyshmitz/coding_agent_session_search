@@ -121,12 +121,13 @@ impl SetupState {
     /// Load state from disk if it exists.
     pub fn load() -> Result<Option<Self>, SetupError> {
         let path = Self::path();
-        if path.exists() {
-            let content = std::fs::read_to_string(&path).map_err(SetupError::Io)?;
-            let state = serde_json::from_str(&content).map_err(SetupError::Json)?;
-            Ok(Some(state))
-        } else {
-            Ok(None)
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                let state = serde_json::from_str(&content).map_err(SetupError::Json)?;
+                Ok(Some(state))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(SetupError::Io(e)),
         }
     }
 
@@ -144,10 +145,11 @@ impl SetupState {
     /// Clear state from disk.
     pub fn clear() -> Result<(), SetupError> {
         let path = Self::path();
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(SetupError::Io)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(SetupError::Io(e)),
         }
-        Ok(())
     }
 
     /// Check if there's any progress to resume.
@@ -665,8 +667,20 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
             }
         }
 
-        state.installation_complete = true;
-        state.save()?;
+        if !opts.dry_run {
+            let completed: HashSet<&str> = state
+                .completed_installs
+                .iter()
+                .map(std::string::String::as_str)
+                .collect();
+            let remaining_installs = selected_hosts
+                .iter()
+                .filter(|h| !h.cass_status.is_installed())
+                .filter(|h| !completed.contains(h.host_name.as_str()))
+                .count();
+            state.installation_complete = remaining_installs == 0;
+            state.save()?;
+        }
     }
 
     // =========================================================================
@@ -757,8 +771,25 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
             }
         }
 
-        state.indexing_complete = true;
-        state.save()?;
+        if !opts.dry_run {
+            let completed: HashSet<&str> = state
+                .completed_indexes
+                .iter()
+                .map(std::string::String::as_str)
+                .collect();
+            let remaining_indexes = selected_hosts
+                .iter()
+                .filter(|h| {
+                    !matches!(
+                        h.cass_status,
+                        CassStatus::Indexed { session_count, .. } if session_count > 0
+                    )
+                })
+                .filter(|h| !completed.contains(h.host_name.as_str()))
+                .count();
+            state.indexing_complete = remaining_indexes == 0;
+            state.save()?;
+        }
     }
 
     // =========================================================================

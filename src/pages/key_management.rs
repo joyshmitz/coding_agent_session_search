@@ -563,8 +563,20 @@ fn decrypt_all_chunks(
     progress: impl Fn(f32),
 ) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(dek).expect("Invalid key length");
-    let base_nonce = BASE64_STANDARD.decode(&config.base_nonce)?;
-    let export_id = BASE64_STANDARD.decode(&config.export_id)?;
+    let base_nonce_raw = BASE64_STANDARD.decode(&config.base_nonce)?;
+    let base_nonce: [u8; 12] = base_nonce_raw.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "invalid base_nonce length: expected 12, got {}",
+            base_nonce_raw.len()
+        )
+    })?;
+    let export_id_raw = BASE64_STANDARD.decode(&config.export_id)?;
+    let export_id: [u8; 16] = export_id_raw.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "invalid export_id length: expected 16, got {}",
+            export_id_raw.len()
+        )
+    })?;
 
     let mut plaintext = Vec::new();
 
@@ -667,16 +679,15 @@ fn encrypt_all_chunks(
 }
 
 /// Derive chunk nonce from base nonce and chunk index
-fn derive_chunk_nonce(base_nonce: &[u8], chunk_index: u32) -> [u8; 12] {
-    let mut nonce = [0u8; 12];
-    nonce[..base_nonce.len().min(12)].copy_from_slice(&base_nonce[..base_nonce.len().min(12)]);
+fn derive_chunk_nonce(base_nonce: &[u8; 12], chunk_index: u32) -> [u8; 12] {
+    let mut nonce = *base_nonce;
     // Set the last 4 bytes to the chunk index (big-endian)
     nonce[8..12].copy_from_slice(&chunk_index.to_be_bytes());
     nonce
 }
 
 /// Build AAD for chunk encryption
-fn build_chunk_aad(export_id: &[u8], chunk_index: u32) -> Vec<u8> {
+fn build_chunk_aad(export_id: &[u8; 16], chunk_index: u32) -> Vec<u8> {
     let mut aad = Vec::with_capacity(21);
     aad.extend_from_slice(export_id);
     aad.extend_from_slice(&chunk_index.to_be_bytes());

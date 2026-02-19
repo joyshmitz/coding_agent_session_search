@@ -3334,8 +3334,7 @@ impl SqliteStorage {
         let now_ms = Self::now_millis();
 
         let hourly_rows = tx.execute(
-            &format!(
-                "INSERT INTO usage_hourly (
+            "INSERT INTO usage_hourly (
                     hour_id, agent_slug, workspace_id, source_id,
                     message_count, user_message_count, assistant_message_count,
                     tool_call_count, plan_message_count, plan_content_tokens_est_total,
@@ -3374,16 +3373,14 @@ impl SqliteStorage {
                     SUM(COALESCE(api_cache_read_tokens, 0)),
                     SUM(COALESCE(api_cache_creation_tokens, 0)),
                     SUM(COALESCE(api_thinking_tokens, 0)),
-                    {now_ms}
+                    ?1
                 FROM message_metrics
-                GROUP BY hour_id, agent_slug, workspace_id, source_id"
-            ),
-            [],
+                GROUP BY hour_id, agent_slug, workspace_id, source_id",
+            params![now_ms],
         )?;
 
         let daily_rows = tx.execute(
-            &format!(
-                "INSERT INTO usage_daily (
+            "INSERT INTO usage_daily (
                     day_id, agent_slug, workspace_id, source_id,
                     message_count, user_message_count, assistant_message_count,
                     tool_call_count, plan_message_count, plan_content_tokens_est_total,
@@ -3422,16 +3419,14 @@ impl SqliteStorage {
                     SUM(COALESCE(api_cache_read_tokens, 0)),
                     SUM(COALESCE(api_cache_creation_tokens, 0)),
                     SUM(COALESCE(api_thinking_tokens, 0)),
-                    {now_ms}
+                    ?1
                 FROM message_metrics
-                GROUP BY day_id, agent_slug, workspace_id, source_id"
-            ),
-            [],
+                GROUP BY day_id, agent_slug, workspace_id, source_id",
+            params![now_ms],
         )?;
 
         let models_daily_rows = tx.execute(
-            &format!(
-                "INSERT INTO usage_models_daily (
+            "INSERT INTO usage_models_daily (
                     day_id, agent_slug, workspace_id, source_id, model_family, model_tier,
                     message_count, user_message_count, assistant_message_count,
                     tool_call_count, plan_message_count, api_coverage_message_count,
@@ -3462,7 +3457,7 @@ impl SqliteStorage {
                     SUM(COALESCE(api_cache_read_tokens, 0)),
                     SUM(COALESCE(api_cache_creation_tokens, 0)),
                     SUM(COALESCE(api_thinking_tokens, 0)),
-                    {now_ms}
+                    ?1
                 FROM message_metrics
                 GROUP BY
                     day_id,
@@ -3470,9 +3465,8 @@ impl SqliteStorage {
                     workspace_id,
                     source_id,
                     COALESCE(NULLIF(model_family, ''), 'unknown'),
-                    COALESCE(NULLIF(model_tier, ''), 'unknown')"
-            ),
-            [],
+                    COALESCE(NULLIF(model_tier, ''), 'unknown')",
+            params![now_ms],
         )?;
 
         tx.commit()?;
