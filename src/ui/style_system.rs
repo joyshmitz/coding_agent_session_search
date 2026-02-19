@@ -1,7 +1,7 @@
 //! FrankenTUI style-system scaffolding for cass.
 //!
 //! Centralizes:
-//! - theme preset selection and [`ThemeColorOverrides`] (19 named color slots)
+//! - theme preset selection (18 gorgeous built-in presets)
 //! - color profile downgrade (mono / ansi16 / ansi256 / truecolor)
 //! - env opt-outs (`NO_COLOR`, `CASS_NO_COLOR`, `CASS_NO_ICONS`, `CASS_NO_GRADIENT`)
 //! - accessibility text markers (`CASS_A11Y`)
@@ -10,8 +10,7 @@
 //!
 //! Widgets reference semantic token names (e.g. `STYLE_STATUS_SUCCESS`) rather
 //! than raw colors, so preset changes and color profile downgrades propagate
-//! automatically. The interactive theme editor (Ctrl+Shift+T in the TUI) writes
-//! [`ThemeColorOverrides`] to `~/.config/cass/theme.toml`.
+//! automatically. F2 / Shift+F2 cycle forward/backward through presets.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,36 +78,74 @@ pub const THEME_CONFIG_VERSION: u32 = 1;
 #[serde(rename_all = "kebab-case")]
 pub enum UiThemePreset {
     #[default]
-    Dark,
-    Light,
+    #[serde(alias = "dark")]
+    TokyoNight,
+    #[serde(alias = "light")]
+    Daylight,
     #[serde(alias = "high_contrast", alias = "highcontrast", alias = "hc")]
     HighContrast,
     #[serde(alias = "cat")]
     Catppuccin,
     Dracula,
     Nord,
+    SolarizedDark,
+    SolarizedLight,
+    Monokai,
+    GruvboxDark,
+    OneDark,
+    RosePine,
+    Everforest,
+    Kanagawa,
+    AyuMirage,
+    Nightfox,
+    CyberpunkAurora,
+    Synthwave84,
 }
 
 impl UiThemePreset {
-    pub const fn all() -> [Self; 6] {
+    pub const fn all() -> [Self; 18] {
         [
-            Self::Dark,
-            Self::Light,
+            Self::TokyoNight,
+            Self::Daylight,
             Self::Catppuccin,
             Self::Dracula,
             Self::Nord,
+            Self::SolarizedDark,
+            Self::SolarizedLight,
+            Self::Monokai,
+            Self::GruvboxDark,
+            Self::OneDark,
+            Self::RosePine,
+            Self::Everforest,
+            Self::Kanagawa,
+            Self::AyuMirage,
+            Self::Nightfox,
+            Self::CyberpunkAurora,
+            Self::Synthwave84,
             Self::HighContrast,
         ]
     }
 
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Dark => "Dark",
-            Self::Light => "Light",
+            Self::TokyoNight => "Tokyo Night",
+            Self::Daylight => "Daylight",
             Self::HighContrast => "High Contrast",
-            Self::Catppuccin => "Catppuccin",
+            Self::Catppuccin => "Catppuccin Mocha",
             Self::Dracula => "Dracula",
             Self::Nord => "Nord",
+            Self::SolarizedDark => "Solarized Dark",
+            Self::SolarizedLight => "Solarized Light",
+            Self::Monokai => "Monokai",
+            Self::GruvboxDark => "Gruvbox Dark",
+            Self::OneDark => "One Dark",
+            Self::RosePine => "Ros\u{e9} Pine",
+            Self::Everforest => "Everforest",
+            Self::Kanagawa => "Kanagawa",
+            Self::AyuMirage => "Ayu Mirage",
+            Self::Nightfox => "Nightfox",
+            Self::CyberpunkAurora => "Cyberpunk Aurora",
+            Self::Synthwave84 => "Synthwave '84",
         }
     }
 
@@ -126,114 +163,51 @@ impl UiThemePreset {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "dark" => Some(Self::Dark),
-            "light" => Some(Self::Light),
+            "dark" | "tokyo-night" | "tokyo_night" | "tokyonight" => Some(Self::TokyoNight),
+            "light" | "daylight" => Some(Self::Daylight),
             "high-contrast" | "high_contrast" | "highcontrast" | "hc" => Some(Self::HighContrast),
-            "catppuccin" | "cat" => Some(Self::Catppuccin),
+            "catppuccin" | "cat" | "catppuccin-mocha" => Some(Self::Catppuccin),
             "dracula" => Some(Self::Dracula),
             "nord" => Some(Self::Nord),
+            "solarized-dark" | "solarized_dark" => Some(Self::SolarizedDark),
+            "solarized-light" | "solarized_light" => Some(Self::SolarizedLight),
+            "monokai" => Some(Self::Monokai),
+            "gruvbox-dark" | "gruvbox_dark" | "gruvbox" => Some(Self::GruvboxDark),
+            "one-dark" | "one_dark" | "onedark" => Some(Self::OneDark),
+            "rose-pine" | "rose_pine" | "rosepine" => Some(Self::RosePine),
+            "everforest" => Some(Self::Everforest),
+            "kanagawa" => Some(Self::Kanagawa),
+            "ayu-mirage" | "ayu_mirage" | "ayumirage" => Some(Self::AyuMirage),
+            "nightfox" => Some(Self::Nightfox),
+            "cyberpunk-aurora" | "cyberpunk_aurora" | "cyberpunk" => Some(Self::CyberpunkAurora),
+            "synthwave-84" | "synthwave_84" | "synthwave84" | "synthwave" => {
+                Some(Self::Synthwave84)
+            }
             _ => None,
         }
     }
 
     fn base_theme(self) -> Theme {
         match self {
-            Self::Dark => tokyo_night_theme(),
-            Self::Light => themes::light(),
+            Self::TokyoNight => tokyo_night_theme(),
+            Self::Daylight => themes::light(),
             Self::HighContrast => high_contrast_theme(),
             Self::Catppuccin => catppuccin_theme(),
             Self::Dracula => themes::dracula(),
             Self::Nord => themes::nord(),
+            Self::SolarizedDark => themes::solarized_dark(),
+            Self::SolarizedLight => themes::solarized_light(),
+            Self::Monokai => themes::monokai(),
+            Self::GruvboxDark => gruvbox_dark_theme(),
+            Self::OneDark => one_dark_theme(),
+            Self::RosePine => rose_pine_theme(),
+            Self::Everforest => everforest_theme(),
+            Self::Kanagawa => kanagawa_theme(),
+            Self::AyuMirage => ayu_mirage_theme(),
+            Self::Nightfox => nightfox_theme(),
+            Self::CyberpunkAurora => cyberpunk_aurora_theme(),
+            Self::Synthwave84 => synthwave_84_theme(),
         }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThemeColorOverrides {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub primary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secondary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub background: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub surface: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overlay: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_muted: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_subtle: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub success: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub warning: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub info: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub border: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub border_focused: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selection_bg: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selection_fg: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scrollbar_track: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scrollbar_thumb: Option<String>,
-}
-
-impl ThemeColorOverrides {
-    fn validate(&self) -> Result<(), ThemeConfigError> {
-        validate_color_slot("primary", self.primary.as_deref())?;
-        validate_color_slot("secondary", self.secondary.as_deref())?;
-        validate_color_slot("accent", self.accent.as_deref())?;
-        validate_color_slot("background", self.background.as_deref())?;
-        validate_color_slot("surface", self.surface.as_deref())?;
-        validate_color_slot("overlay", self.overlay.as_deref())?;
-        validate_color_slot("text", self.text.as_deref())?;
-        validate_color_slot("text_muted", self.text_muted.as_deref())?;
-        validate_color_slot("text_subtle", self.text_subtle.as_deref())?;
-        validate_color_slot("success", self.success.as_deref())?;
-        validate_color_slot("warning", self.warning.as_deref())?;
-        validate_color_slot("error", self.error.as_deref())?;
-        validate_color_slot("info", self.info.as_deref())?;
-        validate_color_slot("border", self.border.as_deref())?;
-        validate_color_slot("border_focused", self.border_focused.as_deref())?;
-        validate_color_slot("selection_bg", self.selection_bg.as_deref())?;
-        validate_color_slot("selection_fg", self.selection_fg.as_deref())?;
-        validate_color_slot("scrollbar_track", self.scrollbar_track.as_deref())?;
-        validate_color_slot("scrollbar_thumb", self.scrollbar_thumb.as_deref())?;
-        Ok(())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.primary.is_none()
-            && self.secondary.is_none()
-            && self.accent.is_none()
-            && self.background.is_none()
-            && self.surface.is_none()
-            && self.overlay.is_none()
-            && self.text.is_none()
-            && self.text_muted.is_none()
-            && self.text_subtle.is_none()
-            && self.success.is_none()
-            && self.warning.is_none()
-            && self.error.is_none()
-            && self.info.is_none()
-            && self.border.is_none()
-            && self.border_focused.is_none()
-            && self.selection_bg.is_none()
-            && self.selection_fg.is_none()
-            && self.scrollbar_track.is_none()
-            && self.scrollbar_thumb.is_none()
     }
 }
 
@@ -243,8 +217,6 @@ pub struct ThemeConfig {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_preset: Option<UiThemePreset>,
-    #[serde(default)]
-    pub colors: ThemeColorOverrides,
 }
 
 impl ThemeConfig {
@@ -293,7 +265,6 @@ impl ThemeConfig {
                 expected: THEME_CONFIG_VERSION,
             });
         }
-        self.colors.validate()?;
         Ok(())
     }
 }
@@ -303,7 +274,6 @@ impl Default for ThemeConfig {
         Self {
             version: THEME_CONFIG_VERSION,
             base_preset: None,
-            colors: ThemeColorOverrides::default(),
         }
     }
 }
@@ -339,8 +309,6 @@ impl ThemeContrastReport {
 pub enum ThemeConfigError {
     #[error("unsupported theme config version {found}; expected {expected}")]
     UnsupportedVersion { found: u32, expected: u32 },
-    #[error("invalid color value for `{field}`: {value}")]
-    InvalidColorValue { field: &'static str, value: String },
     #[error("failed to parse theme config JSON: {source}")]
     ParseJson { source: serde_json::Error },
     #[error("failed to serialize theme config JSON: {source}")]
@@ -375,7 +343,7 @@ pub struct StyleOptions {
 impl Default for StyleOptions {
     fn default() -> Self {
         Self {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             dark_mode: true,
             color_profile: ColorProfile::detect(),
             no_color: false,
@@ -471,7 +439,7 @@ impl StyleOptions {
         let preset = values
             .cass_theme
             .and_then(UiThemePreset::parse)
-            .unwrap_or(UiThemePreset::Dark);
+            .unwrap_or(UiThemePreset::TokyoNight);
 
         let no_color_enabled = env_truthy(values.cass_no_color)
             || (env_truthy(values.cass_respect_no_color) && values.no_color.is_some());
@@ -489,7 +457,7 @@ impl StyleOptions {
         let no_gradient = env_truthy(values.cass_no_gradient) || no_color_enabled || a11y;
 
         let dark_mode = match preset {
-            UiThemePreset::Light => false,
+            UiThemePreset::Daylight | UiThemePreset::SolarizedLight => false,
             UiThemePreset::HighContrast => Theme::detect_dark_mode(),
             _ => true,
         };
@@ -831,36 +799,27 @@ pub struct StyleContext {
 
 impl StyleContext {
     pub fn from_options(options: StyleOptions) -> Self {
-        Self::build(options, None).expect("base style options must always produce a valid theme")
+        Self::build(options)
     }
 
     pub fn from_options_with_theme_config(
         mut options: StyleOptions,
         config: &ThemeConfig,
-    ) -> Result<Self, ThemeConfigError> {
-        config.validate()?;
-
+    ) -> Self {
         if let Some(base_preset) = config.base_preset {
             options.preset = base_preset;
             options.dark_mode = match base_preset {
-                UiThemePreset::Light => false,
+                UiThemePreset::Daylight | UiThemePreset::SolarizedLight => false,
                 UiThemePreset::HighContrast => Theme::detect_dark_mode(),
                 _ => true,
             };
         }
 
-        Self::build(options, Some(&config.colors))
+        Self::build(options)
     }
 
-    fn build(
-        options: StyleOptions,
-        overrides: Option<&ThemeColorOverrides>,
-    ) -> Result<Self, ThemeConfigError> {
+    fn build(options: StyleOptions) -> Self {
         let mut theme = options.preset.base_theme();
-
-        if let Some(overrides) = overrides {
-            theme = apply_theme_overrides(theme, overrides)?;
-        }
 
         if options.a11y && options.preset != UiThemePreset::HighContrast {
             theme = apply_a11y_overrides(theme);
@@ -868,22 +827,21 @@ impl StyleContext {
 
         theme = downgrade_theme_for_profile(theme, options.color_profile);
 
-        let dark_mode = if options.preset == UiThemePreset::Light {
-            false
-        } else {
-            options.dark_mode
+        let dark_mode = match options.preset {
+            UiThemePreset::Daylight | UiThemePreset::SolarizedLight => false,
+            _ => options.dark_mode,
         };
         let resolved = theme.resolve(dark_mode);
         let sheet = build_stylesheet(resolved, options);
         let role_markers = RoleMarkers::from_options(options);
 
-        Ok(Self {
+        Self {
             options,
             theme,
             resolved,
             sheet,
             role_markers,
-        })
+        }
     }
 
     pub fn from_env() -> Self {
@@ -1244,6 +1202,222 @@ fn high_contrast_theme() -> Theme {
         .build()
 }
 
+fn gruvbox_dark_theme() -> Theme {
+    ThemeBuilder::from_theme(themes::dark())
+        .primary(Color::rgb(215, 153, 33))    // #d79921 yellow
+        .secondary(Color::rgb(211, 134, 155))  // #d3869b purple
+        .accent(Color::rgb(250, 189, 47))      // #fabd2f bright yellow
+        .background(Color::rgb(40, 40, 40))    // #282828
+        .surface(Color::rgb(50, 48, 47))       // #32302f
+        .overlay(Color::rgb(60, 56, 54))       // #3c3836
+        .text(Color::rgb(235, 219, 178))       // #ebdbb2
+        .text_muted(Color::rgb(189, 174, 147)) // #bdae93
+        .text_subtle(Color::rgb(146, 131, 116)) // #928374
+        .success(Color::rgb(152, 151, 26))     // #98971a
+        .warning(Color::rgb(215, 153, 33))     // #d79921
+        .error(Color::rgb(204, 36, 29))        // #cc241d
+        .info(Color::rgb(69, 133, 136))        // #458588
+        .border(Color::rgb(80, 73, 69))        // #504945
+        .border_focused(Color::rgb(250, 189, 47)) // #fabd2f
+        .selection_bg(Color::rgb(215, 153, 33))   // #d79921
+        .selection_fg(Color::rgb(40, 40, 40))     // #282828
+        .scrollbar_track(Color::rgb(60, 56, 54))  // #3c3836
+        .scrollbar_thumb(Color::rgb(146, 131, 116)) // #928374
+        .build()
+}
+
+fn one_dark_theme() -> Theme {
+    ThemeBuilder::from_theme(themes::dark())
+        .primary(Color::rgb(97, 175, 239))     // #61afef blue
+        .secondary(Color::rgb(198, 120, 221))  // #c678dd purple
+        .accent(Color::rgb(86, 182, 194))      // #56b6c2 cyan
+        .background(Color::rgb(40, 44, 52))    // #282c34
+        .surface(Color::rgb(49, 53, 63))       // #31353f
+        .overlay(Color::rgb(55, 59, 69))       // #373b45
+        .text(Color::rgb(171, 178, 191))       // #abb2bf
+        .text_muted(Color::rgb(139, 145, 157)) // #8b919d
+        .text_subtle(Color::rgb(99, 109, 131)) // #636d83
+        .success(Color::rgb(152, 195, 121))    // #98c379
+        .warning(Color::rgb(229, 192, 123))    // #e5c07b
+        .error(Color::rgb(224, 108, 117))      // #e06c75
+        .info(Color::rgb(86, 182, 194))        // #56b6c2
+        .border(Color::rgb(62, 68, 81))        // #3e4451
+        .border_focused(Color::rgb(97, 175, 239)) // #61afef
+        .selection_bg(Color::rgb(97, 175, 239))   // #61afef
+        .selection_fg(Color::rgb(40, 44, 52))     // #282c34
+        .scrollbar_track(Color::rgb(49, 53, 63))  // #31353f
+        .scrollbar_thumb(Color::rgb(99, 109, 131)) // #636d83
+        .build()
+}
+
+fn rose_pine_theme() -> Theme {
+    ThemeBuilder::from_theme(themes::dark())
+        .primary(Color::rgb(235, 188, 186))    // #ebbcba rose
+        .secondary(Color::rgb(196, 167, 231))  // #c4a7e7 iris
+        .accent(Color::rgb(49, 116, 143))      // #31748f pine
+        .background(Color::rgb(25, 23, 36))    // #191724
+        .surface(Color::rgb(38, 35, 53))       // #26233a
+        .overlay(Color::rgb(57, 53, 82))       // #393552
+        .text(Color::rgb(224, 222, 244))       // #e0def4
+        .text_muted(Color::rgb(144, 140, 170)) // #908caa
+        .text_subtle(Color::rgb(110, 106, 134)) // #6e6a86
+        .success(Color::rgb(156, 207, 216))    // #9ccfd8
+        .warning(Color::rgb(246, 193, 119))    // #f6c177
+        .error(Color::rgb(235, 111, 146))      // #eb6f92
+        .info(Color::rgb(156, 207, 216))       // #9ccfd8
+        .border(Color::rgb(57, 53, 82))        // #393552
+        .border_focused(Color::rgb(235, 188, 186)) // #ebbcba
+        .selection_bg(Color::rgb(235, 188, 186))   // #ebbcba
+        .selection_fg(Color::rgb(25, 23, 36))      // #191724
+        .scrollbar_track(Color::rgb(38, 35, 53))   // #26233a
+        .scrollbar_thumb(Color::rgb(110, 106, 134)) // #6e6a86
+        .build()
+}
+
+fn everforest_theme() -> Theme {
+    ThemeBuilder::from_theme(themes::dark())
+        .primary(Color::rgb(167, 192, 128))    // #a7c080 green
+        .secondary(Color::rgb(214, 153, 182))  // #d699b6 purple
+        .accent(Color::rgb(131, 192, 146))     // #83c092 aqua
+        .background(Color::rgb(39, 46, 34))    // #272e22 (dark bg)
+        .surface(Color::rgb(47, 55, 42))       // #2f372a
+        .overlay(Color::rgb(56, 64, 51))       // #384033
+        .text(Color::rgb(211, 198, 170))       // #d3c6aa
+        .text_muted(Color::rgb(163, 153, 132)) // #a39984
+        .text_subtle(Color::rgb(125, 117, 100)) // #7d7564
+        .success(Color::rgb(167, 192, 128))    // #a7c080
+        .warning(Color::rgb(219, 188, 127))    // #dbbc7f
+        .error(Color::rgb(230, 126, 128))      // #e67e80
+        .info(Color::rgb(124, 195, 210))       // #7cc3d2 (light blue)
+        .border(Color::rgb(68, 77, 60))        // #444d3c
+        .border_focused(Color::rgb(167, 192, 128)) // #a7c080
+        .selection_bg(Color::rgb(167, 192, 128))   // #a7c080
+        .selection_fg(Color::rgb(39, 46, 34))      // #272e22
+        .scrollbar_track(Color::rgb(47, 55, 42))   // #2f372a
+        .scrollbar_thumb(Color::rgb(125, 117, 100)) // #7d7564
+        .build()
+}
+
+fn kanagawa_theme() -> Theme {
+    ThemeBuilder::from_theme(themes::dark())
+        .primary(Color::rgb(127, 180, 202))    // #7fb4ca wave blue
+        .secondary(Color::rgb(149, 127, 184))  // #957fb8 oniviolet
+        .accent(Color::rgb(126, 156, 216))     // #7e9cd8 crystal blue
+        .background(Color::rgb(31, 31, 40))    // #1f1f28
+        .surface(Color::rgb(42, 42, 54))       // #2a2a36
+        .overlay(Color::rgb(54, 54, 70))       // #363646
+        .text(Color::rgb(220, 215, 186))       // #dcd7ba
+        .text_muted(Color::rgb(168, 162, 138)) // #a8a28a (fuji grey lighter)
+        .text_subtle(Color::rgb(114, 113, 105)) // #727169
+        .success(Color::rgb(152, 187, 108))    // #98bb6c spring green
+        .warning(Color::rgb(255, 169, 98))     // #ffa962 surimiOrange
+        .error(Color::rgb(195, 64, 67))        // #c34043 autumn red
+        .info(Color::rgb(127, 180, 202))       // #7fb4ca
+        .border(Color::rgb(84, 84, 109))       // #54546d sumiInk4
+        .border_focused(Color::rgb(126, 156, 216)) // #7e9cd8
+        .selection_bg(Color::rgb(73, 65, 107))     // #49416b waveblue2
+        .selection_fg(Color::rgb(220, 215, 186))   // #dcd7ba
+        .scrollbar_track(Color::rgb(42, 42, 54))   // #2a2a36
+        .scrollbar_thumb(Color::rgb(84, 84, 109))  // #54546d
+        .build()
+}
+
+fn ayu_mirage_theme() -> Theme {
+    ThemeBuilder::from_theme(themes::dark())
+        .primary(Color::rgb(115, 210, 222))    // #73d2de common.accent
+        .secondary(Color::rgb(217, 155, 243))  // #d99bf3 (purple)
+        .accent(Color::rgb(255, 173, 102))     // #ffad66 syntax.tag
+        .background(Color::rgb(36, 42, 54))    // #242a36 (ui.bg adjusted)
+        .surface(Color::rgb(44, 51, 64))       // #2c3340
+        .overlay(Color::rgb(52, 60, 74))       // #343c4a
+        .text(Color::rgb(204, 204, 204))       // #cccac2 (common.fg)
+        .text_muted(Color::rgb(150, 155, 160)) // #969ba0
+        .text_subtle(Color::rgb(107, 114, 128)) // #6b7280
+        .success(Color::rgb(135, 213, 134))    // #87d586
+        .warning(Color::rgb(255, 213, 109))    // #ffd56d
+        .error(Color::rgb(240, 113, 120))      // #f07178
+        .info(Color::rgb(115, 210, 222))       // #73d2de
+        .border(Color::rgb(60, 68, 82))        // #3c4452
+        .border_focused(Color::rgb(115, 210, 222)) // #73d2de
+        .selection_bg(Color::rgb(115, 210, 222))   // #73d2de
+        .selection_fg(Color::rgb(36, 42, 54))      // #242a36
+        .scrollbar_track(Color::rgb(44, 51, 64))   // #2c3340
+        .scrollbar_thumb(Color::rgb(107, 114, 128)) // #6b7280
+        .build()
+}
+
+fn nightfox_theme() -> Theme {
+    ThemeBuilder::from_theme(themes::dark())
+        .primary(Color::rgb(129, 180, 243))    // #81b4f3 blue
+        .secondary(Color::rgb(174, 140, 211))  // #ae8cd3 magenta
+        .accent(Color::rgb(99, 205, 207))      // #63cdcf cyan
+        .background(Color::rgb(18, 21, 31))    // #12151f
+        .surface(Color::rgb(29, 33, 46))       // #1d212e
+        .overlay(Color::rgb(41, 46, 62))       // #292e3e
+        .text(Color::rgb(205, 207, 216))       // #cdcfd8
+        .text_muted(Color::rgb(143, 145, 158)) // #8f919e
+        .text_subtle(Color::rgb(106, 108, 122)) // #6a6c7a
+        .success(Color::rgb(129, 200, 152))    // #81c898
+        .warning(Color::rgb(218, 167, 89))     // #daa759
+        .error(Color::rgb(201, 101, 120))      // #c96578
+        .info(Color::rgb(99, 205, 207))        // #63cdcf
+        .border(Color::rgb(48, 54, 71))        // #303647
+        .border_focused(Color::rgb(129, 180, 243)) // #81b4f3
+        .selection_bg(Color::rgb(129, 180, 243))   // #81b4f3
+        .selection_fg(Color::rgb(18, 21, 31))      // #12151f
+        .scrollbar_track(Color::rgb(29, 33, 46))   // #1d212e
+        .scrollbar_thumb(Color::rgb(106, 108, 122)) // #6a6c7a
+        .build()
+}
+
+fn cyberpunk_aurora_theme() -> Theme {
+    ThemeBuilder::from_theme(themes::dark())
+        .primary(Color::rgb(255, 0, 128))      // #ff0080 neon pink
+        .secondary(Color::rgb(0, 255, 255))    // #00ffff cyan
+        .accent(Color::rgb(0, 255, 163))       // #00ffa3 neon green
+        .background(Color::rgb(13, 2, 33))     // #0d0221 deep purple-black
+        .surface(Color::rgb(22, 10, 48))       // #160a30
+        .overlay(Color::rgb(33, 18, 63))       // #21123f
+        .text(Color::rgb(224, 210, 255))       // #e0d2ff
+        .text_muted(Color::rgb(160, 140, 200)) // #a08cc8
+        .text_subtle(Color::rgb(120, 100, 160)) // #7864a0
+        .success(Color::rgb(0, 255, 163))      // #00ffa3
+        .warning(Color::rgb(255, 213, 0))      // #ffd500
+        .error(Color::rgb(255, 51, 102))       // #ff3366
+        .info(Color::rgb(0, 200, 255))         // #00c8ff
+        .border(Color::rgb(60, 30, 100))       // #3c1e64
+        .border_focused(Color::rgb(255, 0, 128))  // #ff0080
+        .selection_bg(Color::rgb(255, 0, 128))    // #ff0080
+        .selection_fg(Color::rgb(224, 210, 255))  // #e0d2ff
+        .scrollbar_track(Color::rgb(22, 10, 48))  // #160a30
+        .scrollbar_thumb(Color::rgb(120, 100, 160)) // #7864a0
+        .build()
+}
+
+fn synthwave_84_theme() -> Theme {
+    ThemeBuilder::from_theme(themes::dark())
+        .primary(Color::rgb(255, 123, 213))    // #ff7bd5 hot pink
+        .secondary(Color::rgb(114, 241, 223))  // #72f1df mint
+        .accent(Color::rgb(254, 215, 102))     // #fed766 yellow
+        .background(Color::rgb(34, 20, 54))    // #221436 deep purple
+        .surface(Color::rgb(44, 28, 68))       // #2c1c44
+        .overlay(Color::rgb(54, 36, 82))       // #362452
+        .text(Color::rgb(241, 233, 255))       // #f1e9ff
+        .text_muted(Color::rgb(180, 165, 210)) // #b4a5d2
+        .text_subtle(Color::rgb(130, 115, 165)) // #8273a5
+        .success(Color::rgb(114, 241, 223))    // #72f1df
+        .warning(Color::rgb(254, 215, 102))    // #fed766
+        .error(Color::rgb(254, 73, 99))        // #fe4963
+        .info(Color::rgb(54, 245, 253))        // #36f5fd
+        .border(Color::rgb(70, 45, 100))       // #462d64
+        .border_focused(Color::rgb(255, 123, 213)) // #ff7bd5
+        .selection_bg(Color::rgb(255, 123, 213))   // #ff7bd5
+        .selection_fg(Color::rgb(34, 20, 54))      // #221436
+        .scrollbar_track(Color::rgb(44, 28, 68))   // #2c1c44
+        .scrollbar_thumb(Color::rgb(130, 115, 165)) // #8273a5
+        .build()
+}
+
 fn apply_a11y_overrides(theme: Theme) -> Theme {
     ThemeBuilder::from_theme(theme)
         .border_focused(Color::rgb(255, 255, 0))
@@ -1256,126 +1430,6 @@ fn apply_a11y_overrides(theme: Theme) -> Theme {
             Color::rgb(0, 0, 0),
         ))
         .build()
-}
-
-fn apply_theme_overrides(
-    theme: Theme,
-    overrides: &ThemeColorOverrides,
-) -> Result<Theme, ThemeConfigError> {
-    overrides.validate()?;
-
-    if overrides.is_empty() {
-        return Ok(theme);
-    }
-
-    let mut builder = ThemeBuilder::from_theme(theme);
-
-    if let Some(value) = overrides.primary.as_deref() {
-        builder = builder.primary(parse_color_slot("primary", value)?);
-    }
-    if let Some(value) = overrides.secondary.as_deref() {
-        builder = builder.secondary(parse_color_slot("secondary", value)?);
-    }
-    if let Some(value) = overrides.accent.as_deref() {
-        builder = builder.accent(parse_color_slot("accent", value)?);
-    }
-    if let Some(value) = overrides.background.as_deref() {
-        builder = builder.background(parse_color_slot("background", value)?);
-    }
-    if let Some(value) = overrides.surface.as_deref() {
-        builder = builder.surface(parse_color_slot("surface", value)?);
-    }
-    if let Some(value) = overrides.overlay.as_deref() {
-        builder = builder.overlay(parse_color_slot("overlay", value)?);
-    }
-    if let Some(value) = overrides.text.as_deref() {
-        builder = builder.text(parse_color_slot("text", value)?);
-    }
-    if let Some(value) = overrides.text_muted.as_deref() {
-        builder = builder.text_muted(parse_color_slot("text_muted", value)?);
-    }
-    if let Some(value) = overrides.text_subtle.as_deref() {
-        builder = builder.text_subtle(parse_color_slot("text_subtle", value)?);
-    }
-    if let Some(value) = overrides.success.as_deref() {
-        builder = builder.success(parse_color_slot("success", value)?);
-    }
-    if let Some(value) = overrides.warning.as_deref() {
-        builder = builder.warning(parse_color_slot("warning", value)?);
-    }
-    if let Some(value) = overrides.error.as_deref() {
-        builder = builder.error(parse_color_slot("error", value)?);
-    }
-    if let Some(value) = overrides.info.as_deref() {
-        builder = builder.info(parse_color_slot("info", value)?);
-    }
-    if let Some(value) = overrides.border.as_deref() {
-        builder = builder.border(parse_color_slot("border", value)?);
-    }
-    if let Some(value) = overrides.border_focused.as_deref() {
-        builder = builder.border_focused(parse_color_slot("border_focused", value)?);
-    }
-    if let Some(value) = overrides.selection_bg.as_deref() {
-        builder = builder.selection_bg(parse_color_slot("selection_bg", value)?);
-    }
-    if let Some(value) = overrides.selection_fg.as_deref() {
-        builder = builder.selection_fg(parse_color_slot("selection_fg", value)?);
-    }
-    if let Some(value) = overrides.scrollbar_track.as_deref() {
-        builder = builder.scrollbar_track(parse_color_slot("scrollbar_track", value)?);
-    }
-    if let Some(value) = overrides.scrollbar_thumb.as_deref() {
-        builder = builder.scrollbar_thumb(parse_color_slot("scrollbar_thumb", value)?);
-    }
-
-    Ok(builder.build())
-}
-
-fn validate_color_slot(field: &'static str, value: Option<&str>) -> Result<(), ThemeConfigError> {
-    if let Some(raw) = value {
-        parse_color_slot(field, raw)?;
-    }
-    Ok(())
-}
-
-fn parse_color_slot(field: &'static str, value: &str) -> Result<Color, ThemeConfigError> {
-    parse_hex_color(value).ok_or_else(|| ThemeConfigError::InvalidColorValue {
-        field,
-        value: value.trim().to_string(),
-    })
-}
-
-fn parse_hex_color(raw: &str) -> Option<Color> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    match hex.len() {
-        3 => {
-            let mut chars = hex.chars();
-            let r = chars.next()?;
-            let g = chars.next()?;
-            let b = chars.next()?;
-            Some(Color::rgb(
-                nibble_to_u8(r)? * 17,
-                nibble_to_u8(g)? * 17,
-                nibble_to_u8(b)? * 17,
-            ))
-        }
-        6 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            Some(Color::rgb(r, g, b))
-        }
-        _ => None,
-    }
-}
-
-fn nibble_to_u8(value: char) -> Option<u8> {
-    value.to_digit(16).map(|digit| digit as u8)
 }
 
 fn downgrade_adaptive_color(color: AdaptiveColor, profile: ColorProfile) -> AdaptiveColor {
@@ -1825,8 +1879,14 @@ mod tests {
 
     #[test]
     fn preset_parse_and_cycles_are_stable() {
-        assert_eq!(UiThemePreset::parse("dark"), Some(UiThemePreset::Dark));
-        assert_eq!(UiThemePreset::parse("light"), Some(UiThemePreset::Light));
+        assert_eq!(
+            UiThemePreset::parse("dark"),
+            Some(UiThemePreset::TokyoNight)
+        );
+        assert_eq!(
+            UiThemePreset::parse("light"),
+            Some(UiThemePreset::Daylight)
+        );
         assert_eq!(
             UiThemePreset::parse("catppuccin"),
             Some(UiThemePreset::Catppuccin)
@@ -1840,10 +1900,24 @@ mod tests {
             UiThemePreset::parse("high_contrast"),
             Some(UiThemePreset::HighContrast)
         );
+        assert_eq!(
+            UiThemePreset::parse("gruvbox"),
+            Some(UiThemePreset::GruvboxDark)
+        );
+        assert_eq!(
+            UiThemePreset::parse("rose-pine"),
+            Some(UiThemePreset::RosePine)
+        );
 
-        assert_eq!(UiThemePreset::Dark.next(), UiThemePreset::Light);
-        assert_eq!(UiThemePreset::Light.previous(), UiThemePreset::Dark);
-        assert_eq!(UiThemePreset::Dark.previous(), UiThemePreset::HighContrast);
+        assert_eq!(UiThemePreset::TokyoNight.next(), UiThemePreset::Daylight);
+        assert_eq!(
+            UiThemePreset::Daylight.previous(),
+            UiThemePreset::TokyoNight
+        );
+        assert_eq!(
+            UiThemePreset::TokyoNight.previous(),
+            UiThemePreset::HighContrast
+        );
     }
 
     #[test]
@@ -2115,13 +2189,16 @@ mod tests {
 
     #[test]
     fn dark_mode_follows_preset() {
-        // Light preset → dark_mode=false, all others → true.
+        // Light presets → dark_mode=false, all others → true.
         let presets_and_expected = [
             ("dark", true),
             ("light", false),
             ("nord", true),
             ("cat", true),
             ("dracula", true),
+            ("solarized-light", false),
+            ("solarized-dark", true),
+            ("gruvbox", true),
         ];
         for (name, expected_dark) in presets_and_expected {
             let options = StyleOptions::from_env_values(EnvValues {
@@ -2136,12 +2213,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_theme_falls_back_to_dark() {
+    fn unknown_theme_falls_back_to_tokyo_night() {
         let options = StyleOptions::from_env_values(EnvValues {
             cass_theme: Some("nonexistent"),
             ..EnvValues::default()
         });
-        assert_eq!(options.preset, UiThemePreset::Dark);
+        assert_eq!(options.preset, UiThemePreset::TokyoNight);
         assert!(options.dark_mode);
     }
 
@@ -2241,7 +2318,7 @@ mod tests {
         // Bare minimum: no env vars at all → defaults.
         let bare = StyleOptions::from_env_values(EnvValues::default());
         assert!(!bare.no_color);
-        assert_eq!(bare.preset, UiThemePreset::Dark);
+        assert_eq!(bare.preset, UiThemePreset::TokyoNight);
         assert!(bare.dark_mode);
     }
 
@@ -2250,7 +2327,7 @@ mod tests {
         // Under Mono profile, styles should still resolve (so code doesn't panic)
         // but colors are expected to be downgraded.
         let ctx = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             dark_mode: true,
             color_profile: ColorProfile::Mono,
             no_color: true,
@@ -2276,7 +2353,7 @@ mod tests {
                 ColorProfile::Ansi16,
                 ColorProfile::Mono,
             ] {
-                let dark_mode = !matches!(preset, UiThemePreset::Light);
+                let dark_mode = !matches!(preset, UiThemePreset::Daylight | UiThemePreset::SolarizedLight);
                 let ctx = StyleContext::from_options(StyleOptions {
                     preset,
                     dark_mode,
@@ -2297,7 +2374,7 @@ mod tests {
     #[test]
     fn dark_preset_matches_tokyo_night_palette() {
         let context = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             dark_mode: true,
             color_profile: ColorProfile::TrueColor,
             no_color: false,
@@ -2315,7 +2392,7 @@ mod tests {
     #[test]
     fn style_context_builds_required_semantic_styles() {
         let context = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             dark_mode: true,
             color_profile: ColorProfile::TrueColor,
             no_color: false,
@@ -2411,7 +2488,7 @@ mod tests {
     #[test]
     fn detail_find_tokens_remain_legible_in_mono_mode() {
         let ctx = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             dark_mode: true,
             color_profile: ColorProfile::Mono,
             no_color: true,
@@ -2454,7 +2531,7 @@ mod tests {
     #[test]
     fn accessibility_role_markers_prioritize_text_labels() {
         let markers = RoleMarkers::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             dark_mode: true,
             color_profile: ColorProfile::Ansi256,
             no_color: false,
@@ -2472,7 +2549,7 @@ mod tests {
     #[test]
     fn base_contrast_is_wcag_aa_or_higher_for_all_presets() {
         for preset in UiThemePreset::all() {
-            let dark_mode = !matches!(preset, UiThemePreset::Light);
+            let dark_mode = !matches!(preset, UiThemePreset::Daylight | UiThemePreset::SolarizedLight);
             let context = StyleContext::from_options(StyleOptions {
                 preset,
                 dark_mode,
@@ -2524,13 +2601,6 @@ mod tests {
         let config = ThemeConfig {
             version: THEME_CONFIG_VERSION,
             base_preset: Some(UiThemePreset::Nord),
-            colors: ThemeColorOverrides {
-                text: Some("#E6EDF3".to_string()),
-                background: Some("#0D1117".to_string()),
-                accent: Some("#58A6FF".to_string()),
-                border_focused: Some("#FFD700".to_string()),
-                ..ThemeColorOverrides::default()
-            },
         };
 
         let json = config
@@ -2545,50 +2615,19 @@ mod tests {
         let config = ThemeConfig {
             version: THEME_CONFIG_VERSION,
             base_preset: Some(UiThemePreset::Catppuccin),
-            colors: ThemeColorOverrides {
-                text: Some("#fefefe".to_string()),
-                background: Some("#101218".to_string()),
-                surface: Some("#1b1f2a".to_string()),
-                selection_bg: Some("#ffd166".to_string()),
-                selection_fg: Some("#111111".to_string()),
-                ..ThemeColorOverrides::default()
-            },
         };
 
         let json = config.to_json_pretty().expect("config should serialize");
         let expected = r##"{
   "version": 1,
-  "base_preset": "catppuccin",
-  "colors": {
-    "background": "#101218",
-    "surface": "#1b1f2a",
-    "text": "#fefefe",
-    "selection_bg": "#ffd166",
-    "selection_fg": "#111111"
-  }
+  "base_preset": "catppuccin"
 }"##;
         assert_eq!(json, expected);
     }
 
     #[test]
-    fn invalid_theme_color_is_rejected() {
-        let config_json = r#"{
-  "version": 1,
-  "base_preset": "dark",
-  "colors": {
-    "text": "not-a-color"
-  }
-}"#;
-
-        let err = ThemeConfig::from_json_str(config_json).expect_err("invalid color must fail");
-        assert!(matches!(
-            err,
-            ThemeConfigError::InvalidColorValue { field: "text", .. }
-        ));
-    }
-
-    #[test]
     fn theme_config_allows_known_preset_aliases() {
+        // Old format with "colors" key should be silently ignored (no deny_unknown_fields)
         let config_json = r#"{
   "version": 1,
   "base_preset": "high_contrast",
@@ -2601,20 +2640,29 @@ mod tests {
     }
 
     #[test]
-    fn custom_theme_downgrades_to_ansi16_profile() {
+    fn theme_config_backwards_compat_dark_alias() {
+        let config_json = r#"{"version":1,"base_preset":"dark"}"#;
+        let parsed = ThemeConfig::from_json_str(config_json).expect("dark alias should work");
+        assert_eq!(parsed.base_preset, Some(UiThemePreset::TokyoNight));
+    }
+
+    #[test]
+    fn theme_config_backwards_compat_light_alias() {
+        let config_json = r#"{"version":1,"base_preset":"light"}"#;
+        let parsed = ThemeConfig::from_json_str(config_json).expect("light alias should work");
+        assert_eq!(parsed.base_preset, Some(UiThemePreset::Daylight));
+    }
+
+    #[test]
+    fn preset_downgrades_to_ansi16_profile() {
         let config = ThemeConfig {
             version: THEME_CONFIG_VERSION,
-            base_preset: Some(UiThemePreset::Dark),
-            colors: ThemeColorOverrides {
-                text: Some("#00e5ff".to_string()),
-                background: Some("#050608".to_string()),
-                ..ThemeColorOverrides::default()
-            },
+            base_preset: Some(UiThemePreset::TokyoNight),
         };
 
         let context = StyleContext::from_options_with_theme_config(
             StyleOptions {
-                preset: UiThemePreset::Light,
+                preset: UiThemePreset::Daylight,
                 dark_mode: false,
                 color_profile: ColorProfile::Ansi16,
                 no_color: false,
@@ -2623,42 +2671,10 @@ mod tests {
                 a11y: false,
             },
             &config,
-        )
-        .expect("theme config should apply");
+        );
 
         assert!(matches!(context.resolved.text, Color::Ansi16(_)));
         assert!(matches!(context.resolved.background, Color::Ansi16(_)));
-    }
-
-    #[test]
-    fn contrast_report_flags_low_contrast_theme() {
-        let config = ThemeConfig {
-            version: THEME_CONFIG_VERSION,
-            base_preset: Some(UiThemePreset::Dark),
-            colors: ThemeColorOverrides {
-                text: Some("#222222".to_string()),
-                background: Some("#202020".to_string()),
-                ..ThemeColorOverrides::default()
-            },
-        };
-
-        let context = StyleContext::from_options_with_theme_config(
-            StyleOptions {
-                preset: UiThemePreset::Dark,
-                dark_mode: true,
-                color_profile: ColorProfile::TrueColor,
-                no_color: false,
-                no_icons: false,
-                no_gradient: false,
-                a11y: false,
-            },
-            &config,
-        )
-        .expect("theme config should apply");
-
-        let report = context.contrast_report();
-        assert!(report.has_failures());
-        assert!(report.failing_pairs().contains(&"text/background"));
     }
 
     #[test]
@@ -2672,10 +2688,6 @@ mod tests {
         let config = ThemeConfig {
             version: THEME_CONFIG_VERSION,
             base_preset: Some(UiThemePreset::Dracula),
-            colors: ThemeColorOverrides {
-                accent: Some("#ff00ff".to_string()),
-                ..ThemeColorOverrides::default()
-            },
         };
 
         config
@@ -2687,62 +2699,30 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
-    // -- theme override wiring tests (2dccg.10.5) ----------------------------
-
     #[test]
-    fn override_applies_color_to_resolved_theme() {
-        let options = StyleOptions {
-            color_profile: ColorProfile::TrueColor,
-            ..StyleOptions::default()
-        };
+    fn base_preset_switches_dark_mode() {
         let config = ThemeConfig {
             version: THEME_CONFIG_VERSION,
-            base_preset: Some(UiThemePreset::Dark),
-            colors: ThemeColorOverrides {
-                text: Some("#00ff00".to_string()),
-                ..ThemeColorOverrides::default()
-            },
-        };
-        let ctx = StyleContext::from_options_with_theme_config(options, &config)
-            .expect("valid config should apply");
-
-        // The resolved text color should reflect the override.
-        let rgb = ctx.resolved.text.to_rgb();
-        assert_eq!(
-            (rgb.r, rgb.g, rgb.b),
-            (0, 255, 0),
-            "text override should be green"
-        );
-    }
-
-    #[test]
-    fn override_base_preset_switches_dark_mode() {
-        let config = ThemeConfig {
-            version: THEME_CONFIG_VERSION,
-            base_preset: Some(UiThemePreset::Light),
-            colors: ThemeColorOverrides::default(),
+            base_preset: Some(UiThemePreset::Daylight),
         };
         let ctx = StyleContext::from_options_with_theme_config(
             StyleOptions::default(), // Dark by default
             &config,
-        )
-        .expect("valid config should apply");
+        );
 
-        assert_eq!(ctx.options.preset, UiThemePreset::Light);
-        assert!(!ctx.options.dark_mode, "Light preset → dark_mode=false");
+        assert_eq!(ctx.options.preset, UiThemePreset::Daylight);
+        assert!(!ctx.options.dark_mode, "Daylight preset → dark_mode=false");
     }
 
     #[test]
-    fn override_empty_colors_does_not_change_theme() {
+    fn empty_config_does_not_change_theme() {
         let config = ThemeConfig {
             version: THEME_CONFIG_VERSION,
             base_preset: None,
-            colors: ThemeColorOverrides::default(),
         };
         let base_ctx = StyleContext::from_options(StyleOptions::default());
         let overridden_ctx =
-            StyleContext::from_options_with_theme_config(StyleOptions::default(), &config)
-                .expect("empty config should apply");
+            StyleContext::from_options_with_theme_config(StyleOptions::default(), &config);
 
         // Same preset, same resolved text color.
         assert_eq!(base_ctx.resolved.text, overridden_ctx.resolved.text);
@@ -2753,203 +2733,19 @@ mod tests {
     }
 
     #[test]
-    fn override_invalid_version_is_rejected() {
-        let config = ThemeConfig {
-            version: 99,
-            base_preset: None,
-            colors: ThemeColorOverrides::default(),
-        };
-        let err = StyleContext::from_options_with_theme_config(StyleOptions::default(), &config)
-            .expect_err("version 99 should fail");
-
-        assert!(matches!(
-            err,
-            ThemeConfigError::UnsupportedVersion { found: 99, .. }
-        ));
-    }
-
-    #[test]
-    fn override_invalid_color_is_rejected() {
-        let config = ThemeConfig {
-            version: THEME_CONFIG_VERSION,
-            base_preset: None,
-            colors: ThemeColorOverrides {
-                accent: Some("not-hex".to_string()),
-                ..ThemeColorOverrides::default()
-            },
-        };
-        let err = StyleContext::from_options_with_theme_config(StyleOptions::default(), &config)
-            .expect_err("invalid color should fail");
-
-        assert!(matches!(
-            err,
-            ThemeConfigError::InvalidColorValue {
-                field: "accent",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn override_with_downgrade_still_works() {
-        let config = ThemeConfig {
-            version: THEME_CONFIG_VERSION,
-            base_preset: Some(UiThemePreset::Dark),
-            colors: ThemeColorOverrides {
-                text: Some("#abcdef".to_string()),
-                ..ThemeColorOverrides::default()
-            },
-        };
-        let ctx = StyleContext::from_options_with_theme_config(
-            StyleOptions {
-                color_profile: ColorProfile::Ansi16,
-                ..StyleOptions::default()
-            },
-            &config,
-        )
-        .expect("override+downgrade should work");
-
-        // After ansi16 downgrade, text should be an Ansi16 color.
-        assert!(
-            matches!(ctx.resolved.text, Color::Ansi16(_)),
-            "override should still downgrade to ansi16"
-        );
-    }
-
-    #[test]
-    fn override_fallback_on_invalid_returns_base_context() {
-        // Simulate the pattern used in resolved_style_context():
-        // if from_options_with_theme_config fails, fall back to from_options.
-        let bad_config = ThemeConfig {
-            version: 99,
-            base_preset: None,
-            colors: ThemeColorOverrides::default(),
-        };
-        let options = StyleOptions::default();
-        let ctx = StyleContext::from_options_with_theme_config(options, &bad_config)
-            .unwrap_or_else(|_| StyleContext::from_options(options));
-
-        // Should still produce a valid context.
-        let _ = ctx.style(STYLE_TEXT_PRIMARY);
-        assert_eq!(ctx.options.preset, UiThemePreset::Dark);
-    }
-
-    // -- style-system invariant tests (2dccg.10.3) ---------------------------
-
-    /// Map a Color variant to a numeric fidelity level (higher = richer).
-    fn color_fidelity(c: Color) -> u8 {
-        match c {
-            Color::Mono(_) => 0,
-            Color::Ansi16(_) => 1,
-            Color::Ansi256(_) => 2,
-            Color::Rgb(_) => 3,
-        }
-    }
-
-    #[test]
-    fn profile_downgrade_is_monotonic() {
-        // As ColorProfile degrades TrueColor→Ansi256→Ansi16→Mono,
-        // every resolved color slot's fidelity must be <= the previous level.
-        let profiles = [
-            ColorProfile::TrueColor,
-            ColorProfile::Ansi256,
-            ColorProfile::Ansi16,
-            ColorProfile::Mono,
-        ];
-
-        for preset in UiThemePreset::all() {
-            let dark_mode = !matches!(preset, UiThemePreset::Light);
-            let mut prev_fidelities: Option<Vec<u8>> = None;
-
-            for &profile in &profiles {
-                let ctx = StyleContext::from_options(StyleOptions {
-                    preset,
-                    dark_mode,
-                    color_profile: profile,
-                    no_color: profile == ColorProfile::Mono,
-                    no_icons: false,
-                    no_gradient: profile == ColorProfile::Mono,
-                    a11y: false,
-                });
-
-                let slots = [
-                    ctx.resolved.text,
-                    ctx.resolved.primary,
-                    ctx.resolved.background,
-                    ctx.resolved.accent,
-                    ctx.resolved.success,
-                    ctx.resolved.warning,
-                    ctx.resolved.error,
-                    ctx.resolved.info,
-                ];
-                let fidelities: Vec<u8> = slots.iter().map(|c| color_fidelity(*c)).collect();
-
-                if let Some(prev) = &prev_fidelities {
-                    for (i, (&cur, &prv)) in fidelities.iter().zip(prev.iter()).enumerate() {
-                        assert!(
-                            cur <= prv,
-                            "Monotonic downgrade violated for preset {} slot {i}: \
-                             profile {:?} fidelity {cur} > previous {prv}",
-                            preset.name(),
-                            profile
-                        );
-                    }
-                }
-                prev_fidelities = Some(fidelities);
-            }
-        }
-    }
-
-    #[test]
-    fn override_partial_merge_preserves_unset_slots() {
-        // When only `text` is overridden, `background` should remain the base preset's value.
-        let base_ctx = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
-            ..StyleOptions::default()
-        });
-
-        let config = ThemeConfig {
-            version: THEME_CONFIG_VERSION,
-            base_preset: Some(UiThemePreset::Dark),
-            colors: ThemeColorOverrides {
-                text: Some("#ff0000".to_string()),
-                ..ThemeColorOverrides::default()
-            },
-        };
-        let overridden_ctx =
-            StyleContext::from_options_with_theme_config(StyleOptions::default(), &config)
-                .expect("partial override should apply");
-
-        // text should differ (overridden).
-        assert_ne!(
-            base_ctx.resolved.text.to_rgb(),
-            overridden_ctx.resolved.text.to_rgb(),
-            "text should be overridden"
-        );
-        // background should match (not overridden).
-        assert_eq!(
-            base_ctx.resolved.background.to_rgb(),
-            overridden_ctx.resolved.background.to_rgb(),
-            "background should be unchanged when not overridden"
-        );
-    }
-
-    #[test]
     fn config_base_preset_overrides_options_preset() {
         // ThemeConfig.base_preset wins over StyleOptions.preset.
         let config = ThemeConfig {
             version: THEME_CONFIG_VERSION,
             base_preset: Some(UiThemePreset::Nord),
-            colors: ThemeColorOverrides::default(),
         };
         let ctx = StyleContext::from_options_with_theme_config(
             StyleOptions {
-                preset: UiThemePreset::Dark,
+                preset: UiThemePreset::TokyoNight,
                 ..StyleOptions::default()
             },
             &config,
-        )
-        .expect("preset override should apply");
+        );
 
         assert_eq!(
             ctx.options.preset,
@@ -2995,7 +2791,7 @@ mod tests {
                 ColorProfile::Ansi256,
                 ColorProfile::Ansi16,
             ] {
-                let dark_mode = !matches!(preset, UiThemePreset::Light);
+                let dark_mode = !matches!(preset, UiThemePreset::Daylight | UiThemePreset::SolarizedLight);
                 let ctx = StyleContext::from_options(StyleOptions {
                     preset,
                     dark_mode,
@@ -3027,7 +2823,7 @@ mod tests {
                 ColorProfile::Ansi256,
                 ColorProfile::Ansi16,
             ] {
-                let dark_mode = !matches!(preset, UiThemePreset::Light);
+                let dark_mode = !matches!(preset, UiThemePreset::Daylight | UiThemePreset::SolarizedLight);
                 let ctx = StyleContext::from_options(StyleOptions {
                     preset,
                     dark_mode,
@@ -3055,7 +2851,7 @@ mod tests {
     fn a11y_mode_adds_emphasis_to_roles() {
         // With a11y enabled, role tokens should have bold or underline for emphasis.
         for preset in UiThemePreset::all() {
-            let dark_mode = !matches!(preset, UiThemePreset::Light);
+            let dark_mode = !matches!(preset, UiThemePreset::Daylight | UiThemePreset::SolarizedLight);
             let ctx = StyleContext::from_options(StyleOptions {
                 preset,
                 dark_mode,
@@ -3676,7 +3472,7 @@ mod tests {
 
     #[test]
     fn agent_accent_style_is_bold_for_all_agents() {
-        let ctx = context_for_preset(UiThemePreset::Dark);
+        let ctx = context_for_preset(UiThemePreset::TokyoNight);
         let agents = [
             "claude_code",
             "codex",
@@ -3733,7 +3529,7 @@ mod tests {
     #[test]
     fn agent_accent_style_uses_fg_only_in_no_color_and_a11y_modes() {
         let no_color_ctx = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             dark_mode: true,
             color_profile: ColorProfile::Mono,
             no_color: true,
@@ -3748,7 +3544,7 @@ mod tests {
         );
 
         let a11y_ctx = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             dark_mode: true,
             color_profile: ColorProfile::TrueColor,
             no_color: false,
@@ -3765,7 +3561,7 @@ mod tests {
 
     #[test]
     fn result_row_style_for_agent_tints_background_when_color_enabled() {
-        let ctx = context_for_preset(UiThemePreset::Dark);
+        let ctx = context_for_preset(UiThemePreset::TokyoNight);
         let base = ctx.style(STYLE_RESULT_ROW);
         let tinted = ctx.result_row_style_for_agent(base, "codex");
         assert!(base.bg.is_some(), "base row style should have a background");
@@ -3790,7 +3586,7 @@ mod tests {
             .bg(to_packed(Color::rgb(32, 36, 48)));
 
         let no_color_ctx = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             dark_mode: true,
             color_profile: ColorProfile::Mono,
             no_color: true,
@@ -3805,7 +3601,7 @@ mod tests {
         );
 
         let a11y_ctx = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             dark_mode: true,
             color_profile: ColorProfile::TrueColor,
             no_color: false,
@@ -3959,7 +3755,7 @@ mod tests {
     // -- pill & tab style token tests (k25j6, 2kz6t) -------------------------
 
     fn context_for_preset(preset: UiThemePreset) -> StyleContext {
-        let dark_mode = !matches!(preset, UiThemePreset::Light);
+        let dark_mode = !matches!(preset, UiThemePreset::Daylight | UiThemePreset::SolarizedLight);
         StyleContext::from_options(StyleOptions {
             preset,
             dark_mode,
@@ -4012,7 +3808,7 @@ mod tests {
 
     #[test]
     fn tab_active_differs_from_status_info() {
-        let ctx = context_for_preset(UiThemePreset::Dark);
+        let ctx = context_for_preset(UiThemePreset::TokyoNight);
         let tab = ctx.style(STYLE_TAB_ACTIVE);
         let info = ctx.style(STYLE_STATUS_INFO);
         assert_ne!(
@@ -4023,7 +3819,7 @@ mod tests {
 
     #[test]
     fn pill_active_differs_from_text_primary() {
-        let ctx = context_for_preset(UiThemePreset::Dark);
+        let ctx = context_for_preset(UiThemePreset::TokyoNight);
         let pill = ctx.style(STYLE_PILL_ACTIVE);
         let text = ctx.style(STYLE_TEXT_PRIMARY);
         assert_ne!(
@@ -4240,7 +4036,7 @@ mod tests {
 
     #[test]
     fn markdown_theme_h1_uses_primary_color() {
-        let ctx = context_for_preset(UiThemePreset::Dark);
+        let ctx = context_for_preset(UiThemePreset::TokyoNight);
         let md = ctx.markdown_theme();
         let expected_fg = to_packed(ctx.resolved.primary);
         assert_eq!(
@@ -4278,7 +4074,7 @@ mod tests {
 
     #[test]
     fn markdown_theme_link_is_underlined() {
-        let ctx = context_for_preset(UiThemePreset::Dark);
+        let ctx = context_for_preset(UiThemePreset::TokyoNight);
         let md = ctx.markdown_theme();
         assert!(
             md.link.has_attr(ftui::StyleFlags::UNDERLINE),
@@ -4306,8 +4102,8 @@ mod tests {
 
     #[test]
     fn syntax_highlight_theme_matches_dark_mode() {
-        let dark_ctx = context_for_preset(UiThemePreset::Dark);
-        let light_ctx = context_for_preset(UiThemePreset::Light);
+        let dark_ctx = context_for_preset(UiThemePreset::TokyoNight);
+        let light_ctx = context_for_preset(UiThemePreset::Daylight);
         let dark_hl = dark_ctx.syntax_highlight_theme();
         let light_hl = light_ctx.syntax_highlight_theme();
         // Dark and light highlight themes should differ (keyword color at minimum).
@@ -4335,7 +4131,7 @@ mod tests {
 
     #[test]
     fn markdown_theme_not_default() {
-        let ctx = context_for_preset(UiThemePreset::Dark);
+        let ctx = context_for_preset(UiThemePreset::TokyoNight);
         let themed = ctx.markdown_theme();
         let default = MarkdownTheme::default();
         assert_ne!(
