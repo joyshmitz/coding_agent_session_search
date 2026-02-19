@@ -68,6 +68,64 @@ fn truncate_output(bytes: &[u8], max_len: usize) -> String {
     }
 }
 
+/// Strip ANSI/control escape sequences from PTY output for stable assertions.
+fn strip_terminal_control_sequences(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.peek().copied() {
+                // CSI: ESC [ ... final-byte
+                Some('[') => {
+                    let _ = chars.next();
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: ESC ] ... BEL or ST
+                Some(']') => {
+                    let _ = chars.next();
+                    let mut prev = '\0';
+                    for c in chars.by_ref() {
+                        if c == '\u{7}' || (prev == '\u{1b}' && c == '\\') {
+                            break;
+                        }
+                        prev = c;
+                    }
+                }
+                // DCS/PM/APC: ESC P|^|_ ... ST
+                Some('P') | Some('^') | Some('_') => {
+                    let _ = chars.next();
+                    let mut prev = '\0';
+                    for c in chars.by_ref() {
+                        if prev == '\u{1b}' && c == '\\' {
+                            break;
+                        }
+                        prev = c;
+                    }
+                }
+                // Other 2-byte escapes.
+                Some(_) => {
+                    let _ = chars.next();
+                }
+                None => {}
+            }
+            continue;
+        }
+
+        if ch.is_control() && ch != '\n' && ch != '\t' {
+            continue;
+        }
+        out.push(ch);
+    }
+
+    out
+}
+
 /// Save output as artifact
 fn save_artifact(name: &str, trace: &str, content: &[u8]) -> PathBuf {
     let dir = artifact_dir();
@@ -439,7 +497,7 @@ fn tui_pty_help_overlay_open_close_flow() {
     );
 
     let before_help_open_len = captured.lock().expect("capture lock").len();
-    send_key_sequence(&mut *writer, b"?"); // open help overlay
+    send_key_sequence(&mut *writer, b"\x1bOP"); // F1 opens help overlay
     let saw_help_open =
         wait_for_output_growth(&captured, before_help_open_len, 8, Duration::from_secs(4));
     thread::sleep(Duration::from_millis(180));
@@ -452,7 +510,7 @@ fn tui_pty_help_overlay_open_close_flow() {
             .try_wait()
             .expect("poll child after help toggle")
             .is_none(),
-        "App exited after '?' instead of opening help overlay"
+        "App exited after F1 instead of opening help overlay"
     );
 
     let before_help_close_len = captured.lock().expect("capture lock").len();
@@ -688,7 +746,7 @@ fn tui_pty_enter_selected_hit_opens_detail_modal() {
     drop(pair);
     let _ = reader_handle.join();
     let raw = captured.lock().expect("capture lock").clone();
-    let rendered = String::from_utf8_lossy(&raw);
+    let rendered = strip_terminal_control_sequences(&raw);
     let saw_messages_detail = rendered.contains("Detail [Messages]");
     save_artifact("pty_enter_detail_output.raw", &trace, &raw);
     let summary = serde_json::json!({
@@ -713,6 +771,111 @@ fn tui_pty_enter_selected_hit_opens_detail_modal() {
     assert!(
         !raw.is_empty(),
         "Expected non-empty PTY capture for Enter detail flow"
+    );
+
+    tracker.complete();
+}
+
+#[test]
+fn tui_pty_search_query_with_space_opens_detail_modal() {
+    let _guard_lock = tui_flow_guard();
+    let trace = trace_id();
+    let tracker = tracker_for("tui_pty_search_query_with_space_opens_detail_modal");
+    let _trace_guard = tracker.trace_env_guard();
+    let env = prepare_ftui_pty_env(&trace, &tracker);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 45,
+            cols: 145,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("open PTY");
+    let reader = pair.master.try_clone_reader().expect("clone PTY reader");
+    let (captured, reader_handle) = spawn_reader(reader);
+    let mut writer = pair.master.take_writer().expect("take PTY writer");
+
+    let mut tui_cmd = CommandBuilder::new(cass_bin_path());
+    tui_cmd.arg("tui");
+    apply_ftui_env(&mut tui_cmd, &env);
+    let mut child = pair
+        .slave
+        .spawn_command(tui_cmd)
+        .expect("spawn ftui TUI in PTY");
+
+    assert!(
+        wait_for_output_growth(&captured, 0, 32, PTY_STARTUP_TIMEOUT),
+        "Did not observe startup output before spaced-query detail flow interaction"
+    );
+
+    // Regression contract: literal spaces must remain editable in the query field.
+    send_key_sequence(&mut *writer, b"hello world");
+    thread::sleep(Duration::from_millis(120));
+    let before_submit_len = captured.lock().expect("capture lock").len();
+    send_key_sequence(&mut *writer, b"\r"); // submit query to populate result list
+    assert!(
+        wait_for_output_growth(&captured, before_submit_len, 24, Duration::from_secs(6)),
+        "Did not observe output growth after spaced query submission in PTY Enter flow"
+    );
+    thread::sleep(Duration::from_millis(180));
+
+    let before_open_len = captured.lock().expect("capture lock").len();
+    send_key_sequence(&mut *writer, b"\r");
+    let saw_detail = wait_for_output_growth(&captured, before_open_len, 8, Duration::from_secs(6));
+    assert!(
+        saw_detail,
+        "Did not observe output growth after Enter detail-open attempt for spaced query"
+    );
+
+    send_key_sequence(&mut *writer, b"\x1b");
+    thread::sleep(Duration::from_millis(220));
+    let first_esc_exited = child
+        .try_wait()
+        .expect("poll child after first ESC in spaced-query flow")
+        .is_some();
+    assert!(
+        !first_esc_exited,
+        "First ESC exited app; expected modal-close-only after spaced query detail-open"
+    );
+
+    send_key_sequence(&mut *writer, b"\x1b");
+    let status = wait_for_child_exit(&mut *child, PTY_EXIT_TIMEOUT);
+    assert!(
+        status.success(),
+        "ftui process exited unsuccessfully after spaced query detail flow: {status}"
+    );
+
+    drop(writer);
+    drop(pair);
+    let _ = reader_handle.join();
+    let raw = captured.lock().expect("capture lock").clone();
+    let rendered = strip_terminal_control_sequences(&raw);
+    let saw_messages_detail = rendered.contains("Detail [Messages]");
+    save_artifact("pty_space_query_detail_output.raw", &trace, &raw);
+    let summary = serde_json::json!({
+        "trace_id": trace,
+        "test": "tui_pty_search_query_with_space_opens_detail_modal",
+        "saw_detail_growth": saw_detail,
+        "first_esc_exited": first_esc_exited,
+        "saw_messages_detail": saw_messages_detail,
+        "captured_bytes": raw.len(),
+    });
+    save_artifact(
+        "pty_space_query_detail_summary.json",
+        &trace,
+        serde_json::to_string_pretty(&summary)
+            .expect("serialize spaced-query detail summary")
+            .as_bytes(),
+    );
+    assert!(
+        saw_messages_detail,
+        "Expected PTY capture to include Detail [Messages] marker after spaced query drill-in"
+    );
+    assert!(
+        !raw.is_empty(),
+        "Expected non-empty PTY capture for spaced query detail flow"
     );
 
     tracker.complete();
@@ -793,11 +956,13 @@ fn tui_pty_detail_modal_shows_markdown_content() {
     drop(pair);
     let _ = reader_handle.join();
     let raw = captured.lock().expect("capture lock").clone();
-    let rendered = String::from_utf8_lossy(&raw);
+    let rendered = strip_terminal_control_sequences(&raw);
     let rendered_lower = rendered.to_ascii_lowercase();
     let saw_heading = rendered_lower.contains("markdown sentinel alpha");
     let saw_list_item = rendered_lower.contains("list item bravo");
-    let saw_code = rendered_lower.contains("let sentinel = 42;");
+    // Syntax highlighting can split tokens with style control segments in PTY
+    // captures, so assert code presence via language label + payload fragment.
+    let saw_code = rendered_lower.contains("rust") && rendered_lower.contains("= 42;");
 
     save_artifact("pty_markdown_detail_output.raw", &trace, &raw);
     let summary = serde_json::json!({

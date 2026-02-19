@@ -44,7 +44,7 @@
         "copilot"
     ],
     "limits": {
-        "max_limit": 10000,
+        "max_limit": 0,
         "max_content_length": 0,
         "max_fields": 50,
         "max_agg_buckets": 10

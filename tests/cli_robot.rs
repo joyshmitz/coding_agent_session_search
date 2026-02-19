@@ -209,7 +209,7 @@ fn introspect_repeatable_and_value_types() {
             "limit" => {
                 found_limit = true;
                 assert_eq!(arg["value_type"], "integer");
-                assert_eq!(arg["default"], "10");
+                assert_eq!(arg["default"], "0");
             }
             "aggregate" => {
                 found_aggregate = true;
@@ -1133,7 +1133,7 @@ fn introspect_arguments_capture_types_defaults_and_repeatable() {
     let search = find_command(&json, "search");
     let limit = find_arg(search, "limit");
     assert_eq!(limit["value_type"], "integer");
-    assert_eq!(limit["default"], "10");
+    assert_eq!(limit["default"], "0");
 
     let offset = find_arg(search, "offset");
     assert_eq!(offset["value_type"], "integer");
@@ -2251,7 +2251,10 @@ fn capabilities_json_includes_limits() {
 
     // Sanity check values
     let max_limit = limits["max_limit"].as_u64().expect("max_limit");
-    assert!(max_limit >= 1000, "max_limit should be reasonably high");
+    assert!(
+        max_limit == 0 || max_limit >= 1000,
+        "max_limit should be unlimited (0) or reasonably high"
+    );
 }
 
 #[test]

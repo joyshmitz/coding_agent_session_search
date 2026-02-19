@@ -17,7 +17,7 @@ pub const RANKING: &str = "F12";
 pub const REFRESH: &str = "Ctrl+Shift+R";
 pub const DETAIL_OPEN: &str = "Enter";
 pub const DETAIL_CLOSE: &str = "Esc";
-pub const FOCUS_QUERY: &str = "/";
+pub const FOCUS_QUERY: &str = "Tab/Shift+Tab";
 pub const HISTORY_NEXT: &str = "Ctrl+n";
 pub const HISTORY_PREV: &str = "Ctrl+p";
 pub const HISTORY_CYCLE: &str = "Ctrl+R";
@@ -34,13 +34,13 @@ pub const BORDERS: &str = "Ctrl+B";
 pub const STATS_BAR: &str = "Ctrl+S";
 
 // Actions
-pub const COPY: &str = "y";
+pub const COPY: &str = "Alt+Y";
 pub const COPY_PATH: &str = "Ctrl+Y";
 pub const COPY_CONTENT: &str = "Ctrl+Shift+C";
-pub const BULK_MENU: &str = "A";
-pub const JSON_VIEW: &str = "J";
+pub const BULK_MENU: &str = "Alt+B";
+pub const JSON_VIEW: &str = "Alt+Shift+J";
 pub const TOGGLE_SELECT: &str = "Ctrl+M/Ctrl+X";
-pub const PANE_FILTER: &str = "/";
+pub const PANE_FILTER: &str = "Alt+/";
 
 // Find in detail
 pub const DETAIL_FIND: &str = "/";
@@ -58,6 +58,9 @@ pub const INSPECTOR: &str = "Ctrl+Shift+I";
 
 // Macro recording
 pub const MACRO_TOGGLE: &str = "Alt+M";
+
+// Surface navigation
+pub const SURFACE_ANALYTICS: &str = "Alt+A";
 
 // Navigation
 pub const TAB_FOCUS: &str = "Tab";
@@ -113,6 +116,7 @@ mod tests {
     #[test]
     fn modifier_shortcuts_are_not_empty() {
         assert!(!SEARCH_MODE.is_empty());
+        assert!(!SURFACE_ANALYTICS.is_empty());
         assert!(!CLEAR_FILTERS.is_empty());
         assert!(!RESET_STATE.is_empty());
         assert!(!REFRESH.is_empty());
@@ -126,6 +130,7 @@ mod tests {
     #[test]
     fn modifier_shortcuts_have_expected_values() {
         assert_eq!(SEARCH_MODE, "Alt+S");
+        assert_eq!(SURFACE_ANALYTICS, "Alt+A");
         assert_eq!(CLEAR_FILTERS, "Ctrl+Del");
         assert_eq!(RESET_STATE, "Ctrl+Shift+Del");
         assert_eq!(REFRESH, "Ctrl+Shift+R");
@@ -167,9 +172,9 @@ mod tests {
 
     #[test]
     fn action_shortcuts_have_expected_values() {
-        assert_eq!(COPY, "y");
-        assert_eq!(BULK_MENU, "A");
-        assert_eq!(PANE_FILTER, "/");
+        assert_eq!(COPY, "Alt+Y");
+        assert_eq!(BULK_MENU, "Alt+B");
+        assert_eq!(PANE_FILTER, "Alt+/");
     }
 
     // =========================================================================
@@ -207,7 +212,7 @@ mod tests {
     fn detail_shortcuts_have_expected_values() {
         assert_eq!(DETAIL_OPEN, "Enter");
         assert_eq!(DETAIL_CLOSE, "Esc");
-        assert_eq!(FOCUS_QUERY, "/");
+        assert_eq!(FOCUS_QUERY, "Tab/Shift+Tab");
     }
 
     // =========================================================================
@@ -328,6 +333,7 @@ mod tests {
     fn modifier_shortcuts_contain_plus_separator() {
         let modifier_keys = [
             SEARCH_MODE,
+            SURFACE_ANALYTICS,
             CLEAR_FILTERS,
             RESET_STATE,
             REFRESH,

@@ -612,9 +612,6 @@ pub enum AnalyticsView {
     Breakdowns,
     /// Per-tool usage analytics.
     Tools,
-    /// Legacy cost estimation (USD) by model/provider.
-    /// Hidden from the default analytics navigation surface.
-    Cost,
     /// Plan frequency + plan token share + trends.
     Plans,
     /// Token measurement coverage diagnostics.
@@ -630,7 +627,6 @@ impl AnalyticsView {
             Self::Heatmap => "Heatmap",
             Self::Breakdowns => "Breakdowns",
             Self::Tools => "Tools",
-            Self::Cost => "Cost",
             Self::Plans => "Plans",
             Self::Coverage => "Coverage",
         }
@@ -655,10 +651,7 @@ impl AnalyticsView {
 
     /// Canonicalize legacy views that should no longer be shown in normal UX.
     fn canonical(self) -> Self {
-        match self {
-            Self::Cost => Self::Coverage,
-            other => other,
-        }
+        self
     }
 }
 
@@ -671,7 +664,6 @@ pub enum ExplorerMetric {
     Messages,
     ToolCalls,
     PlanMessages,
-    Cost,
 }
 
 impl ExplorerMetric {
@@ -682,7 +674,6 @@ impl ExplorerMetric {
             Self::Messages => "Messages",
             Self::ToolCalls => "Tool Calls",
             Self::PlanMessages => "Plan Messages",
-            Self::Cost => "Cost (USD)",
         }
     }
 
@@ -693,7 +684,6 @@ impl ExplorerMetric {
             Self::Messages => Self::ToolCalls,
             Self::ToolCalls => Self::PlanMessages,
             Self::PlanMessages => Self::ApiTokens,
-            Self::Cost => Self::ApiTokens,
         }
     }
 
@@ -704,7 +694,6 @@ impl ExplorerMetric {
             Self::Messages => Self::ContentTokens,
             Self::ToolCalls => Self::Messages,
             Self::PlanMessages => Self::ToolCalls,
-            Self::Cost => Self::PlanMessages,
         }
     }
 }
@@ -845,7 +834,6 @@ pub enum HeatmapMetric {
     Messages,
     ContentTokens,
     ToolCalls,
-    Cost,
     Coverage,
 }
 
@@ -856,7 +844,6 @@ impl HeatmapMetric {
             Self::Messages => "Messages",
             Self::ContentTokens => "Content Tokens",
             Self::ToolCalls => "Tool Calls",
-            Self::Cost => "Cost (USD)",
             Self::Coverage => "Coverage %",
         }
     }
@@ -867,7 +854,6 @@ impl HeatmapMetric {
             Self::Messages => Self::ContentTokens,
             Self::ContentTokens => Self::ToolCalls,
             Self::ToolCalls => Self::Coverage,
-            Self::Cost => Self::Coverage,
             Self::Coverage => Self::ApiTokens,
         }
     }
@@ -878,7 +864,6 @@ impl HeatmapMetric {
             Self::Messages => Self::ApiTokens,
             Self::ContentTokens => Self::Messages,
             Self::ToolCalls => Self::ContentTokens,
-            Self::Cost => Self::ToolCalls,
             Self::Coverage => Self::ToolCalls,
         }
     }
@@ -3139,13 +3124,80 @@ fn highlight_query_spans(
 
 /// Extract non-trivial search terms from a query string for highlighting.
 ///
-/// Splits on whitespace and filters out terms shorter than 2 characters to
-/// avoid noise from single-character highlights.
+/// Attempts to:
+/// - ignore boolean operators (`AND`, `OR`, `NOT`, `&&`, `||`)
+/// - strip leading negation (`-foo` -> `foo`)
+/// - strip common wildcard markers (`*foo*` -> `foo`)
+/// - preserve quoted phrases as a single term (`\"error handling\"`)
+///
+/// Terms shorter than 2 characters are dropped to avoid noisy highlights.
 fn extract_query_terms(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .filter(|w| w.len() >= 2)
-        .map(|w| w.to_string())
+    fn push_term(out: &mut Vec<String>, raw: &str) {
+        let mut term = raw.trim();
+        if term.is_empty() {
+            return;
+        }
+        if term == "&&" || term == "||" {
+            return;
+        }
+        let upper = term.to_ascii_uppercase();
+        if matches!(upper.as_str(), "AND" | "OR" | "NOT") {
+            return;
+        }
+
+        // Field queries like `agent:codex` -> highlight value part.
+        if let Some((_, rhs)) = term.split_once(':')
+            && !rhs.trim().is_empty()
+        {
+            term = rhs.trim();
+        }
+
+        term = term.trim_start_matches('-');
+        term = term.trim_matches('*');
+        term = term.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | ','));
+
+        if term.len() < 2 {
+            return;
+        }
+        out.push(term.to_string());
+    }
+
+    let mut terms: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+
+    for ch in query.chars() {
+        if let Some(q) = in_quote {
+            if ch == q {
+                push_term(&mut terms, &current);
+                current.clear();
+                in_quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => {
+                push_term(&mut terms, &current);
+                current.clear();
+                in_quote = Some(ch);
+            }
+            ' ' | '\t' | '\n' => {
+                push_term(&mut terms, &current);
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    push_term(&mut terms, &current);
+
+    // Dedup case-insensitively while preserving a stable order.
+    let mut seen = HashSet::new();
+    terms
+        .into_iter()
+        .filter(|t| seen.insert(t.to_ascii_lowercase()))
         .collect()
 }
 
@@ -3797,6 +3849,20 @@ pub struct CassApp {
     pub suggestions: Vec<QuerySuggestion>,
     /// Elapsed time of the last search (for latency badge).
     pub last_search_ms: Option<u128>,
+    /// Monotonic generation id for the current query so stale async results can be ignored.
+    pub search_generation: u64,
+    /// TUI page size for incremental search loading (infinite scroll).
+    pub search_page_size: usize,
+    /// Backend offset for incremental search paging.
+    ///
+    /// This tracks how many raw hits have been consumed from the backend's
+    /// ordering. It must be used for `offset` when requesting more results,
+    /// because the UI may deduplicate hits before display.
+    pub search_backend_offset: usize,
+    /// Whether the current query likely has more results beyond `results`.
+    pub search_has_more: bool,
+    /// Guard against overlapping async search requests (initial or load-more).
+    pub search_in_flight: bool,
     /// Which search mode is active (lexical / semantic / hybrid).
     pub search_mode: SearchMode,
     /// Text matching strategy.
@@ -3859,6 +3925,10 @@ pub struct CassApp {
     pub detail_session_hit_offsets_cache: RefCell<Vec<u16>>,
     /// Active index in `detail_session_hit_lines`.
     pub detail_session_hit_current: usize,
+    /// When true, the next Messages render will schedule an auto-scroll to `detail_session_hit_current`.
+    pub detail_session_hit_scroll_pending: Cell<bool>,
+    /// Pending scroll target computed during render, applied on the next `Tick`.
+    pub detail_pending_scroll_to: Cell<Option<u16>>,
     /// Whether the detail drill-in modal is open.
     pub show_detail_modal: bool,
     /// Scroll position within the detail modal.
@@ -4103,6 +4173,11 @@ impl Default for CassApp {
             wildcard_fallback: false,
             suggestions: Vec::new(),
             last_search_ms: None,
+            search_generation: 0,
+            search_page_size: 250,
+            search_backend_offset: 0,
+            search_has_more: false,
+            search_in_flight: false,
             search_mode: SearchMode::default(),
             match_mode: MatchMode::default(),
             ranking_mode: RankingMode::default(),
@@ -4130,6 +4205,8 @@ impl Default for CassApp {
             detail_session_hit_lines: Vec::new(),
             detail_session_hit_offsets_cache: RefCell::new(Vec::new()),
             detail_session_hit_current: 0,
+            detail_session_hit_scroll_pending: Cell::new(false),
+            detail_pending_scroll_to: Cell::new(None),
             show_detail_modal: false,
             modal_scroll: 0,
             cached_detail: None,
@@ -4466,19 +4543,78 @@ impl CassApp {
             .filter_map(|hit| hit.line_number)
             .filter(|line| *line > 0)
             .collect();
+
+        // Prefer an on-the-fly scan of the loaded conversation when available so the
+        // detail modal can navigate all in-session hits, even if the results list
+        // is paged/incomplete.
+        if let Some((cached_path, cv)) = self.cached_detail.as_ref()
+            && cached_path == &selected_hit.source_path
+        {
+            let terms = extract_query_terms(&self.query);
+            if !terms.is_empty() {
+                let mut term_lowers: Vec<String> =
+                    terms.into_iter().map(|t| t.to_ascii_lowercase()).collect();
+                term_lowers.retain(|t| !t.is_empty());
+
+                let mut convo_lines: Vec<usize> = Vec::new();
+                for (pos, msg) in cv.messages.iter().enumerate() {
+                    let content_lower = msg.content.to_ascii_lowercase();
+                    if term_lowers.iter().any(|t| content_lower.contains(t)) {
+                        let line = if msg.idx >= 0 {
+                            (msg.idx as usize) + 1
+                        } else {
+                            pos + 1
+                        };
+                        if line > 0 {
+                            convo_lines.push(line);
+                        }
+                    }
+                }
+
+                convo_lines.sort_unstable();
+                convo_lines.dedup();
+                if !convo_lines.is_empty() {
+                    // Union with the result-derived hit lines so we don't lose
+                    // semantic-only hits that may not contain the literal query
+                    // terms (or hits from other phases/modes).
+                    lines.extend(convo_lines);
+                }
+            }
+        }
+
+        // Ensure the selected hit line is always navigable.
+        if let Some(line) = selected_hit.line_number
+            && line > 0
+        {
+            lines.push(line);
+        }
         lines.sort_unstable();
         lines.dedup();
         lines
     }
 
     fn sync_detail_session_hit_state(&mut self, selected_hit: &SearchHit) {
+        let prior_line = self
+            .detail_session_hit_lines
+            .get(self.detail_session_hit_current)
+            .copied();
+
         self.detail_session_hit_lines = self.collect_session_hit_lines(selected_hit);
-        self.detail_session_hit_current = selected_hit
-            .line_number
+
+        // Preserve current navigation when possible (e.g. when the conversation finishes
+        // loading), otherwise anchor to the selected hit.
+        self.detail_session_hit_current = prior_line
             .and_then(|line| {
                 self.detail_session_hit_lines
                     .iter()
                     .position(|n| *n == line)
+            })
+            .or_else(|| {
+                selected_hit.line_number.and_then(|line| {
+                    self.detail_session_hit_lines
+                        .iter()
+                        .position(|n| *n == line)
+                })
             })
             .unwrap_or(0);
         self.detail_session_hit_offsets_cache.borrow_mut().clear();
@@ -4635,7 +4771,6 @@ impl CassApp {
                 AnalyticsView::Heatmap => "analytics:heatmap",
                 AnalyticsView::Breakdowns => "analytics:breakdowns",
                 AnalyticsView::Tools => "analytics:tools",
-                AnalyticsView::Cost => "analytics:coverage",
                 AnalyticsView::Plans => "analytics:plans",
                 AnalyticsView::Coverage => "analytics:coverage",
             };
@@ -4719,7 +4854,6 @@ impl CassApp {
                     AnalyticsTarget::Heatmap => AnalyticsView::Heatmap,
                     AnalyticsTarget::Breakdowns => AnalyticsView::Breakdowns,
                     AnalyticsTarget::Tools => AnalyticsView::Tools,
-                    AnalyticsTarget::Cost => AnalyticsView::Coverage,
                     AnalyticsTarget::Plans => AnalyticsView::Plans,
                     AnalyticsTarget::Coverage => AnalyticsView::Coverage,
                 };
@@ -4831,12 +4965,6 @@ impl CassApp {
                             push(shortcuts::DETAIL_OPEN, "drill", contextual.clone(), 3);
                         }
                     }
-                    AnalyticsView::Cost => {
-                        if self.analytics_selectable_count() > 0 {
-                            push("↑/↓", "select", contextual.clone(), 2);
-                            push(shortcuts::DETAIL_OPEN, "drill", contextual.clone(), 3);
-                        }
-                    }
                 }
 
                 push(shortcuts::DETAIL_CLOSE, "back", contextual.clone(), 10);
@@ -4852,10 +4980,16 @@ impl CassApp {
         // Global hints are low-priority fallback hints.
         push(shortcuts::HELP, "help", HintContext::Global, 20);
         push(shortcuts::THEME, "theme", HintContext::Global, 21);
-        push(shortcuts::DENSITY, "density", HintContext::Global, 22);
-        push(shortcuts::BORDERS, "borders", HintContext::Global, 23);
-        push(shortcuts::PALETTE, "palette", HintContext::Global, 24);
-        push(shortcuts::DETAIL_CLOSE, "quit", HintContext::Global, 25);
+        push(
+            shortcuts::SURFACE_ANALYTICS,
+            "analytics",
+            HintContext::Global,
+            22,
+        );
+        push(shortcuts::DENSITY, "density", HintContext::Global, 23);
+        push(shortcuts::BORDERS, "borders", HintContext::Global, 24);
+        push(shortcuts::PALETTE, "palette", HintContext::Global, 25);
+        push(shortcuts::DETAIL_CLOSE, "quit", HintContext::Global, 26);
 
         hints
     }
@@ -4930,6 +5064,128 @@ impl CassApp {
         } else {
             format!(" | {}", picked.join("  "))
         }
+    }
+
+    fn build_surface_shell_line(
+        &self,
+        width: u16,
+        styles: &StyleContext,
+        apply_style: bool,
+    ) -> ftui::text::Line {
+        if width == 0 {
+            return ftui::text::Line::raw(String::new());
+        }
+
+        let plain = ftui::Style::default();
+        let bracket_style = if apply_style {
+            styles.style(style_system::STYLE_TEXT_SUBTLE)
+        } else {
+            plain
+        };
+        let inactive_style = if apply_style {
+            styles.style(style_system::STYLE_TEXT_MUTED)
+        } else {
+            plain
+        };
+        let key_style = if apply_style {
+            styles.style(style_system::STYLE_KBD_KEY)
+        } else {
+            plain
+        };
+        let desc_style = if apply_style {
+            styles.style(style_system::STYLE_KBD_DESC)
+        } else {
+            plain
+        };
+        let search_active_style = if apply_style {
+            styles.style(style_system::STYLE_STATUS_INFO).bold()
+        } else {
+            plain
+        };
+        let analytics_active_style = if apply_style {
+            styles.style(style_system::STYLE_STATUS_SUCCESS).bold()
+        } else {
+            plain
+        };
+        let sources_active_style = if apply_style {
+            styles.style(style_system::STYLE_STATUS_WARNING).bold()
+        } else {
+            plain
+        };
+
+        let max_chars = width as usize;
+        let mut used = 0usize;
+        let mut spans: Vec<ftui::text::Span<'static>> = Vec::new();
+        let mut try_push = |text: String, style: ftui::Style| -> bool {
+            let chars = text.chars().count();
+            if used + chars > max_chars {
+                return false;
+            }
+            used += chars;
+            spans.push(ftui::text::Span::styled(text, style));
+            true
+        };
+
+        let _ = try_push(" ".to_string(), bracket_style);
+        let surface_tabs = [
+            (AppSurface::Search, "Search", search_active_style),
+            (AppSurface::Analytics, "Analytics", analytics_active_style),
+            (AppSurface::Sources, "Sources", sources_active_style),
+        ];
+        for (idx, (surface, label, active_style)) in surface_tabs.iter().enumerate() {
+            if idx > 0 && !try_push(" ".to_string(), bracket_style) {
+                break;
+            }
+            if !try_push("[".to_string(), bracket_style) {
+                break;
+            }
+            let tab_style = if *surface == self.surface {
+                *active_style
+            } else {
+                inactive_style
+            };
+            let tab_label = if *surface == self.surface {
+                format!("● {label}")
+            } else {
+                (*label).to_string()
+            };
+            if !try_push(tab_label, tab_style) {
+                break;
+            }
+            if !try_push("]".to_string(), bracket_style) {
+                break;
+            }
+        }
+
+        let hint_pairs = [
+            (shortcuts::SURFACE_ANALYTICS, "analytics"),
+            (shortcuts::SOURCES, "sources"),
+            (shortcuts::PALETTE, "palette"),
+            (shortcuts::HELP, "help"),
+            (shortcuts::THEME, "theme"),
+        ];
+        let mut first_hint = true;
+        for (key, action) in hint_pairs {
+            let joiner = if first_hint { " | " } else { "  " };
+            if !try_push(joiner.to_string(), bracket_style) {
+                break;
+            }
+            if !try_push(key.to_string(), key_style) {
+                break;
+            }
+            if !try_push("=".to_string(), bracket_style) {
+                break;
+            }
+            if !try_push(action.to_string(), desc_style) {
+                break;
+            }
+            first_hint = false;
+        }
+
+        if spans.is_empty() {
+            spans.push(ftui::text::Span::styled(" ".to_string(), bracket_style));
+        }
+        ftui::text::Line::from_spans(spans)
     }
 
     fn sort_saved_views(&mut self) {
@@ -5144,11 +5400,8 @@ impl CassApp {
         }
         self.panes = pane_map
             .into_iter()
-            .map(|(key, mut hits)| {
+            .map(|(key, hits)| {
                 let total = hits.len();
-                if self.per_pane_limit > 0 && hits.len() > self.per_pane_limit {
-                    hits.truncate(self.per_pane_limit);
-                }
                 AgentPane {
                     agent: key,
                     hits,
@@ -6062,6 +6315,30 @@ impl CassApp {
                 | MatchType::Substring => fuzzy += 1,
             }
         }
+        let total_match_kinds = exact + prefix + fuzzy;
+        let mix_token = if total_match_kinds == 0 {
+            "···".to_string()
+        } else {
+            const BLOCKS: [char; 9] = [
+                ' ', '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}',
+                '\u{2587}', '\u{2588}',
+            ];
+            let level = |count: usize| -> char {
+                let ratio = count as f64 / total_match_kinds as f64;
+                let idx = (ratio * 8.0).round() as usize;
+                BLOCKS[idx.min(8)]
+            };
+            format!("{}{}{}", level(exact), level(prefix), level(fuzzy))
+        };
+        let mix_style = if total_match_kinds == 0 {
+            value_s
+        } else if fuzzy * 2 >= total_match_kinds {
+            warn_s
+        } else if exact >= prefix && exact >= fuzzy {
+            success_s
+        } else {
+            info_s
+        };
 
         let active_pane_label = if pane_count > 1 {
             self.panes
@@ -6071,6 +6348,15 @@ impl CassApp {
         } else {
             "Mixed".to_string()
         };
+        let active_pane_idx = if pane_count == 0 {
+            "0/0".to_string()
+        } else {
+            format!(
+                "{}/{}",
+                self.active_pane.saturating_add(1).min(pane_count),
+                pane_count
+            )
+        };
         let source_scope = if self.filters.source_filter.is_all() {
             "all".to_string()
         } else {
@@ -6079,11 +6365,13 @@ impl CassApp {
 
         let lanes = vec![
             ("pane", active_pane_label, value_s),
+            ("idx", active_pane_idx, info_s),
             ("hits", total_hits.to_string(), value_s),
             ("sel", self.selected.len().to_string(), info_s),
             ("exact", exact.to_string(), success_s),
             ("prefix", prefix.to_string(), info_s),
             ("fuzzy", fuzzy.to_string(), warn_s),
+            ("mix", mix_token, mix_style),
             ("src", source_scope, value_s),
         ];
 
@@ -6793,6 +7081,14 @@ impl CassApp {
             .collect();
         let mut session_hit_offsets: Vec<u16> = Vec::with_capacity(session_hit_total);
         let session_hit_badge_style = styles.style(style_system::STYLE_QUERY_HIGHLIGHT).bold();
+        let session_hit_active_style = styles.style(style_system::STYLE_DETAIL_FIND_MATCH_ACTIVE);
+        let current_session_hit_rank = if session_hit_total > 0 {
+            self.detail_session_hit_current
+                .min(session_hit_total.saturating_sub(1))
+                + 1
+        } else {
+            0
+        };
 
         // Header: title + metadata
         let title = if hit.title.is_empty() {
@@ -6858,6 +7154,22 @@ impl CassApp {
             ftui::text::Span::styled(sep, meta_style),
         ]));
 
+        // Session hit navigation hint (only when we have in-session hits).
+        if session_hit_total > 0 {
+            let mut hint_spans: Vec<ftui::text::Span> = Vec::new();
+            hint_spans.push(ftui::text::Span::styled("hits ", label_style));
+            hint_spans.push(ftui::text::Span::styled(
+                format!("{}/{}", current_session_hit_rank, session_hit_total),
+                session_hit_badge_style,
+            ));
+            hint_spans.push(ftui::text::Span::styled(
+                "  (Enter/n next, N prev, Esc close)",
+                meta_style,
+            ));
+            lines.push(ftui::text::Line::from_spans(hint_spans));
+            lines.push(ftui::text::Line::from(""));
+        }
+
         // If we have a cached conversation, render full messages
         if let Some((_, ref cv)) = self.cached_detail {
             let md_renderer = MarkdownRenderer::new(styles.markdown_theme())
@@ -6878,6 +7190,8 @@ impl CassApp {
                 let msg_hit_rank = msg_line_from_idx
                     .and_then(|line| session_hit_rank.get(&line).copied())
                     .or_else(|| session_hit_rank.get(&msg_line_from_pos).copied());
+                let msg_is_current_session_hit =
+                    msg_hit_rank.is_some_and(|rank| rank == current_session_hit_rank && rank > 0);
                 let role_s = Self::role_style(&msg.role, styles);
                 let gutter_s = Self::role_gutter_style(&msg.role, styles);
                 let prefix = Self::role_prefix(&msg.role);
@@ -6924,27 +7238,37 @@ impl CassApp {
                 if msg_is_session_hit {
                     session_hit_offsets.push(lines.len() as u16);
                 }
+                let header_gutter = if msg_is_current_session_hit {
+                    "\u{258c}\u{25b6}"
+                } else {
+                    "\u{258c} "
+                };
+                let mut header_role_style = role_s.bold();
+                if msg_is_session_hit {
+                    header_role_style = header_role_style.underline();
+                }
+                if msg_is_current_session_hit && let Some(bg) = session_hit_active_style.bg {
+                    header_role_style = header_role_style.bg(bg);
+                }
                 let mut header_spans = vec![
-                    ftui::text::Span::styled("\u{258c} ", gutter_s),
+                    ftui::text::Span::styled(header_gutter, gutter_s),
                     ftui::text::Span::styled(
                         format!("{role_label}{author_suffix}{ts_label}"),
-                        if msg_is_session_hit {
-                            role_s.bold().underline()
-                        } else {
-                            role_s.bold()
-                        },
+                        header_role_style,
                     ),
                     ftui::text::Span::styled(counter, subtle_style),
                     ftui::text::Span::styled(collapse_indicator, subtle_style),
                 ];
                 if let Some(rank) = msg_hit_rank {
-                    header_spans.push(ftui::text::Span::styled(
-                        "  \u{25ce} ",
-                        session_hit_badge_style,
-                    ));
+                    let badge_style = if msg_is_current_session_hit {
+                        session_hit_active_style.bold()
+                    } else {
+                        session_hit_badge_style
+                    };
+                    header_spans.push(ftui::text::Span::styled("  \u{25ce} ", badge_style));
                     header_spans.push(ftui::text::Span::styled(
                         format!("search hit {rank}/{session_hit_total}"),
-                        session_hit_badge_style,
+                        badge_style,
                     ));
                 }
                 lines.push(ftui::text::Line::from_spans(header_spans));
@@ -6972,7 +7296,10 @@ impl CassApp {
                     // Expanded: render full message content
                     let content = msg.content.trim();
                     if !content.is_empty() {
-                        if is_likely_markdown(content).is_likely() {
+                        // In the drill-in detail modal we always render through the
+                        // GFM renderer for a consistently rich session view.
+                        let force_markdown = self.show_detail_modal;
+                        if force_markdown || is_likely_markdown(content).is_likely() {
                             let rendered = md_renderer.render(content);
                             for line in rendered.into_iter() {
                                 let mut spans =
@@ -7009,8 +7336,21 @@ impl CassApp {
                 // Blank line between messages
                 lines.push(ftui::text::Line::from(""));
             }
+            let pending_scroll_target = if self.detail_session_hit_scroll_pending.get()
+                && !session_hit_offsets.is_empty()
+            {
+                let total = session_hit_offsets.len();
+                let current = self.detail_session_hit_current.min(total.saturating_sub(1));
+                Some(session_hit_offsets[current].saturating_sub(3))
+            } else {
+                None
+            };
             *self.detail_message_offsets.borrow_mut() = msg_offsets;
             *self.detail_session_hit_offsets_cache.borrow_mut() = session_hit_offsets;
+            if let Some(target) = pending_scroll_target {
+                self.detail_pending_scroll_to.set(Some(target));
+                self.detail_session_hit_scroll_pending.set(false);
+            }
         } else {
             // No cached conversation: show the hit's content directly
             self.detail_message_offsets.borrow_mut().clear();
@@ -7020,7 +7360,7 @@ impl CassApp {
             } else {
                 &hit.content
             };
-            if is_likely_markdown(content).is_likely() {
+            if self.show_detail_modal || is_likely_markdown(content).is_likely() {
                 let md_renderer = MarkdownRenderer::new(styles.markdown_theme())
                     .with_syntax_theme(styles.syntax_highlight_theme());
                 let rendered = md_renderer.render(content);
@@ -7386,12 +7726,30 @@ impl CassApp {
 
                     if let Some(len) = matched_len {
                         let end = pos + len;
-                        let style = if match_idx == current_match {
+                        let is_current = match_idx == current_match;
+                        let overlay = if is_current {
                             current_style
                         } else {
                             highlight_style
                         };
-                        rebuilt.push(ftui::text::Span::styled(text[pos..end].to_string(), style));
+
+                        // Preserve markdown/syntax styling while layering match emphasis.
+                        let mut merged = base_style.unwrap_or_default();
+                        if merged.fg.is_none()
+                            && let Some(fg) = overlay.fg
+                        {
+                            merged = merged.fg(fg);
+                        }
+                        if let Some(bg) = overlay.bg {
+                            merged = merged.bg(bg);
+                        }
+                        merged = if is_current {
+                            merged.bold().underline().italic()
+                        } else {
+                            merged.bold().underline()
+                        };
+
+                        rebuilt.push(ftui::text::Span::styled(text[pos..end].to_string(), merged));
                         match_positions.push(line_no as u16);
                         match_idx += 1;
                         pos = end;
@@ -7935,11 +8293,10 @@ impl CassApp {
             return;
         }
 
-        // Reserve space for the interactive find bar only while editing find.
-        // Query-hit highlighting/navigation can stay active while the bar is hidden.
-        let find_bar_active =
-            self.detail_find.is_some() && self.input_mode == InputMode::DetailFind;
-        let (content_area, find_area) = if find_bar_active {
+        // Reserve space for the find bar whenever a find state exists.
+        // This keeps query + match context visible even when the user is not actively editing.
+        let find_bar_visible = self.detail_find.is_some();
+        let (content_area, find_area) = if find_bar_visible {
             let find_h = if inner.height >= 4 { 2u16 } else { 1u16 };
             if inner.height <= find_h + 1 {
                 (inner, None)
@@ -7997,7 +8354,10 @@ impl CassApp {
                 DetailTab::Analytics => self.build_analytics_lines(hit, content_area.width, styles),
             };
 
-            // Apply find-in-detail highlighting and cache match positions
+            // Apply find-in-detail highlighting and cache match positions.
+            //
+            // Find highlighting stays active regardless of whether the user is editing;
+            // the current match index controls the "active" emphasis.
             if let Some(ref find) = self.detail_find {
                 let matches =
                     Self::apply_find_highlight(&mut lines, &find.query, find.current, styles);
@@ -8968,6 +9328,7 @@ impl CassApp {
         let border_s = styles.style(style_system::STYLE_SPLIT_HANDLE);
         for row in [
             "  ┌─────────────────────────────────────────────────┐",
+            "  │ [Surface Tabs + Global Hints]                    │",
             "  │ [Search Bar]         [Filter Chips]    [Status] │",
             "  ├────────────────┬────────────────────────────────┤",
             "  │                │                                │",
@@ -9025,6 +9386,26 @@ impl CassApp {
                 "Auto-fuzzy: searches with few results try *term* fallback".into(),
                 format!("{} refresh search (re-query index)", shortcuts::REFRESH),
                 "/ detail-find in preview; n/N to jump session hits in context".into(),
+            ],
+        );
+
+        add_section(
+            &mut lines,
+            "Surfaces",
+            &[
+                format!(
+                    "{} jump directly to Analytics (global shell + metrics views)",
+                    shortcuts::SURFACE_ANALYTICS
+                ),
+                format!(
+                    "{} open Sources manager (sync, doctor, health)",
+                    shortcuts::SOURCES
+                ),
+                "Esc from Analytics/Sources returns to the previous surface".into(),
+                format!(
+                    "{} opens the command palette for all surface commands",
+                    shortcuts::PALETTE
+                ),
             ],
         );
 
@@ -9140,7 +9521,7 @@ impl CassApp {
                     shortcuts::PANE_FILTER
                 ),
                 format!(
-                    "{}/?/Alt+H toggle this help; {} quit (or back from detail)",
+                    "{}/Alt+H toggle this help; {} quit (or back from detail)",
                     shortcuts::HELP,
                     shortcuts::QUIT
                 ),
@@ -9151,7 +9532,7 @@ impl CassApp {
             &mut lines,
             "Density & Display",
             &[
-                ("Shift+= / Alt+-", "Increase/decrease pane items"),
+                ("Alt+= / Alt+-", "Increase/decrease pane items"),
                 ("Ctrl+D", "Cycle density mode (compact/cozy/spacious)"),
                 ("F2", "Toggle dark/light theme"),
                 ("Ctrl+B", "Toggle border style"),
@@ -9212,7 +9593,7 @@ impl CassApp {
         let title = if self.help_pinned {
             "Quick Start & Shortcuts (pinned)"
         } else {
-            "Quick Start & Shortcuts (F1, ?, or Alt+H)"
+            "Quick Start & Shortcuts (F1 or Alt+H)"
         };
         let outer = Block::new()
             .borders(Borders::ALL)
@@ -9933,7 +10314,6 @@ impl CassApp {
                 super::analytics_charts::breakdown_rows(data, self.breakdown_tab)
             }
             AnalyticsView::Tools => super::analytics_charts::tools_row_count(data),
-            AnalyticsView::Cost => super::analytics_charts::cost_rows(data),
             AnalyticsView::Plans => data.agent_plan_messages.len(),
             AnalyticsView::Coverage => super::analytics_charts::coverage_row_count(data),
             // Dashboard has no selectable rows.
@@ -10038,18 +10418,6 @@ impl CassApp {
                     workspace: None,
                     source_filter: None,
                     model: None,
-                })
-            }
-            AnalyticsView::Cost => {
-                // Drill into a specific model family.
-                let (model, _) = data.model_tokens.get(idx)?;
-                Some(DrilldownContext {
-                    since_ms: base_since,
-                    until_ms: base_until,
-                    agent: None,
-                    workspace: None,
-                    source_filter: None,
-                    model: Some(model.clone()),
                 })
             }
             AnalyticsView::Plans => {
@@ -10160,15 +10528,21 @@ pub enum CassMsg {
     QuerySubmitted,
     /// Search execution requested (Enter or debounce expired).
     SearchRequested,
+    /// Load the next page of results for the current query (infinite scroll).
+    SearchMoreRequested,
     /// Async search completed with results.
     SearchCompleted {
+        /// Monotonic generation id so stale async completions can be ignored.
+        generation: u64,
         hits: Vec<SearchHit>,
         elapsed_ms: u128,
         suggestions: Vec<QuerySuggestion>,
         wildcard_fallback: bool,
+        /// When true, append hits to the existing result set instead of replacing it.
+        append: bool,
     },
     /// Search failed with an error message.
-    SearchFailed(String),
+    SearchFailed { generation: u64, error: String },
     /// Move cursor within the query string (Left/Right arrow keys).
     CursorMoved { delta: i32 },
     /// Jump cursor to start or end of query (Home/End keys).
@@ -11103,6 +11477,7 @@ pub struct SearchParams {
     pub ranking: RankingMode,
     pub context_window: ContextWindow,
     pub limit: usize,
+    pub offset: usize,
 }
 
 /// Result returned by [`SearchService::execute`].
@@ -11183,10 +11558,8 @@ impl SearchService for TantivySearchService {
         use crate::search::query::{FieldMask, SearchResult as BackendSearchResult};
 
         let started = Instant::now();
-        // Preserve `0 = no limit` semantics for backend search paths.
-        // Hybrid mode now uses this to keep lexical completeness while
-        // bounding semantic fanout for responsive staged behavior.
         let limit = params.limit;
+        let offset = params.offset;
         let sparse_threshold = 3;
         let field_mask = FieldMask::new(true, true, true, true);
 
@@ -11198,7 +11571,7 @@ impl SearchService for TantivySearchService {
                         &params.query,
                         params.filters.clone(),
                         limit,
-                        0,
+                        offset,
                         sparse_threshold,
                         field_mask,
                     )
@@ -11210,7 +11583,7 @@ impl SearchService for TantivySearchService {
                             &params.query,
                             params.filters.clone(),
                             limit,
-                            0,
+                            offset,
                             field_mask,
                             false,
                         )
@@ -11230,7 +11603,7 @@ impl SearchService for TantivySearchService {
                         &params.query,
                         params.filters.clone(),
                         limit,
-                        0,
+                        offset,
                         sparse_threshold,
                         field_mask,
                         false,
@@ -11308,7 +11681,6 @@ impl From<super::ftui_adapter::Event> for CassMsg {
 
                     // -- Help -----------------------------------------------------
                     KeyCode::F(1) => CassMsg::HelpToggled,
-                    KeyCode::Char('?') => CassMsg::HelpToggled,
                     KeyCode::Char('h') if alt => CassMsg::HelpToggled,
                     KeyCode::Char('H') if alt => CassMsg::HelpToggled,
 
@@ -11348,12 +11720,29 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::Char('S') if ctrl && !shift => CassMsg::StatsBarToggled,
                     KeyCode::Char('s') if alt => CassMsg::SearchModeCycled,
 
+                    // -- Surface switch -------------------------------------------
+                    KeyCode::Char('a') if alt => CassMsg::AnalyticsEntered,
+                    KeyCode::Char('A') if alt => CassMsg::AnalyticsEntered,
+
                     // -- Macro recording (Alt+M) ----------------------------------
                     KeyCode::Char('m') if alt => CassMsg::MacroRecordingToggled,
 
                     // -- Command palette ------------------------------------------
                     KeyCode::Char('p') if ctrl => CassMsg::PaletteOpened,
                     KeyCode::Char('p') if alt => CassMsg::PaletteOpened,
+
+                    // -- Result/action shortcuts (Alt+...) ------------------------
+                    // Keep printable characters available for query editing.
+                    KeyCode::Char('/') if alt => CassMsg::PaneFilterOpened,
+                    KeyCode::Char('y') if alt => CassMsg::CopySnippet,
+                    KeyCode::Char('o') if alt => CassMsg::OpenInEditor,
+                    KeyCode::Char('v') if alt => CassMsg::ViewRaw,
+                    KeyCode::Char('J') if alt => CassMsg::ToggleJsonView,
+                    KeyCode::Char('r') if alt => CassMsg::ResultsRefreshed,
+                    KeyCode::Char('b') if alt => CassMsg::BulkActionsOpened,
+                    KeyCode::Char('g') if alt => CassMsg::GroupingCycled,
+                    KeyCode::Char('[') if alt => CassMsg::TimelineJumped { forward: false },
+                    KeyCode::Char(']') if alt => CassMsg::TimelineJumped { forward: true },
 
                     // -- History ---------------------------------------------------
                     KeyCode::Char('r') if ctrl && shift => CassMsg::IndexRefreshRequested,
@@ -11445,30 +11834,15 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::PageDown => CassMsg::PageScrolled { delta: 1 },
                     KeyCode::Enter => CassMsg::DetailOpened,
 
-                    // -- Pane sizing (Shift+=, Alt+-) -----------------------------
+                    // -- Pane sizing (Alt+=, Alt+-) -------------------------------
                     KeyCode::Char('-') if alt => CassMsg::PaneShrunk,
-                    KeyCode::Char('=') if shift => CassMsg::PaneGrew,
-                    KeyCode::Char('+') => CassMsg::PaneGrew,
+                    KeyCode::Char('=') if alt => CassMsg::PaneGrew,
+                    KeyCode::Char('+') if alt => CassMsg::PaneGrew,
 
                     // -- Alt+digit pane switch ------------------------------------
                     KeyCode::Char(c @ '1'..='9') if alt => CassMsg::ActivePaneChanged {
                         index: (c as u8 - b'1') as usize,
                     },
-
-                    // -- Slash (context-sensitive) ---------------------------------
-                    KeyCode::Char('/') => CassMsg::PaneFilterOpened,
-
-                    // -- Result actions (bare keys, only in results focus) ---------
-                    KeyCode::Char('y') => CassMsg::CopySnippet,
-                    KeyCode::Char('o') => CassMsg::OpenInEditor,
-                    KeyCode::Char('v') => CassMsg::ViewRaw,
-                    KeyCode::Char('J') => CassMsg::ToggleJsonView,
-                    KeyCode::Char('r') => CassMsg::ResultsRefreshed,
-                    KeyCode::Char('A') => CassMsg::BulkActionsOpened,
-                    KeyCode::Char(' ') => CassMsg::PeekToggled,
-                    KeyCode::Char('G') => CassMsg::GroupingCycled,
-                    KeyCode::Char('[') => CassMsg::TimelineJumped { forward: false },
-                    KeyCode::Char(']') => CassMsg::TimelineJumped { forward: true },
 
                     // -- Default: treat as query input ----------------------------
                     KeyCode::Char(c) => CassMsg::QueryChanged(c.to_string()),
@@ -11960,7 +12334,13 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     // Enter moves to the next contextual search hit while modal is open.
                     CassMsg::QuerySubmitted | CassMsg::DetailOpened => {
-                        return self.update(CassMsg::DetailSessionHitNavigated { forward: true });
+                        // Preserve explicit non-context tabs. Navigation is only meaningful
+                        // on the Messages tab where hits are shown in-session.
+                        if self.detail_tab == DetailTab::Messages {
+                            return self
+                                .update(CassMsg::DetailSessionHitNavigated { forward: true });
+                        }
+                        return ftui::Cmd::none();
                     }
                     // j/k scroll the detail view
                     CassMsg::QueryChanged(text) if text == "j" => {
@@ -12473,6 +12853,7 @@ impl super::ftui_adapter::Model for CassApp {
                 // Clear debounce state so we don't double-fire.
                 self.search_dirty_since = None;
                 // Build search params from current state.
+                let generation = self.search_generation.wrapping_add(1);
                 let params = SearchParams {
                     query: self.query.clone(),
                     filters: self.filters.clone(),
@@ -12480,8 +12861,9 @@ impl super::ftui_adapter::Model for CassApp {
                     match_mode: self.match_mode,
                     ranking: self.ranking_mode,
                     context_window: self.context_window,
-                    // 0 => unlimited in TUI (do not silently cap at 100).
-                    limit: 0,
+                    // Unlimited results are implemented via paging (no silent hard cap).
+                    limit: self.search_page_size.max(1),
+                    offset: 0,
                 };
                 // Skip empty queries.
                 if params.query.trim().is_empty() {
@@ -12490,35 +12872,138 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 // Dispatch async search if a service is available.
                 if let Some(svc) = self.search_service.clone() {
+                    self.search_generation = generation;
+                    self.search_backend_offset = 0;
+                    self.search_has_more = true;
+                    self.search_in_flight = true;
                     self.status = "Searching\u{2026}".to_string();
                     self.set_loading_context(LoadingContext::Search);
                     ftui::Cmd::task(move || match svc.execute(&params) {
                         Ok(result) => CassMsg::SearchCompleted {
+                            generation,
                             hits: result.hits,
                             elapsed_ms: result.elapsed_ms,
                             suggestions: result.suggestions,
                             wildcard_fallback: result.wildcard_fallback,
+                            append: false,
                         },
-                        Err(e) => CassMsg::SearchFailed(e),
+                        Err(e) => CassMsg::SearchFailed {
+                            generation,
+                            error: e,
+                        },
                     })
                 } else {
+                    self.search_in_flight = false;
                     self.clear_loading_context(LoadingContext::Search);
                     ftui::Cmd::none()
                 }
             }
+            CassMsg::SearchMoreRequested => {
+                if self.search_in_flight || !self.search_has_more {
+                    return ftui::Cmd::none();
+                }
+                let generation = self.search_generation;
+                let params = SearchParams {
+                    query: self.query.clone(),
+                    filters: self.filters.clone(),
+                    mode: self.search_mode,
+                    match_mode: self.match_mode,
+                    ranking: self.ranking_mode,
+                    context_window: self.context_window,
+                    limit: self.search_page_size.max(1),
+                    offset: self.search_backend_offset,
+                };
+                if params.query.trim().is_empty() {
+                    return ftui::Cmd::none();
+                }
+                if let Some(svc) = self.search_service.clone() {
+                    self.search_in_flight = true;
+                    self.status = format!("Loading more\u{2026} ({} loaded)", self.results.len());
+                    self.set_loading_context(LoadingContext::Search);
+                    ftui::Cmd::task(move || match svc.execute(&params) {
+                        Ok(result) => CassMsg::SearchCompleted {
+                            generation,
+                            hits: result.hits,
+                            elapsed_ms: result.elapsed_ms,
+                            suggestions: result.suggestions,
+                            wildcard_fallback: result.wildcard_fallback,
+                            append: true,
+                        },
+                        Err(e) => CassMsg::SearchFailed {
+                            generation,
+                            error: e,
+                        },
+                    })
+                } else {
+                    self.search_in_flight = false;
+                    ftui::Cmd::none()
+                }
+            }
             CassMsg::SearchCompleted {
+                generation,
                 hits,
                 elapsed_ms,
                 suggestions,
                 wildcard_fallback,
+                append,
             } => {
+                if generation != self.search_generation {
+                    // Stale async completion from an older query — ignore.
+                    return ftui::Cmd::none();
+                }
+                self.search_in_flight = false;
                 self.clear_loading_context(LoadingContext::Search);
                 self.last_search_ms = Some(elapsed_ms);
+                let page_size = self.search_page_size.max(1);
+                if append {
+                    let backend_returned = hits.len();
+                    // Append page results without duplicating hits already loaded.
+                    let mut seen: HashSet<SelectedHitKey> =
+                        self.results.iter().map(SelectedHitKey::from_hit).collect();
+                    let mut added = 0usize;
+                    for hit in hits {
+                        let key = SelectedHitKey::from_hit(&hit);
+                        if seen.insert(key) {
+                            self.results.push(hit);
+                            added += 1;
+                        }
+                    }
+                    self.search_backend_offset =
+                        self.search_backend_offset.saturating_add(backend_returned);
+                    // If backend returned fewer than a full page, assume we're at the end.
+                    if backend_returned < page_size {
+                        self.search_has_more = false;
+                    }
+                    self.regroup_panes();
+                    self.status = format!(
+                        "Loaded {} (+{added}) results · last page {}ms{}",
+                        self.results.len(),
+                        elapsed_ms,
+                        if self.search_has_more {
+                            " · more available"
+                        } else {
+                            ""
+                        }
+                    );
+                    // If the user typed while the request was in-flight, schedule
+                    // the next debounced search now that we're idle again.
+                    if let Some(dirty_ts) = self.search_dirty_since {
+                        let elapsed = dirty_ts.elapsed();
+                        if elapsed >= SEARCH_DEBOUNCE {
+                            return ftui::Cmd::msg(CassMsg::SearchRequested);
+                        }
+                        return ftui::Cmd::tick(SEARCH_DEBOUNCE.saturating_sub(elapsed));
+                    }
+                    return ftui::Cmd::none();
+                }
+
                 self.suggestions = suggestions;
                 self.wildcard_fallback = wildcard_fallback;
 
                 // Store results and group into panes using current mode.
                 self.results = hits;
+                self.search_backend_offset = self.results.len();
+                self.search_has_more = self.results.len() >= page_size;
                 self.regroup_panes();
 
                 // Keep selection stable across reranking by retaining only keys that
@@ -12530,7 +13015,16 @@ impl super::ftui_adapter::Model for CassApp {
                     self.open_confirm_armed = false;
                 }
 
-                self.status = format!("{} results in {}ms", self.results.len(), elapsed_ms);
+                self.status = format!(
+                    "Loaded {} results in {}ms{}",
+                    self.results.len(),
+                    elapsed_ms,
+                    if self.search_has_more {
+                        " · more available"
+                    } else {
+                        ""
+                    }
+                );
                 if self.anim.enabled
                     && (RESULTS_REVEAL_MIN_HITS..=RESULTS_REVEAL_MAX_HITS)
                         .contains(&self.results.len())
@@ -12545,11 +13039,33 @@ impl super::ftui_adapter::Model for CassApp {
                 let mut state = self.results_list_state.borrow_mut();
                 state.scroll_to_top();
                 state.select(Some(0));
+                // If the user typed while the request was in-flight, schedule
+                // the next debounced search now that we're idle again.
+                if let Some(dirty_ts) = self.search_dirty_since {
+                    let elapsed = dirty_ts.elapsed();
+                    if elapsed >= SEARCH_DEBOUNCE {
+                        return ftui::Cmd::msg(CassMsg::SearchRequested);
+                    }
+                    return ftui::Cmd::tick(SEARCH_DEBOUNCE.saturating_sub(elapsed));
+                }
                 ftui::Cmd::none()
             }
-            CassMsg::SearchFailed(err) => {
+            CassMsg::SearchFailed { generation, error } => {
+                if generation != self.search_generation {
+                    return ftui::Cmd::none();
+                }
+                self.search_in_flight = false;
                 self.clear_loading_context(LoadingContext::Search);
-                self.status = format!("Search error: {err}");
+                self.status = format!("Search error: {error}");
+                // If the user typed while the request was in-flight, schedule
+                // the next debounced search now that we're idle again.
+                if let Some(dirty_ts) = self.search_dirty_since {
+                    let elapsed = dirty_ts.elapsed();
+                    if elapsed >= SEARCH_DEBOUNCE {
+                        return ftui::Cmd::msg(CassMsg::SearchRequested);
+                    }
+                    return ftui::Cmd::tick(SEARCH_DEBOUNCE.saturating_sub(elapsed));
+                }
                 ftui::Cmd::none()
             }
             CassMsg::CursorMoved { delta } => {
@@ -12707,7 +13223,19 @@ impl super::ftui_adapter::Model for CassApp {
                 if self.input_mode == InputMode::Query {
                     self.focus_manager.focus(focus_ids::RESULTS_LIST);
                 }
-                ftui::Cmd::none()
+                if self.search_has_more
+                    && !self.search_in_flight
+                    && self.surface == AppSurface::Search
+                    && !self.show_detail_modal
+                    && self
+                        .panes
+                        .get(self.active_pane)
+                        .is_some_and(|pane| pane.hits.len().saturating_sub(pane.selected + 1) <= 3)
+                {
+                    ftui::Cmd::msg(CassMsg::SearchMoreRequested)
+                } else {
+                    ftui::Cmd::none()
+                }
             }
             CassMsg::SelectionJumped { to_end } => {
                 if let Some(pane) = self.panes.get_mut(self.active_pane) {
@@ -12725,7 +13253,16 @@ impl super::ftui_adapter::Model for CassApp {
                 if self.input_mode == InputMode::Query {
                     self.focus_manager.focus(focus_ids::RESULTS_LIST);
                 }
-                ftui::Cmd::none()
+                if to_end
+                    && self.search_has_more
+                    && !self.search_in_flight
+                    && self.surface == AppSurface::Search
+                    && !self.show_detail_modal
+                {
+                    ftui::Cmd::msg(CassMsg::SearchMoreRequested)
+                } else {
+                    ftui::Cmd::none()
+                }
             }
             CassMsg::ActivePaneChanged { index } => {
                 if index < self.panes.len() {
@@ -12796,7 +13333,20 @@ impl super::ftui_adapter::Model for CassApp {
                     pane.selected = target;
                     state.select(Some(target));
                 }
-                ftui::Cmd::none()
+                if delta > 0
+                    && self.search_has_more
+                    && !self.search_in_flight
+                    && self.surface == AppSurface::Search
+                    && !self.show_detail_modal
+                    && self
+                        .panes
+                        .get(self.active_pane)
+                        .is_some_and(|pane| pane.hits.len().saturating_sub(pane.selected + 1) <= 3)
+                {
+                    ftui::Cmd::msg(CassMsg::SearchMoreRequested)
+                } else {
+                    ftui::Cmd::none()
+                }
             }
 
             // -- Undo/redo ----------------------------------------------------
@@ -12897,6 +13447,10 @@ impl super::ftui_adapter::Model for CassApp {
                 self.detail_scroll = 0;
                 self.modal_scroll = 0;
                 self.sync_detail_session_hit_state(&selected_hit);
+                // Auto-scroll to the selected search hit once the Messages renderer
+                // computes exact line offsets for session hit anchors.
+                self.detail_session_hit_scroll_pending.set(true);
+                self.detail_pending_scroll_to.set(None);
                 // Seed modal-highlight terms from the active search query so
                 // matches are visible immediately in full conversation context.
                 let mut highlight_terms = extract_query_terms(&self.query);
@@ -12949,10 +13503,11 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::DetailLoadRequested { source_path } => {
+                let loaded_path = source_path.clone();
                 if let Some(db) = self.db_reader.as_ref() {
                     match load_conversation(db, &source_path) {
                         Ok(Some(view)) => {
-                            self.cached_detail = Some((source_path, view));
+                            self.cached_detail = Some((loaded_path.clone(), view));
                         }
                         Ok(None) => {
                             // Keep fallback rendering from SearchHit content.
@@ -12961,6 +13516,18 @@ impl super::ftui_adapter::Model for CassApp {
                             self.status = format!("Failed to load conversation detail: {err}");
                         }
                     }
+                }
+
+                // Now that the conversation is available, refresh in-session hit anchors
+                // based on the full content so navigation can cover all hits, even when
+                // the results list is paged.
+                if self.show_detail_modal
+                    && let Some(hit) = self.selected_hit().cloned()
+                    && hit.source_path == loaded_path
+                {
+                    self.sync_detail_session_hit_state(&hit);
+                    self.detail_session_hit_scroll_pending.set(true);
+                    self.detail_pending_scroll_to.set(None);
                 }
                 self.clear_loading_context(LoadingContext::DetailModal);
                 ftui::Cmd::none()
@@ -12973,6 +13540,8 @@ impl super::ftui_adapter::Model for CassApp {
                 self.detail_session_hit_lines.clear();
                 self.detail_session_hit_offsets_cache.borrow_mut().clear();
                 self.detail_session_hit_current = 0;
+                self.detail_session_hit_scroll_pending.set(false);
+                self.detail_pending_scroll_to.set(None);
                 self.focus_manager.pop_trap();
                 self.focus_manager.focus(focus_ids::RESULTS_LIST);
                 self.clear_loading_context(LoadingContext::DetailModal);
@@ -12983,6 +13552,8 @@ impl super::ftui_adapter::Model for CassApp {
                 self.detail_scroll = 0;
                 if tab != DetailTab::Messages {
                     self.detail_session_hit_offsets_cache.borrow_mut().clear();
+                    self.detail_session_hit_scroll_pending.set(false);
+                    self.detail_pending_scroll_to.set(None);
                 }
                 ftui::Cmd::none()
             }
@@ -13079,13 +13650,16 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::DetailFindToggled => {
-                if self.input_mode == InputMode::DetailFind {
-                    self.input_mode = InputMode::Query;
-                } else {
-                    self.input_mode = InputMode::DetailFind;
-                    if self.detail_find.is_none() {
-                        self.detail_find = Some(DetailFindState::default());
+                if self.detail_find.is_some() {
+                    self.detail_find = None;
+                    self.detail_find_matches_cache.borrow_mut().clear();
+                    if self.input_mode == InputMode::DetailFind {
+                        self.input_mode = InputMode::Query;
                     }
+                } else {
+                    self.detail_find = Some(DetailFindState::default());
+                    self.detail_find_matches_cache.borrow_mut().clear();
+                    self.input_mode = InputMode::DetailFind;
                 }
                 ftui::Cmd::none()
             }
@@ -13137,7 +13711,21 @@ impl super::ftui_adapter::Model for CassApp {
                     if self.detail_session_hit_lines.is_empty() {
                         return self.update(CassMsg::DetailFindNavigated { forward });
                     }
-                    self.status = "Render pending: session hit anchors not ready yet".to_string();
+                    // Allow single-key navigation even before the renderer has computed
+                    // exact line offsets: advance the hit index now, then auto-scroll
+                    // once offsets are available.
+                    let total = self.detail_session_hit_lines.len();
+                    if total > 0 {
+                        let mut current =
+                            self.detail_session_hit_current.min(total.saturating_sub(1));
+                        if forward {
+                            current = (current + 1) % total;
+                        } else {
+                            current = current.checked_sub(1).unwrap_or(total - 1);
+                        }
+                        self.detail_session_hit_current = current;
+                        self.detail_session_hit_scroll_pending.set(true);
+                    }
                     return ftui::Cmd::none();
                 }
 
@@ -14685,6 +15273,16 @@ impl super::ftui_adapter::Model for CassApp {
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_tick);
                 self.last_tick = now;
+                // Apply scroll targets computed during rendering (e.g. jump to the
+                // selected session hit after the Messages view builds hit anchors).
+                if self.show_detail_modal {
+                    if let Some(target) = self.detail_pending_scroll_to.get() {
+                        self.detail_pending_scroll_to.set(None);
+                        self.detail_scroll = target;
+                    }
+                } else {
+                    self.detail_pending_scroll_to.set(None);
+                }
                 // Record frame interval for inspector overlay.
                 if self.show_inspector {
                     self.frame_timing.record_frame();
@@ -14754,7 +15352,12 @@ impl super::ftui_adapter::Model for CassApp {
                 if let Some(dirty_ts) = self.search_dirty_since
                     && dirty_ts.elapsed() >= SEARCH_DEBOUNCE
                 {
-                    cmds.push(ftui::Cmd::msg(CassMsg::SearchRequested));
+                    // Never overlap searches: if a search is already in-flight,
+                    // leave `search_dirty_since` set and let SearchCompleted/Failed
+                    // schedule the next attempt once the current request finishes.
+                    if !self.search_in_flight {
+                        cmds.push(ftui::Cmd::msg(CassMsg::SearchRequested));
+                    }
                 }
                 if let Some(dirty_ts) = self.dirty_since
                     && dirty_ts.elapsed() >= STATE_SAVE_DEBOUNCE
@@ -15348,8 +15951,8 @@ impl super::ftui_adapter::Model for CassApp {
                 if let Some(source_filter) = drill_source_filter {
                     self.filters.source_filter = source_filter;
                 }
-                // Seed the query for model-driven drilldowns so Cost view
-                // selections immediately narrow to relevant sessions.
+                // Seed the query for model-driven drilldowns so analytics selections
+                // immediately narrow to relevant sessions.
                 self.query.clear();
                 if let Some(ref model_name) = model {
                     self.query = model_name.clone();
@@ -15975,6 +16578,28 @@ impl super::ftui_adapter::Model for CassApp {
             layout_area = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
         }
 
+        // Global shell strip: surface tabs + high-signal global shortcuts.
+        // Only enabled when there's enough space to preserve tiny-terminal resilience.
+        if layout_area.height >= 9 && layout_area.width >= 52 {
+            let shell_area = Rect::new(layout_area.x, layout_area.y, layout_area.width, 1);
+            let shell_bg_style = if apply_style {
+                styles.style(style_system::STYLE_TAB_INACTIVE)
+            } else {
+                plain
+            };
+            Block::new().style(shell_bg_style).render(shell_area, frame);
+            let shell_line = self.build_surface_shell_line(shell_area.width, &styles, apply_style);
+            Paragraph::new(ftui::text::Text::from_lines(vec![shell_line]))
+                .style(shell_bg_style)
+                .render(shell_area, frame);
+            layout_area = Rect::new(
+                layout_area.x,
+                layout_area.y + 1,
+                layout_area.width,
+                layout_area.height - 1,
+            );
+        }
+
         // ── Surface routing ──────────────────────────────────────────────
         match self.surface {
             AppSurface::Search => {
@@ -16550,7 +17175,6 @@ impl super::ftui_adapter::Model for CassApp {
                     AnalyticsView::Heatmap => ftui::PackedRgba::rgb(255, 180, 90),
                     AnalyticsView::Breakdowns => ftui::PackedRgba::rgb(210, 140, 255),
                     AnalyticsView::Tools => ftui::PackedRgba::rgb(255, 120, 160),
-                    AnalyticsView::Cost => ftui::PackedRgba::rgb(190, 220, 130),
                     AnalyticsView::Plans => ftui::PackedRgba::rgb(140, 220, 220),
                     AnalyticsView::Coverage => ftui::PackedRgba::rgb(190, 220, 130),
                 };
@@ -18384,6 +19008,120 @@ mod tests {
     }
 
     #[test]
+    fn event_mapping_alt_a_maps_to_analytics_entered() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('a')).with_modifiers(Modifiers::ALT));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::AnalyticsEntered));
+    }
+
+    #[test]
+    fn event_mapping_space_maps_to_query_changed_space() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char(' ')));
+
+        assert!(matches!(
+            CassMsg::from(event),
+            CassMsg::QueryChanged(q) if q == " "
+        ));
+    }
+
+    #[test]
+    fn event_mapping_ctrl_space_maps_to_peek_toggled() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char(' ')).with_modifiers(Modifiers::CTRL));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::PeekToggled));
+    }
+
+    #[test]
+    fn event_mapping_question_mark_maps_to_query_changed() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('?')));
+
+        assert!(matches!(
+            CassMsg::from(event),
+            CassMsg::QueryChanged(q) if q == "?"
+        ));
+    }
+
+    #[test]
+    fn event_mapping_slash_maps_to_query_changed() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('/')));
+
+        assert!(matches!(
+            CassMsg::from(event),
+            CassMsg::QueryChanged(q) if q == "/"
+        ));
+    }
+
+    #[test]
+    fn event_mapping_y_maps_to_query_changed() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('y')));
+
+        assert!(matches!(
+            CassMsg::from(event),
+            CassMsg::QueryChanged(q) if q == "y"
+        ));
+    }
+
+    #[test]
+    fn event_mapping_plus_maps_to_query_changed() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('+')));
+
+        assert!(matches!(
+            CassMsg::from(event),
+            CassMsg::QueryChanged(q) if q == "+"
+        ));
+    }
+
+    #[test]
+    fn event_mapping_alt_slash_maps_to_pane_filter_opened() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('/')).with_modifiers(Modifiers::ALT));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::PaneFilterOpened));
+    }
+
+    #[test]
+    fn event_mapping_alt_y_maps_to_copy_snippet() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('y')).with_modifiers(Modifiers::ALT));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::CopySnippet));
+    }
+
+    #[test]
+    fn event_mapping_alt_plus_maps_to_pane_grew() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('+')).with_modifiers(Modifiers::ALT));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::PaneGrew));
+    }
+
+    #[test]
+    fn event_mapping_alt_equals_maps_to_pane_grew() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('=')).with_modifiers(Modifiers::ALT));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::PaneGrew));
+    }
+
+    #[test]
     fn event_mapping_key_release_is_ignored() {
         use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent};
 
@@ -19345,7 +20083,6 @@ mod tests {
             PaletteResult::OpenAnalyticsView(AnalyticsTarget::Heatmap),
             PaletteResult::OpenAnalyticsView(AnalyticsTarget::Breakdowns),
             PaletteResult::OpenAnalyticsView(AnalyticsTarget::Tools),
-            PaletteResult::OpenAnalyticsView(AnalyticsTarget::Cost),
             PaletteResult::OpenAnalyticsView(AnalyticsTarget::Plans),
             PaletteResult::OpenAnalyticsView(AnalyticsTarget::Coverage),
             PaletteResult::Screenshot(ScreenshotTarget::Html),
@@ -19802,10 +20539,12 @@ mod tests {
             },
         ];
         let _ = app.update(CassMsg::SearchCompleted {
+            generation: app.search_generation,
             hits,
             elapsed_ms: 42,
             suggestions: vec![],
             wildcard_fallback: false,
+            append: false,
         });
         assert_eq!(app.panes.len(), 2, "should have 2 agent panes");
         // BTreeMap ordering: claude_code before codex
@@ -20454,15 +21193,20 @@ mod tests {
         app.loading_context = Some(LoadingContext::Search);
 
         let _ = app.update(CassMsg::SearchCompleted {
+            generation: app.search_generation,
             hits: vec![],
             elapsed_ms: 1,
             suggestions: vec![],
             wildcard_fallback: false,
+            append: false,
         });
         assert!(app.loading_context.is_none());
 
         app.loading_context = Some(LoadingContext::Search);
-        let _ = app.update(CassMsg::SearchFailed("boom".into()));
+        let _ = app.update(CassMsg::SearchFailed {
+            generation: app.search_generation,
+            error: "boom".into(),
+        });
         assert!(app.loading_context.is_none());
     }
 
@@ -20634,10 +21378,12 @@ mod tests {
             origin_host: None,
         }];
         let _ = app.update(CassMsg::SearchCompleted {
+            generation: app.search_generation,
             hits,
             elapsed_ms: 10,
             suggestions: vec![],
             wildcard_fallback: false,
+            append: false,
         });
         let state = app.results_list_state.borrow();
         assert_eq!(state.selected, Some(0), "should reset to first item");
@@ -23593,9 +24339,6 @@ mod tests {
             transition.from_snapshot.is_some(),
             "analytics subview transition should capture previous subview snapshot"
         );
-
-        let _ = app.update(CassMsg::AnalyticsViewChanged(AnalyticsView::Cost));
-        assert_eq!(app.analytics_view, AnalyticsView::Coverage);
     }
 
     #[test]
@@ -25178,7 +25921,6 @@ mod tests {
             (AnalyticsView::Heatmap, "analytics:heatmap"),
             (AnalyticsView::Breakdowns, "analytics:breakdowns"),
             (AnalyticsView::Tools, "analytics:tools"),
-            (AnalyticsView::Cost, "analytics:coverage"),
             (AnalyticsView::Plans, "analytics:plans"),
             (AnalyticsView::Coverage, "analytics:coverage"),
         ] {
@@ -28951,22 +29693,6 @@ mod tests {
     }
 
     #[test]
-    fn build_drilldown_context_cost_model() {
-        let mut app = CassApp::default();
-        app.analytics_view = AnalyticsView::Cost;
-        let mut data = AnalyticsChartData::default();
-        data.model_tokens = vec![("claude-3-sonnet".into(), 500.0), ("gpt-4o".into(), 300.0)];
-        app.analytics_cache = Some(data);
-        app.analytics_selection = 0;
-
-        let ctx = app.build_drilldown_context().expect("should build context");
-        assert_eq!(ctx.model.as_deref(), Some("claude-3-sonnet"));
-        assert!(ctx.agent.is_none());
-        assert!(ctx.workspace.is_none());
-        assert!(ctx.source_filter.is_none());
-    }
-
-    #[test]
     fn build_drilldown_context_tools_agent() {
         let mut app = CassApp::default();
         app.analytics_view = AnalyticsView::Tools;
@@ -29302,9 +30028,7 @@ mod tests {
         data.total_tool_calls = 3000;
         data.total_content_tokens = 800_000;
         data.total_plan_messages = 200;
-        data.total_cost_usd = 42.57;
         data.coverage_pct = 85.0;
-        data.pricing_coverage_pct = 72.0;
         data.plan_message_pct = 4.0;
         data.plan_api_token_share = 6.5;
         data.agent_tokens = vec![
@@ -29333,16 +30057,6 @@ mod tests {
             ("claude-opus-4-6".into(), 500_000.0),
             ("claude-sonnet-4-5".into(), 400_000.0),
             ("gpt-4o".into(), 300_000.0),
-        ];
-        data.model_cost = vec![
-            ("claude-opus-4-6".into(), 20.0),
-            ("claude-sonnet-4-5".into(), 12.0),
-            ("gpt-4o".into(), 10.57),
-        ];
-        data.model_messages = vec![
-            ("claude-opus-4-6".into(), 1500.0),
-            ("claude-sonnet-4-5".into(), 2000.0),
-            ("gpt-4o".into(), 1500.0),
         ];
         data.daily_tokens = vec![
             ("2026-02-01".into(), 200_000.0),
@@ -29380,15 +30094,6 @@ mod tests {
             ("2026-02-05".into(), 35.0),
             ("2026-02-06".into(), 25.0),
             ("2026-02-07".into(), 25.0),
-        ];
-        data.daily_cost = vec![
-            ("2026-02-01".into(), 7.0),
-            ("2026-02-02".into(), 6.0),
-            ("2026-02-03".into(), 8.5),
-            ("2026-02-04".into(), 5.5),
-            ("2026-02-05".into(), 6.0),
-            ("2026-02-06".into(), 5.0),
-            ("2026-02-07".into(), 4.57),
         ];
         data.heatmap_days = vec![
             ("2026-02-01".into(), 0.8),
@@ -29647,7 +30352,6 @@ mod tests {
             AnalyticsView::Heatmap,
             AnalyticsView::Breakdowns,
             AnalyticsView::Tools,
-            AnalyticsView::Cost,
             AnalyticsView::Plans,
             AnalyticsView::Coverage,
         ];
@@ -29671,7 +30375,6 @@ mod tests {
             AnalyticsView::Heatmap,
             AnalyticsView::Breakdowns,
             AnalyticsView::Tools,
-            AnalyticsView::Cost,
             AnalyticsView::Plans,
             AnalyticsView::Coverage,
         ];
@@ -30270,10 +30973,12 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             .map(|i| make_hit(i as u64, &format!("/reveal/{i}")))
             .collect();
         let _ = app.update(CassMsg::SearchCompleted {
+            generation: app.search_generation,
             hits,
             elapsed_ms: 7,
             suggestions: Vec::new(),
             wildcard_fallback: false,
+            append: false,
         });
         assert!(
             app.anim.reveal_active,
@@ -30299,10 +31004,12 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             .map(|i| make_hit(i as u64, &format!("/small/{i}")))
             .collect();
         let _ = app.update(CassMsg::SearchCompleted {
+            generation: app.search_generation,
             hits,
             elapsed_ms: 6,
             suggestions: Vec::new(),
             wildcard_fallback: false,
+            append: false,
         });
         assert!(
             !app.anim.reveal_active,
@@ -30690,6 +31397,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             "Data Locations",
             "Updates",
             "Search",
+            "Surfaces",
             "Filters",
             "Sources",
             "Modes",
@@ -30739,6 +31447,10 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         assert!(
             text.contains(shortcuts::STATS_BAR),
             "Should reference stats bar shortcut"
+        );
+        assert!(
+            text.contains(shortcuts::SURFACE_ANALYTICS),
+            "Should reference analytics surface shortcut"
         );
     }
 
