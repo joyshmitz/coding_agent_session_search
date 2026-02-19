@@ -21,6 +21,7 @@ use fastembed::{
 };
 
 use super::embedder::{Embedder, EmbedderError, EmbedderResult};
+use frankensearch::{ModelCategory, ModelTier};
 
 // MiniLM constants (baseline)
 const MINILM_MODEL_ID: &str = "all-minilm-l6-v2";
@@ -140,10 +141,10 @@ impl FastEmbedder {
     /// Load an ONNX embedder with custom configuration.
     pub fn load_with_config(model_dir: &Path, config: OnnxEmbedderConfig) -> EmbedderResult<Self> {
         if !model_dir.is_dir() {
-            return Err(EmbedderError::Unavailable(format!(
-                "model directory not found: {}",
-                model_dir.display()
-            )));
+            return Err(EmbedderError::EmbedderUnavailable {
+                model: config.embedder_id.clone(),
+                reason: format!("model directory not found: {}", model_dir.display()),
+            });
         }
 
         let required = Self::required_model_files();
@@ -155,20 +156,38 @@ impl FastEmbedder {
             }
         }
         if !missing.is_empty() {
-            return Err(EmbedderError::Unavailable(format!(
-                "model files missing in {}: {}",
-                model_dir.display(),
-                missing.join(", ")
-            )));
+            return Err(EmbedderError::EmbedderUnavailable {
+                model: config.embedder_id.clone(),
+                reason: format!(
+                    "model files missing in {}: {}",
+                    model_dir.display(),
+                    missing.join(", ")
+                ),
+            });
         }
 
-        let model_file = Self::read_required(model_dir.join(MODEL_FILE), MODEL_FILE)?;
-        let tokenizer_file = Self::read_required(model_dir.join(TOKENIZER_JSON), TOKENIZER_JSON)?;
-        let config_file = Self::read_required(model_dir.join(CONFIG_JSON), CONFIG_JSON)?;
-        let special_tokens_map_file =
-            Self::read_required(model_dir.join(SPECIAL_TOKENS_JSON), SPECIAL_TOKENS_JSON)?;
-        let tokenizer_config_file =
-            Self::read_required(model_dir.join(TOKENIZER_CONFIG_JSON), TOKENIZER_CONFIG_JSON)?;
+        let model_file =
+            Self::read_required(model_dir.join(MODEL_FILE), MODEL_FILE, &config.embedder_id)?;
+        let tokenizer_file = Self::read_required(
+            model_dir.join(TOKENIZER_JSON),
+            TOKENIZER_JSON,
+            &config.embedder_id,
+        )?;
+        let config_file = Self::read_required(
+            model_dir.join(CONFIG_JSON),
+            CONFIG_JSON,
+            &config.embedder_id,
+        )?;
+        let special_tokens_map_file = Self::read_required(
+            model_dir.join(SPECIAL_TOKENS_JSON),
+            SPECIAL_TOKENS_JSON,
+            &config.embedder_id,
+        )?;
+        let tokenizer_config_file = Self::read_required(
+            model_dir.join(TOKENIZER_CONFIG_JSON),
+            TOKENIZER_CONFIG_JSON,
+            &config.embedder_id,
+        )?;
 
         let tokenizer_files = TokenizerFiles {
             tokenizer_file,
@@ -182,8 +201,12 @@ impl FastEmbedder {
 
         let init_options = InitOptionsUserDefined::new();
 
-        let model = TextEmbedding::try_new_from_user_defined(model, init_options)
-            .map_err(|e| EmbedderError::EmbeddingFailed(format!("fastembed init failed: {e}")))?;
+        let model = TextEmbedding::try_new_from_user_defined(model, init_options).map_err(|e| {
+            EmbedderError::EmbeddingFailed {
+                model: config.embedder_id.clone(),
+                source: Box::new(std::io::Error::other(format!("fastembed init failed: {e}"))),
+            }
+        })?;
 
         Ok(Self {
             model: Mutex::new(model),
@@ -196,11 +219,16 @@ impl FastEmbedder {
     /// Load an embedder by name from the data directory.
     pub fn load_by_name(data_dir: &Path, embedder_name: &str) -> EmbedderResult<Self> {
         let model_dir = Self::model_dir_for(data_dir, embedder_name).ok_or_else(|| {
-            EmbedderError::Unavailable(format!("unknown embedder: {}", embedder_name))
+            EmbedderError::EmbedderUnavailable {
+                model: embedder_name.to_string(),
+                reason: format!("unknown embedder: {}", embedder_name),
+            }
         })?;
-        let config = Self::config_for(embedder_name).ok_or_else(|| {
-            EmbedderError::Unavailable(format!("no config for embedder: {}", embedder_name))
-        })?;
+        let config =
+            Self::config_for(embedder_name).ok_or_else(|| EmbedderError::EmbedderUnavailable {
+                model: embedder_name.to_string(),
+                reason: format!("no config for embedder: {}", embedder_name),
+            })?;
         Self::load_with_config(&model_dir, config)
     }
 
@@ -209,9 +237,10 @@ impl FastEmbedder {
         &self.model_id
     }
 
-    fn read_required(path: PathBuf, label: &str) -> EmbedderResult<Vec<u8>> {
-        fs::read(&path).map_err(|e| {
-            EmbedderError::Unavailable(format!("unable to read {label} at {}: {e}", path.display()))
+    fn read_required(path: PathBuf, label: &str, model_id: &str) -> EmbedderResult<Vec<u8>> {
+        fs::read(&path).map_err(|e| EmbedderError::EmbedderUnavailable {
+            model: model_id.to_string(),
+            reason: format!("unable to read {label} at {}: {e}", path.display()),
         })
     }
 
@@ -226,43 +255,66 @@ impl FastEmbedder {
 }
 
 impl Embedder for FastEmbedder {
-    fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
+    fn embed_sync(&self, text: &str) -> EmbedderResult<Vec<f32>> {
         if text.is_empty() {
-            return Err(EmbedderError::InvalidInput("empty text".to_string()));
+            return Err(EmbedderError::InvalidConfig {
+                field: "input_text".to_string(),
+                value: "(empty)".to_string(),
+                reason: "empty text".to_string(),
+            });
         }
 
         #[allow(unused_mut)]
         let mut model = self
             .model
             .lock()
-            .map_err(|_| EmbedderError::Internal("fastembed lock poisoned".to_string()))?;
+            .map_err(|_| EmbedderError::SubsystemError {
+                subsystem: "embedder",
+                source: Box::new(std::io::Error::other("fastembed lock poisoned")),
+            })?;
 
-        let embeddings = model
-            .embed(vec![text], None)
-            .map_err(|e| EmbedderError::EmbeddingFailed(format!("fastembed embed failed: {e}")))?;
+        let embeddings =
+            model
+                .embed(vec![text], None)
+                .map_err(|e| EmbedderError::EmbeddingFailed {
+                    model: self.id.clone(),
+                    source: Box::new(std::io::Error::other(format!(
+                        "fastembed embed failed: {e}"
+                    ))),
+                })?;
 
-        let mut embedding = embeddings.into_iter().next().ok_or_else(|| {
-            EmbedderError::EmbeddingFailed("fastembed returned no embedding".to_string())
-        })?;
+        let mut embedding =
+            embeddings
+                .into_iter()
+                .next()
+                .ok_or_else(|| EmbedderError::EmbeddingFailed {
+                    model: self.id.clone(),
+                    source: Box::new(std::io::Error::other("fastembed returned no embedding")),
+                })?;
 
         if embedding.len() != self.dimension {
-            return Err(EmbedderError::EmbeddingFailed(format!(
-                "fastembed dimension mismatch: expected {}, got {}",
-                self.dimension,
-                embedding.len()
-            )));
+            return Err(EmbedderError::EmbeddingFailed {
+                model: self.id.clone(),
+                source: Box::new(std::io::Error::other(format!(
+                    "fastembed dimension mismatch: expected {}, got {}",
+                    self.dimension,
+                    embedding.len()
+                ))),
+            });
         }
 
         Self::normalize_in_place(&mut embedding);
         Ok(embedding)
     }
 
-    fn embed_batch(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
+    fn embed_batch_sync(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
         for text in texts {
             if text.is_empty() {
-                return Err(EmbedderError::InvalidInput(
-                    "empty text in batch".to_string(),
-                ));
+                return Err(EmbedderError::InvalidConfig {
+                    field: "input_text".to_string(),
+                    value: "(empty)".to_string(),
+                    reason: "empty text in batch".to_string(),
+                });
             }
         }
 
@@ -274,20 +326,32 @@ impl Embedder for FastEmbedder {
         let mut model = self
             .model
             .lock()
-            .map_err(|_| EmbedderError::Internal("fastembed lock poisoned".to_string()))?;
+            .map_err(|_| EmbedderError::SubsystemError {
+                subsystem: "embedder",
+                source: Box::new(std::io::Error::other("fastembed lock poisoned")),
+            })?;
 
         let inputs = texts.to_vec();
-        let mut embeddings = model
-            .embed(inputs, None)
-            .map_err(|e| EmbedderError::EmbeddingFailed(format!("fastembed embed failed: {e}")))?;
+        let mut embeddings =
+            model
+                .embed(inputs, None)
+                .map_err(|e| EmbedderError::EmbeddingFailed {
+                    model: self.id.clone(),
+                    source: Box::new(std::io::Error::other(format!(
+                        "fastembed embed failed: {e}"
+                    ))),
+                })?;
 
         for embedding in embeddings.iter_mut() {
             if embedding.len() != self.dimension {
-                return Err(EmbedderError::EmbeddingFailed(format!(
-                    "fastembed dimension mismatch: expected {}, got {}",
-                    self.dimension,
-                    embedding.len()
-                )));
+                return Err(EmbedderError::EmbeddingFailed {
+                    model: self.id.clone(),
+                    source: Box::new(std::io::Error::other(format!(
+                        "fastembed dimension mismatch: expected {}, got {}",
+                        self.dimension,
+                        embedding.len()
+                    ))),
+                });
             }
             Self::normalize_in_place(embedding);
         }
@@ -303,8 +367,20 @@ impl Embedder for FastEmbedder {
         &self.id
     }
 
+    fn model_name(&self) -> &str {
+        &self.model_id
+    }
+
     fn is_semantic(&self) -> bool {
         true
+    }
+
+    fn category(&self) -> ModelCategory {
+        ModelCategory::TransformerEmbedder
+    }
+
+    fn tier(&self) -> ModelTier {
+        ModelTier::Quality
     }
 }
 
@@ -319,11 +395,9 @@ mod tests {
             Ok(_) => panic!("expected missing-model error"),
             Err(err) => err,
         };
-        match err {
-            EmbedderError::Unavailable(msg) => {
-                assert!(msg.contains("model files missing"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(err, EmbedderError::EmbedderUnavailable { .. }),
+            "expected EmbedderUnavailable, got {err:?}"
+        );
     }
 }

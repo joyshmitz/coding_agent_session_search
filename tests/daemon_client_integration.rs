@@ -7,7 +7,10 @@ use coding_agent_search::search::daemon_client::{
     DaemonClient, DaemonError, DaemonFallbackEmbedder, DaemonFallbackReranker, DaemonRetryConfig,
 };
 use coding_agent_search::search::embedder::{Embedder, EmbedderResult};
-use coding_agent_search::search::reranker::{Reranker, RerankerResult};
+use coding_agent_search::search::reranker::{
+    RerankDocument, RerankScore, Reranker, RerankerResult, rerank_texts,
+};
+use frankensearch::ModelCategory;
 use parking_lot::Mutex;
 
 #[derive(Clone, Copy)]
@@ -208,11 +211,11 @@ struct StaticEmbedder {
 }
 
 impl Embedder for StaticEmbedder {
-    fn embed(&self, _text: &str) -> EmbedderResult<Vec<f32>> {
+    fn embed_sync(&self, _text: &str) -> EmbedderResult<Vec<f32>> {
         Ok(vec![self.value; self.dim])
     }
 
-    fn embed_batch(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
+    fn embed_batch_sync(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
         Ok(texts.iter().map(|_| vec![self.value; self.dim]).collect())
     }
 
@@ -227,6 +230,10 @@ impl Embedder for StaticEmbedder {
     fn is_semantic(&self) -> bool {
         true
     }
+
+    fn category(&self) -> ModelCategory {
+        ModelCategory::StaticEmbedder
+    }
 }
 
 struct StaticReranker {
@@ -234,11 +241,27 @@ struct StaticReranker {
 }
 
 impl Reranker for StaticReranker {
-    fn rerank(&self, _query: &str, documents: &[&str]) -> RerankerResult<Vec<f32>> {
-        Ok(documents.iter().map(|_| self.value).collect())
+    fn rerank_sync(
+        &self,
+        _query: &str,
+        documents: &[RerankDocument],
+    ) -> RerankerResult<Vec<RerankScore>> {
+        Ok(documents
+            .iter()
+            .enumerate()
+            .map(|(i, doc)| RerankScore {
+                doc_id: doc.doc_id.clone(),
+                score: self.value,
+                original_rank: i,
+            })
+            .collect())
     }
 
     fn id(&self) -> &str {
+        "static-reranker"
+    }
+
+    fn model_name(&self) -> &str {
         "static-reranker"
     }
 
@@ -261,12 +284,12 @@ fn daemon_integration_embed_and_rerank() {
     };
 
     let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg.clone());
-    let embed = embedder.embed("hello").unwrap();
+    let embed = embedder.embed_sync("hello").unwrap();
     assert_eq!(embed[0], 2.0);
 
     let reranker_fallback = Arc::new(StaticReranker { value: 0.5 });
     let reranker = DaemonFallbackReranker::new(daemon, Some(reranker_fallback), cfg);
-    let scores = reranker.rerank("q", &["a", "b"]).unwrap();
+    let scores = rerank_texts(&reranker, "q", &["a", "b"]).unwrap();
     assert_eq!(scores, vec![1.0, 1.0]);
 
     assert_eq!(harness.calls(), 2);
@@ -286,18 +309,18 @@ fn daemon_integration_crash_falls_back() {
     };
 
     let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg.clone());
-    let first = embedder.embed("hello").unwrap();
+    let first = embedder.embed_sync("hello").unwrap();
     assert_eq!(first[0], 1.0);
     assert_eq!(harness.calls(), 1);
 
     harness.set_available(false);
-    let second = embedder.embed("hello again").unwrap();
+    let second = embedder.embed_sync("hello again").unwrap();
     assert_eq!(second[0], 1.0);
     assert_eq!(harness.calls(), 1);
 
     let reranker_fallback = Arc::new(StaticReranker { value: 0.5 });
     let reranker = DaemonFallbackReranker::new(daemon, Some(reranker_fallback), cfg);
-    let scores = reranker.rerank("q", &["doc"]).unwrap();
+    let scores = rerank_texts(&reranker, "q", &["doc"]).unwrap();
     assert_eq!(scores, vec![0.5]);
 }
 
@@ -315,17 +338,17 @@ fn daemon_integration_timeout_backoff_with_jitter() {
     };
 
     let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg.clone());
-    let _ = embedder.embed("first").unwrap();
+    let _ = embedder.embed_sync("first").unwrap();
     let calls_after_first = harness.calls();
 
-    let _ = embedder.embed("second").unwrap();
+    let _ = embedder.embed_sync("second").unwrap();
     let calls_after_second = harness.calls();
     assert_eq!(calls_after_first, calls_after_second);
 
     let max_jitter_ms = (cfg.base_delay.as_millis() as f64 * (1.0 + cfg.jitter_pct)).ceil();
     std::thread::sleep(Duration::from_millis(max_jitter_ms as u64 + 10));
 
-    let _ = embedder.embed("third").unwrap();
+    let _ = embedder.embed_sync("third").unwrap();
     let calls_after_third = harness.calls();
     assert!(calls_after_third > calls_after_second);
 }

@@ -271,8 +271,9 @@ impl RerankerRegistry {
     ///
     /// Returns `Ok(())` if available, or an error with details about what's missing.
     pub fn validate(&self, name: &str) -> RerankerResult<&'static RegisteredReranker> {
-        let reranker = self.get(name).ok_or_else(|| {
-            RerankerError::Unavailable(format!(
+        let reranker = self.get(name).ok_or_else(|| RerankerError::RerankFailed {
+            model: name.to_string(),
+            source: format!(
                 "unknown reranker '{}'. Available: {}",
                 name,
                 RERANKERS
@@ -280,7 +281,8 @@ impl RerankerRegistry {
                     .map(|r| r.name)
                     .collect::<Vec<_>>()
                     .join(", ")
-            ))
+            )
+            .into(),
         })?;
 
         if !reranker.is_available(&self.data_dir) {
@@ -290,12 +292,16 @@ impl RerankerRegistry {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
 
-            return Err(RerankerError::Unavailable(format!(
-                "reranker '{}' not available: missing files in {}: {}. Run 'cass models install' to download.",
-                name,
-                model_dir,
-                missing.join(", ")
-            )));
+            return Err(RerankerError::RerankFailed {
+                model: name.to_string(),
+                source: format!(
+                    "reranker '{}' not available: missing files in {}: {}. Run 'cass models install' to download.",
+                    name,
+                    model_dir,
+                    missing.join(", ")
+                )
+                .into(),
+            });
         }
 
         Ok(reranker)
@@ -319,7 +325,10 @@ pub fn get_reranker(data_dir: &Path, name: Option<&str>) -> RerankerResult<Arc<d
         Some(n) => registry.validate(n)?,
         None => registry
             .best_available()
-            .ok_or_else(|| RerankerError::Unavailable("no rerankers available".to_string()))?,
+            .ok_or_else(|| RerankerError::RerankFailed {
+                model: "reranker".to_string(),
+                source: "no rerankers available".into(),
+            })?,
     };
 
     load_reranker_by_name(data_dir, reranker_info.name)
@@ -334,16 +343,17 @@ fn load_reranker_by_name(data_dir: &Path, name: &str) -> RerankerResult<Arc<dyn 
                 .iter()
                 .find(|r| r.name == name)
                 .and_then(|r| r.model_dir(data_dir))
-                .ok_or_else(|| {
-                    RerankerError::Unavailable(format!("no model dir for reranker: {}", name))
+                .ok_or_else(|| RerankerError::RerankFailed {
+                    model: name.to_string(),
+                    source: format!("no model dir for reranker: {}", name).into(),
                 })?;
             let reranker = FastEmbedReranker::load_from_dir(&model_dir)?;
             Ok(Arc::new(reranker))
         }
-        _ => Err(RerankerError::Unavailable(format!(
-            "reranker '{}' not implemented",
-            name
-        ))),
+        _ => Err(RerankerError::RerankFailed {
+            model: name.to_string(),
+            source: format!("reranker '{}' not implemented", name).into(),
+        }),
     }
 }
 

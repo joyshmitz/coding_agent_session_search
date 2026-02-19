@@ -6,6 +6,7 @@ use coding_agent_search::bakeoff::{
     EvaluationConfig, EvaluationCorpus, EvaluationHarness, ModelMetadata, format_comparison_table,
 };
 use coding_agent_search::search::embedder::{Embedder, EmbedderError, EmbedderResult};
+use frankensearch::ModelCategory;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A fixture embedder for testing the harness.
@@ -31,9 +32,13 @@ impl FixtureEmbedder {
 }
 
 impl Embedder for FixtureEmbedder {
-    fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
+    fn embed_sync(&self, text: &str) -> EmbedderResult<Vec<f32>> {
         if text.is_empty() {
-            return Err(EmbedderError::InvalidInput("empty text".to_string()));
+            return Err(EmbedderError::InvalidConfig {
+                field: "input_text".into(),
+                value: "(empty)".into(),
+                reason: "empty text".into(),
+            });
         }
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
@@ -70,6 +75,10 @@ impl Embedder for FixtureEmbedder {
 
     fn is_semantic(&self) -> bool {
         true
+    }
+
+    fn category(&self) -> ModelCategory {
+        ModelCategory::StaticEmbedder
     }
 }
 
@@ -139,9 +148,13 @@ impl QualityFixtureEmbedder {
 }
 
 impl Embedder for QualityFixtureEmbedder {
-    fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
+    fn embed_sync(&self, text: &str) -> EmbedderResult<Vec<f32>> {
         if text.is_empty() {
-            return Err(EmbedderError::InvalidInput("empty text".to_string()));
+            return Err(EmbedderError::InvalidConfig {
+                field: "input_text".into(),
+                value: "(empty)".into(),
+                reason: "empty text".into(),
+            });
         }
         Ok(self.text_features(text))
     }
@@ -156,6 +169,10 @@ impl Embedder for QualityFixtureEmbedder {
 
     fn is_semantic(&self) -> bool {
         true
+    }
+
+    fn category(&self) -> ModelCategory {
+        ModelCategory::StaticEmbedder
     }
 }
 

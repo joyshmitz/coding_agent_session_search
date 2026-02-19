@@ -39,6 +39,9 @@ use thiserror::Error;
 
 use super::provenance::SourceKind;
 
+// Re-export types from franken_agent_detection.
+pub use franken_agent_detection::{PathMapping, Platform};
+
 /// Errors that can occur when loading or saving source configuration.
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -64,98 +67,6 @@ pub struct SourcesConfig {
     /// List of configured sources.
     #[serde(default)]
     pub sources: Vec<SourceDefinition>,
-}
-
-/// A single path mapping rule for rewriting paths.
-///
-/// Path mappings transform paths from one location to another,
-/// useful for mapping remote paths to local equivalents.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PathMapping {
-    /// Remote path prefix to match.
-    pub from: String,
-    /// Local path prefix to replace with.
-    pub to: String,
-    /// Optional: only apply this mapping for specific agents.
-    /// If None, applies to all agents.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agents: Option<Vec<String>>,
-}
-
-impl PathMapping {
-    /// Create a new path mapping.
-    pub fn new(from: impl Into<String>, to: impl Into<String>) -> Self {
-        Self {
-            from: from.into(),
-            to: to.into(),
-            agents: None,
-        }
-    }
-
-    /// Create a new path mapping with agent filter.
-    pub fn with_agents(
-        from: impl Into<String>,
-        to: impl Into<String>,
-        agents: Vec<String>,
-    ) -> Self {
-        Self {
-            from: from.into(),
-            to: to.into(),
-            agents: Some(agents),
-        }
-    }
-
-    /// Apply this mapping to a path if it matches.
-    ///
-    /// Returns `Some(rewritten_path)` if the path starts with `from` prefix,
-    /// `None` otherwise.
-    pub fn apply(&self, path: &str) -> Option<String> {
-        if path == self.from {
-            return Some(self.to.clone());
-        }
-
-        if !path.starts_with(&self.from) {
-            return None;
-        }
-
-        let rest = &path[self.from.len()..];
-        let boundary_ok =
-            self.from.ends_with('/') || self.from.ends_with('\\') || rest.starts_with(['/', '\\']);
-        if boundary_ok {
-            // Fix: ensure separator if 'from' ends with one but 'to' does not (and 'rest' doesn't start with one)
-            // This prevents "/a/" -> "/b" mapping "/a/file" to "/bfile"
-            let from_sep = if self.from.ends_with('/') {
-                Some('/')
-            } else if self.from.ends_with('\\') {
-                Some('\\')
-            } else {
-                None
-            };
-
-            let needs_sep = from_sep.is_some()
-                && !self.to.ends_with('/')
-                && !self.to.ends_with('\\')
-                && !rest.starts_with(['/', '\\']);
-
-            if needs_sep {
-                // Use the separator style from 'from' as a reasonable default
-                Some(format!("{}{}{}", self.to, from_sep.unwrap(), rest))
-            } else {
-                Some(format!("{}{}", self.to, rest))
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Check if this mapping applies to a given agent.
-    pub fn applies_to_agent(&self, agent: Option<&str>) -> bool {
-        match (&self.agents, agent) {
-            (None, _) => true,       // No filter means applies to all
-            (Some(_), None) => true, // No agent specified means match all mappings
-            (Some(agents), Some(a)) => agents.iter().any(|allowed| allowed == a),
-        }
-    }
 }
 
 /// Definition of a single source (local or remote).
@@ -350,25 +261,6 @@ impl std::fmt::Display for SyncSchedule {
             Self::Manual => write!(f, "manual"),
             Self::Hourly => write!(f, "hourly"),
             Self::Daily => write!(f, "daily"),
-        }
-    }
-}
-
-/// Platform hint for choosing default paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Platform {
-    Macos,
-    Linux,
-    Windows,
-}
-
-impl std::fmt::Display for Platform {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Macos => write!(f, "macos"),
-            Self::Linux => write!(f, "linux"),
-            Self::Windows => write!(f, "windows"),
         }
     }
 }

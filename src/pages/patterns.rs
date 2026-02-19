@@ -185,7 +185,7 @@ pub static EMAIL_ADDRESS: PatternDef = PatternDef {
     name: "Email Address",
     category: PatternCategory::PersonalInfo,
     description: "Email addresses",
-    pattern: r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
+    pattern: r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
     replacement: "[EMAIL_REDACTED]",
 };
 

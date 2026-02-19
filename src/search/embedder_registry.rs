@@ -307,17 +307,19 @@ impl EmbedderRegistry {
     ///
     /// Returns `Ok(())` if available, or an error with details about what's missing.
     pub fn validate(&self, name: &str) -> EmbedderResult<&'static RegisteredEmbedder> {
-        let embedder = self.get(name).ok_or_else(|| {
-            EmbedderError::Unavailable(format!(
-                "unknown embedder '{}'. Available: {}",
-                name,
-                EMBEDDERS
-                    .iter()
-                    .map(|e| e.name)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-        })?;
+        let embedder = self
+            .get(name)
+            .ok_or_else(|| EmbedderError::EmbedderUnavailable {
+                model: name.to_string(),
+                reason: format!(
+                    "unknown embedder. Available: {}",
+                    EMBEDDERS
+                        .iter()
+                        .map(|e| e.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            })?;
 
         if !embedder.is_available(&self.data_dir) {
             let missing = embedder.missing_files(&self.data_dir);
@@ -326,12 +328,14 @@ impl EmbedderRegistry {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
 
-            return Err(EmbedderError::Unavailable(format!(
-                "embedder '{}' not available: missing files in {}: {}. Run 'cass models install' to download.",
-                name,
-                model_dir,
-                missing.join(", ")
-            )));
+            return Err(EmbedderError::EmbedderUnavailable {
+                model: name.to_string(),
+                reason: format!(
+                    "missing files in {}: {}. Run 'cass models install' to download.",
+                    model_dir,
+                    missing.join(", ")
+                ),
+            });
         }
 
         Ok(embedder)
@@ -371,10 +375,10 @@ fn load_embedder_by_name(data_dir: &Path, name: &str) -> EmbedderResult<Arc<dyn 
             let embedder = FastEmbedder::load_by_name(data_dir, name)?;
             Ok(Arc::new(embedder))
         }
-        _ => Err(EmbedderError::Unavailable(format!(
-            "embedder '{}' not implemented",
-            name
-        ))),
+        _ => Err(EmbedderError::EmbedderUnavailable {
+            model: name.to_string(),
+            reason: "embedder not implemented".to_string(),
+        }),
     }
 }
 
@@ -458,7 +462,7 @@ mod tests {
         let result = registry.validate("minilm");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, EmbedderError::Unavailable(_)));
+        assert!(matches!(err, EmbedderError::EmbedderUnavailable { .. }));
     }
 
     #[test]

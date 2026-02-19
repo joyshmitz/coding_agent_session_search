@@ -540,7 +540,7 @@ impl<'a, D: DaemonClient> TwoTierSearcher<'a, D> {
     /// Perform fast-only search (no daemon refinement).
     pub fn search_fast_only(&self, query: &str, k: usize) -> Result<Vec<ScoredResult>> {
         let start = Instant::now();
-        let query_vec = self.fast_embedder.embed(query)?;
+        let query_vec = self.fast_embedder.embed_sync(query)?;
         let results = self.index.search_fast(&query_vec, k);
         debug!(
             query_len = query.len(),
@@ -633,7 +633,7 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                 self.phase = 1;
                 let start = Instant::now();
 
-                match self.searcher.fast_embedder.embed(&self.query) {
+                match self.searcher.fast_embedder.embed_sync(&self.query) {
                     Ok(query_vec) => {
                         let results = self.searcher.index.search_fast(&query_vec, self.k);
                         let latency_ms = start.elapsed().as_millis() as u64;
@@ -843,6 +843,7 @@ mod tests {
     use crate::search::daemon_client::{DaemonClient, DaemonError};
     use crate::search::embedder::{Embedder, EmbedderError};
     use crate::search::hash_embedder::HashEmbedder;
+    use frankensearch::ModelCategory;
     use std::sync::Arc;
 
     struct TestDaemon {
@@ -855,10 +856,11 @@ mod tests {
     }
 
     impl Embedder for FailingEmbedder {
-        fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedderError> {
-            Err(EmbedderError::EmbeddingFailed(
-                "synthetic fast embed failure".to_string(),
-            ))
+        fn embed_sync(&self, _text: &str) -> Result<Vec<f32>, EmbedderError> {
+            Err(EmbedderError::EmbeddingFailed {
+                model: "failing-embedder".to_string(),
+                source: Box::new(std::io::Error::other("synthetic fast embed failure")),
+            })
         }
 
         fn dimension(&self) -> usize {
@@ -871,6 +873,10 @@ mod tests {
 
         fn is_semantic(&self) -> bool {
             false
+        }
+
+        fn category(&self) -> ModelCategory {
+            ModelCategory::HashEmbedder
         }
     }
 

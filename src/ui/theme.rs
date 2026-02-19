@@ -10,7 +10,7 @@
 //!   and mono terminals get safe automatic fallbacks via `ColorProfile`.
 //! - Env-var overrides: respects `NO_COLOR`, `CASS_NO_COLOR`, `CASS_NO_ICONS`,
 //!   `CASS_NO_GRADIENT`, `CASS_DISABLE_ANIMATIONS`, and `CASS_A11Y`.
-//! - Preset cycling: all six `ThemePreset` variants produce a valid ftui Theme.
+//! - Preset cycling: all eighteen `ThemePreset` variants produce a valid ftui Theme.
 
 use ftui::render::cell::PackedRgba;
 use ftui::{Color, ColorCache, ColorProfile, Style, StyleSheet, Theme};
@@ -191,14 +191,7 @@ impl CassTheme {
     /// Build a theme with explicit profile and flags (for testing / headless).
     pub fn with_options(preset: ThemePreset, profile: ColorProfile, flags: ThemeFlags) -> Self {
         let palette = preset.to_palette();
-        let is_dark = matches!(
-            preset,
-            ThemePreset::Dark
-                | ThemePreset::Catppuccin
-                | ThemePreset::Dracula
-                | ThemePreset::Nord
-                | ThemePreset::HighContrast
-        );
+        let is_dark = !matches!(preset, ThemePreset::Daylight | ThemePreset::SolarizedLight);
         let theme = build_ftui_theme(&palette, is_dark);
         let styles = build_stylesheet(&palette, is_dark, &flags);
         let color_cache = ColorCache::new(profile);
@@ -229,13 +222,9 @@ impl CassTheme {
     /// Rebuild theme + stylesheet from current preset/profile/flags.
     fn rebuild(&mut self) {
         let palette = self.preset.to_palette();
-        self.is_dark = matches!(
+        self.is_dark = !matches!(
             self.preset,
-            ThemePreset::Dark
-                | ThemePreset::Catppuccin
-                | ThemePreset::Dracula
-                | ThemePreset::Nord
-                | ThemePreset::HighContrast
+            ThemePreset::Daylight | ThemePreset::SolarizedLight
         );
         self.theme = build_ftui_theme(&palette, self.is_dark);
         self.styles = build_stylesheet(&palette, self.is_dark, &self.flags);
@@ -597,7 +586,7 @@ mod tests {
     #[test]
     fn default_creates_dark_theme() {
         let theme = CassTheme::default();
-        assert_eq!(theme.preset, ThemePreset::Dark);
+        assert_eq!(theme.preset, ThemePreset::TokyoNight);
         assert!(theme.is_dark);
     }
 
@@ -612,7 +601,7 @@ mod tests {
     #[test]
     fn style_sheet_has_core_styles() {
         let theme = CassTheme::with_options(
-            ThemePreset::Dark,
+            ThemePreset::TokyoNight,
             ColorProfile::TrueColor,
             ThemeFlags::all_enabled(),
         );
@@ -635,13 +624,14 @@ mod tests {
             ThemeFlags::all_enabled(),
         );
         theme.next_preset();
-        assert_eq!(theme.preset, ThemePreset::Dark);
+        assert_eq!(theme.preset, ThemePreset::TokyoNight);
     }
 
     #[test]
     fn no_color_forces_mono_profile() {
         let flags = ThemeFlags::custom(true, false, false, false, false);
-        let theme = CassTheme::with_options(ThemePreset::Dark, ColorProfile::TrueColor, flags);
+        let theme =
+            CassTheme::with_options(ThemePreset::TokyoNight, ColorProfile::TrueColor, flags);
         // Even if we pass TrueColor, the theme stores it as-is (profile is up to
         // the caller when using with_options), but from_preset would force Mono.
         assert!(theme.flags.no_color);
@@ -650,7 +640,8 @@ mod tests {
     #[test]
     fn no_icons_suppresses_agent_icons() {
         let flags = ThemeFlags::custom(false, true, false, false, false);
-        let theme = CassTheme::with_options(ThemePreset::Dark, ColorProfile::TrueColor, flags);
+        let theme =
+            CassTheme::with_options(ThemePreset::TokyoNight, ColorProfile::TrueColor, flags);
         assert_eq!(theme.agent_icon("codex"), "");
         assert_eq!(theme.agent_icon("claude_code"), "");
     }
@@ -658,14 +649,15 @@ mod tests {
     #[test]
     fn icons_shown_by_default() {
         let flags = ThemeFlags::all_enabled();
-        let theme = CassTheme::with_options(ThemePreset::Dark, ColorProfile::TrueColor, flags);
+        let theme =
+            CassTheme::with_options(ThemePreset::TokyoNight, ColorProfile::TrueColor, flags);
         assert_eq!(theme.agent_icon("codex"), "\u{25c6}"); // ◆
     }
 
     #[test]
     fn role_styles_return_non_default() {
         let theme = CassTheme::with_options(
-            ThemePreset::Dark,
+            ThemePreset::TokyoNight,
             ColorProfile::TrueColor,
             ThemeFlags::all_enabled(),
         );
@@ -683,7 +675,7 @@ mod tests {
     #[test]
     fn stripe_alternates() {
         let theme = CassTheme::with_options(
-            ThemePreset::Dark,
+            ThemePreset::TokyoNight,
             ColorProfile::TrueColor,
             ThemeFlags::all_enabled(),
         );
@@ -696,7 +688,7 @@ mod tests {
     #[test]
     fn light_theme_has_light_bg() {
         let theme = CassTheme::with_options(
-            ThemePreset::Light,
+            ThemePreset::Daylight,
             ColorProfile::TrueColor,
             ThemeFlags::all_enabled(),
         );
@@ -717,7 +709,7 @@ mod tests {
     #[test]
     fn compose_merges_styles() {
         let theme = CassTheme::with_options(
-            ThemePreset::Dark,
+            ThemePreset::TokyoNight,
             ColorProfile::TrueColor,
             ThemeFlags::all_enabled(),
         );
@@ -792,7 +784,8 @@ mod tests {
     #[test]
     fn no_gradient_skips_gradient_styles() {
         let flags = ThemeFlags::custom(false, false, true, false, false);
-        let theme = CassTheme::with_options(ThemePreset::Dark, ColorProfile::TrueColor, flags);
+        let theme =
+            CassTheme::with_options(ThemePreset::TokyoNight, ColorProfile::TrueColor, flags);
         assert!(!theme.styles.contains(style_ids::GRADIENT_TOP));
         assert!(!theme.show_gradient());
     }
@@ -800,7 +793,8 @@ mod tests {
     #[test]
     fn gradient_present_when_enabled() {
         let flags = ThemeFlags::all_enabled();
-        let theme = CassTheme::with_options(ThemePreset::Dark, ColorProfile::TrueColor, flags);
+        let theme =
+            CassTheme::with_options(ThemePreset::TokyoNight, ColorProfile::TrueColor, flags);
         assert!(theme.styles.contains(style_ids::GRADIENT_TOP));
         assert!(theme.styles.contains(style_ids::GRADIENT_MID));
         assert!(theme.styles.contains(style_ids::GRADIENT_BOT));
@@ -809,7 +803,8 @@ mod tests {
     #[test]
     fn a11y_mode_reports_correctly() {
         let flags = ThemeFlags::custom(false, false, false, false, true);
-        let theme = CassTheme::with_options(ThemePreset::Dark, ColorProfile::TrueColor, flags);
+        let theme =
+            CassTheme::with_options(ThemePreset::TokyoNight, ColorProfile::TrueColor, flags);
         assert!(theme.a11y_mode());
     }
 

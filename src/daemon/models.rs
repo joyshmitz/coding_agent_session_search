@@ -13,7 +13,7 @@ use crate::search::embedder::{Embedder, EmbedderError, EmbedderResult};
 use crate::search::fastembed_embedder::FastEmbedder;
 use crate::search::fastembed_reranker::FastEmbedReranker;
 use crate::search::hash_embedder::HashEmbedder;
-use crate::search::reranker::{Reranker, RerankerError, RerankerResult};
+use crate::search::reranker::{Reranker, RerankerError, RerankerResult, rerank_texts};
 
 /// Model manager that handles lazy loading of embedder and reranker models.
 pub struct ModelManager {
@@ -152,11 +152,14 @@ impl ModelManager {
         let embedder = self.embedder.read();
         let embedder = embedder
             .as_ref()
-            .ok_or_else(|| EmbedderError::Unavailable("embedder not loaded".to_string()))?;
+            .ok_or_else(|| EmbedderError::EmbedderUnavailable {
+                model: "unknown".to_string(),
+                reason: "embedder not loaded".to_string(),
+            })?;
 
         // Convert to &str slice for the batch call
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-        embedder.embed_batch(&text_refs)
+        embedder.embed_batch_sync(&text_refs)
     }
 
     /// Embed a single text.
@@ -169,9 +172,12 @@ impl ModelManager {
         let embedder = self.embedder.read();
         let embedder = embedder
             .as_ref()
-            .ok_or_else(|| EmbedderError::Unavailable("embedder not loaded".to_string()))?;
+            .ok_or_else(|| EmbedderError::EmbedderUnavailable {
+                model: "unknown".to_string(),
+                reason: "embedder not loaded".to_string(),
+            })?;
 
-        embedder.embed(text)
+        embedder.embed_sync(text)
     }
 
     /// Rerank documents against a query.
@@ -184,11 +190,13 @@ impl ModelManager {
         let reranker = self.reranker.read();
         let reranker = reranker
             .as_ref()
-            .ok_or_else(|| RerankerError::Unavailable("reranker not loaded".to_string()))?;
+            .ok_or_else(|| RerankerError::RerankerUnavailable {
+                model: "reranker".to_string(),
+            })?;
 
-        // Convert to &str slice
+        // Convert to &str slice and use rerank_texts bridge
         let doc_refs: Vec<&str> = documents.iter().map(|s| s.as_str()).collect();
-        reranker.rerank(query, &doc_refs)
+        rerank_texts(&**reranker, query, &doc_refs)
     }
 
     /// Unload all models to free memory.

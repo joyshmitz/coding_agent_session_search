@@ -1,99 +1,56 @@
 //! Reranker trait and types for cross-encoder reranking.
 //!
-//! This module defines the [`Reranker`] trait that all reranking implementations must satisfy.
-//! A reranker takes a query and a list of documents and produces relevance scores for each
-//! query-document pair using a cross-encoder model that attends to both simultaneously.
+//! This module re-exports the canonical [`Reranker`] trait from frankensearch's
+//! [`SyncRerank`](frankensearch::SyncRerank) trait. All reranking implementations
+//! must satisfy `Reranker`, which provides a synchronous reranking interface
+//! suitable for cass's sync call sites.
+//!
+//! The [`SyncRerankerAdapter`](frankensearch::SyncRerankerAdapter) can wrap any
+//! `Reranker` implementor into frankensearch's async `Reranker` trait when needed
+//! for the frankensearch search pipeline.
 //!
 //! # Implementations
 //!
 //! - **FastEmbed Reranker**: Uses ms-marco-MiniLM-L-6-v2 cross-encoder via FastEmbed.
 //!   Requires model download with user consent.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use crate::search::reranker::{Reranker, RerankerError};
-//!
-//! fn rerank_results(reranker: &dyn Reranker, query: &str, docs: &[&str]) -> Result<Vec<(usize, f32)>, RerankerError> {
-//!     let scores = reranker.rerank(query, docs)?;
-//!     // scores[i] is the relevance score for docs[i]
-//!     let mut indexed: Vec<_> = scores.into_iter().enumerate().collect();
-//!     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-//!     Ok(indexed)
-//! }
-//! ```
 
 use std::fmt;
 
-/// Error type for reranker operations.
-#[derive(Debug)]
-pub enum RerankerError {
-    /// The reranker is not available (e.g., model not downloaded).
-    Unavailable(String),
-    /// Failed to rerank the input.
-    RerankFailed(String),
-    /// Input is empty or invalid.
-    InvalidInput(String),
-    /// Internal error in the reranker.
-    Internal(String),
-}
+pub use frankensearch::SearchError as RerankerError;
+pub use frankensearch::SearchResult as RerankerResult;
+pub use frankensearch::SyncRerank as Reranker;
+pub use frankensearch::{RerankDocument, RerankScore};
 
-impl fmt::Display for RerankerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RerankerError::Unavailable(msg) => write!(f, "reranker unavailable: {msg}"),
-            RerankerError::RerankFailed(msg) => write!(f, "rerank failed: {msg}"),
-            RerankerError::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
-            RerankerError::Internal(msg) => write!(f, "internal error: {msg}"),
+/// Convenience function to rerank raw text documents.
+///
+/// Wraps `&[&str]` documents into [`RerankDocument`] structs and extracts
+/// the resulting scores back into a `Vec<f32>` in original document order.
+pub fn rerank_texts(
+    reranker: &dyn Reranker,
+    query: &str,
+    documents: &[&str],
+) -> RerankerResult<Vec<f32>> {
+    let rerank_docs: Vec<RerankDocument> = documents
+        .iter()
+        .enumerate()
+        .map(|(i, text)| RerankDocument {
+            doc_id: i.to_string(),
+            text: text.to_string(),
+        })
+        .collect();
+
+    let scores = reranker.rerank_sync(query, &rerank_docs)?;
+
+    // Convert RerankScore vec back to Vec<f32> in original document order
+    let mut result = vec![0.0f32; documents.len()];
+    for rs in &scores {
+        if let Ok(idx) = rs.doc_id.parse::<usize>()
+            && idx < result.len()
+        {
+            result[idx] = rs.score;
         }
     }
-}
-
-impl std::error::Error for RerankerError {}
-
-/// Result type for reranker operations.
-pub type RerankerResult<T> = Result<T, RerankerError>;
-
-/// Trait for cross-encoder reranking implementations.
-///
-/// Rerankers score query-document pairs using a cross-encoder that attends to both
-/// query and document simultaneously. This provides more accurate relevance scores
-/// than bi-encoder (embedding-based) similarity but at higher computational cost.
-///
-/// # Thread Safety
-///
-/// Implementations should be `Send + Sync` to allow use across threads.
-pub trait Reranker: Send + Sync {
-    /// Rerank documents against a query.
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - The search query.
-    /// * `documents` - Slice of documents to rerank.
-    ///
-    /// # Returns
-    ///
-    /// A vector of relevance scores, one per document, in the same order as input.
-    /// Higher scores indicate more relevant documents.
-    ///
-    /// # Errors
-    ///
-    /// - [`RerankerError::InvalidInput`] if query or any document is empty.
-    /// - [`RerankerError::Unavailable`] if the reranker is not ready.
-    /// - [`RerankerError::RerankFailed`] if reranking fails.
-    fn rerank(&self, query: &str, documents: &[&str]) -> RerankerResult<Vec<f32>>;
-
-    /// Unique identifier for this reranker.
-    ///
-    /// Format: `{model}-{version}`
-    ///
-    /// # Examples
-    ///
-    /// - `"ms-marco-minilm-l6-v2"` for the default MiniLM reranker
-    fn id(&self) -> &str;
-
-    /// Whether this reranker is available and ready to use.
-    fn is_available(&self) -> bool;
+    Ok(result)
 }
 
 /// Metadata about a reranker for display and logging.
@@ -145,8 +102,12 @@ mod tests {
     #[test]
     fn test_reranker_trait_basic() {
         let reranker = load_fastembed_fixture();
-        let docs = ["short", "medium length doc", "longer document text"];
-        let scores = reranker.rerank("test query", &docs).unwrap();
+        let scores = rerank_texts(
+            &reranker,
+            "test query",
+            &["short", "medium length doc", "longer document text"],
+        )
+        .unwrap();
 
         assert_eq!(scores.len(), 3);
         for score in scores {
@@ -161,29 +122,26 @@ mod tests {
             Ok(_) => panic!("expected unavailable error"),
             Err(err) => err,
         };
-        assert!(matches!(err, RerankerError::Unavailable(_)));
+        assert!(matches!(
+            err,
+            RerankerError::RerankFailed { .. }
+                | RerankerError::EmbedderUnavailable { .. }
+                | RerankerError::RerankerUnavailable { .. }
+        ));
     }
 
     #[test]
     fn test_reranker_empty_query_error() {
         let reranker = load_fastembed_fixture();
-        let result = reranker.rerank("", &["doc"]);
+        let result = rerank_texts(&reranker, "", &["doc"]);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            RerankerError::InvalidInput(_)
-        ));
     }
 
     #[test]
     fn test_reranker_empty_documents_error() {
         let reranker = load_fastembed_fixture();
-        let result = reranker.rerank("query", &[]);
+        let result = rerank_texts(&reranker, "query", &[]);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            RerankerError::InvalidInput(_)
-        ));
     }
 
     #[test]
@@ -201,16 +159,10 @@ mod tests {
 
     #[test]
     fn test_reranker_error_display() {
-        let err = RerankerError::Unavailable("model not downloaded".to_string());
-        assert!(err.to_string().contains("unavailable"));
-
-        let err = RerankerError::RerankFailed("inference error".to_string());
-        assert!(err.to_string().contains("rerank failed"));
-
-        let err = RerankerError::InvalidInput("empty".to_string());
-        assert!(err.to_string().contains("invalid input"));
-
-        let err = RerankerError::Internal("panic".to_string());
-        assert!(err.to_string().contains("internal error"));
+        let err = RerankerError::RerankFailed {
+            model: "test".to_string(),
+            source: Box::new(std::io::Error::other("inference error")),
+        };
+        assert!(err.to_string().contains("inference error"));
     }
 }

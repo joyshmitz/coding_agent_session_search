@@ -730,78 +730,128 @@ pub fn ensure_contrast(fg: PackedRgba, bg: PackedRgba, min_level: ContrastLevel)
 pub enum ThemePreset {
     /// Default dark theme - Tokyo Night inspired, premium feel
     #[default]
-    Dark,
+    TokyoNight,
     /// Light theme - clean, minimal, professional
-    Light,
+    Daylight,
     /// Catppuccin Mocha - warm, pastel colors
     Catppuccin,
     /// Dracula - purple-tinted dark theme
     Dracula,
     /// Nord - arctic, cool blue tones
     Nord,
+    /// Solarized Dark
+    SolarizedDark,
+    /// Solarized Light
+    SolarizedLight,
+    /// Monokai
+    Monokai,
+    /// Gruvbox Dark
+    GruvboxDark,
+    /// One Dark
+    OneDark,
+    /// Rosé Pine
+    RosePine,
+    /// Everforest
+    Everforest,
+    /// Kanagawa
+    Kanagawa,
+    /// Ayu Mirage
+    AyuMirage,
+    /// Nightfox
+    Nightfox,
+    /// Cyberpunk Aurora
+    CyberpunkAurora,
+    /// Synthwave '84
+    Synthwave84,
     /// High Contrast - maximum contrast for accessibility (WCAG AAA)
     HighContrast,
 }
 
 impl ThemePreset {
+    const ALL: [Self; 18] = [
+        Self::TokyoNight,
+        Self::Daylight,
+        Self::Catppuccin,
+        Self::Dracula,
+        Self::Nord,
+        Self::SolarizedDark,
+        Self::SolarizedLight,
+        Self::Monokai,
+        Self::GruvboxDark,
+        Self::OneDark,
+        Self::RosePine,
+        Self::Everforest,
+        Self::Kanagawa,
+        Self::AyuMirage,
+        Self::Nightfox,
+        Self::CyberpunkAurora,
+        Self::Synthwave84,
+        Self::HighContrast,
+    ];
+
     /// Get the display name for this theme preset
     pub fn name(self) -> &'static str {
         match self {
-            Self::Dark => "Dark",
-            Self::Light => "Light",
-            Self::Catppuccin => "Catppuccin",
+            Self::TokyoNight => "Tokyo Night",
+            Self::Daylight => "Daylight",
+            Self::Catppuccin => "Catppuccin Mocha",
             Self::Dracula => "Dracula",
             Self::Nord => "Nord",
+            Self::SolarizedDark => "Solarized Dark",
+            Self::SolarizedLight => "Solarized Light",
+            Self::Monokai => "Monokai",
+            Self::GruvboxDark => "Gruvbox Dark",
+            Self::OneDark => "One Dark",
+            Self::RosePine => "Ros\u{e9} Pine",
+            Self::Everforest => "Everforest",
+            Self::Kanagawa => "Kanagawa",
+            Self::AyuMirage => "Ayu Mirage",
+            Self::Nightfox => "Nightfox",
+            Self::CyberpunkAurora => "Cyberpunk Aurora",
+            Self::Synthwave84 => "Synthwave '84",
             Self::HighContrast => "High Contrast",
         }
     }
 
     /// Cycle to the next theme preset
     pub fn next(self) -> Self {
-        match self {
-            Self::Dark => Self::Light,
-            Self::Light => Self::Catppuccin,
-            Self::Catppuccin => Self::Dracula,
-            Self::Dracula => Self::Nord,
-            Self::Nord => Self::HighContrast,
-            Self::HighContrast => Self::Dark,
-        }
+        let idx = Self::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
     }
 
     /// Cycle to the previous theme preset
     pub fn prev(self) -> Self {
-        match self {
-            Self::Dark => Self::HighContrast,
-            Self::Light => Self::Dark,
-            Self::Catppuccin => Self::Light,
-            Self::Dracula => Self::Catppuccin,
-            Self::Nord => Self::Dracula,
-            Self::HighContrast => Self::Nord,
-        }
+        let idx = Self::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 
     /// Convert this preset to its `ThemePalette`
     pub fn to_palette(self) -> ThemePalette {
         match self {
-            Self::Dark => ThemePalette::dark(),
-            Self::Light => ThemePalette::light(),
+            Self::TokyoNight => ThemePalette::dark(),
+            Self::Daylight => ThemePalette::light(),
             Self::Catppuccin => ThemePalette::catppuccin(),
             Self::Dracula => ThemePalette::dracula(),
             Self::Nord => ThemePalette::nord(),
+            Self::SolarizedDark => ThemePalette::solarized_dark(),
+            Self::SolarizedLight => ThemePalette::solarized_light(),
+            Self::Monokai => ThemePalette::monokai(),
+            Self::GruvboxDark => ThemePalette::gruvbox_dark(),
+            Self::OneDark => ThemePalette::one_dark(),
+            Self::RosePine => ThemePalette::rose_pine(),
+            Self::Everforest => ThemePalette::everforest(),
+            Self::Kanagawa => ThemePalette::kanagawa(),
+            Self::AyuMirage => ThemePalette::ayu_mirage(),
+            Self::Nightfox => ThemePalette::nightfox(),
+            Self::CyberpunkAurora => ThemePalette::cyberpunk_aurora(),
+            Self::Synthwave84 => ThemePalette::synthwave_84(),
             Self::HighContrast => ThemePalette::high_contrast(),
         }
     }
 
     /// List all available presets
     pub fn all() -> &'static [Self] {
-        &[
-            Self::Dark,
-            Self::Light,
-            Self::Catppuccin,
-            Self::Dracula,
-            Self::Nord,
-            Self::HighContrast,
-        ]
+        &Self::ALL
     }
 }
 
@@ -875,20 +925,235 @@ impl ThemePalette {
     /// Uses pure black/white with saturated accent colors for maximum visibility.
     pub fn high_contrast() -> Self {
         Self {
-            // High contrast palette - pure black background, white text
-            accent: PackedRgba::rgb(0, 191, 255), // Bright cyan - high visibility
-            accent_alt: PackedRgba::rgb(255, 105, 180), // Hot pink - distinct secondary
-            bg: PackedRgba::BLACK,                // Pure black
-            fg: PackedRgba::WHITE,                // Pure white
-            surface: PackedRgba::rgb(28, 28, 28), // Very dark gray for elevation
-            hint: PackedRgba::rgb(180, 180, 180), // Light gray - still readable
-            border: PackedRgba::WHITE,            // White borders for clear separation
-            user: PackedRgba::rgb(0, 255, 127),   // Bright spring green
-            agent: PackedRgba::rgb(0, 191, 255),  // Bright cyan (matches accent)
-            tool: PackedRgba::rgb(255, 165, 0),   // Bright orange
-            system: PackedRgba::rgb(255, 255, 0), // Pure yellow
-            stripe_even: PackedRgba::BLACK,       // Pure black
-            stripe_odd: PackedRgba::rgb(24, 24, 24), // Very dark gray
+            accent: PackedRgba::rgb(0, 191, 255),
+            accent_alt: PackedRgba::rgb(255, 105, 180),
+            bg: PackedRgba::BLACK,
+            fg: PackedRgba::WHITE,
+            surface: PackedRgba::rgb(28, 28, 28),
+            hint: PackedRgba::rgb(180, 180, 180),
+            border: PackedRgba::WHITE,
+            user: PackedRgba::rgb(0, 255, 127),
+            agent: PackedRgba::rgb(0, 191, 255),
+            tool: PackedRgba::rgb(255, 165, 0),
+            system: PackedRgba::rgb(255, 255, 0),
+            stripe_even: PackedRgba::BLACK,
+            stripe_odd: PackedRgba::rgb(24, 24, 24),
+        }
+    }
+
+    pub fn solarized_dark() -> Self {
+        Self {
+            accent: PackedRgba::rgb(38, 139, 210),      // #268bd2 blue
+            accent_alt: PackedRgba::rgb(108, 113, 196), // #6c71c4 violet
+            bg: PackedRgba::rgb(0, 43, 54),             // #002b36 base03
+            fg: PackedRgba::rgb(131, 148, 150),         // #839496 base0
+            surface: PackedRgba::rgb(7, 54, 66),        // #073642 base02
+            hint: PackedRgba::rgb(101, 123, 131),       // #657b83 base00
+            border: PackedRgba::rgb(88, 110, 117),      // #586e75 base01
+            user: PackedRgba::rgb(133, 153, 0),         // #859900 green
+            agent: PackedRgba::rgb(38, 139, 210),       // #268bd2 blue
+            tool: PackedRgba::rgb(203, 75, 22),         // #cb4b16 orange
+            system: PackedRgba::rgb(181, 137, 0),       // #b58900 yellow
+            stripe_even: PackedRgba::rgb(0, 43, 54),
+            stripe_odd: PackedRgba::rgb(7, 54, 66),
+        }
+    }
+
+    pub fn solarized_light() -> Self {
+        Self {
+            accent: PackedRgba::rgb(38, 139, 210),
+            accent_alt: PackedRgba::rgb(108, 113, 196),
+            bg: PackedRgba::rgb(253, 246, 227), // #fdf6e3 base3
+            fg: PackedRgba::rgb(101, 123, 131), // #657b83 base00
+            surface: PackedRgba::rgb(238, 232, 213), // #eee8d5 base2
+            hint: PackedRgba::rgb(131, 148, 150), // #839496 base0
+            border: PackedRgba::rgb(147, 161, 161), // #93a1a1 base1
+            user: PackedRgba::rgb(133, 153, 0),
+            agent: PackedRgba::rgb(38, 139, 210),
+            tool: PackedRgba::rgb(203, 75, 22),
+            system: PackedRgba::rgb(181, 137, 0),
+            stripe_even: PackedRgba::rgb(253, 246, 227),
+            stripe_odd: PackedRgba::rgb(238, 232, 213),
+        }
+    }
+
+    pub fn monokai() -> Self {
+        Self {
+            accent: PackedRgba::rgb(166, 226, 46),      // #a6e22e green
+            accent_alt: PackedRgba::rgb(174, 129, 255), // #ae81ff purple
+            bg: PackedRgba::rgb(39, 40, 34),            // #272822
+            fg: PackedRgba::rgb(248, 248, 242),         // #f8f8f2
+            surface: PackedRgba::rgb(53, 54, 45),       // #35362d
+            hint: PackedRgba::rgb(150, 155, 140),       // #969b8c
+            border: PackedRgba::rgb(73, 72, 62),        // #49483e
+            user: PackedRgba::rgb(166, 226, 46),        // green
+            agent: PackedRgba::rgb(102, 217, 239),      // #66d9ef cyan
+            tool: PackedRgba::rgb(253, 151, 31),        // #fd971f orange
+            system: PackedRgba::rgb(230, 219, 116),     // #e6db74 yellow
+            stripe_even: PackedRgba::rgb(39, 40, 34),
+            stripe_odd: PackedRgba::rgb(48, 49, 42),
+        }
+    }
+
+    pub fn gruvbox_dark() -> Self {
+        Self {
+            accent: PackedRgba::rgb(250, 189, 47),      // #fabd2f yellow
+            accent_alt: PackedRgba::rgb(211, 134, 155), // #d3869b purple
+            bg: PackedRgba::rgb(40, 40, 40),            // #282828
+            fg: PackedRgba::rgb(235, 219, 178),         // #ebdbb2
+            surface: PackedRgba::rgb(50, 48, 47),       // #32302f
+            hint: PackedRgba::rgb(146, 131, 116),       // #928374
+            border: PackedRgba::rgb(80, 73, 69),        // #504945
+            user: PackedRgba::rgb(184, 187, 38),        // #b8bb26 green
+            agent: PackedRgba::rgb(131, 165, 152),      // #83a598 aqua
+            tool: PackedRgba::rgb(254, 128, 25),        // #fe8019 orange
+            system: PackedRgba::rgb(250, 189, 47),      // #fabd2f yellow
+            stripe_even: PackedRgba::rgb(40, 40, 40),
+            stripe_odd: PackedRgba::rgb(50, 48, 47),
+        }
+    }
+
+    pub fn one_dark() -> Self {
+        Self {
+            accent: PackedRgba::rgb(97, 175, 239),      // #61afef blue
+            accent_alt: PackedRgba::rgb(198, 120, 221), // #c678dd purple
+            bg: PackedRgba::rgb(40, 44, 52),            // #282c34
+            fg: PackedRgba::rgb(171, 178, 191),         // #abb2bf
+            surface: PackedRgba::rgb(49, 53, 63),       // #31353f
+            hint: PackedRgba::rgb(99, 109, 131),        // #636d83
+            border: PackedRgba::rgb(62, 68, 81),        // #3e4451
+            user: PackedRgba::rgb(152, 195, 121),       // #98c379 green
+            agent: PackedRgba::rgb(97, 175, 239),       // #61afef blue
+            tool: PackedRgba::rgb(229, 192, 123),       // #e5c07b yellow
+            system: PackedRgba::rgb(224, 108, 117),     // #e06c75 red
+            stripe_even: PackedRgba::rgb(40, 44, 52),
+            stripe_odd: PackedRgba::rgb(49, 53, 63),
+        }
+    }
+
+    pub fn rose_pine() -> Self {
+        Self {
+            accent: PackedRgba::rgb(235, 188, 186),     // #ebbcba rose
+            accent_alt: PackedRgba::rgb(196, 167, 231), // #c4a7e7 iris
+            bg: PackedRgba::rgb(25, 23, 36),            // #191724
+            fg: PackedRgba::rgb(224, 222, 244),         // #e0def4
+            surface: PackedRgba::rgb(38, 35, 53),       // #26233a
+            hint: PackedRgba::rgb(110, 106, 134),       // #6e6a86
+            border: PackedRgba::rgb(57, 53, 82),        // #393552
+            user: PackedRgba::rgb(156, 207, 216),       // #9ccfd8 foam
+            agent: PackedRgba::rgb(196, 167, 231),      // #c4a7e7 iris
+            tool: PackedRgba::rgb(246, 193, 119),       // #f6c177 gold
+            system: PackedRgba::rgb(235, 111, 146),     // #eb6f92 love
+            stripe_even: PackedRgba::rgb(25, 23, 36),
+            stripe_odd: PackedRgba::rgb(33, 30, 46),
+        }
+    }
+
+    pub fn everforest() -> Self {
+        Self {
+            accent: PackedRgba::rgb(167, 192, 128),     // #a7c080 green
+            accent_alt: PackedRgba::rgb(214, 153, 182), // #d699b6 purple
+            bg: PackedRgba::rgb(39, 46, 34),            // #272e22
+            fg: PackedRgba::rgb(211, 198, 170),         // #d3c6aa
+            surface: PackedRgba::rgb(47, 55, 42),       // #2f372a
+            hint: PackedRgba::rgb(125, 117, 100),       // #7d7564
+            border: PackedRgba::rgb(68, 77, 60),        // #444d3c
+            user: PackedRgba::rgb(131, 192, 146),       // #83c092 aqua
+            agent: PackedRgba::rgb(124, 195, 210),      // #7cc3d2 blue
+            tool: PackedRgba::rgb(219, 188, 127),       // #dbbc7f yellow
+            system: PackedRgba::rgb(230, 126, 128),     // #e67e80 red
+            stripe_even: PackedRgba::rgb(39, 46, 34),
+            stripe_odd: PackedRgba::rgb(47, 55, 42),
+        }
+    }
+
+    pub fn kanagawa() -> Self {
+        Self {
+            accent: PackedRgba::rgb(126, 156, 216), // #7e9cd8 crystal blue
+            accent_alt: PackedRgba::rgb(149, 127, 184), // #957fb8 oniviolet
+            bg: PackedRgba::rgb(31, 31, 40),        // #1f1f28
+            fg: PackedRgba::rgb(220, 215, 186),     // #dcd7ba
+            surface: PackedRgba::rgb(42, 42, 54),   // #2a2a36
+            hint: PackedRgba::rgb(114, 113, 105),   // #727169
+            border: PackedRgba::rgb(84, 84, 109),   // #54546d
+            user: PackedRgba::rgb(152, 187, 108),   // #98bb6c spring green
+            agent: PackedRgba::rgb(127, 180, 202),  // #7fb4ca wave blue
+            tool: PackedRgba::rgb(255, 169, 98),    // #ffa962 surimi orange
+            system: PackedRgba::rgb(195, 64, 67),   // #c34043 autumn red
+            stripe_even: PackedRgba::rgb(31, 31, 40),
+            stripe_odd: PackedRgba::rgb(42, 42, 54),
+        }
+    }
+
+    pub fn ayu_mirage() -> Self {
+        Self {
+            accent: PackedRgba::rgb(115, 210, 222),     // #73d2de
+            accent_alt: PackedRgba::rgb(217, 155, 243), // #d99bf3
+            bg: PackedRgba::rgb(36, 42, 54),            // #242a36
+            fg: PackedRgba::rgb(204, 204, 194),         // #cccac2
+            surface: PackedRgba::rgb(44, 51, 64),       // #2c3340
+            hint: PackedRgba::rgb(107, 114, 128),       // #6b7280
+            border: PackedRgba::rgb(60, 68, 82),        // #3c4452
+            user: PackedRgba::rgb(135, 213, 134),       // #87d586
+            agent: PackedRgba::rgb(115, 210, 222),      // #73d2de
+            tool: PackedRgba::rgb(255, 213, 109),       // #ffd56d
+            system: PackedRgba::rgb(240, 113, 120),     // #f07178
+            stripe_even: PackedRgba::rgb(36, 42, 54),
+            stripe_odd: PackedRgba::rgb(44, 51, 64),
+        }
+    }
+
+    pub fn nightfox() -> Self {
+        Self {
+            accent: PackedRgba::rgb(129, 180, 243),     // #81b4f3
+            accent_alt: PackedRgba::rgb(174, 140, 211), // #ae8cd3
+            bg: PackedRgba::rgb(18, 21, 31),            // #12151f
+            fg: PackedRgba::rgb(205, 207, 216),         // #cdcfd8
+            surface: PackedRgba::rgb(29, 33, 46),       // #1d212e
+            hint: PackedRgba::rgb(106, 108, 122),       // #6a6c7a
+            border: PackedRgba::rgb(48, 54, 71),        // #303647
+            user: PackedRgba::rgb(129, 200, 152),       // #81c898
+            agent: PackedRgba::rgb(129, 180, 243),      // #81b4f3
+            tool: PackedRgba::rgb(218, 167, 89),        // #daa759
+            system: PackedRgba::rgb(201, 101, 120),     // #c96578
+            stripe_even: PackedRgba::rgb(18, 21, 31),
+            stripe_odd: PackedRgba::rgb(29, 33, 46),
+        }
+    }
+
+    pub fn cyberpunk_aurora() -> Self {
+        Self {
+            accent: PackedRgba::rgb(255, 0, 128),     // #ff0080 neon pink
+            accent_alt: PackedRgba::rgb(0, 255, 255), // #00ffff cyan
+            bg: PackedRgba::rgb(13, 2, 33),           // #0d0221
+            fg: PackedRgba::rgb(224, 210, 255),       // #e0d2ff
+            surface: PackedRgba::rgb(22, 10, 48),     // #160a30
+            hint: PackedRgba::rgb(120, 100, 160),     // #7864a0
+            border: PackedRgba::rgb(60, 30, 100),     // #3c1e64
+            user: PackedRgba::rgb(0, 255, 163),       // #00ffa3 neon green
+            agent: PackedRgba::rgb(0, 200, 255),      // #00c8ff
+            tool: PackedRgba::rgb(255, 213, 0),       // #ffd500
+            system: PackedRgba::rgb(255, 51, 102),    // #ff3366
+            stripe_even: PackedRgba::rgb(13, 2, 33),
+            stripe_odd: PackedRgba::rgb(22, 10, 48),
+        }
+    }
+
+    pub fn synthwave_84() -> Self {
+        Self {
+            accent: PackedRgba::rgb(255, 123, 213),     // #ff7bd5 hot pink
+            accent_alt: PackedRgba::rgb(114, 241, 223), // #72f1df mint
+            bg: PackedRgba::rgb(34, 20, 54),            // #221436
+            fg: PackedRgba::rgb(241, 233, 255),         // #f1e9ff
+            surface: PackedRgba::rgb(44, 28, 68),       // #2c1c44
+            hint: PackedRgba::rgb(130, 115, 165),       // #8273a5
+            border: PackedRgba::rgb(70, 45, 100),       // #462d64
+            user: PackedRgba::rgb(114, 241, 223),       // #72f1df mint
+            agent: PackedRgba::rgb(54, 245, 253),       // #36f5fd
+            tool: PackedRgba::rgb(254, 215, 102),       // #fed766
+            system: PackedRgba::rgb(254, 73, 99),       // #fe4963
+            stripe_even: PackedRgba::rgb(34, 20, 54),
+            stripe_odd: PackedRgba::rgb(44, 28, 68),
         }
     }
 }
@@ -1193,14 +1458,14 @@ mod tests {
     #[test]
     fn test_theme_preset_default() {
         let preset = ThemePreset::default();
-        assert_eq!(preset, ThemePreset::Dark);
+        assert_eq!(preset, ThemePreset::TokyoNight);
     }
 
     #[test]
     fn test_theme_preset_name() {
-        assert_eq!(ThemePreset::Dark.name(), "Dark");
-        assert_eq!(ThemePreset::Light.name(), "Light");
-        assert_eq!(ThemePreset::Catppuccin.name(), "Catppuccin");
+        assert_eq!(ThemePreset::TokyoNight.name(), "Tokyo Night");
+        assert_eq!(ThemePreset::Daylight.name(), "Daylight");
+        assert_eq!(ThemePreset::Catppuccin.name(), "Catppuccin Mocha");
         assert_eq!(ThemePreset::Dracula.name(), "Dracula");
         assert_eq!(ThemePreset::Nord.name(), "Nord");
         assert_eq!(ThemePreset::HighContrast.name(), "High Contrast");
@@ -1208,45 +1473,41 @@ mod tests {
 
     #[test]
     fn test_theme_preset_next_cycles() {
-        let mut preset = ThemePreset::Dark;
-        preset = preset.next(); // Light
-        assert_eq!(preset, ThemePreset::Light);
-        preset = preset.next(); // Catppuccin
+        let mut preset = ThemePreset::TokyoNight;
+        preset = preset.next();
+        assert_eq!(preset, ThemePreset::Daylight);
+        preset = preset.next();
         assert_eq!(preset, ThemePreset::Catppuccin);
-        preset = preset.next(); // Dracula
-        assert_eq!(preset, ThemePreset::Dracula);
-        preset = preset.next(); // Nord
-        assert_eq!(preset, ThemePreset::Nord);
-        preset = preset.next(); // HighContrast
-        assert_eq!(preset, ThemePreset::HighContrast);
-        preset = preset.next(); // Back to Dark
-        assert_eq!(preset, ThemePreset::Dark);
+        // Cycle through all 18 and verify wrap
+        let mut p = ThemePreset::HighContrast;
+        p = p.next();
+        assert_eq!(p, ThemePreset::TokyoNight);
     }
 
     #[test]
     fn test_theme_preset_prev_cycles() {
-        let mut preset = ThemePreset::Dark;
-        preset = preset.prev(); // HighContrast
+        let mut preset = ThemePreset::TokyoNight;
+        preset = preset.prev();
         assert_eq!(preset, ThemePreset::HighContrast);
-        preset = preset.prev(); // Nord
-        assert_eq!(preset, ThemePreset::Nord);
+        preset = preset.prev();
+        assert_eq!(preset, ThemePreset::Synthwave84);
     }
 
     #[test]
     fn test_theme_preset_to_palette() {
-        let palette = ThemePreset::Dark.to_palette();
+        let palette = ThemePreset::TokyoNight.to_palette();
         assert_eq!(palette.bg, ThemePalette::dark().bg);
 
-        let palette = ThemePreset::Light.to_palette();
+        let palette = ThemePreset::Daylight.to_palette();
         assert_eq!(palette.bg, ThemePalette::light().bg);
     }
 
     #[test]
     fn test_theme_preset_all() {
         let all = ThemePreset::all();
-        assert_eq!(all.len(), 6);
-        assert!(all.contains(&ThemePreset::Dark));
-        assert!(all.contains(&ThemePreset::Light));
+        assert_eq!(all.len(), 18);
+        assert!(all.contains(&ThemePreset::TokyoNight));
+        assert!(all.contains(&ThemePreset::Daylight));
     }
 
     // ==================== Style helper tests ====================

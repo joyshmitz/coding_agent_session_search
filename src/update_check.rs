@@ -104,7 +104,7 @@ impl UpdateState {
     /// Check if enough time has passed since last check
     pub fn should_check(&self) -> bool {
         let now = now_unix();
-        (now - self.last_check_ts) >= CHECK_INTERVAL_SECS as i64
+        now.saturating_sub(self.last_check_ts) >= CHECK_INTERVAL_SECS as i64
     }
 
     /// Mark that we just checked
@@ -273,19 +273,30 @@ pub fn open_in_browser(url: &str) -> std::io::Result<()> {
 /// This function does NOT return - it replaces the current process with the installer.
 /// The caller should ensure the terminal is in a clean state before calling.
 pub fn run_self_update(version: &str) -> ! {
+    // Defense-in-depth: validate version contains only safe characters before
+    // using it in shell commands. Semver upstream validation already rejects
+    // metacharacters, but this function is pub and must be safe standalone.
+    if !version
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b'v'))
+    {
+        eprintln!("Invalid version string: {}", version);
+        std::process::exit(1);
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         use std::os::unix::process::CommandExt;
         let install_url =
             format!("https://raw.githubusercontent.com/{GITHUB_REPO}/{version}/install.sh");
-        // exec replaces the current process, so we don't return
+        // Use positional args ($1, $2) instead of string interpolation to prevent injection
         let err = std::process::Command::new("bash")
             .args([
                 "-c",
-                &format!(
-                    "curl -fsSL '{}' | bash -s -- --easy-mode --version {}",
-                    install_url, version
-                ),
+                r#"curl -fsSL "$1" | bash -s -- --easy-mode --version "$2""#,
+                "cass-updater",
+                &install_url,
+                version,
             ])
             .exec();
         // If we get here, exec failed
@@ -297,7 +308,8 @@ pub fn run_self_update(version: &str) -> ! {
     {
         let install_url =
             format!("https://raw.githubusercontent.com/{GITHUB_REPO}/{version}/install.ps1");
-        // Windows doesn't have exec(), so we spawn and wait
+        // Version is validated above to contain only [0-9A-Za-z.+-v], safe for interpolation.
+        // Windows doesn't have exec(), so we spawn and wait.
         let status = std::process::Command::new("powershell")
             .args([
                 "-ExecutionPolicy",

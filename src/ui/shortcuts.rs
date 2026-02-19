@@ -47,8 +47,8 @@ pub const DETAIL_FIND: &str = "/";
 pub const DETAIL_FIND_NEXT: &str = "n";
 pub const DETAIL_FIND_PREV: &str = "N";
 
-// Theme editor
-pub const THEME_EDITOR: &str = "Ctrl+Shift+T";
+// Theme cycling
+pub const THEME_PREV: &str = "Shift+F2";
 
 // Sources management
 pub const SOURCES: &str = "Ctrl+Shift+S";
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn shift_function_keys_are_unique() {
         let mut seen = HashSet::new();
-        let shift_keys = [SCOPE_AGENT, SCOPE_WORKSPACE, CYCLE_TIME_PRESETS];
+        let shift_keys = [THEME_PREV, SCOPE_AGENT, SCOPE_WORKSPACE, CYCLE_TIME_PRESETS];
 
         for key in &shift_keys {
             assert!(
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn shift_function_key_format_is_valid() {
-        let shift_keys = [SCOPE_AGENT, SCOPE_WORKSPACE, CYCLE_TIME_PRESETS];
+        let shift_keys = [THEME_PREV, SCOPE_AGENT, SCOPE_WORKSPACE, CYCLE_TIME_PRESETS];
 
         for key in &shift_keys {
             assert!(

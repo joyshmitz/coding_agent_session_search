@@ -78,15 +78,14 @@
 //! [`FrameTimingStats`] maintains a rolling ring buffer of frame durations for
 //! FPS calculation and jitter detection.
 //!
-//! ## Theme Editor
+//! ## Theme Cycling
 //!
-//! Ctrl+Shift+T opens [`ThemeEditorState`] — a modal editor for 19 color slots
-//! ([`ThemeColorSlot`]). Supports hex input, preset cycling, WCAG contrast warnings,
-//! and export-to-disk. Changes apply live and revert on cancel.
+//! F2 cycles forward through 18 preset themes; Shift+F2 cycles backward.
+//! Theme selection persists to `theme.json` in the data directory.
 //!
 //! ## Key Bindings
 //!
-//! Modal interceptors form a priority stack: theme editor > inspector > palette >
+//! Modal interceptors form a priority stack: inspector > palette >
 //! normal key handling. When a modal is open, it captures all input except its own
 //! dismiss/close messages, which must be explicitly passed through (not swallowed
 //! by `_ => Cmd::none()` wildcards).
@@ -1971,240 +1970,6 @@ impl ResizeEvidenceSummary {
     }
 }
 
-/// Named color slots in the theme editor, matching ThemeColorOverrides fields.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThemeColorSlot {
-    Primary,
-    Secondary,
-    Accent,
-    Background,
-    Surface,
-    Overlay,
-    Text,
-    TextMuted,
-    TextSubtle,
-    Success,
-    Warning,
-    Error,
-    Info,
-    Border,
-    BorderFocused,
-    SelectionBg,
-    SelectionFg,
-    ScrollbarTrack,
-    ScrollbarThumb,
-}
-
-impl ThemeColorSlot {
-    pub const ALL: [Self; 19] = [
-        Self::Primary,
-        Self::Secondary,
-        Self::Accent,
-        Self::Background,
-        Self::Surface,
-        Self::Overlay,
-        Self::Text,
-        Self::TextMuted,
-        Self::TextSubtle,
-        Self::Success,
-        Self::Warning,
-        Self::Error,
-        Self::Info,
-        Self::Border,
-        Self::BorderFocused,
-        Self::SelectionBg,
-        Self::SelectionFg,
-        Self::ScrollbarTrack,
-        Self::ScrollbarThumb,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Primary => "Primary",
-            Self::Secondary => "Secondary",
-            Self::Accent => "Accent",
-            Self::Background => "Background",
-            Self::Surface => "Surface",
-            Self::Overlay => "Overlay",
-            Self::Text => "Text",
-            Self::TextMuted => "Text Muted",
-            Self::TextSubtle => "Text Subtle",
-            Self::Success => "Success",
-            Self::Warning => "Warning",
-            Self::Error => "Error",
-            Self::Info => "Info",
-            Self::Border => "Border",
-            Self::BorderFocused => "Border Focus",
-            Self::SelectionBg => "Selection BG",
-            Self::SelectionFg => "Selection FG",
-            Self::ScrollbarTrack => "Scrollbar Trk",
-            Self::ScrollbarThumb => "Scrollbar Thm",
-        }
-    }
-
-    /// Get the current override value from ThemeColorOverrides.
-    pub fn get(self, overrides: &style_system::ThemeColorOverrides) -> Option<&str> {
-        match self {
-            Self::Primary => overrides.primary.as_deref(),
-            Self::Secondary => overrides.secondary.as_deref(),
-            Self::Accent => overrides.accent.as_deref(),
-            Self::Background => overrides.background.as_deref(),
-            Self::Surface => overrides.surface.as_deref(),
-            Self::Overlay => overrides.overlay.as_deref(),
-            Self::Text => overrides.text.as_deref(),
-            Self::TextMuted => overrides.text_muted.as_deref(),
-            Self::TextSubtle => overrides.text_subtle.as_deref(),
-            Self::Success => overrides.success.as_deref(),
-            Self::Warning => overrides.warning.as_deref(),
-            Self::Error => overrides.error.as_deref(),
-            Self::Info => overrides.info.as_deref(),
-            Self::Border => overrides.border.as_deref(),
-            Self::BorderFocused => overrides.border_focused.as_deref(),
-            Self::SelectionBg => overrides.selection_bg.as_deref(),
-            Self::SelectionFg => overrides.selection_fg.as_deref(),
-            Self::ScrollbarTrack => overrides.scrollbar_track.as_deref(),
-            Self::ScrollbarThumb => overrides.scrollbar_thumb.as_deref(),
-        }
-    }
-
-    /// Set an override value in ThemeColorOverrides.
-    pub fn set(self, overrides: &mut style_system::ThemeColorOverrides, value: Option<String>) {
-        match self {
-            Self::Primary => overrides.primary = value,
-            Self::Secondary => overrides.secondary = value,
-            Self::Accent => overrides.accent = value,
-            Self::Background => overrides.background = value,
-            Self::Surface => overrides.surface = value,
-            Self::Overlay => overrides.overlay = value,
-            Self::Text => overrides.text = value,
-            Self::TextMuted => overrides.text_muted = value,
-            Self::TextSubtle => overrides.text_subtle = value,
-            Self::Success => overrides.success = value,
-            Self::Warning => overrides.warning = value,
-            Self::Error => overrides.error = value,
-            Self::Info => overrides.info = value,
-            Self::Border => overrides.border = value,
-            Self::BorderFocused => overrides.border_focused = value,
-            Self::SelectionBg => overrides.selection_bg = value,
-            Self::SelectionFg => overrides.selection_fg = value,
-            Self::ScrollbarTrack => overrides.scrollbar_track = value,
-            Self::ScrollbarThumb => overrides.scrollbar_thumb = value,
-        }
-    }
-
-    /// Get the resolved color from the current theme.
-    pub fn resolved_color(self, resolved: ftui::ResolvedTheme) -> ftui::Color {
-        match self {
-            Self::Primary => resolved.primary,
-            Self::Secondary => resolved.secondary,
-            Self::Accent => resolved.accent,
-            Self::Background => resolved.background,
-            Self::Surface => resolved.surface,
-            Self::Overlay => resolved.overlay,
-            Self::Text => resolved.text,
-            Self::TextMuted => resolved.text_muted,
-            Self::TextSubtle => resolved.text_subtle,
-            Self::Success => resolved.success,
-            Self::Warning => resolved.warning,
-            Self::Error => resolved.error,
-            Self::Info => resolved.info,
-            Self::Border => resolved.border,
-            Self::BorderFocused => resolved.border_focused,
-            Self::SelectionBg => resolved.selection_bg,
-            Self::SelectionFg => resolved.selection_fg,
-            Self::ScrollbarTrack => resolved.scrollbar_track,
-            Self::ScrollbarThumb => resolved.scrollbar_thumb,
-        }
-    }
-}
-
-/// State for the interactive theme editor modal.
-#[derive(Clone, Debug)]
-pub struct ThemeEditorState {
-    /// Working copy of color overrides being edited.
-    pub overrides: style_system::ThemeColorOverrides,
-    /// Base preset the editor started from.
-    pub base_preset: style_system::UiThemePreset,
-    /// Currently selected color slot index.
-    pub selected: usize,
-    /// Whether we're editing a color value (hex input mode).
-    pub editing: bool,
-    /// Hex input buffer when editing a color.
-    pub hex_buffer: String,
-    /// Scroll offset for the color list.
-    pub scroll: usize,
-    /// Cached contrast report for the current config.
-    pub contrast_warnings: Vec<String>,
-}
-
-impl ThemeEditorState {
-    pub fn new(preset: style_system::UiThemePreset) -> Self {
-        Self {
-            overrides: style_system::ThemeColorOverrides::default(),
-            base_preset: preset,
-            selected: 0,
-            editing: false,
-            hex_buffer: String::new(),
-            scroll: 0,
-            contrast_warnings: Vec::new(),
-        }
-    }
-
-    /// Create a new editor state, loading from a saved config if one exists.
-    ///
-    /// In test builds, skips disk I/O and returns a fresh state.
-    #[allow(unused_mut)]
-    pub fn from_data_dir(preset: style_system::UiThemePreset, data_dir: &Path) -> Self {
-        let mut state = Self::new(preset);
-        #[cfg(test)]
-        let _ = data_dir;
-        #[cfg(not(test))]
-        {
-            let cfg_path = data_dir.join("theme.json");
-            if let Ok(cfg) = style_system::ThemeConfig::load_from_path(&cfg_path) {
-                if let Some(p) = cfg.base_preset {
-                    state.base_preset = p;
-                }
-                state.overrides = cfg.colors;
-            }
-        }
-        state
-    }
-
-    #[allow(unused_mut)]
-    pub fn from_disk(preset: style_system::UiThemePreset) -> Self {
-        let data_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("coding-agent-search");
-        Self::from_data_dir(preset, &data_dir)
-    }
-
-    /// Get the currently selected color slot.
-    pub fn selected_slot(&self) -> ThemeColorSlot {
-        ThemeColorSlot::ALL[self.selected.min(ThemeColorSlot::ALL.len() - 1)]
-    }
-
-    /// Build a ThemeConfig from the current editor state.
-    pub fn to_config(&self) -> style_system::ThemeConfig {
-        style_system::ThemeConfig {
-            version: style_system::THEME_CONFIG_VERSION,
-            base_preset: Some(self.base_preset),
-            colors: self.overrides.clone(),
-        }
-    }
-
-    /// Refresh the contrast warnings from the current theme.
-    pub fn refresh_contrast(&mut self, styles: &StyleContext) {
-        let report = styles.contrast_report();
-        self.contrast_warnings = report
-            .checks
-            .iter()
-            .filter(|c| !c.passes)
-            .map(|c| format!("{}: {:.1}:1 (need {:.1}:1)", c.pair, c.ratio, c.minimum))
-            .collect();
-    }
-}
-
 /// Inline find state within the detail pane.
 #[derive(Clone, Debug, Default)]
 pub struct DetailFindState {
@@ -2854,7 +2619,13 @@ impl ResultItem {
 }
 
 impl RenderItem for ResultItem {
-    fn render(&self, area: Rect, frame: &mut super::ftui_adapter::Frame, selected: bool) {
+    fn render(
+        &self,
+        area: Rect,
+        frame: &mut super::ftui_adapter::Frame,
+        selected: bool,
+        _skip_rows: u16,
+    ) {
         let hit = &self.hit;
         let location_full = self.location_label();
         let title = if hit.title.trim().is_empty() {
@@ -4168,12 +3939,6 @@ pub struct CassApp {
     /// Whether to redact absolute paths when saving macros.
     pub macro_redact_paths: bool,
 
-    // -- Theme editor -----------------------------------------------------
-    /// Whether the theme editor modal is open.
-    pub show_theme_editor: bool,
-    /// Theme editor state (overrides, selected slot, hex input).
-    pub theme_editor: Option<ThemeEditorState>,
-
     // -- Inspector / debug overlays ---------------------------------------
     /// Whether the inspector overlay is visible.
     pub show_inspector: bool,
@@ -4270,7 +4035,7 @@ impl Default for CassApp {
             collapsed_tools: HashSet::new(),
             show_stats_bar: true,
             theme_dark: true,
-            theme_preset: UiThemePreset::Dark,
+            theme_preset: UiThemePreset::TokyoNight,
             style_options: StyleOptions::from_env(),
             theme_config: None,
             fancy_borders: true,
@@ -4362,8 +4127,6 @@ impl Default for CassApp {
             macro_recorder: None,
             macro_playback: None,
             macro_redact_paths: false,
-            show_theme_editor: false,
-            theme_editor: None,
             show_inspector: false,
             inspector_tab: InspectorTab::default(),
             inspector_state: InspectorState::default(),
@@ -4390,7 +4153,10 @@ impl CassApp {
     fn refresh_theme_config_from_data_dir(&mut self) {
         self.theme_config = None;
         self.theme_preset = self.style_options.preset;
-        self.theme_dark = !matches!(self.theme_preset, UiThemePreset::Light);
+        self.theme_dark = !matches!(
+            self.theme_preset,
+            UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+        );
         self.style_options.preset = self.theme_preset;
         self.style_options.dark_mode = self.theme_dark;
 
@@ -4405,7 +4171,10 @@ impl CassApp {
                     if let Some(preset) = config.base_preset {
                         self.theme_preset = preset;
                         self.style_options.preset = preset;
-                        self.theme_dark = !matches!(preset, UiThemePreset::Light);
+                        self.theme_dark = !matches!(
+                            preset,
+                            UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+                        );
                         self.style_options.dark_mode = self.theme_dark;
                     }
                     self.theme_config = Some(config);
@@ -4554,7 +4323,6 @@ impl CassApp {
         options.dark_mode = self.theme_dark;
         if let Some(config) = &self.theme_config {
             StyleContext::from_options_with_theme_config(options, config)
-                .unwrap_or_else(|_| StyleContext::from_options(options))
         } else {
             StyleContext::from_options(options)
         }
@@ -8558,146 +8326,6 @@ impl CassApp {
         }
     }
 
-    /// Render the theme editor modal (centered, with color slots and contrast report).
-    fn render_theme_editor_overlay(
-        &self,
-        frame: &mut super::ftui_adapter::Frame,
-        area: Rect,
-        styles: &StyleContext,
-    ) {
-        let Some(editor) = self.theme_editor.as_ref() else {
-            return;
-        };
-
-        let popup_w = 60u16.min(area.width.saturating_sub(4));
-        let popup_h = (ThemeColorSlot::ALL.len() as u16 + 8).min(area.height.saturating_sub(4));
-        if popup_w < 30 || popup_h < 10 {
-            return;
-        }
-
-        let px = area.x + (area.width.saturating_sub(popup_w)) / 2;
-        let py = area.y + (area.height.saturating_sub(popup_h)) / 2;
-        let popup_area = Rect::new(px, py, popup_w, popup_h);
-
-        let bg_style = styles.style(style_system::STYLE_PANE_BASE);
-        let border_style = styles.style(style_system::STYLE_PANE_FOCUSED);
-        let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
-        let primary_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
-        let warn_style = styles.style(style_system::STYLE_STATUS_WARNING);
-        let selected_style = styles.style(style_system::STYLE_RESULT_ROW_SELECTED);
-
-        Block::new().style(bg_style).render(popup_area, frame);
-
-        let title = format!(
-            " Theme Editor [{}] (Ctrl+Shift+T) ",
-            editor.base_preset.name()
-        );
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .title(&title)
-            .title_alignment(Alignment::Left)
-            .style(border_style);
-        let inner = block.inner(popup_area);
-        block.render(popup_area, frame);
-
-        if inner.is_empty() {
-            return;
-        }
-
-        let mut y = inner.y;
-        let max_y = inner.y + inner.height;
-
-        // Header line
-        if y < max_y {
-            let header = format!(" {:14} {:9} {:7}", "Slot", "Override", "Resolved");
-            Paragraph::new(&*header)
-                .style(muted_style)
-                .render(Rect::new(inner.x, y, inner.width, 1), frame);
-            y += 1;
-        }
-
-        // Color slot rows
-        let visible_start = editor.scroll;
-        let visible_count = (max_y.saturating_sub(y).saturating_sub(3)) as usize;
-
-        for (i, slot) in ThemeColorSlot::ALL
-            .iter()
-            .enumerate()
-            .skip(visible_start)
-            .take(visible_count)
-        {
-            if y >= max_y.saturating_sub(3) {
-                break;
-            }
-
-            let is_selected = i == editor.selected;
-            let override_val = slot.get(&editor.overrides);
-            let resolved = slot.resolved_color(styles.resolved);
-            let rgb = resolved.to_rgb();
-            let resolved_hex = format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b);
-
-            let pointer = if is_selected { ">" } else { " " };
-            let override_str = override_val.unwrap_or("-");
-
-            let row_text = if is_selected && editor.editing {
-                format!("{pointer} {:14} #{:<8}", slot.label(), editor.hex_buffer)
-            } else {
-                format!(
-                    "{pointer} {:14} {:9} {}",
-                    slot.label(),
-                    override_str,
-                    resolved_hex
-                )
-            };
-
-            let row_style = if is_selected {
-                selected_style
-            } else {
-                primary_style
-            };
-            let row_area = Rect::new(inner.x, y, inner.width, 1);
-            Paragraph::new(&*row_text)
-                .style(row_style)
-                .render(row_area, frame);
-
-            // Color swatch at end of row (3 chars wide)
-            if inner.width > 40 {
-                let swatch_x = inner.x + inner.width - 4;
-                let swatch_area = Rect::new(swatch_x, y, 3, 1);
-                let swatch_style =
-                    ftui::Style::default().bg(ftui::PackedRgba::rgb(rgb.r, rgb.g, rgb.b));
-                Paragraph::new("   ")
-                    .style(swatch_style)
-                    .render(swatch_area, frame);
-            }
-
-            y += 1;
-        }
-
-        // Contrast warnings
-        if !editor.contrast_warnings.is_empty() && y < max_y.saturating_sub(1) {
-            let warn_text = format!("! {} contrast warning(s)", editor.contrast_warnings.len());
-            Paragraph::new(&*warn_text)
-                .style(warn_style)
-                .render(Rect::new(inner.x, y, inner.width, 1), frame);
-            y += 1;
-        }
-
-        // Footer hints
-        let hint = if editor.editing {
-            "Enter:apply  Esc:cancel"
-        } else {
-            "j/k:nav  Enter:edit  Del:clear  p:preset  s:save  Esc:close"
-        };
-        let hint_y = max_y.saturating_sub(1);
-        if hint_y > y {
-            Paragraph::new(hint)
-                .style(muted_style)
-                .render(Rect::new(inner.x, hint_y, inner.width, 1), frame);
-        }
-    }
-
     /// Render the palette evidence ledger panel below the palette overlay.
     fn render_palette_evidence(
         &self,
@@ -9543,8 +9171,9 @@ impl CassApp {
                     shortcuts::RANKING
                 ),
                 format!(
-                    "{} cycle themes (Dark → Light → Catppuccin → Dracula → Nord → High Contrast) | {} toggle border style",
+                    "{}/{} cycle 18 themes (Tokyo Night → Daylight → Catppuccin → … → High Contrast) | {} toggle border style",
                     shortcuts::THEME,
+                    shortcuts::THEME_PREV,
                     shortcuts::BORDERS
                 ),
             ],
@@ -9620,7 +9249,7 @@ impl CassApp {
             &[
                 ("Alt+= / Alt+-", "Increase/decrease pane items"),
                 ("Ctrl+D", "Cycle density mode (compact/cozy/spacious)"),
-                ("F2", "Cycle theme preset"),
+                ("F2/Shift+F2", "Next/prev theme"),
                 ("Ctrl+B", "Toggle border style"),
             ],
         );
@@ -10730,6 +10359,8 @@ pub enum CassMsg {
     DensityModeCycled,
     /// Cycle through all built-in theme presets.
     ThemeToggled,
+    /// Cycle to the previous theme preset (Shift+F2).
+    ThemePreviousToggled,
 
     // -- Navigation -------------------------------------------------------
     /// Move selection in the results pane.
@@ -10868,28 +10499,6 @@ pub enum CassMsg {
     PaletteBenchToggled,
     /// Cycle the palette match-type filter (F9 while palette is open).
     PaletteMatchModeCycled,
-
-    // -- Theme editor -----------------------------------------------------
-    /// Open the interactive theme editor modal.
-    ThemeEditorOpened,
-    /// Close the theme editor (discarding unsaved changes).
-    ThemeEditorClosed,
-    /// Move selection in the theme editor color list.
-    ThemeEditorMoved { delta: i32 },
-    /// Start editing the selected color slot (Enter).
-    ThemeEditorEditStarted,
-    /// Commit the hex input for the selected color slot (Enter while editing).
-    ThemeEditorEditCommitted,
-    /// Cancel hex editing (Esc while editing).
-    ThemeEditorEditCancelled,
-    /// Update the hex input buffer.
-    ThemeEditorHexChanged(String),
-    /// Clear the override for the selected slot (Del).
-    ThemeEditorSlotCleared,
-    /// Cycle the base preset in the editor.
-    ThemeEditorPresetCycled,
-    /// Export/save the theme config to disk.
-    ThemeEditorExported,
 
     // -- Inspector overlay ------------------------------------------------
     /// Toggle the inspector debug overlay (Ctrl+Shift+I).
@@ -11888,10 +11497,8 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::Char('H') if alt => CassMsg::HelpToggled,
 
                     // -- Theme ----------------------------------------------------
+                    KeyCode::F(2) if shift => CassMsg::ThemePreviousToggled,
                     KeyCode::F(2) => CassMsg::ThemeToggled,
-                    KeyCode::Char('t') if ctrl && !shift => CassMsg::ThemeEditorOpened,
-                    KeyCode::Char('t') if alt => CassMsg::ThemeEditorOpened,
-                    KeyCode::Char('T') if alt => CassMsg::ThemeEditorOpened,
 
                     // -- Filters --------------------------------------------------
                     KeyCode::F(3) if shift => CassMsg::FilterAgentSet(HashSet::new()),
@@ -11961,10 +11568,6 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     // -- Clear / reset --------------------------------------------
                     KeyCode::Delete if ctrl && shift => CassMsg::StateResetRequested,
                     KeyCode::Delete if ctrl => CassMsg::FiltersClearAll,
-
-                    // -- Theme editor -------------------------------------------------
-                    KeyCode::Char('t') if ctrl && shift => CassMsg::ThemeEditorOpened,
-                    KeyCode::Char('T') if ctrl => CassMsg::ThemeEditorOpened,
 
                     // -- Sources management -----------------------------------------
                     KeyCode::Char('s') if ctrl && shift => CassMsg::SourcesEntered,
@@ -12249,79 +11852,6 @@ impl super::ftui_adapter::Model for CassApp {
                     return self.update(CassMsg::UpdateDismissed);
                 }
                 _ => {}
-            }
-        }
-
-        // ── Theme editor modal intercept ────────────────────────────
-        if self.show_theme_editor
-            && let Some(editor) = self.theme_editor.as_ref()
-        {
-            let is_editing = editor.editing;
-            if is_editing {
-                // In hex editing mode: intercept text and confirm/cancel
-                match &msg {
-                    CassMsg::QueryChanged(text) => {
-                        if let Some(ed) = self.theme_editor.as_mut() {
-                            if text.is_empty() {
-                                ed.hex_buffer.pop();
-                            } else {
-                                ed.hex_buffer.push_str(text);
-                            }
-                        }
-                        return ftui::Cmd::none();
-                    }
-                    CassMsg::DetailOpened | CassMsg::QuerySubmitted => {
-                        return self.update(CassMsg::ThemeEditorEditCommitted);
-                    }
-                    CassMsg::QuitRequested => {
-                        return self.update(CassMsg::ThemeEditorEditCancelled);
-                    }
-                    // Let direct theme-editor messages through to the handler
-                    CassMsg::ThemeEditorEditCommitted
-                    | CassMsg::ThemeEditorEditCancelled
-                    | CassMsg::ThemeEditorHexChanged(_)
-                    | CassMsg::ThemeEditorClosed => {}
-                    _ => return ftui::Cmd::none(),
-                }
-            } else {
-                // In navigation mode: intercept nav and action keys
-                match &msg {
-                    CassMsg::SelectionMoved { delta } => {
-                        return self.update(CassMsg::ThemeEditorMoved { delta: *delta });
-                    }
-                    CassMsg::CursorMoved { delta } => {
-                        return self.update(CassMsg::ThemeEditorMoved { delta: *delta });
-                    }
-                    CassMsg::DetailOpened | CassMsg::QuerySubmitted => {
-                        return self.update(CassMsg::ThemeEditorEditStarted);
-                    }
-                    CassMsg::QuitRequested => {
-                        return self.update(CassMsg::ThemeEditorClosed);
-                    }
-                    CassMsg::QueryChanged(text) => match text.as_str() {
-                        "p" => return self.update(CassMsg::ThemeEditorPresetCycled),
-                        "s" => return self.update(CassMsg::ThemeEditorExported),
-                        "j" => return self.update(CassMsg::ThemeEditorMoved { delta: 1 }),
-                        "k" => return self.update(CassMsg::ThemeEditorMoved { delta: -1 }),
-                        _ => return ftui::Cmd::none(),
-                    },
-                    CassMsg::FiltersClearAll => {
-                        return self.update(CassMsg::ThemeEditorSlotCleared);
-                    }
-                    CassMsg::ThemeEditorOpened
-                    | CassMsg::ThemeEditorClosed
-                    | CassMsg::ThemeEditorMoved { .. }
-                    | CassMsg::ThemeEditorEditStarted
-                    | CassMsg::ThemeEditorEditCommitted
-                    | CassMsg::ThemeEditorEditCancelled
-                    | CassMsg::ThemeEditorHexChanged(_)
-                    | CassMsg::ThemeEditorPresetCycled
-                    | CassMsg::ThemeEditorExported
-                    | CassMsg::ThemeEditorSlotCleared => {
-                        // Let these through to the handler
-                    }
-                    _ => return ftui::Cmd::none(),
-                }
             }
         }
 
@@ -13446,7 +12976,26 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::ThemeToggled => {
                 self.theme_preset = self.theme_preset.next();
-                self.theme_dark = !matches!(self.theme_preset, UiThemePreset::Light);
+                self.theme_dark = !matches!(
+                    self.theme_preset,
+                    UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+                );
+                self.style_options.dark_mode = self.theme_dark;
+                self.style_options.preset = self.theme_preset;
+                self.status = format!("Theme: {}", self.theme_preset.name());
+                if let Err(err) = self.persist_theme_selection() {
+                    self.status =
+                        format!("Theme: {} (not persisted: {err})", self.theme_preset.name());
+                }
+                self.dirty_since = Some(Instant::now());
+                ftui::Cmd::none()
+            }
+            CassMsg::ThemePreviousToggled => {
+                self.theme_preset = self.theme_preset.previous();
+                self.theme_dark = !matches!(
+                    self.theme_preset,
+                    UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+                );
                 self.style_options.dark_mode = self.theme_dark;
                 self.style_options.preset = self.theme_preset;
                 self.status = format!("Theme: {}", self.theme_preset.name());
@@ -14538,118 +14087,6 @@ impl super::ftui_adapter::Model for CassApp {
                 self.palette_result_to_cmd(result)
             }
 
-            // -- Help overlay -------------------------------------------------
-            // -- Theme editor -------------------------------------------------
-            CassMsg::ThemeEditorOpened => {
-                if !self.show_theme_editor {
-                    self.show_theme_editor = true;
-                    self.theme_editor = Some(ThemeEditorState::from_data_dir(
-                        self.theme_preset,
-                        &self.data_dir,
-                    ));
-                }
-                ftui::Cmd::none()
-            }
-            CassMsg::ThemeEditorClosed => {
-                self.show_theme_editor = false;
-                self.theme_editor = None;
-                ftui::Cmd::none()
-            }
-            CassMsg::ThemeEditorMoved { delta } => {
-                if let Some(editor) = self.theme_editor.as_mut()
-                    && !editor.editing
-                {
-                    let n = ThemeColorSlot::ALL.len();
-                    if delta > 0 {
-                        editor.selected = (editor.selected + 1).min(n - 1);
-                    } else if delta < 0 {
-                        editor.selected = editor.selected.saturating_sub(1);
-                    }
-                }
-                ftui::Cmd::none()
-            }
-            CassMsg::ThemeEditorEditStarted => {
-                if let Some(editor) = self.theme_editor.as_mut() {
-                    editor.editing = true;
-                    let slot = editor.selected_slot();
-                    editor.hex_buffer = slot.get(&editor.overrides).unwrap_or("").to_string();
-                }
-                ftui::Cmd::none()
-            }
-            CassMsg::ThemeEditorEditCommitted => {
-                if let Some(editor) = self.theme_editor.as_mut()
-                    && editor.editing
-                {
-                    let hex = editor.hex_buffer.trim().to_string();
-                    let slot = editor.selected_slot();
-                    if hex.is_empty() {
-                        slot.set(&mut editor.overrides, None);
-                    } else {
-                        slot.set(&mut editor.overrides, Some(hex));
-                    }
-                    editor.editing = false;
-                    editor.hex_buffer.clear();
-
-                    // Live-apply the config to preview
-                    let config = editor.to_config();
-                    if let Ok(ctx) =
-                        StyleContext::from_options_with_theme_config(self.style_options, &config)
-                    {
-                        editor.refresh_contrast(&ctx);
-                    }
-                }
-                ftui::Cmd::none()
-            }
-            CassMsg::ThemeEditorEditCancelled => {
-                if let Some(editor) = self.theme_editor.as_mut() {
-                    editor.editing = false;
-                    editor.hex_buffer.clear();
-                }
-                ftui::Cmd::none()
-            }
-            CassMsg::ThemeEditorHexChanged(text) => {
-                if let Some(editor) = self.theme_editor.as_mut()
-                    && editor.editing
-                {
-                    editor.hex_buffer = text;
-                }
-                ftui::Cmd::none()
-            }
-            CassMsg::ThemeEditorSlotCleared => {
-                if let Some(editor) = self.theme_editor.as_mut() {
-                    let slot = editor.selected_slot();
-                    slot.set(&mut editor.overrides, None);
-                }
-                ftui::Cmd::none()
-            }
-            CassMsg::ThemeEditorPresetCycled => {
-                if let Some(editor) = self.theme_editor.as_mut() {
-                    editor.base_preset = editor.base_preset.next();
-                }
-                ftui::Cmd::none()
-            }
-            CassMsg::ThemeEditorExported => {
-                if let Some(editor) = self.theme_editor.as_ref() {
-                    let config = editor.to_config();
-                    let path = self.data_dir.join("theme.json");
-                    match config.save_to_path(&path) {
-                        Ok(()) => {
-                            // Apply saved theme to the live UI.
-                            self.theme_preset = editor.base_preset;
-                            self.style_options.preset = editor.base_preset;
-                            self.theme_dark = !matches!(editor.base_preset, UiThemePreset::Light);
-                            self.style_options.dark_mode = self.theme_dark;
-                            self.theme_config = Some(config);
-                            self.status = format!("Theme saved to {}", path.display());
-                        }
-                        Err(e) => {
-                            self.status = format!("Failed to save theme: {e}");
-                        }
-                    }
-                }
-                ftui::Cmd::none()
-            }
-
             // -- Inspector overlay -----------------------------------------
             CassMsg::InspectorToggled => {
                 self.show_inspector = !self.show_inspector;
@@ -15461,21 +14898,24 @@ impl super::ftui_adapter::Model for CassApp {
                 if let Some(config) = self.theme_config.as_ref() {
                     if let Some(preset) = config.base_preset {
                         self.theme_preset = preset;
-                        self.theme_dark = !matches!(preset, UiThemePreset::Light);
+                        self.theme_dark = !matches!(
+                            preset,
+                            UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+                        );
                     } else {
                         self.theme_dark = state.theme_dark;
                         self.theme_preset = if self.theme_dark {
-                            UiThemePreset::Dark
+                            UiThemePreset::TokyoNight
                         } else {
-                            UiThemePreset::Light
+                            UiThemePreset::Daylight
                         };
                     }
                 } else {
                     self.theme_dark = state.theme_dark;
                     self.theme_preset = if self.theme_dark {
-                        UiThemePreset::Dark
+                        UiThemePreset::TokyoNight
                     } else {
-                        UiThemePreset::Light
+                        UiThemePreset::Daylight
                     };
                 }
                 self.style_options.dark_mode = self.theme_dark;
@@ -15629,7 +15069,6 @@ impl super::ftui_adapter::Model for CassApp {
                     || self.show_saved_views_modal
                     || self.show_detail_modal
                     || self.show_help
-                    || self.show_theme_editor
                     || self.show_inspector
                     || self.source_filter_menu_open
                     || self.command_palette.is_visible();
@@ -16664,11 +16103,6 @@ impl super::ftui_adapter::Model for CassApp {
                 if self.show_consent_dialog {
                     self.show_consent_dialog = false;
                     self.focus_manager.pop_trap();
-                    return ftui::Cmd::none();
-                }
-                if self.show_theme_editor {
-                    self.show_theme_editor = false;
-                    self.theme_editor = None;
                     return ftui::Cmd::none();
                 }
                 if self.show_inspector {
@@ -17865,7 +17299,6 @@ impl super::ftui_adapter::Model for CassApp {
             || self.show_saved_views_modal
             || self.show_detail_modal
             || self.show_help
-            || self.show_theme_editor
             || self.show_inspector
             || self.show_consent_dialog
             || self.source_filter_menu_open
@@ -17979,11 +17412,6 @@ impl super::ftui_adapter::Model for CassApp {
         // ── Help overlay ─────────────────────────────────────────────
         if self.show_help {
             self.render_help_overlay(frame, area, &styles);
-        }
-
-        // ── Theme editor overlay ─────────────────────────────────────
-        if self.show_theme_editor {
-            self.render_theme_editor_overlay(frame, area, &styles);
         }
 
         // ── Inspector overlay ────────────────────────────────────────
@@ -19137,7 +18565,7 @@ mod tests {
         assert_eq!(app.context_window, ContextWindow::Medium);
         assert_eq!(app.density_mode, DensityMode::Cozy);
         assert!(app.theme_dark);
-        assert_eq!(app.theme_preset, UiThemePreset::Dark);
+        assert_eq!(app.theme_preset, UiThemePreset::TokyoNight);
         assert!(app.fancy_borders);
         assert!(!app.show_help);
         assert!(!app.show_detail_modal);
@@ -19403,15 +18831,6 @@ mod tests {
         let event = Event::Key(KeyEvent::new(KeyCode::Char('h')).with_modifiers(Modifiers::ALT));
 
         assert!(matches!(CassMsg::from(event), CassMsg::HelpToggled));
-    }
-
-    #[test]
-    fn event_mapping_alt_t_maps_to_theme_editor_opened() {
-        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
-
-        let event = Event::Key(KeyEvent::new(KeyCode::Char('t')).with_modifiers(Modifiers::ALT));
-
-        assert!(matches!(CassMsg::from(event), CassMsg::ThemeEditorOpened));
     }
 
     #[test]
@@ -19714,39 +19133,39 @@ mod tests {
         let _ = app.update(CassMsg::StateLoaded(Box::new(state)));
 
         assert!(!app.theme_dark);
-        assert_eq!(app.theme_preset, UiThemePreset::Light);
+        assert_eq!(app.theme_preset, UiThemePreset::Daylight);
         assert!(!app.style_options.dark_mode);
-        assert_eq!(app.style_options.preset, UiThemePreset::Light);
+        assert_eq!(app.style_options.preset, UiThemePreset::Daylight);
     }
 
     #[test]
     fn refresh_theme_config_respects_light_startup_preset() {
         let mut app = CassApp::default();
-        app.style_options.preset = UiThemePreset::Light;
+        app.style_options.preset = UiThemePreset::Daylight;
         app.style_options.dark_mode = false;
 
         app.refresh_theme_config_from_data_dir();
 
         assert!(!app.theme_dark);
-        assert_eq!(app.theme_preset, UiThemePreset::Light);
+        assert_eq!(app.theme_preset, UiThemePreset::Daylight);
         assert!(!app.style_options.dark_mode);
-        assert_eq!(app.style_options.preset, UiThemePreset::Light);
+        assert_eq!(app.style_options.preset, UiThemePreset::Daylight);
     }
 
     #[test]
     fn resolved_style_context_honors_theme_config_light_preset() {
         let mut app = CassApp::default();
         app.theme_dark = true;
-        app.theme_preset = UiThemePreset::Dark;
+        app.theme_preset = UiThemePreset::TokyoNight;
         app.style_options.dark_mode = true;
-        app.style_options.preset = UiThemePreset::Dark;
+        app.style_options.preset = UiThemePreset::TokyoNight;
         app.theme_config = Some(style_system::ThemeConfig {
-            base_preset: Some(UiThemePreset::Light),
+            base_preset: Some(UiThemePreset::Daylight),
             ..style_system::ThemeConfig::default()
         });
 
         let styles = app.resolved_style_context();
-        assert_eq!(styles.options.preset, UiThemePreset::Light);
+        assert_eq!(styles.options.preset, UiThemePreset::Daylight);
         assert!(!styles.options.dark_mode);
     }
 
@@ -22442,7 +21861,7 @@ mod tests {
         use ftui::render::budget::DegradationLevel;
         use ftui_harness::buffer_to_text;
 
-        for preset in [UiThemePreset::Dark, UiThemePreset::Light] {
+        for preset in [UiThemePreset::TokyoNight, UiThemePreset::Daylight] {
             for density in [
                 DensityMode::Compact,
                 DensityMode::Cozy,
@@ -22451,7 +21870,10 @@ mod tests {
                 let mut app = app_with_hits(6);
                 app.density_mode = density;
                 app.theme_preset = preset;
-                app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                app.theme_dark = !matches!(
+                    preset,
+                    UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+                );
                 app.style_options.preset = preset;
                 app.style_options.dark_mode = app.theme_dark;
 
@@ -22667,8 +22089,8 @@ mod tests {
         let _ = app.update(CassMsg::ThemeToggled);
         assert!(!app.theme_dark, "should be light after toggle");
         assert!(
-            app.status.contains("Light"),
-            "status should report Light theme, got: {}",
+            app.status.contains("Daylight"),
+            "status should report Daylight theme, got: {}",
             app.status
         );
     }
@@ -22832,7 +22254,11 @@ mod tests {
         use ftui::ColorProfile;
         StyleContext::from_options(StyleOptions {
             preset,
-            dark_mode: !matches!(preset, crate::ui::style_system::UiThemePreset::Light),
+            dark_mode: !matches!(
+                preset,
+                crate::ui::style_system::UiThemePreset::Daylight
+                    | crate::ui::style_system::UiThemePreset::SolarizedLight
+            ),
             color_profile: ColorProfile::TrueColor,
             no_color: false,
             no_icons: false,
@@ -22846,7 +22272,7 @@ mod tests {
         use crate::ui::style_system::{
             STYLE_SCORE_HIGH, STYLE_SCORE_LOW, STYLE_SCORE_MID, UiThemePreset,
         };
-        let ctx = style_ctx_for_preset(UiThemePreset::Dark);
+        let ctx = style_ctx_for_preset(UiThemePreset::TokyoNight);
 
         // score_style(score) routes based on thresholds: >=8.0 → HIGH, >=5.0 → MID, <5.0 → LOW
         let high = ctx.score_style(9.5);
@@ -22948,7 +22374,7 @@ mod tests {
     #[test]
     fn selected_row_has_distinct_style_from_default() {
         use crate::ui::style_system::{STYLE_RESULT_ROW_SELECTED, UiThemePreset};
-        for preset in [UiThemePreset::Dark, UiThemePreset::Light] {
+        for preset in [UiThemePreset::TokyoNight, UiThemePreset::Daylight] {
             let ctx = style_ctx_for_preset(preset);
             let selected = ctx.style(STYLE_RESULT_ROW_SELECTED);
             let default = ftui::Style::default();
@@ -24469,8 +23895,8 @@ mod tests {
         let mut hit = make_test_hit();
         hit.content = "# Themed Heading\n\nSome **bold** text".to_string();
         let presets = [
-            (UiThemePreset::Dark, true),
-            (UiThemePreset::Light, false),
+            (UiThemePreset::TokyoNight, true),
+            (UiThemePreset::Daylight, false),
             (UiThemePreset::HighContrast, true),
             (UiThemePreset::Catppuccin, true),
         ];
@@ -24640,8 +24066,8 @@ mod tests {
         .repeat(24);
 
         for (preset, dark_mode) in [
-            (UiThemePreset::Dark, true),
-            (UiThemePreset::Light, false),
+            (UiThemePreset::TokyoNight, true),
+            (UiThemePreset::Daylight, false),
             (UiThemePreset::HighContrast, true),
             (UiThemePreset::Catppuccin, true),
         ] {
@@ -26602,7 +26028,7 @@ mod tests {
             ftui::render::budget::DegradationLevel::Full,
         ));
         assert!(
-            wide_text.contains("Dark") || wide_text.contains("Light"),
+            wide_text.contains("Tokyo Night") || wide_text.contains("Daylight"),
             "wide search title should show theme preset name"
         );
 
@@ -26623,8 +26049,8 @@ mod tests {
     fn search_title_and_caret_render_across_core_presets() {
         use ftui_harness::buffer_to_text;
         let presets = [
-            UiThemePreset::Dark,
-            UiThemePreset::Light,
+            UiThemePreset::TokyoNight,
+            UiThemePreset::Daylight,
             UiThemePreset::HighContrast,
         ];
 
@@ -26632,7 +26058,10 @@ mod tests {
             let mut app = CassApp::default();
             app.theme_preset = preset;
             app.style_options.preset = preset;
-            app.theme_dark = !matches!(preset, UiThemePreset::Light);
+            app.theme_dark = !matches!(
+                preset,
+                UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+            );
             app.style_options.dark_mode = app.theme_dark;
 
             let medium_text = buffer_to_text(&render_at_degradation(
@@ -31459,7 +30888,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         // Switch to light
         let _ = app.update(CassMsg::ThemeToggled);
         let mut light_options = StyleOptions::default();
-        light_options.preset = UiThemePreset::Light;
+        light_options.preset = UiThemePreset::Daylight;
         let light_styles = StyleContext::from_options(light_options);
         let light_lines = app.build_messages_lines(&hit, 120, &light_styles);
 
@@ -32055,7 +31484,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     fn help_build_lines_contains_all_sections() {
         let app = test_app();
         let styles = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             ..StyleOptions::default()
         });
         let lines = app.build_help_lines(&styles);
@@ -32089,7 +31518,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     fn help_build_lines_references_shortcuts() {
         let app = test_app();
         let styles = StyleContext::from_options(StyleOptions {
-            preset: UiThemePreset::Dark,
+            preset: UiThemePreset::TokyoNight,
             ..StyleOptions::default()
         });
         let lines = app.build_help_lines(&styles);
@@ -32776,299 +32205,6 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         });
         let msg = CassMsg::from(event);
         assert!(matches!(msg, CassMsg::InspectorToggled));
-    }
-
-    // =========================================================================
-    // Theme Editor Tests
-    // =========================================================================
-
-    #[test]
-    fn theme_editor_opens_and_closes() {
-        let mut app = CassApp::default();
-        assert!(!app.show_theme_editor);
-        assert!(app.theme_editor.is_none());
-
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-        assert!(app.show_theme_editor);
-        assert!(app.theme_editor.is_some());
-
-        let _ = app.update(CassMsg::ThemeEditorClosed);
-        assert!(!app.show_theme_editor);
-        assert!(app.theme_editor.is_none());
-    }
-
-    #[test]
-    fn theme_editor_navigation_moves_selection() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-
-        let editor = app.theme_editor.as_ref().unwrap();
-        assert_eq!(editor.selected, 0);
-
-        let _ = app.update(CassMsg::ThemeEditorMoved { delta: 1 });
-        assert_eq!(app.theme_editor.as_ref().unwrap().selected, 1);
-
-        let _ = app.update(CassMsg::ThemeEditorMoved { delta: 1 });
-        assert_eq!(app.theme_editor.as_ref().unwrap().selected, 2);
-
-        let _ = app.update(CassMsg::ThemeEditorMoved { delta: -1 });
-        assert_eq!(app.theme_editor.as_ref().unwrap().selected, 1);
-    }
-
-    #[test]
-    fn theme_editor_navigation_clamps_at_boundaries() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-
-        // At top, moving up stays at 0
-        let _ = app.update(CassMsg::ThemeEditorMoved { delta: -1 });
-        assert_eq!(app.theme_editor.as_ref().unwrap().selected, 0);
-
-        // Move to last slot
-        for _ in 0..30 {
-            let _ = app.update(CassMsg::ThemeEditorMoved { delta: 1 });
-        }
-        let n = ThemeColorSlot::ALL.len();
-        assert_eq!(app.theme_editor.as_ref().unwrap().selected, n - 1);
-    }
-
-    #[test]
-    fn theme_editor_navigation_blocked_while_editing() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-
-        let _ = app.update(CassMsg::ThemeEditorEditStarted);
-        assert!(app.theme_editor.as_ref().unwrap().editing);
-
-        // Moving while editing should be a no-op
-        let _ = app.update(CassMsg::ThemeEditorMoved { delta: 1 });
-        assert_eq!(app.theme_editor.as_ref().unwrap().selected, 0);
-    }
-
-    #[test]
-    fn theme_editor_edit_start_and_cancel() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-
-        let _ = app.update(CassMsg::ThemeEditorEditStarted);
-        assert!(app.theme_editor.as_ref().unwrap().editing);
-
-        let _ = app.update(CassMsg::ThemeEditorEditCancelled);
-        assert!(!app.theme_editor.as_ref().unwrap().editing);
-        assert!(app.theme_editor.as_ref().unwrap().hex_buffer.is_empty());
-    }
-
-    #[test]
-    fn theme_editor_edit_commit_sets_override() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-
-        // Start editing Primary (index 0)
-        let _ = app.update(CassMsg::ThemeEditorEditStarted);
-        let _ = app.update(CassMsg::ThemeEditorHexChanged("#ff0000".into()));
-        assert_eq!(app.theme_editor.as_ref().unwrap().hex_buffer, "#ff0000");
-
-        let _ = app.update(CassMsg::ThemeEditorEditCommitted);
-        let editor = app.theme_editor.as_ref().unwrap();
-        assert!(!editor.editing);
-        assert_eq!(editor.overrides.primary.as_deref(), Some("#ff0000"));
-    }
-
-    #[test]
-    fn theme_editor_edit_commit_empty_clears_override() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-
-        // First set a value
-        let _ = app.update(CassMsg::ThemeEditorEditStarted);
-        let _ = app.update(CassMsg::ThemeEditorHexChanged("#ff0000".into()));
-        let _ = app.update(CassMsg::ThemeEditorEditCommitted);
-
-        // Now commit with empty string to clear it
-        let _ = app.update(CassMsg::ThemeEditorEditStarted);
-        let _ = app.update(CassMsg::ThemeEditorHexChanged("".into()));
-        let _ = app.update(CassMsg::ThemeEditorEditCommitted);
-
-        let editor = app.theme_editor.as_ref().unwrap();
-        assert!(editor.overrides.primary.is_none());
-    }
-
-    #[test]
-    fn theme_editor_hex_change_only_when_editing() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-
-        // Not in editing mode — hex change should be ignored
-        let _ = app.update(CassMsg::ThemeEditorHexChanged("#aabbcc".into()));
-        assert!(app.theme_editor.as_ref().unwrap().hex_buffer.is_empty());
-    }
-
-    #[test]
-    fn theme_editor_slot_clear() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-
-        // Set a value first
-        let _ = app.update(CassMsg::ThemeEditorEditStarted);
-        let _ = app.update(CassMsg::ThemeEditorHexChanged("#00ff00".into()));
-        let _ = app.update(CassMsg::ThemeEditorEditCommitted);
-        assert!(
-            app.theme_editor
-                .as_ref()
-                .unwrap()
-                .overrides
-                .primary
-                .is_some()
-        );
-
-        // Clear it
-        let _ = app.update(CassMsg::ThemeEditorSlotCleared);
-        assert!(
-            app.theme_editor
-                .as_ref()
-                .unwrap()
-                .overrides
-                .primary
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn theme_editor_preset_cycling() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-
-        let initial = app.theme_editor.as_ref().unwrap().base_preset;
-        let _ = app.update(CassMsg::ThemeEditorPresetCycled);
-        let after = app.theme_editor.as_ref().unwrap().base_preset;
-        assert_ne!(initial, after);
-    }
-
-    #[test]
-    fn theme_editor_esc_closes() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-        assert!(app.show_theme_editor);
-
-        let _ = app.update(CassMsg::QuitRequested);
-        assert!(!app.show_theme_editor);
-    }
-
-    #[test]
-    fn theme_editor_off_by_default() {
-        let app = CassApp::default();
-        assert!(!app.show_theme_editor);
-        assert!(app.theme_editor.is_none());
-    }
-
-    #[test]
-    fn theme_editor_to_config_round_trip() {
-        let mut state = ThemeEditorState::new(style_system::UiThemePreset::default());
-        ThemeColorSlot::Accent.set(&mut state.overrides, Some("#abc123".into()));
-
-        let config = state.to_config();
-        assert_eq!(config.colors.accent.as_deref(), Some("#abc123"));
-        assert_eq!(config.base_preset, Some(state.base_preset));
-    }
-
-    #[test]
-    fn theme_color_slot_all_has_19_entries() {
-        assert_eq!(ThemeColorSlot::ALL.len(), 19);
-    }
-
-    #[test]
-    fn theme_color_slot_labels_are_unique() {
-        let labels: Vec<&str> = ThemeColorSlot::ALL.iter().map(|s| s.label()).collect();
-        let unique: HashSet<&str> = labels.iter().copied().collect();
-        assert_eq!(labels.len(), unique.len());
-    }
-
-    #[test]
-    fn theme_color_slot_get_set_round_trip() {
-        let mut overrides = style_system::ThemeColorOverrides::default();
-        for slot in &ThemeColorSlot::ALL {
-            assert!(slot.get(&overrides).is_none());
-            slot.set(&mut overrides, Some("#facade".into()));
-            assert_eq!(slot.get(&overrides), Some("#facade"));
-            slot.set(&mut overrides, None);
-            assert!(slot.get(&overrides).is_none());
-        }
-    }
-
-    #[test]
-    fn theme_editor_render_does_not_panic_small_terminal() {
-        use crate::ui::style_system::StyleOptions;
-        let app = CassApp::default();
-        let styles = StyleContext::from_options(StyleOptions::default());
-        let mut pool = ftui::GraphemePool::new();
-        let mut frame = ftui::Frame::new(10, 5, &mut pool);
-        let area = Rect::new(0, 0, 10, 5);
-        app.render_theme_editor_overlay(&mut frame, area, &styles);
-    }
-
-    #[test]
-    fn theme_editor_render_does_not_panic_normal_terminal() {
-        use crate::ui::style_system::StyleOptions;
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-        let styles = StyleContext::from_options(StyleOptions::default());
-        let mut pool = ftui::GraphemePool::new();
-        let mut frame = ftui::Frame::new(120, 40, &mut pool);
-        let area = Rect::new(0, 0, 120, 40);
-        app.render_theme_editor_overlay(&mut frame, area, &styles);
-    }
-
-    #[test]
-    fn ctrl_shift_t_maps_to_theme_editor_opened() {
-        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
-        let event = Event::Key(KeyEvent {
-            code: KeyCode::Char('t'),
-            modifiers: Modifiers::CTRL | Modifiers::SHIFT,
-            kind: ftui::KeyEventKind::Press,
-        });
-        let msg = CassMsg::from(event);
-        assert!(matches!(msg, CassMsg::ThemeEditorOpened));
-    }
-
-    #[test]
-    fn theme_editor_import_loads_saved_config() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let theme_dir = tmp.path().join("coding-agent-search");
-        std::fs::create_dir_all(&theme_dir).unwrap();
-        let theme_path = theme_dir.join("theme.json");
-        let config_json =
-            r##"{"version":1,"base_preset":"catppuccin","colors":{"accent":"#ff00ff"}}"##;
-        std::fs::write(&theme_path, config_json).unwrap();
-
-        // Load config directly (ThemeEditorOpened handler uses dirs::data_dir which
-        // we can't override in unit tests, so test the config loading logic directly).
-        let cfg = style_system::ThemeConfig::load_from_path(&theme_path).unwrap();
-        let mut state = ThemeEditorState::new(style_system::UiThemePreset::Dark);
-        if let Some(preset) = cfg.base_preset {
-            state.base_preset = preset;
-        }
-        state.overrides = cfg.colors;
-
-        assert_eq!(state.base_preset, style_system::UiThemePreset::Catppuccin);
-        assert_eq!(state.overrides.accent.as_deref(), Some("#ff00ff"));
-    }
-
-    #[test]
-    fn theme_editor_export_applies_preset_to_main() {
-        let mut app = CassApp::default();
-        let _ = app.update(CassMsg::ThemeEditorOpened);
-
-        // Cycle preset in editor
-        let _ = app.update(CassMsg::ThemeEditorPresetCycled);
-        let editor_preset = app.theme_editor.as_ref().unwrap().base_preset;
-        // The main preset should not change until export
-        assert_ne!(app.theme_preset, editor_preset);
-
-        // Export (will try to save to disk — may fail in test env, but
-        // we're testing the preset-apply logic, not file I/O).
-        let _ = app.update(CassMsg::ThemeEditorExported);
-        // After export, the main preset should match the editor preset.
-        assert_eq!(app.theme_preset, editor_preset);
     }
 
     // =========================================================================
@@ -36127,8 +35263,8 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         // Full + SimpleBorders: full hierarchy must be present
         // EssentialOnly: too aggressive for content assertions — tested as no-panic only
         let themes = [
-            UiThemePreset::Dark,
-            UiThemePreset::Light,
+            UiThemePreset::TokyoNight,
+            UiThemePreset::Daylight,
             UiThemePreset::HighContrast,
         ];
 
@@ -36136,7 +35272,10 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             for level in [DegradationLevel::Full, DegradationLevel::SimpleBorders] {
                 let mut app = app_with_hits(8);
                 app.theme_preset = preset;
-                app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                app.theme_dark = !matches!(
+                    preset,
+                    UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+                );
                 app.style_options.preset = preset;
                 app.style_options.dark_mode = app.theme_dark;
 
@@ -36167,7 +35306,10 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             {
                 let mut app = app_with_hits(8);
                 app.theme_preset = preset;
-                app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                app.theme_dark = !matches!(
+                    preset,
+                    UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+                );
                 app.style_options.preset = preset;
                 app.style_options.dark_mode = app.theme_dark;
                 let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::EssentialOnly);
@@ -36182,8 +35324,8 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         use ftui_harness::buffer_to_text;
 
         let themes = [
-            UiThemePreset::Dark,
-            UiThemePreset::Light,
+            UiThemePreset::TokyoNight,
+            UiThemePreset::Daylight,
             UiThemePreset::HighContrast,
         ];
 
@@ -36191,7 +35333,10 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             for level in [DegradationLevel::Full, DegradationLevel::SimpleBorders] {
                 let mut app = search_surface_fixture_app();
                 app.theme_preset = preset;
-                app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                app.theme_dark = !matches!(
+                    preset,
+                    UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+                );
                 app.style_options.preset = preset;
                 app.style_options.dark_mode = app.theme_dark;
 
@@ -36209,7 +35354,10 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             {
                 let mut app = search_surface_fixture_app();
                 app.theme_preset = preset;
-                app.theme_dark = !matches!(preset, UiThemePreset::Light);
+                app.theme_dark = !matches!(
+                    preset,
+                    UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+                );
                 app.style_options.preset = preset;
                 app.style_options.dark_mode = app.theme_dark;
                 let _buf = render_at_degradation(&app, 120, 24, DegradationLevel::EssentialOnly);
@@ -36227,7 +35375,10 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         for preset in UiThemePreset::all() {
             let mut app = app_with_hits(5);
             app.theme_preset = preset;
-            app.theme_dark = !matches!(preset, UiThemePreset::Light);
+            app.theme_dark = !matches!(
+                preset,
+                UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+            );
             app.style_options.preset = preset;
             app.style_options.dark_mode = app.theme_dark;
 
@@ -36250,9 +35401,9 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
 
         // Light theme at degraded levels — historically where regressions hide
         let mut app = app_with_hits(8);
-        app.theme_preset = UiThemePreset::Light;
+        app.theme_preset = UiThemePreset::Daylight;
         app.theme_dark = false;
-        app.style_options.preset = UiThemePreset::Light;
+        app.style_options.preset = UiThemePreset::Daylight;
         app.style_options.dark_mode = false;
 
         for level in [

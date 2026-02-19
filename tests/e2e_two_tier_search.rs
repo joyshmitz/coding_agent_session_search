@@ -49,7 +49,7 @@ impl coding_agent_search::search::daemon_client::DaemonClient for FixtureQuality
         _request_id: &str,
     ) -> Result<Vec<f32>, coding_agent_search::search::daemon_client::DaemonError> {
         use coding_agent_search::search::embedder::Embedder;
-        self.embedder.embed(text).map_err(|e| {
+        self.embedder.embed_sync(text).map_err(|e| {
             coding_agent_search::search::daemon_client::DaemonError::Failed(e.to_string())
         })
     }
@@ -60,7 +60,7 @@ impl coding_agent_search::search::daemon_client::DaemonClient for FixtureQuality
         _request_id: &str,
     ) -> Result<Vec<Vec<f32>>, coding_agent_search::search::daemon_client::DaemonError> {
         use coding_agent_search::search::embedder::Embedder;
-        self.embedder.embed_batch(texts).map_err(|e| {
+        self.embedder.embed_batch_sync(texts).map_err(|e| {
             coding_agent_search::search::daemon_client::DaemonError::Failed(e.to_string())
         })
     }
@@ -145,12 +145,12 @@ fn compute_ground_truth_rankings(
 ) -> Vec<(usize, f32)> {
     use coding_agent_search::search::embedder::Embedder;
 
-    let query_vec = embedder.embed(query).expect("embed query");
+    let query_vec = embedder.embed_sync(query).expect("embed query");
     let mut scores: Vec<(usize, f32)> = documents
         .iter()
         .enumerate()
         .map(|(idx, doc)| {
-            let doc_vec = embedder.embed(doc.content).expect("embed doc");
+            let doc_vec = embedder.embed_sync(doc.content).expect("embed doc");
             let score = dot_product(&query_vec, &doc_vec);
             (idx, score)
         })
@@ -180,8 +180,10 @@ fn build_test_index(
         .iter()
         .enumerate()
         .map(|(idx, doc)| {
-            let fast_vec = fast_embedder.embed(doc.content).expect("fast embed");
-            let quality_vec = quality_embedder.embed(doc.content).expect("quality embed");
+            let fast_vec = fast_embedder.embed_sync(doc.content).expect("fast embed");
+            let quality_vec = quality_embedder
+                .embed_sync(doc.content)
+                .expect("quality embed");
 
             TwoTierEntry {
                 doc_id: DocumentId::Session(doc.id.to_string()),
@@ -220,7 +222,7 @@ fn fast_search_matches_ground_truth() {
     let expected = compute_ground_truth_rankings(query, &documents, &fast_embedder);
 
     // Run fast search
-    let query_vec = fast_embedder.embed(query).expect("embed query");
+    let query_vec = fast_embedder.embed_sync(query).expect("embed query");
     let results = index.search_fast(&query_vec, 5);
 
     // Verify top results match ground truth order
@@ -279,7 +281,7 @@ fn quality_search_matches_ground_truth() {
     let expected = compute_ground_truth_rankings(query, &documents, &quality_embedder);
 
     // Run quality search
-    let query_vec = quality_embedder.embed(query).expect("embed query");
+    let query_vec = quality_embedder.embed_sync(query).expect("embed query");
     let results = index.search_quality(&query_vec, 5);
 
     // Verify top results match ground truth order
@@ -479,7 +481,7 @@ fn fast_search_latency_under_budget() {
     let index = build_test_index(&documents, &fast_embedder, &quality_embedder, &config);
 
     let query = "authentication security login";
-    let query_vec = fast_embedder.embed(query).expect("embed query");
+    let query_vec = fast_embedder.embed_sync(query).expect("embed query");
 
     // Warm up
     let _ = index.search_fast(&query_vec, 5);
@@ -527,7 +529,7 @@ fn quality_search_latency_under_budget() {
     let index = build_test_index(&documents, &fast_embedder, &quality_embedder, &config);
 
     let query = "database performance optimization";
-    let query_vec = quality_embedder.embed(query).expect("embed query");
+    let query_vec = quality_embedder.embed_sync(query).expect("embed query");
 
     // Warm up
     let _ = index.search_quality(&query_vec, 5);
@@ -731,11 +733,11 @@ fn quality_weight_affects_ranking() {
     let query = "user interface form input button";
 
     // Get fast-only results
-    let fast_query = fast_embedder.embed(query).expect("embed");
+    let fast_query = fast_embedder.embed_sync(query).expect("embed");
     let fast_results = index.search_fast(&fast_query, documents.len());
 
     // Get quality-only results
-    let quality_query = quality_embedder.embed(query).expect("embed");
+    let quality_query = quality_embedder.embed_sync(query).expect("embed");
     let quality_results = index.search_quality(&quality_query, documents.len());
 
     // The ranking orders might differ between fast and quality
@@ -780,7 +782,7 @@ fn search_empty_index() {
     assert!(index.is_empty());
     assert_eq!(index.len(), 0);
 
-    let query_vec = embedder.embed("test query").expect("embed");
+    let query_vec = embedder.embed_sync("test query").expect("embed");
     let results = index.search_fast(&query_vec, 10);
     assert!(results.is_empty(), "empty index should return no results");
 }
@@ -800,7 +802,7 @@ fn search_k_larger_than_docs() {
     let doc_count = documents.len();
     let index = build_test_index(&documents, &fast_embedder, &quality_embedder, &config);
 
-    let query_vec = fast_embedder.embed("test").expect("embed");
+    let query_vec = fast_embedder.embed_sync("test").expect("embed");
     let results = index.search_fast(&query_vec, 100); // Request more than available
 
     assert_eq!(
@@ -826,13 +828,13 @@ fn different_queries_different_rankings() {
 
     // Query 1: Auth-focused
     let auth_query = fast_embedder
-        .embed("authentication login security")
+        .embed_sync("authentication login security")
         .expect("embed");
     let auth_results = index.search_fast(&auth_query, 3);
 
     // Query 2: Database-focused
     let db_query = fast_embedder
-        .embed("database sql query table")
+        .embed_sync("database sql query table")
         .expect("embed");
     let db_results = index.search_fast(&db_query, 3);
 

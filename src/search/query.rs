@@ -1243,7 +1243,7 @@ impl QueryCache {
         }
 
         let embedding = embedder
-            .embed(canonical)
+            .embed_sync(canonical)
             .map_err(|e| anyhow!("embedding failed: {e}"))?;
         self.embeddings
             .put(canonical.to_string(), embedding.clone());

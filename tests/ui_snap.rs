@@ -178,12 +178,12 @@ fn stripe_colors_have_subtle_contrast() {
 #[test]
 fn theme_preset_cycle_is_complete() {
     // Test that cycling through themes covers all presets
-    let mut current = ThemePreset::Dark;
+    let mut current = ThemePreset::TokyoNight;
     let mut visited = vec![current];
 
-    for _ in 0..10 {
+    for _ in 0..20 {
         current = current.next();
-        if current == ThemePreset::Dark {
+        if current == ThemePreset::TokyoNight {
             break;
         }
         visited.push(current);

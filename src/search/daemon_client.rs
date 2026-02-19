@@ -18,7 +18,10 @@ use parking_lot::Mutex;
 use tracing::{debug, warn};
 
 use crate::search::embedder::{Embedder, EmbedderResult};
-use crate::search::reranker::{Reranker, RerankerError, RerankerResult};
+use crate::search::reranker::{
+    RerankDocument, RerankScore, Reranker, RerankerError, RerankerResult,
+};
+use frankensearch::ModelCategory;
 
 /// Retry/backoff configuration for daemon requests.
 #[derive(Debug, Clone)]
@@ -414,7 +417,7 @@ impl DaemonFallbackEmbedder {
 }
 
 impl Embedder for DaemonFallbackEmbedder {
-    fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>> {
+    fn embed_sync(&self, text: &str) -> EmbedderResult<Vec<f32>> {
         let request_id = next_request_id();
         match self.try_embed(&request_id, text) {
             Ok(vector) => Ok(vector),
@@ -422,12 +425,12 @@ impl Embedder for DaemonFallbackEmbedder {
                 let retries = failure.attempts.saturating_sub(1);
                 let reason = Self::fallback_reason(&failure.error, failure.backoff);
                 self.log_fallback(&request_id, retries, reason);
-                self.fallback.embed(text)
+                self.fallback.embed_sync(text)
             }
         }
     }
 
-    fn embed_batch(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
+    fn embed_batch_sync(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
         let request_id = next_request_id();
         match self.try_embed_batch(&request_id, texts) {
             Ok(vectors) => Ok(vectors),
@@ -435,7 +438,7 @@ impl Embedder for DaemonFallbackEmbedder {
                 let retries = failure.attempts.saturating_sub(1);
                 let reason = Self::fallback_reason(&failure.error, failure.backoff);
                 self.log_fallback(&request_id, retries, reason);
-                self.fallback.embed_batch(texts)
+                self.fallback.embed_batch_sync(texts)
             }
         }
     }
@@ -450,6 +453,10 @@ impl Embedder for DaemonFallbackEmbedder {
 
     fn is_semantic(&self) -> bool {
         self.fallback.is_semantic()
+    }
+
+    fn category(&self) -> ModelCategory {
+        self.fallback.category()
     }
 }
 
@@ -564,20 +571,38 @@ impl DaemonFallbackReranker {
 }
 
 impl Reranker for DaemonFallbackReranker {
-    fn rerank(&self, query: &str, documents: &[&str]) -> RerankerResult<Vec<f32>> {
+    fn rerank_sync(
+        &self,
+        query: &str,
+        documents: &[RerankDocument],
+    ) -> RerankerResult<Vec<RerankScore>> {
+        // Extract texts for the daemon wire protocol
+        let texts: Vec<&str> = documents.iter().map(|d| d.text.as_str()).collect();
         let request_id = next_request_id();
-        match self.try_rerank(&request_id, query, documents) {
-            Ok(scores) => Ok(scores),
+        match self.try_rerank(&request_id, query, &texts) {
+            Ok(scores) => {
+                // Convert daemon Vec<f32> back to Vec<RerankScore>
+                Ok(documents
+                    .iter()
+                    .enumerate()
+                    .map(|(i, doc)| RerankScore {
+                        doc_id: doc.doc_id.clone(),
+                        score: scores.get(i).copied().unwrap_or(0.0),
+                        original_rank: i,
+                    })
+                    .collect())
+            }
             Err(failure) => {
                 let retries = failure.attempts.saturating_sub(1);
                 let reason =
                     DaemonFallbackEmbedder::fallback_reason(&failure.error, failure.backoff);
                 self.log_fallback(&request_id, retries, reason);
                 match &self.fallback {
-                    Some(reranker) => reranker.rerank(query, documents),
-                    None => Err(RerankerError::Unavailable(
-                        "no local reranker available".to_string(),
-                    )),
+                    Some(reranker) => reranker.rerank_sync(query, documents),
+                    None => Err(RerankerError::RerankFailed {
+                        model: "daemon-reranker".to_string(),
+                        source: "no local reranker available".into(),
+                    }),
                 }
             }
         }
@@ -586,6 +611,14 @@ impl Reranker for DaemonFallbackReranker {
     fn id(&self) -> &str {
         if let Some(fallback) = &self.fallback {
             fallback.id()
+        } else {
+            "daemon-reranker"
+        }
+    }
+
+    fn model_name(&self) -> &str {
+        if let Some(fallback) = &self.fallback {
+            fallback.model_name()
         } else {
             "daemon-reranker"
         }
@@ -637,10 +670,11 @@ fn next_jitter_unit() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::embedder::EmbedderError;
+    use crate::search::embedder::{Embedder, EmbedderError};
     use crate::search::fastembed_embedder::FastEmbedder;
     use crate::search::fastembed_reranker::FastEmbedReranker;
     use crate::search::hash_embedder::HashEmbedder;
+    use crate::search::reranker::rerank_texts;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -733,19 +767,20 @@ mod tests {
 
     fn map_embedder_error(err: EmbedderError) -> DaemonError {
         match err {
-            EmbedderError::Unavailable(msg) => DaemonError::Unavailable(msg),
-            EmbedderError::EmbeddingFailed(msg) => DaemonError::Failed(msg),
-            EmbedderError::InvalidInput(msg) => DaemonError::InvalidInput(msg),
-            EmbedderError::Internal(msg) => DaemonError::Failed(msg),
+            EmbedderError::EmbedderUnavailable { reason, .. } => DaemonError::Unavailable(reason),
+            EmbedderError::EmbeddingFailed { source, .. } => {
+                DaemonError::Failed(source.to_string())
+            }
+            EmbedderError::InvalidConfig { reason, .. } => DaemonError::InvalidInput(reason),
+            other => DaemonError::Failed(other.to_string()),
         }
     }
 
     fn map_reranker_error(err: RerankerError) -> DaemonError {
-        match err {
-            RerankerError::Unavailable(msg) => DaemonError::Unavailable(msg),
-            RerankerError::RerankFailed(msg) => DaemonError::Failed(msg),
-            RerankerError::InvalidInput(msg) => DaemonError::InvalidInput(msg),
-            RerankerError::Internal(msg) => DaemonError::Failed(msg),
+        match &err {
+            RerankerError::RerankFailed { source, .. } => DaemonError::Failed(source.to_string()),
+            RerankerError::RerankerUnavailable { model } => DaemonError::Unavailable(model.clone()),
+            _ => DaemonError::Failed(err.to_string()),
         }
     }
 
@@ -763,7 +798,7 @@ mod tests {
             if call < self.fail_first {
                 Err(self.mode.error())
             } else {
-                self.embedder.embed(text).map_err(map_embedder_error)
+                self.embedder.embed_sync(text).map_err(map_embedder_error)
             }
         }
 
@@ -776,7 +811,9 @@ mod tests {
             if call < self.fail_first {
                 Err(self.mode.error())
             } else {
-                self.embedder.embed_batch(texts).map_err(map_embedder_error)
+                self.embedder
+                    .embed_batch_sync(texts)
+                    .map_err(map_embedder_error)
             }
         }
 
@@ -790,9 +827,7 @@ mod tests {
             if call < self.fail_first {
                 Err(self.mode.error())
             } else {
-                self.reranker
-                    .rerank(query, documents)
-                    .map_err(map_reranker_error)
+                rerank_texts(&*self.reranker, query, documents).map_err(map_reranker_error)
             }
         }
     }
@@ -833,10 +868,10 @@ mod tests {
     fn daemon_embedder_falls_back_on_failure() {
         let daemon_embedder = load_fastembed_embedder();
         let daemon_reranker = load_fastembed_reranker();
-        let expected_daemon = daemon_embedder.embed("hello").unwrap();
+        let expected_daemon = daemon_embedder.embed_sync("hello").unwrap();
 
         let fallback = hash_fallback_embedder();
-        let expected_fallback = fallback.embed("hello").unwrap();
+        let expected_fallback = fallback.embed_sync("hello").unwrap();
         let fallback = Arc::new(fallback);
 
         let daemon = Arc::new(FixtureDaemon::new_with_mode(
@@ -851,7 +886,7 @@ mod tests {
         };
 
         let embedder = DaemonFallbackEmbedder::new(daemon, fallback, cfg);
-        let result = embedder.embed("hello").unwrap();
+        let result = embedder.embed_sync("hello").unwrap();
         assert!(
             embeddings_close(&result, &expected_fallback),
             "expected fallback result"
@@ -879,7 +914,7 @@ mod tests {
             daemon_reranker.clone(),
         ));
         let reranker_no_fallback = DaemonFallbackReranker::new(daemon_fail, None, cfg.clone());
-        let result = reranker_no_fallback.rerank("query", &["doc a", "doc b"]);
+        let result = rerank_texts(&reranker_no_fallback, "query", &["doc a", "doc b"]);
         assert!(
             result.is_err(),
             "expected error when no fallback and daemon fails"
@@ -896,16 +931,14 @@ mod tests {
         let reranker_with_fallback =
             DaemonFallbackReranker::new(daemon_fail, Some(fallback_reranker.clone()), cfg.clone());
         let docs = ["doc a", "doc b"];
-        let result = reranker_with_fallback.rerank("query", &docs).unwrap();
-        let expected = fallback_reranker.rerank("query", &docs).unwrap();
+        let result = rerank_texts(&reranker_with_fallback, "query", &docs).unwrap();
+        let expected = rerank_texts(&*fallback_reranker, "query", &docs).unwrap();
         assert!(scores_close(&result, &expected));
 
         // With a daemon that succeeds immediately, it should return daemon scores
         let working_daemon = Arc::new(FixtureDaemon::new(daemon_embedder, daemon_reranker.clone()));
         let reranker_working = DaemonFallbackReranker::new(working_daemon, None, cfg);
-        let result = reranker_working
-            .rerank("query", &["doc a", "doc b"])
-            .unwrap();
+        let result = rerank_texts(&reranker_working, "query", &["doc a", "doc b"]).unwrap();
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|score| score.is_finite()));
     }
@@ -914,7 +947,7 @@ mod tests {
     fn daemon_embedder_retries_then_succeeds() {
         let daemon_embedder = load_fastembed_embedder();
         let daemon_reranker = load_fastembed_reranker();
-        let expected_daemon = daemon_embedder.embed("hello").unwrap();
+        let expected_daemon = daemon_embedder.embed_sync("hello").unwrap();
         let daemon = Arc::new(FixtureDaemon::new_with_mode(
             1,
             FailureMode::Failed,
@@ -931,7 +964,7 @@ mod tests {
         };
 
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
-        let result = embedder.embed("hello").unwrap();
+        let result = embedder.embed_sync("hello").unwrap();
         assert!(
             embeddings_close(&result, &expected_daemon),
             "expected daemon result after retry"
@@ -951,7 +984,7 @@ mod tests {
         ));
 
         let fallback = hash_fallback_embedder();
-        let expected_fallback = fallback.embed("hello").unwrap();
+        let expected_fallback = fallback.embed_sync("hello").unwrap();
         let fallback = Arc::new(fallback);
         let cfg = DaemonRetryConfig {
             max_attempts: 2,
@@ -961,7 +994,7 @@ mod tests {
         };
 
         let embedder = DaemonFallbackEmbedder::new(daemon, fallback, cfg);
-        let result = embedder.embed("hello").unwrap();
+        let result = embedder.embed_sync("hello").unwrap();
         assert!(
             embeddings_close(&result, &expected_fallback),
             "expected fallback after timeout"
@@ -980,7 +1013,7 @@ mod tests {
         ));
 
         let fallback = hash_fallback_embedder();
-        let expected_fallback = fallback.embed("hello").unwrap();
+        let expected_fallback = fallback.embed_sync("hello").unwrap();
         let fallback = Arc::new(fallback);
         let cfg = DaemonRetryConfig {
             max_attempts: 3,
@@ -988,7 +1021,7 @@ mod tests {
         };
 
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
-        let result = embedder.embed("hello").unwrap();
+        let result = embedder.embed_sync("hello").unwrap();
         // InvalidInput should not retry, just fallback immediately
         assert!(
             embeddings_close(&result, &expected_fallback),
@@ -1001,7 +1034,7 @@ mod tests {
     fn daemon_invalid_input_does_not_backoff() {
         let daemon_embedder = load_fastembed_embedder();
         let daemon_reranker = load_fastembed_reranker();
-        let expected_daemon = daemon_embedder.embed("hello-again").unwrap();
+        let expected_daemon = daemon_embedder.embed_sync("hello-again").unwrap();
         let daemon = Arc::new(FixtureDaemon::new_with_mode(
             1,
             FailureMode::InvalidInput,
@@ -1010,7 +1043,7 @@ mod tests {
         ));
 
         let fallback = hash_fallback_embedder();
-        let expected_fallback = fallback.embed("hello").unwrap();
+        let expected_fallback = fallback.embed_sync("hello").unwrap();
         let fallback = Arc::new(fallback);
         let cfg = DaemonRetryConfig {
             max_attempts: 1,
@@ -1020,7 +1053,7 @@ mod tests {
         };
 
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
-        let first = embedder.embed("hello").unwrap();
+        let first = embedder.embed_sync("hello").unwrap();
         // First call fails with InvalidInput, falls back
         assert!(
             embeddings_close(&first, &expected_fallback),
@@ -1028,7 +1061,7 @@ mod tests {
         );
 
         // Second call should try daemon again (no backoff for InvalidInput)
-        let second = embedder.embed("hello-again").unwrap();
+        let second = embedder.embed_sync("hello-again").unwrap();
         assert!(
             embeddings_close(&second, &expected_daemon),
             "expected daemon result on second call"
@@ -1048,7 +1081,7 @@ mod tests {
         ));
 
         let fallback = hash_fallback_embedder();
-        let expected_fallback = fallback.embed("hello").unwrap();
+        let expected_fallback = fallback.embed_sync("hello").unwrap();
         let fallback = Arc::new(fallback);
         let cfg = DaemonRetryConfig {
             max_attempts: 2,
@@ -1058,7 +1091,7 @@ mod tests {
         };
 
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
-        let result = embedder.embed("hello").unwrap();
+        let result = embedder.embed_sync("hello").unwrap();
         assert!(
             embeddings_close(&result, &expected_fallback),
             "expected fallback after failures"
@@ -1087,11 +1120,11 @@ mod tests {
         };
 
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
-        let _ = embedder.embed("first").unwrap();
+        let _ = embedder.embed_sync("first").unwrap();
         let calls_after_first = daemon.calls.load(Ordering::Relaxed);
 
         // Second call should skip daemon due to backoff
-        let _ = embedder.embed("second").unwrap();
+        let _ = embedder.embed_sync("second").unwrap();
         let calls_after_second = daemon.calls.load(Ordering::Relaxed);
         assert_eq!(calls_after_first, calls_after_second);
     }
@@ -1116,18 +1149,18 @@ mod tests {
         };
 
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
-        let _ = embedder.embed("first").unwrap();
+        let _ = embedder.embed_sync("first").unwrap();
         let calls_after_first = daemon.calls.load(Ordering::Relaxed);
 
         // Before retry_after expires, should skip daemon
         std::thread::sleep(Duration::from_millis(10));
-        let _ = embedder.embed("second").unwrap();
+        let _ = embedder.embed_sync("second").unwrap();
         let calls_after_second = daemon.calls.load(Ordering::Relaxed);
         assert_eq!(calls_after_first, calls_after_second);
 
         // After retry_after expires, should try daemon again
         std::thread::sleep(Duration::from_millis(45));
-        let _ = embedder.embed("third").unwrap();
+        let _ = embedder.embed_sync("third").unwrap();
         let calls_after_third = daemon.calls.load(Ordering::Relaxed);
         assert!(calls_after_third > calls_after_second);
     }
@@ -1166,17 +1199,17 @@ mod tests {
         };
 
         let embedder = DaemonFallbackEmbedder::new(daemon.clone(), fallback, cfg);
-        let _ = embedder.embed("first").unwrap();
+        let _ = embedder.embed_sync("first").unwrap();
         let calls_after_first = daemon.calls.load(Ordering::Relaxed);
 
         // Immediate retry should be skipped due to backoff
-        let _ = embedder.embed("second").unwrap();
+        let _ = embedder.embed_sync("second").unwrap();
         let calls_after_second = daemon.calls.load(Ordering::Relaxed);
         assert_eq!(calls_after_first, calls_after_second);
 
         // After backoff expires, should try daemon again
         std::thread::sleep(Duration::from_millis(15));
-        let _ = embedder.embed("third").unwrap();
+        let _ = embedder.embed_sync("third").unwrap();
         let calls_after_third = daemon.calls.load(Ordering::Relaxed);
         assert!(calls_after_third > calls_after_second);
     }

@@ -211,12 +211,12 @@ pub const SCENARIO_MATRIX: &[Scenario] = &[
     },
     Scenario {
         id: "CW-022",
-        description: "Inspector + theme editor both open",
-        workstreams: &[Workstream::Cockpit, Workstream::Palette],
+        description: "Inspector is the only debug overlay (theme editor removed)",
+        workstreams: &[Workstream::Cockpit],
         class: ScenarioClass::Edge,
-        expected: "At most one modal focus trap active; theme editor focus takes priority; \
-                   inspector visible behind editor overlay; no focus graph corruption",
-        covered_by: &["inspector_plus_theme_editor"],
+        expected: "Inspector is non-blocking overlay without focus trap; \
+                   no focus graph corruption",
+        covered_by: &["inspector_only_debug_overlay"],
     },
     Scenario {
         id: "CW-023",
@@ -435,7 +435,7 @@ pub const TEST_COVERAGE_MAP: &[TestMapping] = &[
     TestMapping {
         scenario_id: "CW-022",
         unit_tests: &[],
-        integration_tests: &["cross_workstream_integration::inspector_plus_theme_editor"],
+        integration_tests: &["cross_workstream_integration::inspector_only_debug_overlay"],
         e2e_tests: &[],
         snapshots: &[],
         covered: true,
@@ -1294,32 +1294,27 @@ fn inspector_across_surface_switch() {
 }
 
 // ===========================================================================
-// CW-022: Inspector + theme editor both open
+// CW-022: Inspector is the only debug overlay (theme editor removed)
 // ===========================================================================
 #[test]
-fn inspector_plus_theme_editor() {
+fn inspector_only_debug_overlay() {
     let mut log = IntegrationLogger::new("CW-022");
 
-    // Both can be "open" as state flags, but focus trap only applies to
-    // theme editor (modal). Inspector is an overlay without its own trap.
+    // With the theme editor removed, the inspector is the only debug overlay.
+    // It does NOT push a focus trap — it's a non-blocking overlay.
     let show_inspector = true;
-    let show_theme_editor = true;
 
-    // Theme editor should take focus priority (it pushes a trap)
-    // Inspector remains visible behind it but doesn't intercept keys
     log.info(
         IntegrationPhase::Assert,
-        "dual_overlay_state",
+        "overlay_state",
         Some(serde_json::json!({
             "inspector": show_inspector,
-            "theme_editor": show_theme_editor,
-            "focus_owner": "theme_editor"
+            "inspector_pushes_trap": false,
+            "note": "Inspector is overlay-only; no modal focus trap"
         })),
     );
 
-    // Key insight: inspector does NOT push_trap, theme editor does
     log.assert_ok("inspector_no_trap", "true", "true");
-    log.assert_ok("theme_editor_has_trap", "true", "true");
 }
 
 // ===========================================================================
@@ -1464,7 +1459,6 @@ fn palette_inspector_focus_stacking() {
         Some(serde_json::json!({
             "palette_pushes_trap": true,
             "inspector_pushes_trap": false,
-            "theme_editor_pushes_trap": true,
             "max_concurrent_traps": 1,
             "note": "Only one modal trap active at a time; inspector is overlay-only"
         })),
@@ -1831,7 +1825,6 @@ fn all_overlays_ultra_narrow() {
                 "width": w, "height": h,
                 "palette_suppressed": true,
                 "inspector_suppressed": true,
-                "theme_editor_suppressed": true,
                 "fallback_rendered": true
             })),
         );

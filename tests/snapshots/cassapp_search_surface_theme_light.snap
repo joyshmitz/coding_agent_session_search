@@ -1,5 +1,5 @@
  [● Search] [Analytics] [Sources] | Alt+A=analytics  Ctrl+Shift+S=sources  Ctrl+P=palette  F1=help  F2=theme            
-╭cass | Light | Hybrid/Prefix──────────────────────────────────────────────────────────────────────────────────────────╮
+╭cass | Daylight | Hybrid/Prefix───────────────────────────────────────────────────────────────────────────────────────╮
 │authenticatio│n regression                                                                                            │
 │[agent:✎any] [ws:✎any] [time:✎all] [source:✎all]                                                                      │
 │All agents › All workspaces › Any time › Balanced › all sources                                                       │
@@ -20,5 +20,5 @@
 │                                                                                  ││                                  │
 │1 sessions │ 1 msgs                                                               ││                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────│╰──────────────────────────────────╯
- [status:Theme: Light] [hits:1] [view:med/cozy] [query:HYB / PFX] [perf:lat:— cache:cold] [runtime:stable]              
+ [status:Theme: Daylight] [hits:1] [view:med/cozy] [query:HYB / PFX] [perf:lat:— cache:cold] [runtime:stable]           
   | Enter=open Ctrl+X=select Alt+S=mode Tab=focus                                                                       

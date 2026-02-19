@@ -2856,7 +2856,10 @@ async fn execute_cli(
 
                         if validate_config {
                             // Just validate and output result
-                            println!("{}", serde_json::to_string_pretty(&validation).unwrap());
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&validation).unwrap_or_default()
+                            );
                             if !validation.valid {
                                 return Err(CliError {
                                     code: 2,
@@ -2871,7 +2874,10 @@ async fn execute_cli(
 
                         if !validation.valid {
                             if json || robot_mode {
-                                println!("{}", serde_json::to_string_pretty(&validation).unwrap());
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&validation).unwrap_or_default()
+                                );
                             } else {
                                 eprintln!("Configuration errors:");
                                 for err in &validation.errors {
@@ -2975,7 +2981,10 @@ async fn execute_cli(
                     // Check for unencrypted export in robot mode
                     if no_encryption && (json || robot_mode) && !i_understand_unencrypted_risks {
                         let error = crate::pages::confirmation::robot_mode_blocked_error();
-                        eprintln!("{}", serde_json::to_string_pretty(&error).unwrap());
+                        eprintln!(
+                            "{}",
+                            serde_json::to_string_pretty(&error).unwrap_or_default()
+                        );
                         return Err(CliError {
                             code: crate::pages::confirmation::EXIT_CODE_UNENCRYPTED_NOT_CONFIRMED,
                             kind: "pages",
@@ -3000,7 +3009,10 @@ async fn execute_cli(
                             })?;
 
                         if json {
-                            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&result).unwrap_or_default()
+                            );
                         } else {
                             crate::pages::verify::print_result(&result, verbose);
                         }
@@ -3994,7 +4006,10 @@ async fn import_chatgpt_export(
             "skipped": skipped,
             "output_dir": conv_dir.display().to_string(),
         });
-        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_default()
+        );
     } else {
         println!("Import complete!");
         println!("  Total conversations: {total}");
@@ -4084,7 +4099,7 @@ fn state_meta_json(
 
     let index_age_secs = last_indexed_at.map(|ts| {
         let ts_secs = ts / 1000;
-        now_secs.saturating_sub(ts_secs as u64)
+        now_secs.saturating_sub(ts_secs.max(0) as u64)
     });
     let is_stale = match index_age_secs {
         None => true,
@@ -5691,7 +5706,7 @@ fn run_cli_search(
             DaemonFallbackReranker, DaemonRetryConfig, NoopDaemonClient,
         };
         use crate::search::fastembed_reranker::FastEmbedReranker;
-        use crate::search::reranker::Reranker;
+        use crate::search::reranker::{Reranker, rerank_texts};
 
         let model_dir = FastEmbedReranker::default_model_dir(&data_dir);
         let local_reranker: Option<Arc<dyn Reranker>> =
@@ -5739,7 +5754,7 @@ fn run_cli_search(
             } else {
                 let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
 
-                match reranker.rerank(query, &doc_refs) {
+                match rerank_texts(&*reranker, query, &doc_refs) {
                     Ok(scores) => {
                         // Update scores and re-sort hits
                         let mut scored_hits: Vec<_> = result
@@ -7900,7 +7915,7 @@ fn run_status(
     // Calculate index age and staleness
     let index_age_secs = last_indexed_at.map(|ts| {
         let ts_secs = ts / 1000; // Convert millis to secs
-        now_secs.saturating_sub(ts_secs as u64)
+        now_secs.saturating_sub(ts_secs.max(0) as u64)
     });
     let is_stale = match index_age_secs {
         None => true,
@@ -14224,8 +14239,9 @@ fn run_timeline(
         }
 
         let duration = ended.map(|e| {
-            // Timestamps are in milliseconds, divide by 60_000 to get minutes
-            let mins = (e - started) / 60_000;
+            // Timestamps are in milliseconds, divide by 60_000 to get minutes.
+            // Guard against negative durations from clock skew or corrupt data.
+            let mins = (e - started).max(0) / 60_000;
             if mins < 60 {
                 format!("{}m", mins)
             } else {
@@ -14873,7 +14889,7 @@ fn run_sources_doctor(source_filter: Option<&str>, json_output: bool) -> CliResu
     if json_output {
         println!(
             "{}",
-            serde_json::to_string_pretty(&all_diagnostics).unwrap()
+            serde_json::to_string_pretty(&all_diagnostics).unwrap_or_default()
         );
     } else {
         for diag in &all_diagnostics {

@@ -1728,7 +1728,11 @@ fn save_watch_state(data_dir: &Path, state: &HashMap<ConnectorKind, i64>) -> Res
         map: state.clone(),
     };
     let json = serde_json::to_vec(&watch_state)?;
-    fs::write(path, json)?;
+    // Atomic write: write to temp file then rename, so a crash mid-write
+    // cannot leave a truncated/corrupt watch_state.json.
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, json)?;
+    fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 

@@ -504,7 +504,7 @@ impl EvaluationHarness {
         let cold_start = Instant::now();
         let first_doc = corpus.documents.first().ok_or("Empty corpus")?;
         embedder
-            .embed(&first_doc.content)
+            .embed_sync(&first_doc.content)
             .map_err(|e| e.to_string())?;
         let cold_start_ms = cold_start.elapsed().as_millis() as u64;
 
@@ -512,13 +512,13 @@ impl EvaluationHarness {
         let doc_embeddings: Vec<Vec<f32>> = corpus
             .documents
             .iter()
-            .map(|d| embedder.embed(&d.content))
+            .map(|d| embedder.embed_sync(&d.content))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
 
         // Warmup queries
         for i in 0..self.config.warmup_queries.min(corpus.queries.len()) {
-            let _ = embedder.embed(&corpus.queries[i].query);
+            let _ = embedder.embed_sync(&corpus.queries[i].query);
         }
 
         // Evaluate each query
@@ -540,7 +540,7 @@ impl EvaluationHarness {
             for _ in 0..iterations {
                 let start = Instant::now();
                 query_embedding = embedder
-                    .embed(&query_with_judgments.query)
+                    .embed_sync(&query_with_judgments.query)
                     .map_err(|e| e.to_string())?;
                 query_latencies.push(start.elapsed());
             }
@@ -677,12 +677,14 @@ impl EvaluationHarness {
 
         if let Some((model_id, ndcg, p99, memory)) = winner_data {
             comparison.recommendation = Some(model_id.clone());
+            let pct_of_baseline = if baseline_report.ndcg_at_10 > 0.0 {
+                format!("{}%", (ndcg / baseline_report.ndcg_at_10 * 100.0) as u32)
+            } else {
+                "N/A".to_string()
+            };
             comparison.recommendation_reason = format!(
-                "Best eligible candidate with NDCG@10={:.3} ({}% of baseline), p99={}ms, memory={}MB",
-                ndcg,
-                (ndcg / baseline_report.ndcg_at_10 * 100.0) as u32,
-                p99,
-                memory
+                "Best eligible candidate with NDCG@10={:.3} ({} of baseline), p99={}ms, memory={}MB",
+                ndcg, pct_of_baseline, p99, memory
             );
         } else {
             comparison.recommendation_reason =

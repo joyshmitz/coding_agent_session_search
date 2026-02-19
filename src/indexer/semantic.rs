@@ -145,7 +145,7 @@ impl SemanticIndexer {
 
             let texts: Vec<&str> = batch.iter().map(|p| p.canonical.as_str()).collect();
             let vectors = embedder
-                .embed_batch(&texts)
+                .embed_batch_sync(&texts)
                 .map_err(|e| anyhow::anyhow!("embedding failed: {e}"))?;
 
             if vectors.len() != batch.len() {
