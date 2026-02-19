@@ -21,4 +21,4 @@
 │0 sessions │ 0 msgs                                                               ││                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────│╰──────────────────────────────────╯
  [hits:1] [view:med/cozy] [query:HYB / PFX] [perf:lat:— cache:cold] [runtime:stable]                                    
-  | Enter=open Ctrl+M/Ctrl+X=select Tab=focus F1=help                                                                   
+  | Enter=open Ctrl+X=select Alt+S=mode Tab=focus                                                                       
