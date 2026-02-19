@@ -676,39 +676,47 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
 
                 match daemon.embed(&self.query, &request_id) {
                     Ok(query_vec) => {
-                        // Get candidate indices from fast results
-                        let candidates: Vec<usize> = self
-                            .fast_results
-                            .as_ref()
-                            .map(|r| r.iter().map(|sr| sr.idx).collect())
-                            .unwrap_or_default();
-
                         // If we have fast results, blend scores; otherwise full quality search
-                        let results = if !candidates.is_empty() {
-                            let fast_results = self.fast_results.as_ref().unwrap();
-                            let quality_scores = self
-                                .searcher
-                                .index
-                                .quality_scores_for_indices(&query_vec, &candidates);
-
-                            // Blend scores
-                            let weight = self.searcher.config.quality_weight;
-                            let mut blended: Vec<ScoredResult> = fast_results
+                        let results = if let Some(fast_results) = self.fast_results.as_ref() {
+                            let refine_cap = self.searcher.config.max_refinement_docs;
+                            let candidates: Vec<usize> = fast_results
                                 .iter()
-                                .zip(quality_scores.iter())
-                                .map(|(fast, &quality)| ScoredResult {
-                                    idx: fast.idx,
-                                    message_id: fast.message_id,
-                                    score: (1.0 - weight) * fast.score + weight * quality,
-                                })
+                                .take(refine_cap)
+                                .map(|sr| sr.idx)
                                 .collect();
+                            if candidates.is_empty() {
+                                fast_results.clone()
+                            } else {
+                                let quality_scores = self
+                                    .searcher
+                                    .index
+                                    .quality_scores_for_indices(&query_vec, &candidates);
 
-                            // Re-sort by blended score
-                            blended.sort_by(|a, b| {
-                                b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal)
-                            });
-                            blended.truncate(self.k);
-                            blended
+                                // Blend scores
+                                let weight = self.searcher.config.quality_weight;
+                                let mut blended: Vec<ScoredResult> =
+                                    Vec::with_capacity(fast_results.len());
+                                for (idx, fast) in fast_results.iter().enumerate() {
+                                    let score = if idx < quality_scores.len() {
+                                        let quality = quality_scores[idx];
+                                        (1.0 - weight) * fast.score + weight * quality
+                                    } else {
+                                        fast.score
+                                    };
+                                    blended.push(ScoredResult {
+                                        idx: fast.idx,
+                                        message_id: fast.message_id,
+                                        score,
+                                    });
+                                }
+
+                                // Re-sort by blended score
+                                blended.sort_by(|a, b| {
+                                    b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal)
+                                });
+                                blended.truncate(self.k);
+                                blended
+                            }
                         } else {
                             self.searcher.index.search_quality(&query_vec, self.k)
                         };
