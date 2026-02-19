@@ -1562,12 +1562,15 @@ fn reindex_paths(
             let guard = state
                 .lock()
                 .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-            guard
-                .get(&kind)
-                .copied()
-                // Use min_ts for scanning window start to capture oldest change in batch
-                .or_else(|| min_ts.map(|v| v.saturating_sub(1)))
-                .map(|v| v.saturating_sub(1))
+            let previous_ts = guard.get(&kind).copied();
+            match (previous_ts, min_ts) {
+                // No previous watermark and no trigger timestamp: full scan this root.
+                (None, None) => None,
+                // Only one side available: use it.
+                (Some(ts), None) | (None, Some(ts)) => Some(ts.saturating_sub(1)),
+                // Use the older timestamp so out-of-order file events are not skipped.
+                (Some(prev), Some(batch_min)) => Some(prev.min(batch_min).saturating_sub(1)),
+            }
         };
 
         // Use explicit root context
@@ -1627,7 +1630,9 @@ fn reindex_paths(
         // Track total indexed for stale detection
         total_indexed += conv_count;
 
-        if let Some(ts_val) = max_ts {
+        if conv_count > 0
+            && let Some(ts_val) = max_ts
+        {
             let mut guard = state
                 .lock()
                 .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
@@ -2728,6 +2733,140 @@ mod tests {
         drop(t_index);
         drop(storage);
         drop(state);
+
+        if let Some(prev) = prev {
+            unsafe { std::env::set_var("XDG_DATA_HOME", prev) };
+        } else {
+            unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn reindex_paths_uses_oldest_trigger_window_when_state_is_newer() {
+        let tmp = TempDir::new().unwrap();
+        let xdg = tmp.path().join("xdg_oldest_window");
+        std::fs::create_dir_all(&xdg).unwrap();
+        let prev = dotenvy::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
+
+        let data_dir = xdg.join("amp");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let amp_dir = data_dir.join("amp");
+        std::fs::create_dir_all(&amp_dir).unwrap();
+        let amp_file = amp_dir.join("thread-window.json");
+        let now_u128 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let now = i64::try_from(now_u128)
+            .unwrap_or(i64::MAX)
+            .saturating_add(10_000);
+        std::fs::write(
+            &amp_file,
+            format!(r#"{{"id":"tw","messages":[{{"role":"user","text":"p","createdAt":{now}}}]}}"#),
+        )
+        .unwrap();
+
+        let opts = super::IndexOptions {
+            full: false,
+            watch: false,
+            force_rebuild: false,
+            watch_once_paths: None,
+            db_path: data_dir.join("db.sqlite"),
+            data_dir: data_dir.clone(),
+            semantic: false,
+            build_hnsw: false,
+            embedder: "fastembed".to_string(),
+            progress: None,
+        };
+
+        let storage = SqliteStorage::open(&opts.db_path).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let mut initial = HashMap::new();
+        initial.insert(ConnectorKind::Amp, i64::MAX / 4);
+        let state = Arc::new(Mutex::new(initial));
+        let storage = Arc::new(Mutex::new(storage));
+        let t_index = Arc::new(Mutex::new(t_index));
+        let roots = vec![(ConnectorKind::Amp, ScanRoot::local(amp_dir))];
+
+        let indexed = reindex_paths(
+            &opts,
+            vec![amp_file],
+            &roots,
+            state.clone(),
+            storage,
+            t_index,
+            false,
+        )
+        .unwrap();
+        assert!(
+            indexed > 0,
+            "expected indexing to use trigger min_ts instead of stale future watch-state"
+        );
+
+        if let Some(prev) = prev {
+            unsafe { std::env::set_var("XDG_DATA_HOME", prev) };
+        } else {
+            unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn reindex_paths_does_not_advance_watch_state_when_scan_yields_no_conversations() {
+        let tmp = TempDir::new().unwrap();
+        let xdg = tmp.path().join("xdg_zero_scan");
+        std::fs::create_dir_all(&xdg).unwrap();
+        let prev = dotenvy::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
+
+        let data_dir = xdg.join("amp");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let amp_dir = data_dir.join("amp");
+        std::fs::create_dir_all(&amp_dir).unwrap();
+        let amp_file = amp_dir.join("thread-zero.json");
+        // Intentionally malformed payload so scan yields zero conversations.
+        std::fs::write(&amp_file, "not valid json").unwrap();
+
+        let opts = super::IndexOptions {
+            full: false,
+            watch: false,
+            force_rebuild: false,
+            watch_once_paths: None,
+            db_path: data_dir.join("db.sqlite"),
+            data_dir: data_dir.clone(),
+            semantic: false,
+            build_hnsw: false,
+            embedder: "fastembed".to_string(),
+            progress: None,
+        };
+
+        let storage = SqliteStorage::open(&opts.db_path).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let mut initial = HashMap::new();
+        initial.insert(ConnectorKind::Amp, 10_000);
+        let state = Arc::new(Mutex::new(initial));
+        let storage = Arc::new(Mutex::new(storage));
+        let t_index = Arc::new(Mutex::new(t_index));
+        let roots = vec![(ConnectorKind::Amp, ScanRoot::local(amp_dir))];
+
+        let indexed = reindex_paths(
+            &opts,
+            vec![amp_file],
+            &roots,
+            state.clone(),
+            storage,
+            t_index,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            indexed, 0,
+            "fixture should produce no indexed conversations"
+        );
+        let guard = state.lock().unwrap();
+        assert_eq!(guard.get(&ConnectorKind::Amp), Some(&10_000));
 
         if let Some(prev) = prev {
             unsafe { std::env::set_var("XDG_DATA_HOME", prev) };

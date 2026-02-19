@@ -232,28 +232,38 @@ impl SemanticIndexer {
         )
         .map_err(|err| anyhow::anyhow!("create fsvi index failed: {err}"))?;
 
-        for embedded in embedded_messages {
-            if embedded.embedding.len() != self.embedder_dimension() {
-                bail!(
-                    "embedding dimension mismatch: expected {}, got {}",
-                    self.embedder_dimension(),
-                    embedded.embedding.len()
-                );
+        let write_result: Result<()> = (|| {
+            for embedded in embedded_messages {
+                if embedded.embedding.len() != self.embedder_dimension() {
+                    bail!(
+                        "embedding dimension mismatch: expected {}, got {}",
+                        self.embedder_dimension(),
+                        embedded.embedding.len()
+                    );
+                }
+                let doc_id = SemanticDocId {
+                    message_id: embedded.message_id,
+                    chunk_idx: embedded.chunk_idx,
+                    agent_id: embedded.agent_id,
+                    workspace_id: embedded.workspace_id,
+                    source_id: embedded.source_id,
+                    role: embedded.role,
+                    created_at_ms: embedded.created_at_ms,
+                    content_hash: Some(embedded.content_hash),
+                }
+                .to_doc_id_string();
+                writer
+                    .write_record(&doc_id, &embedded.embedding)
+                    .map_err(|err| anyhow::anyhow!("write fsvi record failed: {err}"))?;
             }
-            let doc_id = SemanticDocId {
-                message_id: embedded.message_id,
-                chunk_idx: embedded.chunk_idx,
-                agent_id: embedded.agent_id,
-                workspace_id: embedded.workspace_id,
-                source_id: embedded.source_id,
-                role: embedded.role,
-                created_at_ms: embedded.created_at_ms,
-                content_hash: Some(embedded.content_hash),
-            }
-            .to_doc_id_string();
-            writer
-                .write_record(&doc_id, &embedded.embedding)
-                .map_err(|err| anyhow::anyhow!("write fsvi record failed: {err}"))?;
+            Ok(())
+        })();
+
+        if let Err(e) = &write_result {
+            // Clean up partial index file to prevent corruption
+            tracing::warn!("removing partial vector index after write failure: {e}");
+            let _ = std::fs::remove_file(&index_path);
+            return Err(anyhow::anyhow!("{e}"));
         }
 
         writer
