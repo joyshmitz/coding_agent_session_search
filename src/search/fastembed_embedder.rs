@@ -29,8 +29,9 @@ const MINILM_DIR_NAME: &str = "all-MiniLM-L6-v2";
 const MINILM_EMBEDDER_ID: &str = "minilm-384";
 const MINILM_DIMENSION: usize = 384;
 
-// Standard ONNX file names
-const MODEL_FILE: &str = "model.onnx";
+// Standard ONNX file names — prefer onnx/ subdir (modern layout), fall back to flat (legacy).
+const MODEL_ONNX_SUBDIR: &str = "onnx/model.onnx";
+const MODEL_ONNX_LEGACY: &str = "model.onnx";
 const TOKENIZER_JSON: &str = "tokenizer.json";
 const CONFIG_JSON: &str = "config.json";
 const SPECIAL_TOKENS_JSON: &str = "special_tokens_map.json";
@@ -81,15 +82,30 @@ impl FastEmbedder {
         MINILM_MODEL_ID
     }
 
-    /// Required model files for any ONNX embedder.
+    /// Required non-model files for any ONNX embedder.
+    ///
+    /// The ONNX model itself can live at `onnx/model.onnx` (modern) or
+    /// `model.onnx` (legacy) — use [`select_model_file`] to find it.
     pub fn required_model_files() -> &'static [&'static str] {
         &[
-            MODEL_FILE,
             TOKENIZER_JSON,
             CONFIG_JSON,
             SPECIAL_TOKENS_JSON,
             TOKENIZER_CONFIG_JSON,
         ]
+    }
+
+    /// Select the ONNX model file, preferring `onnx/model.onnx` over `model.onnx`.
+    fn select_model_file(model_dir: &Path) -> Option<PathBuf> {
+        let modern = model_dir.join(MODEL_ONNX_SUBDIR);
+        if modern.is_file() {
+            return Some(modern);
+        }
+        let legacy = model_dir.join(MODEL_ONNX_LEGACY);
+        if legacy.is_file() {
+            return Some(legacy);
+        }
+        None
     }
 
     /// Default MiniLM model directory relative to the cass data dir.
@@ -147,6 +163,18 @@ impl FastEmbedder {
             });
         }
 
+        let onnx_path = Self::select_model_file(model_dir).ok_or_else(|| {
+            EmbedderError::EmbedderUnavailable {
+                model: config.embedder_id.clone(),
+                reason: format!(
+                    "no ONNX model file in {} (checked {} and {})",
+                    model_dir.display(),
+                    MODEL_ONNX_SUBDIR,
+                    MODEL_ONNX_LEGACY
+                ),
+            }
+        })?;
+
         let required = Self::required_model_files();
         let mut missing = Vec::new();
         for name in required {
@@ -167,7 +195,7 @@ impl FastEmbedder {
         }
 
         let model_file =
-            Self::read_required(model_dir.join(MODEL_FILE), MODEL_FILE, &config.embedder_id)?;
+            Self::read_required(onnx_path, "model.onnx", &config.embedder_id)?;
         let tokenizer_file = Self::read_required(
             model_dir.join(TOKENIZER_JSON),
             TOKENIZER_JSON,
@@ -245,11 +273,15 @@ impl FastEmbedder {
     }
 
     fn normalize_in_place(embedding: &mut [f32]) {
-        let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm > f32::EPSILON {
+        let norm_sq: f32 = embedding.iter().map(|x| x * x).sum();
+        if norm_sq.is_finite() && norm_sq > f32::EPSILON {
+            let inv_norm = 1.0 / norm_sq.sqrt();
             for v in embedding.iter_mut() {
-                *v /= norm;
+                *v *= inv_norm;
             }
+        } else {
+            // NaN/Inf contamination — zero out to prevent poisoning similarity search.
+            embedding.fill(0.0);
         }
     }
 }
@@ -399,5 +431,51 @@ mod tests {
             matches!(err, EmbedderError::EmbedderUnavailable { .. }),
             "expected EmbedderUnavailable, got {err:?}"
         );
+    }
+
+    #[test]
+    fn select_model_file_prefers_modern_onnx_layout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("onnx")).unwrap();
+        std::fs::write(tmp.path().join("onnx/model.onnx"), b"modern").unwrap();
+        std::fs::write(tmp.path().join("model.onnx"), b"legacy").unwrap();
+
+        let selected = FastEmbedder::select_model_file(tmp.path()).unwrap();
+        assert!(
+            selected.ends_with("onnx/model.onnx"),
+            "should prefer onnx/ subdir: {selected:?}"
+        );
+    }
+
+    #[test]
+    fn select_model_file_falls_back_to_legacy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("model.onnx"), b"legacy").unwrap();
+
+        let selected = FastEmbedder::select_model_file(tmp.path()).unwrap();
+        assert!(
+            selected.ends_with("model.onnx"),
+            "should fall back to legacy: {selected:?}"
+        );
+    }
+
+    #[test]
+    fn select_model_file_returns_none_for_empty_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(FastEmbedder::select_model_file(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn config_for_known_models() {
+        let minilm = FastEmbedder::config_for("minilm").unwrap();
+        assert_eq!(minilm.dimension, 384);
+
+        let snowflake = FastEmbedder::config_for("snowflake-arctic-s").unwrap();
+        assert_eq!(snowflake.dimension, 384);
+
+        let nomic = FastEmbedder::config_for("nomic-embed").unwrap();
+        assert_eq!(nomic.dimension, 768);
+
+        assert!(FastEmbedder::config_for("unknown").is_none());
     }
 }
