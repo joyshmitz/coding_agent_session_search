@@ -116,6 +116,10 @@ pub struct AnalyticsChartData {
     pub plan_message_pct: f64,
     /// Plan API token share (% of API tokens attributed to plans).
     pub plan_api_token_share: f64,
+    /// True when analytics rollups were auto-rebuilt during the latest load.
+    pub auto_rebuilt: bool,
+    /// Captures auto-rebuild errors; data may still be partially available.
+    pub auto_rebuild_error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -642,9 +646,11 @@ pub fn render_explorer(
     let (metric_data, metric_color) = metric_series(data, state.metric);
 
     if metric_data.is_empty() {
-        Paragraph::new(" No timeseries data. Run 'cass analytics rebuild' to populate.")
-            .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
-            .render(area, frame);
+        Paragraph::new(
+            " No analytics timeseries yet. If data exists, cass is rebuilding automatically.",
+        )
+        .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
+        .render(area, frame);
         return;
     }
 
@@ -675,14 +681,17 @@ pub fn render_explorer(
         String::new()
     };
 
-    let header_text = format!(
-        " {} ({})  |  {}  |  Zoom: {}  |  Overlay: {}  |  Scatter: auto  |  m/M g/G z/Z o{}",
-        state.metric.label(),
-        total_display,
-        state.group_by.label(),
-        state.zoom.label(),
-        state.overlay.label(),
-        date_range,
+    let header_text = truncate_with_ellipsis(
+        &format!(
+            " {} ({})  |  {}  |  Zoom: {}  |  Overlay: {}  |  Scatter: auto  |  m/M g/G z/Z o{}",
+            state.metric.label(),
+            total_display,
+            state.group_by.label(),
+            state.zoom.label(),
+            state.overlay.label(),
+            date_range,
+        ),
+        chunks[0].width as usize,
     );
     Paragraph::new(&*header_text)
         .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 200)))
@@ -817,10 +826,13 @@ fn render_explorer_line_canvas(
         return;
     }
 
-    let annotation = build_explorer_annotation_line(metric, metric_data, overlay_labels);
     let chunks = Flex::vertical()
         .constraints([Constraint::Fixed(1), Constraint::Min(4)])
         .split(area);
+    let annotation = truncate_with_ellipsis(
+        &build_explorer_annotation_line(metric, metric_data, overlay_labels),
+        chunks[0].width as usize,
+    );
     Paragraph::new(annotation)
         .style(ftui::Style::new().fg(PackedRgba::rgb(150, 160, 180)))
         .render(chunks[0], frame);
@@ -845,7 +857,7 @@ fn render_explorer_line_canvas(
 
     let top_label = format_explorer_metric_value(metric, y_max);
     let bottom_label = format_explorer_metric_value(metric, 0.0);
-    let y_axis_w = (top_label.len().max(bottom_label.len()) as u16 + 1)
+    let y_axis_w = (display_width(&top_label).max(display_width(&bottom_label)) as u16 + 1)
         .min(chart_outer.width.saturating_sub(6))
         .max(1);
     let x_axis_h = 2u16;
@@ -1028,11 +1040,13 @@ fn render_explorer_line_canvas(
     if !x_labels.is_empty() {
         let label_y = chart_outer.y + chart_outer.height.saturating_sub(1);
         let slots = x_labels.len().saturating_sub(1).max(1) as u16;
+        let mut last_label_end = plot_area.x;
         for (idx, label) in x_labels.iter().enumerate() {
             if label.is_empty() {
                 continue;
             }
-            let width = (label.len() as u16).min(plot_area.width);
+            let label_text = truncate_with_ellipsis(label, plot_area.width as usize);
+            let width = (display_width(&label_text) as u16).min(plot_area.width);
             if width == 0 {
                 continue;
             }
@@ -1048,7 +1062,11 @@ fn render_explorer_line_canvas(
                 plot_area.x,
                 plot_area.x + plot_area.width.saturating_sub(width),
             );
-            Paragraph::new(*label)
+            // Keep labels legible on narrow charts by skipping overlapping slots.
+            if x < last_label_end {
+                continue;
+            }
+            Paragraph::new(label_text)
                 .style(ftui::Style::new().fg(PackedRgba::rgb(150, 150, 170)))
                 .render(
                     Rect {
@@ -1059,6 +1077,7 @@ fn render_explorer_line_canvas(
                     },
                     frame,
                 );
+            last_label_end = x.saturating_add(width.saturating_add(1));
         }
     }
 }
@@ -1102,10 +1121,13 @@ fn render_explorer_scatter(
     } else {
         0.0
     };
-    let header = format!(
-        " Scatter: session tokens vs messages ({})  avg tok/msg {}",
-        valid.len(),
-        format_compact(avg_efficiency.round() as i64)
+    let header = truncate_with_ellipsis(
+        &format!(
+            " Scatter: session tokens vs messages ({})  avg tok/msg {}",
+            valid.len(),
+            format_compact(avg_efficiency.round() as i64)
+        ),
+        chunks[0].width as usize,
     );
     Paragraph::new(header)
         .style(ftui::Style::new().fg(PackedRgba::rgb(160, 170, 185)))
@@ -1305,12 +1327,33 @@ fn heatmap_series_for_metric(
     data: &AnalyticsChartData,
     metric: HeatmapMetric,
 ) -> (Vec<(String, f64)>, f64, f64) {
+    if matches!(metric, HeatmapMetric::Coverage) {
+        if data.heatmap_days.is_empty() {
+            return (Vec::new(), 0.0, 0.0);
+        }
+        let min_norm = data
+            .heatmap_days
+            .iter()
+            .map(|(_, v)| *v)
+            .fold(f64::INFINITY, f64::min);
+        let max_norm = data
+            .heatmap_days
+            .iter()
+            .map(|(_, v)| *v)
+            .fold(0.0_f64, f64::max);
+        return (
+            data.heatmap_days.clone(),
+            min_norm * 100.0,
+            max_norm * 100.0,
+        );
+    }
+
     let raw: &[(String, f64)] = match metric {
         HeatmapMetric::ApiTokens => &data.daily_tokens,
         HeatmapMetric::Messages => &data.daily_messages,
         HeatmapMetric::ContentTokens => &data.daily_content_tokens,
         HeatmapMetric::ToolCalls => &data.daily_tool_calls,
-        HeatmapMetric::Coverage => &data.daily_tokens, // placeholder; normalized later
+        HeatmapMetric::Coverage => &[],
     };
     if raw.is_empty() {
         return (Vec::new(), 0.0, 0.0);
@@ -1375,7 +1418,7 @@ pub fn render_heatmap(
     let (series, min_raw, max_raw) = heatmap_series_for_metric(data, metric);
 
     if series.is_empty() {
-        Paragraph::new(" No daily data available for heatmap. Run 'cass analytics rebuild'.")
+        Paragraph::new(" No daily data available for this view yet.")
             .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
             .render(area, frame);
         return;
@@ -1695,7 +1738,7 @@ pub fn render_breakdowns(
 
     if tokens.is_empty() {
         let msg = format!(
-            " No {} breakdown data. Run 'cass analytics rebuild'.",
+            " No {} breakdown data for the current filters.",
             tab.label()
         );
         Paragraph::new(&*msg)
@@ -1802,9 +1845,24 @@ fn model_color(idx: usize) -> PackedRgba {
     MODEL_COLORS[idx % MODEL_COLORS.len()]
 }
 
-/// Render the tab selector bar for the Breakdowns view.
-fn render_breakdown_tabs(active: BreakdownTab, area: Rect, frame: &mut ftui::Frame) {
-    let mut text = String::with_capacity(64);
+fn truncate_with_ellipsis(input: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let char_count = input.chars().count();
+    if char_count <= width {
+        return input.to_string();
+    }
+    if width == 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut out: String = input.chars().take(width - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+
+fn breakdown_tabs_line(active: BreakdownTab, width: usize) -> String {
+    let mut text = String::with_capacity(96);
     text.push(' ');
     for tab in BreakdownTab::all() {
         if *tab == active {
@@ -1815,22 +1873,34 @@ fn render_breakdown_tabs(active: BreakdownTab, area: Rect, frame: &mut ftui::Fra
         text.push(' ');
     }
     text.push_str("  (Tab/Shift+Tab to switch)");
+    truncate_with_ellipsis(&text, width)
+}
+
+/// Render the tab selector bar for the Breakdowns view.
+fn render_breakdown_tabs(active: BreakdownTab, area: Rect, frame: &mut ftui::Frame) {
+    let text = breakdown_tabs_line(active, area.width as usize);
     let style = ftui::Style::new().fg(PackedRgba::rgb(180, 200, 255)).bold();
     Paragraph::new(&*text).style(style).render(area, frame);
 }
 
 /// Shorten a label (e.g., workspace path) to fit in `max_len` characters.
 fn shorten_label(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if max_len == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max_len {
         return s.to_string();
     }
     if s.contains('/') {
         let last = s.rsplit('/').next().unwrap_or(s);
-        if last.len() <= max_len {
+        if last.chars().count() <= max_len {
             return last.to_string();
         }
     }
-    let mut truncated = s[..max_len.saturating_sub(1)].to_string();
+    if max_len == 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut truncated: String = s.chars().take(max_len - 1).collect();
     truncated.push('\u{2026}');
     truncated
 }
@@ -1849,7 +1919,7 @@ pub fn coverage_row_count(data: &AnalyticsChartData) -> usize {
 /// Render the Tools view: per-agent table with calls, messages, tokens, calls/1K, and trend.
 pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
     if data.tool_rows.is_empty() {
-        Paragraph::new(" No tool usage data available. Run 'cass analytics rebuild'.")
+        Paragraph::new(" No tool usage data available for the current filters.")
             .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
             .render(area, frame);
         return;
@@ -1875,7 +1945,7 @@ pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
 
     // ── Header ──
     let header_style = ftui::Style::new().fg(PackedRgba::rgb(180, 200, 255)).bold();
-    let header = tools_header_line(area.width as usize);
+    let header = tools_header_line(chunks[0].width as usize);
     Paragraph::new(&*header)
         .style(header_style)
         .render(chunks[0], frame);
@@ -1896,7 +1966,7 @@ pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
             height: 1,
         };
         let pct_share = (row.tool_call_count as f64 / total_calls) * 100.0;
-        let line = tools_row_line(row, pct_share, area.width as usize);
+        let line = tools_row_line(row, pct_share, row_rect.width as usize);
         let color = agent_color(i);
         Paragraph::new(&*line)
             .style(ftui::Style::new().fg(color))
@@ -1914,16 +1984,19 @@ pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
 
     // ── Summary ──
     let summary_idx = if has_sparkline { 3 } else { 2 };
-    let summary = format!(
-        " {} agents \u{00b7} {} total calls \u{00b7} {} API tokens",
-        data.tool_rows.len(),
-        format_compact(data.total_tool_calls),
-        format_compact(
-            data.tool_rows
-                .iter()
-                .map(|r| r.api_tokens_total)
-                .sum::<i64>()
+    let summary = truncate_with_ellipsis(
+        &format!(
+            " {} agents \u{00b7} {} total calls \u{00b7} {} API tokens",
+            data.tool_rows.len(),
+            format_compact(data.total_tool_calls),
+            format_compact(
+                data.tool_rows
+                    .iter()
+                    .map(|r| r.api_tokens_total)
+                    .sum::<i64>()
+            ),
         ),
+        chunks[summary_idx].width as usize,
     );
     Paragraph::new(&*summary)
         .style(ftui::Style::new().fg(PackedRgba::rgb(150, 150, 150)))
@@ -1932,30 +2005,56 @@ pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
 
 /// Build the header line for the tools table.
 fn tools_header_line(width: usize) -> String {
-    let w = width.max(40);
-    let name_w = (w * 30 / 100).max(8);
-    format!(
-        " {:<name_w$} {:>10} {:>10} {:>12} {:>9} {:>6}",
+    if width == 0 {
+        return String::new();
+    }
+    let compact = format!(
+        " {:<10} {:>5} {:>5} {:>8} {:>5}",
+        "Agent", "Calls", "Msgs", "Tokens", "Share"
+    );
+    if width < 56 {
+        return truncate_with_ellipsis(&compact, width);
+    }
+
+    let w = width;
+    let name_w = (w * 28 / 100).clamp(8, 24);
+    let line = format!(
+        " {:<name_w$} {:>8} {:>8} {:>10} {:>8} {:>6}",
         "Agent",
         "Calls",
-        "Messages",
-        "API Tokens",
+        "Msgs",
+        "API Tok",
         "Calls/1K",
         "Share",
         name_w = name_w,
-    )
+    );
+    truncate_with_ellipsis(&line, width)
 }
 
 /// Format a single tool-report row into a table line.
 fn tools_row_line(row: &crate::analytics::ToolRow, pct_share: f64, width: usize) -> String {
-    let w = width.max(40);
-    let name_w = (w * 30 / 100).max(8);
+    if width == 0 {
+        return String::new();
+    }
     let per_1k = row
         .tool_calls_per_1k_api_tokens
         .map(|v| format!("{v:.2}"))
         .unwrap_or_else(|| "\u{2014}".to_string());
-    format!(
-        " {:<name_w$} {:>10} {:>10} {:>12} {:>9} {:>5.1}%",
+    if width < 56 {
+        let line = format!(
+            " {:<10} {:>5} {:>5} {:>8} {:>4.0}%",
+            shorten_label(&row.key, 10),
+            format_compact(row.tool_call_count),
+            format_compact(row.message_count),
+            format_compact(row.api_tokens_total),
+            pct_share,
+        );
+        return truncate_with_ellipsis(&line, width);
+    }
+    let w = width;
+    let name_w = (w * 28 / 100).clamp(8, 24);
+    let line = format!(
+        " {:<name_w$} {:>8} {:>8} {:>10} {:>8} {:>5.1}%",
         shorten_label(&row.key, name_w),
         format_number(row.tool_call_count),
         format_number(row.message_count),
@@ -1963,7 +2062,8 @@ fn tools_row_line(row: &crate::analytics::ToolRow, pct_share: f64, width: usize)
         per_1k,
         pct_share,
         name_w = name_w,
-    )
+    );
+    truncate_with_ellipsis(&line, width)
 }
 
 // Cost (USD) UI removed: pricing-derived token costs were misleading and not
@@ -1989,11 +2089,14 @@ fn render_plans(data: &AnalyticsChartData, selection: usize, area: Rect, frame: 
     };
 
     // Header
-    let header = format!(
-        " Plans: {} plan msgs / {} total ({:.1}%)  |  Up/Down=select  Enter=drilldown",
-        format_compact(total_plan),
-        format_compact(total_msgs),
-        plan_pct,
+    let header = truncate_with_ellipsis(
+        &format!(
+            " Plans: {} plan msgs / {} total ({:.1}%)  |  Up/Down=select  Enter=drilldown",
+            format_compact(total_plan),
+            format_compact(total_msgs),
+            plan_pct,
+        ),
+        area.width as usize,
     );
     Paragraph::new(&*header)
         .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 200)))
@@ -2021,7 +2124,19 @@ fn render_plans(data: &AnalyticsChartData, selection: usize, area: Rect, frame: 
             break;
         }
         let bar_width = ((count / max_val) * (area.width as f64 * 0.5).max(1.0)) as u16;
-        let label = format!(" {:12} {:>8}", agent, format_compact(*count as i64));
+        let value = format_compact(*count as i64);
+        let value_w = display_width(&value);
+        let agent_w = area.width.saturating_sub(value_w as u16 + 3).max(4) as usize;
+        let label = truncate_with_ellipsis(
+            &format!(
+                " {:<agent_w$} {:>value_w$}",
+                shorten_label(agent, agent_w),
+                value,
+                agent_w = agent_w,
+                value_w = value_w.max(1),
+            ),
+            area.width as usize,
+        );
         let fg = if i == selection {
             PackedRgba::rgb(255, 255, 100)
         } else {
@@ -2072,16 +2187,22 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
     let bar_width = area.width.saturating_sub(6) as usize;
     let api_filled = (data.coverage_pct / 100.0 * bar_width as f64).round() as usize;
     let api_empty = bar_width.saturating_sub(api_filled);
-    let line1 = format!(
-        " API Token Coverage: {:.1}%  [{}{}]",
-        data.coverage_pct,
-        "\u{2588}".repeat(api_filled),
-        "\u{2591}".repeat(api_empty),
+    let line1 = truncate_with_ellipsis(
+        &format!(
+            " API Token Coverage: {:.1}%  [{}{}]",
+            data.coverage_pct,
+            "\u{2588}".repeat(api_filled),
+            "\u{2591}".repeat(api_empty),
+        ),
+        chunks[0].width as usize,
     );
-    let line2 = format!(
-        " {} agents  \u{2502}  {} total API tokens",
-        data.agent_count,
-        format_compact(data.total_api_tokens),
+    let line2 = truncate_with_ellipsis(
+        &format!(
+            " {} agents  \u{2502}  {} total API tokens",
+            data.agent_count,
+            format_compact(data.total_api_tokens),
+        ),
+        chunks[0].width as usize,
     );
     let cov_color = coverage_color(data.coverage_pct);
     Paragraph::new(&*line1)
@@ -2103,10 +2224,14 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
     if agent_row_count > 0 && chunks[1].height > 0 {
         let w = chunks[1].width as usize;
         // Header.
-        let header = format!(
-            " {:<16} {:>12} {:>10} {:>8}",
-            "Agent", "API Tokens", "Messages", "Data"
-        );
+        let header = if w < 48 {
+            format!(" {:<12} {:>8} {:>6}", "Agent", "Tokens", "Msgs")
+        } else {
+            format!(
+                " {:<16} {:>12} {:>10} {:>8}",
+                "Agent", "API Tokens", "Messages", "Data"
+            )
+        };
         let header_trunc = coverage_truncate(&header, w);
         let header_area = Rect {
             x: chunks[1].x,
@@ -2141,14 +2266,22 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
             } else {
                 PackedRgba::rgb(255, 200, 0)
             };
-            let agent_display = coverage_truncate(agent, 16);
-            let row_text = format!(
-                " {:<16} {:>12} {:>10} {:>8}",
-                agent_display,
-                format_compact(*tokens as i64),
-                format_compact(msgs as i64),
-                data_indicator,
-            );
+            let row_text = if w < 48 {
+                format!(
+                    " {:<12} {:>8} {:>6}",
+                    coverage_truncate(agent, 12),
+                    format_compact(*tokens as i64),
+                    format_compact(msgs as i64),
+                )
+            } else {
+                format!(
+                    " {:<16} {:>12} {:>10} {:>8}",
+                    coverage_truncate(agent, 16),
+                    format_compact(*tokens as i64),
+                    format_compact(msgs as i64),
+                    "",
+                )
+            };
             let row_trunc = coverage_truncate(&row_text, w);
             let row_area = Rect {
                 x: chunks[1].x,
@@ -2160,8 +2293,8 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
                 .style(ftui::Style::new().fg(agent_color(i)))
                 .render(row_area, frame);
             // Overlay data indicator in its own color at the right edge.
-            let indicator_len = data_indicator.len() as u16;
-            if chunks[1].width > indicator_len + 1 {
+            let indicator_len = display_width(data_indicator) as u16;
+            if w >= 48 && chunks[1].width > indicator_len + 1 {
                 let ind_area = Rect {
                     x: chunks[1].x + chunks[1].width - indicator_len - 1,
                     y: row_y,
@@ -2184,13 +2317,14 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
     if !data.daily_tokens.is_empty() {
         let label = " Daily API Tokens";
         if chunks[2].height > 0 {
+            let label_text = truncate_with_ellipsis(label, chunks[2].width as usize);
             let label_area = Rect {
                 x: chunks[2].x,
                 y: chunks[2].y,
-                width: chunks[2].width.min(label.len() as u16),
+                width: chunks[2].width.min(display_width(&label_text) as u16),
                 height: 1,
             };
-            Paragraph::new(label)
+            Paragraph::new(label_text)
                 .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
                 .render(label_area, frame);
         }
@@ -2227,11 +2361,11 @@ fn coverage_color(pct: f64) -> PackedRgba {
 }
 
 fn coverage_truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        s[..max_len].to_string()
-    }
+    truncate_with_ellipsis(s, max_len)
+}
+
+fn display_width(input: &str) -> usize {
+    input.chars().count()
 }
 
 /// Explorer view state passed to the render function.
@@ -2535,6 +2669,21 @@ mod tests {
     }
 
     #[test]
+    fn heatmap_series_coverage_uses_normalized_heatmap_days() {
+        let data = AnalyticsChartData {
+            heatmap_days: vec![
+                ("2026-02-01".to_string(), 0.25),
+                ("2026-02-02".to_string(), 1.0),
+            ],
+            ..Default::default()
+        };
+        let (series, min, max) = heatmap_series_for_metric(&data, HeatmapMetric::Coverage);
+        assert_eq!(series, data.heatmap_days);
+        assert!((min - 25.0).abs() < 0.001);
+        assert!((max - 100.0).abs() < 0.001);
+    }
+
+    #[test]
     fn format_heatmap_value_coverage_is_percent() {
         assert_eq!(format_heatmap_value(72.9, HeatmapMetric::Coverage), "73%");
     }
@@ -2627,10 +2776,19 @@ mod tests {
         let header = tools_header_line(100);
         assert!(header.contains("Agent"));
         assert!(header.contains("Calls"));
-        assert!(header.contains("Messages"));
-        assert!(header.contains("API Tokens"));
+        assert!(header.contains("Msgs"));
+        assert!(header.contains("API"));
         assert!(header.contains("Calls/1K"));
         assert!(header.contains("Share"));
+    }
+
+    #[test]
+    fn tools_header_line_respects_requested_width() {
+        let header = tools_header_line(24);
+        assert!(
+            header.chars().count() <= 24,
+            "header should be truncated to available width"
+        );
     }
 
     #[test]
@@ -2657,6 +2815,35 @@ mod tests {
         };
         let line = tools_row_line(&row, 1.0, 80);
         assert!(line.contains("\u{2014}")); // em-dash for missing data
+    }
+
+    #[test]
+    fn tools_row_line_respects_requested_width() {
+        let row = &sample_tool_rows()[0];
+        let line = tools_row_line(row, 33.3, 28);
+        assert!(
+            line.chars().count() <= 28,
+            "row should be truncated to available width"
+        );
+    }
+
+    #[test]
+    fn breakdown_tabs_line_respects_requested_width() {
+        let line = breakdown_tabs_line(BreakdownTab::Agent, 36);
+        assert!(
+            line.chars().count() <= 36,
+            "tab line should be truncated on narrow terminals"
+        );
+    }
+
+    #[test]
+    fn shorten_label_handles_unicode_boundaries() {
+        let label = "agent/\u{1F9EA}unicode-project";
+        let shortened = shorten_label(label, 7);
+        assert!(
+            shortened.chars().count() <= 7,
+            "unicode labels must truncate safely"
+        );
     }
 
     // ── Coverage view tests ──────────────────────────────────────────

@@ -471,12 +471,17 @@ impl PaletteState {
 /// Prebuilt action catalog with keyboard shortcut hints from [`shortcuts`].
 pub fn default_actions() -> Vec<PaletteItem> {
     let mut items = vec![
-        item(PaletteAction::ToggleTheme, "Toggle theme", shortcuts::THEME),
+        item(
+            PaletteAction::OpenSavedViews,
+            "Saved views",
+            "List saved slots",
+        ),
         item(
             PaletteAction::ToggleDensity,
             "Toggle density",
             shortcuts::DENSITY,
         ),
+        item(PaletteAction::ToggleTheme, "Toggle theme", shortcuts::THEME),
         item(
             PaletteAction::ToggleHelpStrip,
             "Toggle help strip",
@@ -521,11 +526,6 @@ pub fn default_actions() -> Vec<PaletteItem> {
             PaletteAction::ReloadIndex,
             "Reload index/view",
             shortcuts::REFRESH,
-        ),
-        item(
-            PaletteAction::OpenSavedViews,
-            "Saved views",
-            "List saved slots",
         ),
     ];
     // -- Analytics surface commands ----------------------------------------

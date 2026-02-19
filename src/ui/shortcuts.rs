@@ -39,7 +39,7 @@ pub const COPY_PATH: &str = "Ctrl+Y";
 pub const COPY_CONTENT: &str = "Ctrl+Shift+C";
 pub const BULK_MENU: &str = "Alt+B";
 pub const JSON_VIEW: &str = "Alt+Shift+J";
-pub const TOGGLE_SELECT: &str = "Ctrl+M/Ctrl+X";
+pub const TOGGLE_SELECT: &str = "Ctrl+X";
 pub const PANE_FILTER: &str = "Alt+/";
 
 // Find in detail
@@ -138,7 +138,7 @@ mod tests {
         assert_eq!(HISTORY_PREV, "Ctrl+p");
         assert_eq!(HISTORY_CYCLE, "Ctrl+R");
         assert_eq!(STATS_BAR, "Ctrl+S");
-        assert_eq!(TOGGLE_SELECT, "Ctrl+M/Ctrl+X");
+        assert_eq!(TOGGLE_SELECT, "Ctrl+X");
     }
 
     // =========================================================================

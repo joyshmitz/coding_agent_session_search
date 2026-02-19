@@ -2187,7 +2187,7 @@ impl ThemeEditorState {
     /// Build a ThemeConfig from the current editor state.
     pub fn to_config(&self) -> style_system::ThemeConfig {
         style_system::ThemeConfig {
-            version: 1,
+            version: style_system::THEME_CONFIG_VERSION,
             base_preset: Some(self.base_preset),
             colors: self.overrides.clone(),
         }
@@ -2572,6 +2572,60 @@ fn elide_text(text: &str, max_chars: usize) -> String {
     }
     let kept: String = text.chars().take(max_chars - 3).collect();
     format!("{kept}...")
+}
+
+fn clamp_cursor_boundary(text: &str, cursor: usize) -> usize {
+    let mut idx = cursor.min(text.len());
+    while idx > 0 && !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn prev_cursor_boundary(text: &str, cursor: usize) -> usize {
+    let idx = clamp_cursor_boundary(text, cursor);
+    if idx == 0 {
+        return 0;
+    }
+    text[..idx]
+        .char_indices()
+        .last()
+        .map(|(pos, _)| pos)
+        .unwrap_or(0)
+}
+
+fn next_cursor_boundary(text: &str, cursor: usize) -> usize {
+    let idx = clamp_cursor_boundary(text, cursor);
+    if idx >= text.len() {
+        return text.len();
+    }
+    text[idx..]
+        .chars()
+        .next()
+        .map(|ch| idx + ch.len_utf8())
+        .unwrap_or(text.len())
+}
+
+fn move_cursor_by_chars(text: &str, cursor: usize, delta: i32) -> usize {
+    let mut idx = clamp_cursor_boundary(text, cursor);
+    if delta > 0 {
+        for _ in 0..delta {
+            let next = next_cursor_boundary(text, idx);
+            if next == idx {
+                break;
+            }
+            idx = next;
+        }
+    } else if delta < 0 {
+        for _ in 0..delta.unsigned_abs() {
+            let prev = prev_cursor_boundary(text, idx);
+            if prev == idx {
+                break;
+            }
+            idx = prev;
+        }
+    }
+    idx
 }
 
 /// Elide long paths while preserving their tail for faster row-level scanning.
@@ -3968,6 +4022,8 @@ pub struct CassApp {
     pub help_scroll: u16,
     /// Whether the help strip is pinned.
     pub help_pinned: bool,
+    /// Whether help has been shown at least once for this profile.
+    pub has_seen_help: bool,
     /// Whether the export modal is visible.
     pub show_export_modal: bool,
     /// State of the export modal form.
@@ -4223,6 +4279,7 @@ impl Default for CassApp {
             show_help: false,
             help_scroll: 0,
             help_pinned: false,
+            has_seen_help: false,
             show_export_modal: false,
             export_modal_state: None,
             screenshot_pending: None,
@@ -4331,17 +4388,9 @@ impl CassApp {
     /// deterministic. If a valid theme config exists, it may override the base
     /// preset and color slots.
     fn refresh_theme_config_from_data_dir(&mut self) {
-        fn startup_preset(preset: UiThemePreset) -> UiThemePreset {
-            if matches!(preset, UiThemePreset::Light) {
-                UiThemePreset::Dark
-            } else {
-                preset
-            }
-        }
-
         self.theme_config = None;
-        self.theme_preset = startup_preset(self.style_options.preset);
-        self.theme_dark = true;
+        self.theme_preset = self.style_options.preset;
+        self.theme_dark = !matches!(self.theme_preset, UiThemePreset::Light);
         self.style_options.preset = self.theme_preset;
         self.style_options.dark_mode = self.theme_dark;
 
@@ -4352,13 +4401,11 @@ impl CassApp {
                 return;
             }
             match style_system::ThemeConfig::load_from_path(&theme_path) {
-                Ok(mut config) => {
+                Ok(config) => {
                     if let Some(preset) = config.base_preset {
-                        let preset = startup_preset(preset);
-                        config.base_preset = Some(preset);
                         self.theme_preset = preset;
                         self.style_options.preset = preset;
-                        self.theme_dark = true;
+                        self.theme_dark = !matches!(preset, UiThemePreset::Light);
                         self.style_options.dark_mode = self.theme_dark;
                     }
                     self.theme_config = Some(config);
@@ -4490,9 +4537,14 @@ impl CassApp {
             per_pane_limit: self.per_pane_limit,
             query_history: self.query_history.clone(),
             saved_views: self.saved_views.clone(),
+            analytics_since_ms: self.analytics_filters.since_ms,
+            analytics_until_ms: self.analytics_filters.until_ms,
+            analytics_agents: self.analytics_filters.agents.clone(),
+            analytics_workspaces: self.analytics_filters.workspaces.clone(),
+            analytics_source_filter: self.analytics_filters.source_filter.clone(),
             fancy_borders: self.fancy_borders,
             help_pinned: self.help_pinned,
-            has_seen_help: self.help_pinned || self.show_help,
+            has_seen_help: self.has_seen_help || self.help_pinned || self.show_help,
         }
     }
 
@@ -4501,16 +4553,27 @@ impl CassApp {
         options.preset = self.theme_preset;
         options.dark_mode = self.theme_dark;
         if let Some(config) = &self.theme_config {
-            let mut effective_config = config.clone();
-            if self.theme_dark && matches!(effective_config.base_preset, Some(UiThemePreset::Light))
-            {
-                effective_config.base_preset = Some(UiThemePreset::Dark);
-            }
-            StyleContext::from_options_with_theme_config(options, &effective_config)
+            StyleContext::from_options_with_theme_config(options, config)
                 .unwrap_or_else(|_| StyleContext::from_options(options))
         } else {
             StyleContext::from_options(options)
         }
+    }
+
+    fn persist_theme_selection(&mut self) -> Result<(), String> {
+        let mut config = self.theme_config.clone().unwrap_or_default();
+        config.base_preset = Some(self.theme_preset);
+        self.theme_config = Some(config.clone());
+
+        #[cfg(not(test))]
+        {
+            let theme_path = self.data_dir.join("theme.json");
+            config
+                .save_to_path(&theme_path)
+                .map_err(|e| format!("failed writing {}: {e}", theme_path.display()))?;
+        }
+
+        Ok(())
     }
 
     fn selected_hit(&self) -> Option<&SearchHit> {
@@ -4906,17 +4969,22 @@ impl CassApp {
         match self.footer_hint_context_key() {
             "results" => {
                 push(shortcuts::DETAIL_OPEN, "open", contextual.clone(), 1);
-                push(shortcuts::TOGGLE_SELECT, "select", contextual.clone(), 2);
                 if !self.selected.is_empty() {
-                    push(shortcuts::BULK_MENU, "bulk", contextual.clone(), 3);
+                    // Bulk actions are the highest-value next action when
+                    // selection exists; keep them ahead of secondary toggles.
+                    push(shortcuts::BULK_MENU, "bulk", contextual.clone(), 2);
+                    push(shortcuts::TOGGLE_SELECT, "select", contextual.clone(), 3);
                     push("Ctrl+O", "open", contextual.clone(), 4);
-                    push(shortcuts::STATS_BAR, "stats", contextual.clone(), 5);
-                    push(shortcuts::TAB_FOCUS, "focus", contextual.clone(), 6);
-                    push(shortcuts::PANE_FILTER, "filter", contextual.clone(), 7);
+                    push(shortcuts::SEARCH_MODE, "mode", contextual.clone(), 5);
+                    push(shortcuts::STATS_BAR, "stats", contextual.clone(), 6);
+                    push(shortcuts::TAB_FOCUS, "focus", contextual.clone(), 7);
+                    push(shortcuts::PANE_FILTER, "filter", contextual.clone(), 8);
                 } else {
-                    push(shortcuts::TAB_FOCUS, "focus", contextual.clone(), 3);
-                    push(shortcuts::STATS_BAR, "stats", contextual.clone(), 4);
-                    push(shortcuts::PANE_FILTER, "filter", contextual.clone(), 5);
+                    push(shortcuts::TOGGLE_SELECT, "select", contextual.clone(), 2);
+                    push(shortcuts::SEARCH_MODE, "mode", contextual.clone(), 3);
+                    push(shortcuts::TAB_FOCUS, "focus", contextual.clone(), 4);
+                    push(shortcuts::STATS_BAR, "stats", contextual.clone(), 5);
+                    push(shortcuts::PANE_FILTER, "filter", contextual.clone(), 6);
                 }
             }
             "detail" => {
@@ -4980,16 +5048,17 @@ impl CassApp {
         // Global hints are low-priority fallback hints.
         push(shortcuts::HELP, "help", HintContext::Global, 20);
         push(shortcuts::THEME, "theme", HintContext::Global, 21);
+        push(shortcuts::SEARCH_MODE, "mode", HintContext::Global, 22);
         push(
             shortcuts::SURFACE_ANALYTICS,
             "analytics",
             HintContext::Global,
-            22,
+            23,
         );
-        push(shortcuts::DENSITY, "density", HintContext::Global, 23);
-        push(shortcuts::BORDERS, "borders", HintContext::Global, 24);
-        push(shortcuts::PALETTE, "palette", HintContext::Global, 25);
-        push(shortcuts::DETAIL_CLOSE, "quit", HintContext::Global, 26);
+        push(shortcuts::DENSITY, "density", HintContext::Global, 24);
+        push(shortcuts::BORDERS, "borders", HintContext::Global, 25);
+        push(shortcuts::PALETTE, "palette", HintContext::Global, 26);
+        push(shortcuts::DETAIL_CLOSE, "quit", HintContext::Global, 27);
 
         hints
     }
@@ -8309,6 +8378,15 @@ impl CassApp {
             (inner, None)
         };
 
+        if !content_area.is_empty() {
+            Block::new().style(block_style).render(content_area, frame);
+        }
+        if let Some(find_rect) = find_area
+            && !find_rect.is_empty()
+        {
+            Block::new().style(block_style).render(find_rect, frame);
+        }
+
         if let Some(hit) = self.selected_hit() {
             if self.loading_context == Some(LoadingContext::DetailModal) {
                 let loading_line = format!(
@@ -9365,8 +9443,9 @@ impl CassApp {
             "Updates",
             &[
                 "Checks GitHub releases hourly (offline-friendly, no auto-download)".into(),
-                "When available: banner shows at top with U/S/Esc options".into(),
-                "  U - Open release page in browser (Shift+U)".into(),
+                "When available: banner shows at top with U/N/S/Esc options".into(),
+                "  U - Start upgrade flow (press U twice to confirm)".into(),
+                "  N - Open release notes in browser (Shift+N)".into(),
                 "  S - Skip this version permanently (Shift+S)".into(),
                 "  Esc - Dismiss banner for this session".into(),
             ],
@@ -9384,8 +9463,11 @@ impl CassApp {
                 "Enter in query bar submits immediately; Enter on selected result opens detail modal (Messages tab)".into(),
                 "Wildcards: foo* (prefix), *foo (suffix), *foo* (contains)".into(),
                 "Auto-fuzzy: searches with few results try *term* fallback".into(),
-                format!("{} refresh search (re-query index)", shortcuts::REFRESH),
-                "/ detail-find in preview; n/N to jump session hits in context".into(),
+                format!("{} refresh index in background", shortcuts::REFRESH),
+                format!(
+                    "/ or {} detail-find in preview; n/N to jump session hits in context",
+                    shortcuts::PANE_FILTER
+                ),
             ],
         );
 
@@ -9422,7 +9504,7 @@ impl CassApp {
                     shortcuts::CLEAR_FILTERS
                 ),
                 format!(
-                    "{} scope to active agent | {} clear scope | {} cycle time presets (24h/7d/30d/all)",
+                    "{} clear agent filter | {} clear all filters | {} cycle time presets (24h/7d/30d/all)",
                     shortcuts::SCOPE_AGENT,
                     shortcuts::SCOPE_WORKSPACE,
                     shortcuts::CYCLE_TIME_PRESETS
@@ -9453,15 +9535,15 @@ impl CassApp {
                     shortcuts::SEARCH_MODE
                 ),
                 format!(
-                    "{} match mode: prefix (default) ⇄ standard",
+                    "{} match mode: standard (default) ⇄ prefix",
                     shortcuts::MATCH_MODE
                 ),
                 format!(
-                    "{} ranking: recent → balanced → relevance → match-quality",
+                    "{} ranking: recent → balanced → relevance → match-quality → date-newest → date-oldest",
                     shortcuts::RANKING
                 ),
                 format!(
-                    "{} theme: dark/light (Alt+T or Ctrl+T also works) | {} toggle border style",
+                    "{} cycle themes (Dark → Light → Catppuccin → Dracula → Nord → High Contrast) | {} toggle border style",
                     shortcuts::THEME,
                     shortcuts::BORDERS
                 ),
@@ -9494,7 +9576,9 @@ impl CassApp {
                     "Open detail (Messages tab default; if no selected hit, submit query)",
                 ),
                 ("Esc", "Close/back"),
-                ("[ / ]", "Cycle detail tabs"),
+                ("Tab (in detail)", "Cycle detail tabs"),
+                ("{ / }", "Jump messages"),
+                ("[ / ]", "Jump user messages"),
                 ("Ctrl+Enter", "Queue item; Ctrl+O open all queued"),
             ],
         );
@@ -9508,9 +9592,11 @@ impl CassApp {
                     shortcuts::DETAIL_OPEN
                 ),
                 format!(
-                    "{} open hit in $EDITOR; {} copy path/content",
+                    "{} open hit in $EDITOR; {} copy snippet | {} copy path | {} copy content",
                     shortcuts::EDITOR,
-                    shortcuts::COPY
+                    shortcuts::COPY,
+                    shortcuts::COPY_PATH,
+                    shortcuts::COPY_CONTENT
                 ),
                 format!(
                     "{} toggle aggregate results stats bar",
@@ -9534,7 +9620,7 @@ impl CassApp {
             &[
                 ("Alt+= / Alt+-", "Increase/decrease pane items"),
                 ("Ctrl+D", "Cycle density mode (compact/cozy/spacious)"),
-                ("F2", "Toggle dark/light theme"),
+                ("F2", "Cycle theme preset"),
                 ("Ctrl+B", "Toggle border style"),
             ],
         );
@@ -9678,6 +9764,69 @@ impl CassApp {
             };
             Paragraph::new(&*line).style(style).render(row_area, frame);
         }
+    }
+
+    /// Render the semantic model consent dialog overlay.
+    fn render_consent_overlay(
+        &self,
+        frame: &mut super::ftui_adapter::Frame,
+        area: Rect,
+        styles: &StyleContext,
+    ) {
+        let dialog_w = 68u16.min(area.width.saturating_sub(2));
+        let dialog_h = 9u16.min(area.height.saturating_sub(2));
+        if dialog_w < 28 || dialog_h < 6 {
+            return;
+        }
+
+        let dialog_x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
+        let dialog_y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
+        let dialog_area = Rect::new(dialog_x, dialog_y, dialog_w, dialog_h);
+
+        let bg_style = styles.style(style_system::STYLE_PANE_BASE);
+        let border_style = styles.style(style_system::STYLE_PANE_FOCUSED);
+        let text_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
+        let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
+        let key_style = styles.style(style_system::STYLE_KBD_KEY);
+
+        Block::new().style(bg_style).render(dialog_area, frame);
+        let outer = Block::new()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .title("Enable semantic search?")
+            .title_alignment(Alignment::Left)
+            .style(border_style);
+        let inner = outer.inner(dialog_area);
+        outer.render(dialog_area, frame);
+        if inner.is_empty() {
+            return;
+        }
+
+        let lines = vec![
+            ftui::text::Line::from_spans(vec![ftui::text::Span::styled(
+                "Semantic/Hybrid mode needs a local embedding model download.".to_string(),
+                text_style,
+            )]),
+            ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("[D]".to_string(), key_style.bold()),
+                ftui::text::Span::styled(" Download model (recommended)".to_string(), text_style),
+            ]),
+            ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("[H]".to_string(), key_style.bold()),
+                ftui::text::Span::styled(
+                    " Use hash fallback (no download)".to_string(),
+                    text_style,
+                ),
+            ]),
+            ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("[Esc]".to_string(), key_style.bold()),
+                ftui::text::Span::styled(" Cancel for now".to_string(), muted_style),
+            ]),
+        ];
+        Paragraph::new(ftui::text::Text::from_lines(lines))
+            .style(text_style)
+            .wrap(ftui::text::WrapMode::Word)
+            .render(inner, frame);
     }
 
     /// Render the saved views manager popup centered on screen.
@@ -10005,7 +10154,7 @@ impl CassApp {
             } else {
                 format!("~{est_kb}KB")
             };
-            let mut features = vec!["Dark/Light themes", "Print-friendly"];
+            let mut features = vec!["Theme presets", "Print-friendly"];
             if state.encrypt {
                 features.push("Encrypted");
             }
@@ -10577,7 +10726,7 @@ pub enum CassMsg {
     ContextWindowCycled,
     /// Cycle density mode (Compact -> Cozy -> Spacious).
     DensityModeCycled,
-    /// Toggle dark/light theme.
+    /// Cycle through all built-in theme presets.
     ThemeToggled,
 
     // -- Navigation -------------------------------------------------------
@@ -11076,6 +11225,11 @@ pub struct PersistedState {
     pub per_pane_limit: usize,
     pub query_history: VecDeque<String>,
     pub saved_views: Vec<SavedView>,
+    pub analytics_since_ms: Option<i64>,
+    pub analytics_until_ms: Option<i64>,
+    pub analytics_agents: HashSet<String>,
+    pub analytics_workspaces: HashSet<String>,
+    pub analytics_source_filter: SourceFilter,
     pub fancy_borders: bool,
     pub help_pinned: bool,
     pub has_seen_help: bool,
@@ -11127,6 +11281,20 @@ struct PersistedStateFile {
     query_history: Vec<String>,
     #[serde(default)]
     saved_views: Vec<PersistedSavedView>,
+    #[serde(default)]
+    analytics_since_ms: Option<i64>,
+    #[serde(default)]
+    analytics_until_ms: Option<i64>,
+    #[serde(default)]
+    analytics_agents: Vec<String>,
+    #[serde(default)]
+    analytics_workspaces: Vec<String>,
+    #[serde(default)]
+    analytics_source_filter_kind: Option<String>,
+    #[serde(default)]
+    analytics_source_filter_value: Option<String>,
+    #[serde(default)]
+    analytics_source_filter: Option<serde_json::Value>,
     #[serde(default)]
     fancy_borders: Option<bool>,
     #[serde(default)]
@@ -11291,6 +11459,11 @@ fn persisted_state_defaults() -> PersistedState {
         per_pane_limit: 0,
         query_history: VecDeque::with_capacity(QUERY_HISTORY_CAP),
         saved_views: Vec::new(),
+        analytics_since_ms: None,
+        analytics_until_ms: None,
+        analytics_agents: HashSet::new(),
+        analytics_workspaces: HashSet::new(),
+        analytics_source_filter: SourceFilter::All,
         fancy_borders: true,
         help_pinned: false,
         has_seen_help: false,
@@ -11318,6 +11491,8 @@ fn persisted_state_file_from_state(state: &PersistedState) -> PersistedStateFile
             }
         })
         .collect();
+    let (analytics_source_filter_kind, analytics_source_filter_value) =
+        source_filter_to_parts(&state.analytics_source_filter);
     PersistedStateFile {
         version: 1,
         search_mode: Some(search_mode_str(state.search_mode).to_string()),
@@ -11329,6 +11504,15 @@ fn persisted_state_file_from_state(state: &PersistedState) -> PersistedStateFile
         per_pane_limit: Some(state.per_pane_limit),
         query_history: state.query_history.iter().cloned().collect(),
         saved_views,
+        analytics_since_ms: state.analytics_since_ms,
+        analytics_until_ms: state.analytics_until_ms,
+        analytics_agents: state.analytics_agents.iter().cloned().collect(),
+        analytics_workspaces: state.analytics_workspaces.iter().cloned().collect(),
+        analytics_source_filter_kind: Some(analytics_source_filter_kind),
+        analytics_source_filter_value,
+        analytics_source_filter: Some(serde_json::Value::String(
+            state.analytics_source_filter.to_string(),
+        )),
         fancy_borders: Some(state.fancy_borders),
         help_pinned: Some(state.help_pinned),
         has_seen_help: Some(state.has_seen_help),
@@ -11414,6 +11598,23 @@ fn persisted_state_from_file(file: PersistedStateFile) -> PersistedState {
         per_pane_limit: file.per_pane_limit.unwrap_or(defaults.per_pane_limit),
         query_history,
         saved_views,
+        analytics_since_ms: file.analytics_since_ms,
+        analytics_until_ms: file.analytics_until_ms,
+        analytics_agents: file
+            .analytics_agents
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect(),
+        analytics_workspaces: file
+            .analytics_workspaces
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect(),
+        analytics_source_filter: source_filter_from_parts(
+            file.analytics_source_filter_kind.as_deref(),
+            file.analytics_source_filter_value.as_deref(),
+            file.analytics_source_filter.as_ref(),
+        ),
         fancy_borders: file.fancy_borders.unwrap_or(defaults.fancy_borders),
         help_pinned: file.help_pinned.unwrap_or(defaults.help_pinned),
         has_seen_help: file.has_seen_help.unwrap_or(defaults.has_seen_help),
@@ -11686,9 +11887,9 @@ impl From<super::ftui_adapter::Event> for CassMsg {
 
                     // -- Theme ----------------------------------------------------
                     KeyCode::F(2) => CassMsg::ThemeToggled,
-                    KeyCode::Char('t') if ctrl && !shift => CassMsg::ThemeToggled,
-                    KeyCode::Char('t') if alt => CassMsg::ThemeToggled,
-                    KeyCode::Char('T') if alt => CassMsg::ThemeToggled,
+                    KeyCode::Char('t') if ctrl && !shift => CassMsg::ThemeEditorOpened,
+                    KeyCode::Char('t') if alt => CassMsg::ThemeEditorOpened,
+                    KeyCode::Char('T') if alt => CassMsg::ThemeEditorOpened,
 
                     // -- Filters --------------------------------------------------
                     KeyCode::F(3) if shift => CassMsg::FilterAgentSet(HashSet::new()),
@@ -11719,6 +11920,7 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::Char('s') if ctrl && !shift => CassMsg::StatsBarToggled,
                     KeyCode::Char('S') if ctrl && !shift => CassMsg::StatsBarToggled,
                     KeyCode::Char('s') if alt => CassMsg::SearchModeCycled,
+                    KeyCode::Char('S') if alt => CassMsg::SearchModeCycled,
 
                     // -- Surface switch -------------------------------------------
                     KeyCode::Char('a') if alt => CassMsg::AnalyticsEntered,
@@ -11787,9 +11989,11 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::Char('d') if ctrl => CassMsg::DensityModeCycled,
 
                     // -- Multi-select ---------------------------------------------
-                    KeyCode::Char('m') if ctrl => CassMsg::SelectionToggled,
                     KeyCode::Char('x') if ctrl => CassMsg::SelectionToggled,
                     KeyCode::Char('a') if ctrl => CassMsg::SelectAllToggled,
+                    // Compatibility path: many terminals encode Enter as Ctrl+M / Ctrl+J.
+                    KeyCode::Char('m') if ctrl && !alt && !shift => CassMsg::DetailOpened,
+                    KeyCode::Char('j') if ctrl && !alt && !shift => CassMsg::DetailOpened,
                     KeyCode::Enter if ctrl => CassMsg::ItemEnqueued,
                     KeyCode::Char('o') if ctrl => CassMsg::OpenAllQueued,
 
@@ -12022,19 +12226,19 @@ impl super::ftui_adapter::Model for CassApp {
         }
 
         // Update banner shortcuts:
-        // - U: upgrade (two-step confirm)
-        // - N: open release notes
-        // - S: skip version
+        // - Shift+U: upgrade (two-step confirm)
+        // - Shift+N: open release notes
+        // - Shift+S: skip version
         // - Esc: dismiss banner for this session
         if self.can_handle_update_shortcuts() {
             match &msg {
-                CassMsg::QueryChanged(text) if text.eq_ignore_ascii_case("u") => {
+                CassMsg::QueryChanged(text) if text == "U" => {
                     return self.update(CassMsg::UpdateUpgradeRequested);
                 }
-                CassMsg::QueryChanged(text) if text.eq_ignore_ascii_case("n") => {
+                CassMsg::QueryChanged(text) if text == "N" => {
                     return self.update(CassMsg::UpdateReleaseNotesRequested);
                 }
-                CassMsg::QueryChanged(text) if text.eq_ignore_ascii_case("s") => {
+                CassMsg::QueryChanged(text) if text == "S" => {
                     return self.update(CassMsg::UpdateSkipped);
                 }
                 CassMsg::QuitRequested => {
@@ -12242,6 +12446,7 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 CassMsg::SavedViewsSelectionMoved { .. }
                 | CassMsg::SavedViewLoadedSelected
+                | CassMsg::ViewLoaded(_)
                 | CassMsg::SavedViewRenameStarted
                 | CassMsg::SavedViewRenameCommitted
                 | CassMsg::SavedViewDeletedSelected
@@ -12260,6 +12465,7 @@ impl super::ftui_adapter::Model for CassApp {
                 CassMsg::SourceFilterMenuToggled | CassMsg::QuitRequested => {
                     self.source_filter_menu_open = false;
                     self.status = "Source filter menu closed".to_string();
+                    self.focus_manager.pop_trap();
                     return ftui::Cmd::none();
                 }
                 CassMsg::SelectionMoved { delta } => {
@@ -12320,6 +12526,12 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::DetailTabChanged(_)
                     | CassMsg::DetailScrolled { .. }
                     | CassMsg::DetailWrapToggled
+                    | CassMsg::CopySnippet
+                    | CassMsg::CopyPath
+                    | CassMsg::CopyContent
+                    | CassMsg::OpenInEditor
+                    | CassMsg::OpenInNano
+                    | CassMsg::ViewRaw
                     | CassMsg::Tick
                     | CassMsg::MouseEvent { .. }
                     | CassMsg::ForceQuit => {}
@@ -12330,6 +12542,9 @@ impl super::ftui_adapter::Model for CassApp {
                 match &msg {
                     // Slash or Ctrl+F opens find
                     CassMsg::PaneFilterOpened | CassMsg::WildcardFallbackToggled => {
+                        return self.update(CassMsg::DetailFindToggled);
+                    }
+                    CassMsg::QueryChanged(text) if text == "/" => {
                         return self.update(CassMsg::DetailFindToggled);
                     }
                     // Enter moves to the next contextual search hit while modal is open.
@@ -12447,6 +12662,12 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::DetailFindNavigated { .. }
                     | CassMsg::DetailSessionHitNavigated { .. }
                     | CassMsg::ToggleJsonView
+                    | CassMsg::CopySnippet
+                    | CassMsg::CopyPath
+                    | CassMsg::CopyContent
+                    | CassMsg::OpenInEditor
+                    | CassMsg::OpenInNano
+                    | CassMsg::ViewRaw
                     | CassMsg::ToolCollapseToggled(_)
                     | CassMsg::ToolExpandAll
                     | CassMsg::ToolCollapseAll
@@ -12785,15 +13006,17 @@ impl super::ftui_adapter::Model for CassApp {
 
             // -- Query & search -----------------------------------------------
             CassMsg::QueryChanged(text) => {
+                let cursor = clamp_cursor_boundary(&self.query, self.cursor_pos);
                 if text.is_empty() {
                     // Backspace: remove char before cursor
-                    if self.cursor_pos > 0 {
-                        self.query.remove(self.cursor_pos - 1);
-                        self.cursor_pos -= 1;
+                    if cursor > 0 {
+                        let new_cursor = prev_cursor_boundary(&self.query, cursor);
+                        self.query.drain(new_cursor..cursor);
+                        self.cursor_pos = new_cursor;
                     }
                 } else {
-                    self.query.insert_str(self.cursor_pos, &text);
-                    self.cursor_pos += text.len();
+                    self.query.insert_str(cursor, &text);
+                    self.cursor_pos = cursor + text.len();
                 }
                 self.dirty_since = Some(Instant::now());
                 self.search_dirty_since = Some(Instant::now());
@@ -12812,15 +13035,16 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::QueryWordDeleted => {
                 // Delete word backward from cursor (Ctrl+W): trim trailing
                 // whitespace before cursor, then delete to word boundary.
-                if self.cursor_pos > 0 {
+                let cursor = clamp_cursor_boundary(&self.query, self.cursor_pos);
+                if cursor > 0 {
                     self.push_undo("Delete word");
-                    let before = &self.query[..self.cursor_pos];
+                    let before = &self.query[..cursor];
                     let trimmed = before.trim_end();
                     let new_end = trimmed
                         .rfind(|c: char| c.is_whitespace())
                         .map(|i| i + 1)
                         .unwrap_or(0);
-                    self.query.drain(new_end..self.cursor_pos);
+                    self.query.drain(new_end..cursor);
                     self.cursor_pos = new_end;
                     self.dirty_since = Some(Instant::now());
                     self.search_dirty_since = Some(Instant::now());
@@ -12840,10 +13064,12 @@ impl super::ftui_adapter::Model for CassApp {
                     if self.query_history.len() > QUERY_HISTORY_CAP {
                         self.query_history.pop_back();
                     }
+                    self.dirty_since = Some(Instant::now());
                 } else if let Some(prev) = self.query_history.front().cloned() {
                     // Empty query + history → load most recent query
                     self.query = prev;
                     self.cursor_pos = self.query.len();
+                    self.dirty_since = Some(Instant::now());
                 }
                 self.history_cursor = None;
                 self.search_dirty_since = None; // cancel pending debounce
@@ -13069,8 +13295,7 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::CursorMoved { delta } => {
-                let new_pos = self.cursor_pos as i32 + delta;
-                self.cursor_pos = new_pos.clamp(0, self.query.len() as i32) as usize;
+                self.cursor_pos = move_cursor_by_chars(&self.query, self.cursor_pos, delta);
                 ftui::Cmd::none()
             }
             CassMsg::CursorJumped { to_end } => {
@@ -13142,6 +13367,11 @@ impl super::ftui_adapter::Model for CassApp {
                     SearchMode::Semantic => SearchMode::Hybrid,
                     SearchMode::Hybrid => SearchMode::Lexical,
                 };
+                self.status = format!(
+                    "Search mode: {} ({} to cycle)",
+                    search_mode_str(self.search_mode),
+                    shortcuts::SEARCH_MODE
+                );
                 self.dirty_since = Some(Instant::now());
                 ftui::Cmd::msg(CassMsg::SearchRequested)
             }
@@ -13186,15 +13416,15 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::ThemeToggled => {
-                self.theme_dark = !self.theme_dark;
-                self.theme_preset = if self.theme_dark {
-                    UiThemePreset::Dark
-                } else {
-                    UiThemePreset::Light
-                };
+                self.theme_preset = self.theme_preset.next();
+                self.theme_dark = !matches!(self.theme_preset, UiThemePreset::Light);
                 self.style_options.dark_mode = self.theme_dark;
                 self.style_options.preset = self.theme_preset;
-                self.status = format!("Theme: {}", if self.theme_dark { "Dark" } else { "Light" });
+                self.status = format!("Theme: {}", self.theme_preset.name());
+                if let Err(err) = self.persist_theme_selection() {
+                    self.status =
+                        format!("Theme: {} (not persisted: {err})", self.theme_preset.name());
+                }
                 self.dirty_since = Some(Instant::now());
                 ftui::Cmd::none()
             }
@@ -13750,8 +13980,9 @@ impl super::ftui_adapter::Model for CassApp {
                     } else {
                         self.selected.insert(key);
                         self.status = format!(
-                            "Selected ({} total) · Ctrl+M/Ctrl+X toggle · A bulk actions · Esc clear",
-                            self.selected.len()
+                            "Selected ({} total) · {} bulk actions · Esc clear",
+                            self.selected.len(),
+                            shortcuts::BULK_MENU
                         );
                     }
                 }
@@ -13774,8 +14005,9 @@ impl super::ftui_adapter::Model for CassApp {
                             self.selected.insert(key);
                         }
                         self.status = format!(
-                            "Selected all in pane ({} total) · A bulk actions",
-                            self.selected.len()
+                            "Selected all in pane ({} total) · {} bulk actions",
+                            self.selected.len(),
+                            shortcuts::BULK_MENU
                         );
                     }
                 }
@@ -13802,8 +14034,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::BulkActionsOpened => {
                 if self.selected.is_empty() {
                     self.status =
-                        "No items selected. Ctrl+M/Ctrl+X to select, Ctrl+A to select all."
-                            .to_string();
+                        "No items selected. Ctrl+X to select, Ctrl+A to select all.".to_string();
                 } else {
                     self.show_bulk_modal = true;
                     self.bulk_action_idx = 0;
@@ -14267,10 +14498,14 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::PaletteActionExecuted => {
                 let result = execute_selected(&self.palette_state);
+                let palette_was_visible = self.command_palette.is_visible();
                 self.command_palette.close();
                 self.show_palette_evidence = false;
                 self.palette_latency.bench_mode = false;
                 self.palette_latency.bench_start = None;
+                if palette_was_visible {
+                    self.focus_manager.pop_trap();
+                }
                 self.palette_result_to_cmd(result)
             }
 
@@ -14423,7 +14658,9 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::HelpToggled => {
                 self.show_help = !self.show_help;
                 self.help_scroll = 0;
+                self.dirty_since = Some(Instant::now());
                 if self.show_help {
+                    self.has_seen_help = true;
                     self.focus_manager.push_trap(focus_ids::GROUP_HELP);
                     self.focus_manager.focus(focus_ids::HELP_OVERLAY);
                 } else {
@@ -14438,6 +14675,10 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::HelpPinToggled => {
                 self.help_pinned = !self.help_pinned;
+                if self.help_pinned {
+                    self.has_seen_help = true;
+                }
+                self.dirty_since = Some(Instant::now());
                 ftui::Cmd::none()
             }
 
@@ -14938,10 +15179,14 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::SavedViewLoadedSelected => {
                 if let Some(slot) = self.selected_saved_view_slot() {
+                    let modal_was_open = self.show_saved_views_modal;
                     self.show_saved_views_modal = false;
                     self.saved_view_drag = None;
                     self.saved_view_rename_mode = false;
                     self.saved_view_rename_buffer.clear();
+                    if modal_was_open {
+                        self.focus_manager.pop_trap();
+                    }
                     return ftui::Cmd::msg(CassMsg::ViewLoaded(slot));
                 }
                 use crate::ui::components::toast::{Toast, ToastType};
@@ -15079,9 +15324,14 @@ impl super::ftui_adapter::Model for CassApp {
                     self.filters.created_to = view.created_to;
                     self.ranking_mode = view.ranking;
                     self.filters.source_filter = view.source_filter.clone();
+                    let modal_was_open = self.show_saved_views_modal;
                     self.show_saved_views_modal = false;
+                    self.saved_view_drag = None;
                     self.saved_view_rename_mode = false;
                     self.saved_view_rename_buffer.clear();
+                    if modal_was_open {
+                        self.focus_manager.pop_trap();
+                    }
                     let label = view
                         .label
                         .filter(|s| !s.trim().is_empty())
@@ -15177,20 +15427,59 @@ impl super::ftui_adapter::Model for CassApp {
                 self.match_mode = state.match_mode;
                 self.ranking_mode = state.ranking_mode;
                 self.context_window = state.context_window;
-                // Always boot into dark mode. Persisted light-mode preference is
-                // intentionally ignored so defaults remain consistent.
-                self.theme_dark = true;
-                self.theme_preset = UiThemePreset::Dark;
+                // If theme.json has an explicit preset, it is the source of truth.
+                // Otherwise fall back to legacy dark/light persisted state.
+                if let Some(config) = self.theme_config.as_ref() {
+                    if let Some(preset) = config.base_preset {
+                        self.theme_preset = preset;
+                        self.theme_dark = !matches!(preset, UiThemePreset::Light);
+                    } else {
+                        self.theme_dark = state.theme_dark;
+                        self.theme_preset = if self.theme_dark {
+                            UiThemePreset::Dark
+                        } else {
+                            UiThemePreset::Light
+                        };
+                    }
+                } else {
+                    self.theme_dark = state.theme_dark;
+                    self.theme_preset = if self.theme_dark {
+                        UiThemePreset::Dark
+                    } else {
+                        UiThemePreset::Light
+                    };
+                }
                 self.style_options.dark_mode = self.theme_dark;
                 self.style_options.preset = self.theme_preset;
                 self.density_mode = state.density_mode;
                 self.per_pane_limit = state.per_pane_limit;
                 self.query_history = state.query_history;
                 self.saved_views = state.saved_views;
+                self.analytics_filters.since_ms = state.analytics_since_ms;
+                self.analytics_filters.until_ms = state.analytics_until_ms;
+                self.analytics_filters.agents = state.analytics_agents;
+                self.analytics_filters.workspaces = state.analytics_workspaces;
+                self.analytics_filters.source_filter = state.analytics_source_filter;
                 self.sort_saved_views();
                 self.clamp_saved_views_selection();
                 self.fancy_borders = state.fancy_borders;
                 self.help_pinned = state.help_pinned;
+                // Re-open help if the user pinned it, or on first run so key
+                // hints are immediately discoverable.
+                let should_show_help = state.help_pinned || !state.has_seen_help;
+                self.show_help = should_show_help;
+                self.help_scroll = 0;
+                self.has_seen_help = state.has_seen_help || should_show_help;
+                if should_show_help && !state.has_seen_help {
+                    // Persist first-run auto-help dismissal state.
+                    self.dirty_since = Some(Instant::now());
+                }
+                if should_show_help {
+                    if self.focus_manager.current() != Some(focus_ids::HELP_OVERLAY) {
+                        self.focus_manager.push_trap(focus_ids::GROUP_HELP);
+                    }
+                    self.focus_manager.focus(focus_ids::HELP_OVERLAY);
+                }
                 self.dirty_since = None;
                 ftui::Cmd::none()
             }
@@ -15231,6 +15520,9 @@ impl super::ftui_adapter::Model for CassApp {
                     ..CassApp::default()
                 };
                 *self = reset;
+                // Re-resolve theme from the real data dir after reset so
+                // custom theme.json remains authoritative.
+                self.refresh_theme_config_from_data_dir();
                 if let Err(e) = clear_persisted_state_file(&state_path) {
                     self.status = format!("State reset in-memory, but failed to remove file: {e}");
                 } else {
@@ -15807,15 +16099,71 @@ impl super::ftui_adapter::Model for CassApp {
                 {
                     ftui::Cmd::task(move || {
                         match crate::storage::sqlite::SqliteStorage::open_readonly(&db_path) {
-                            Ok(db) => CassMsg::AnalyticsChartDataLoaded(Box::new(
-                                super::analytics_charts::load_chart_data(&db, &filters, group_by),
-                            )),
+                            Ok(db) => {
+                                let mut data = super::analytics_charts::load_chart_data(
+                                    &db, &filters, group_by,
+                                );
+
+                                let should_auto_rebuild = if data.daily_tokens.is_empty() {
+                                    match crate::analytics::query::query_status(
+                                        db.raw(),
+                                        &crate::analytics::AnalyticsFilter::default(),
+                                    ) {
+                                        Ok(status) => {
+                                            status.coverage.total_messages > 0
+                                                && (status
+                                                    .recommended_action
+                                                    .starts_with("rebuild")
+                                                    || status.drift.signals.iter().any(|signal| {
+                                                        matches!(
+                                                            signal.signal.as_str(),
+                                                            "missing_rollups" | "no_analytics_data"
+                                                        )
+                                                    }))
+                                        }
+                                        Err(_) => false,
+                                    }
+                                } else {
+                                    false
+                                };
+
+                                if should_auto_rebuild {
+                                    match crate::storage::sqlite::SqliteStorage::open(&db_path) {
+                                        Ok(mut db_rw) => match db_rw.rebuild_analytics() {
+                                            Ok(_) => {
+                                                let mut refreshed =
+                                                    super::analytics_charts::load_chart_data(
+                                                        &db_rw, &filters, group_by,
+                                                    );
+                                                refreshed.auto_rebuilt = true;
+                                                data = refreshed;
+                                            }
+                                            Err(err) => {
+                                                data.auto_rebuild_error = Some(format!(
+                                                    "analytics rebuild failed: {err}"
+                                                ));
+                                            }
+                                        },
+                                        Err(err) => {
+                                            data.auto_rebuild_error =
+                                                Some(format!("failed opening analytics DB: {err}"));
+                                        }
+                                    }
+                                }
+
+                                CassMsg::AnalyticsChartDataLoaded(Box::new(data))
+                            }
                             Err(e) => CassMsg::AnalyticsChartDataFailed(e.to_string()),
                         }
                     })
                 }
             }
             CassMsg::AnalyticsChartDataLoaded(data) => {
+                if data.auto_rebuilt {
+                    self.status = "Analytics data rebuilt automatically.".to_string();
+                } else if let Some(err) = data.auto_rebuild_error.as_deref() {
+                    self.status = format!("Automatic analytics rebuild failed: {err}");
+                }
                 self.analytics_cache = Some(*data);
                 self.clear_loading_context(LoadingContext::Analytics);
                 ftui::Cmd::none()
@@ -15855,6 +16203,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::AnalyticsTimeRangeSet { since_ms, until_ms } => {
                 self.analytics_filters.since_ms = since_ms;
                 self.analytics_filters.until_ms = until_ms;
+                self.dirty_since = Some(Instant::now());
                 self.analytics_cache = None; // invalidate chart data on filter change
                 if self.surface == AppSurface::Analytics {
                     return self.schedule_analytics_reload();
@@ -15863,6 +16212,7 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::AnalyticsAgentFilterSet(agents) => {
                 self.analytics_filters.agents = agents;
+                self.dirty_since = Some(Instant::now());
                 self.analytics_cache = None;
                 if self.surface == AppSurface::Analytics {
                     return self.schedule_analytics_reload();
@@ -15871,6 +16221,7 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::AnalyticsWorkspaceFilterSet(workspaces) => {
                 self.analytics_filters.workspaces = workspaces;
+                self.dirty_since = Some(Instant::now());
                 self.analytics_cache = None;
                 if self.surface == AppSurface::Analytics {
                     return self.schedule_analytics_reload();
@@ -15879,6 +16230,7 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::AnalyticsSourceFilterSet(sf) => {
                 self.analytics_filters.source_filter = sf;
+                self.dirty_since = Some(Instant::now());
                 self.analytics_cache = None;
                 if self.surface == AppSurface::Analytics {
                     return self.schedule_analytics_reload();
@@ -15887,6 +16239,7 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::AnalyticsFiltersClearAll => {
                 self.analytics_filters = AnalyticsFilterState::default();
+                self.dirty_since = Some(Instant::now());
                 self.analytics_cache = None;
                 if self.surface == AppSurface::Analytics {
                     return self.schedule_analytics_reload();
@@ -15957,7 +16310,7 @@ impl super::ftui_adapter::Model for CassApp {
                 if let Some(ref model_name) = model {
                     self.query = model_name.clone();
                 }
-                self.cursor_pos = self.query.chars().count();
+                self.cursor_pos = self.query.len();
                 self.input_mode = InputMode::Query;
 
                 let mut origin_parts = Vec::new();
@@ -16011,6 +16364,7 @@ impl super::ftui_adapter::Model for CassApp {
                     let (since_ms, until_ms) = self.explorer_zoom.to_range();
                     self.analytics_filters.since_ms = since_ms;
                     self.analytics_filters.until_ms = until_ms;
+                    self.dirty_since = Some(Instant::now());
                     self.status = "Explorer set to Hourly (last 7 days).".to_string();
                 }
                 // Invalidate cache so timeseries reloads with new granularity.
@@ -16042,6 +16396,7 @@ impl super::ftui_adapter::Model for CassApp {
                 let (since_ms, until_ms) = self.explorer_zoom.to_range();
                 self.analytics_filters.since_ms = since_ms;
                 self.analytics_filters.until_ms = until_ms;
+                self.dirty_since = Some(Instant::now());
                 self.analytics_cache = None;
                 if self.surface == AppSurface::Analytics {
                     return self.schedule_analytics_reload();
@@ -16361,6 +16716,15 @@ impl super::ftui_adapter::Model for CassApp {
                     self.input_buffer.clear();
                     return ftui::Cmd::none();
                 }
+                if self.dirty_since.is_some() {
+                    let state_path = self.state_file_path();
+                    let snapshot = self.capture_persisted_state();
+                    if let Err(err) = save_persisted_state_to_path(&state_path, &snapshot) {
+                        self.status = format!("Failed to save TUI state before quit: {err}");
+                    } else {
+                        self.dirty_since = None;
+                    }
+                }
                 ftui::Cmd::quit()
             }
             // -- Macro recording/playback -----------------------------------------
@@ -16565,8 +16929,8 @@ impl super::ftui_adapter::Model for CassApp {
                     info.current_version, info.latest_version
                 )
             };
-            if banner_text.len() > banner_area.width as usize {
-                banner_text.truncate(banner_area.width as usize);
+            if banner_text.chars().count() > banner_area.width as usize {
+                banner_text = elide_text(&banner_text, banner_area.width as usize);
             }
             Paragraph::new(&*banner_text)
                 .style(if self.update_upgrade_armed {
@@ -16706,7 +17070,7 @@ impl super::ftui_adapter::Model for CassApp {
                                     ftui::text::Span::styled("<type to search>", text_muted_style),
                                 ])
                             } else {
-                                let cpos = self.cursor_pos.min(self.query.len());
+                                let cpos = clamp_cursor_boundary(&self.query, self.cursor_pos);
                                 ftui::text::Line::from_spans(vec![
                                     ftui::text::Span::styled(
                                         self.query[..cpos].to_string(),
@@ -16993,9 +17357,10 @@ impl super::ftui_adapter::Model for CassApp {
                     text_muted_style
                 };
                 let query_lane = format!(
-                    "{} / {}",
+                    "{} / {} ({})",
                     search_mode_token(self.search_mode),
-                    match_mode_token(self.match_mode)
+                    match_mode_token(self.match_mode),
+                    shortcuts::SEARCH_MODE
                 );
                 let source_scope = if self.filters.source_filter.is_all() {
                     "all".to_string()
@@ -17474,6 +17839,7 @@ impl super::ftui_adapter::Model for CassApp {
             || self.show_help
             || self.show_theme_editor
             || self.show_inspector
+            || self.show_consent_dialog
             || self.source_filter_menu_open
             || self.command_palette.is_visible();
         if modal_visible && apply_style {
@@ -17503,7 +17869,7 @@ impl super::ftui_adapter::Model for CassApp {
             let modal_w = area.width.saturating_sub(margin_x * 2).max(1);
             let modal_h = area.height.saturating_sub(margin_y * 2).max(1);
             let modal_area = Rect::new(area.x + margin_x, area.y + margin_y, modal_w, modal_h);
-            Block::new().style(root_style).render(modal_area, frame);
+            Block::new().style(pane_style).render(modal_area, frame);
             self.render_detail_pane(
                 frame,
                 modal_area,
@@ -17576,6 +17942,10 @@ impl super::ftui_adapter::Model for CassApp {
 
         if self.source_filter_menu_open {
             self.render_source_filter_menu_overlay(frame, area, &styles);
+        }
+
+        if self.show_consent_dialog {
+            self.render_consent_overlay(frame, area, &styles);
         }
 
         // ── Help overlay ─────────────────────────────────────────────
@@ -18961,12 +19331,21 @@ mod tests {
     }
 
     #[test]
-    fn event_mapping_ctrl_m_maps_to_selection_toggled() {
+    fn event_mapping_ctrl_m_maps_to_detail_opened() {
         use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
 
         let event = Event::Key(KeyEvent::new(KeyCode::Char('m')).with_modifiers(Modifiers::CTRL));
 
-        assert!(matches!(CassMsg::from(event), CassMsg::SelectionToggled));
+        assert!(matches!(CassMsg::from(event), CassMsg::DetailOpened));
+    }
+
+    #[test]
+    fn event_mapping_ctrl_j_maps_to_detail_opened() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('j')).with_modifiers(Modifiers::CTRL));
+
+        assert!(matches!(CassMsg::from(event), CassMsg::DetailOpened));
     }
 
     #[test]
@@ -18999,12 +19378,12 @@ mod tests {
     }
 
     #[test]
-    fn event_mapping_alt_t_maps_to_theme_toggled() {
+    fn event_mapping_alt_t_maps_to_theme_editor_opened() {
         use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
 
         let event = Event::Key(KeyEvent::new(KeyCode::Char('t')).with_modifiers(Modifiers::ALT));
 
-        assert!(matches!(CassMsg::from(event), CassMsg::ThemeToggled));
+        assert!(matches!(CassMsg::from(event), CassMsg::ThemeEditorOpened));
     }
 
     #[test]
@@ -19166,6 +19545,11 @@ mod tests {
             per_pane_limit: 0,
             query_history: VecDeque::new(),
             saved_views: Vec::new(),
+            analytics_since_ms: None,
+            analytics_until_ms: None,
+            analytics_agents: HashSet::new(),
+            analytics_workspaces: HashSet::new(),
+            analytics_source_filter: SourceFilter::All,
             fancy_borders: true,
             help_pinned: false,
             has_seen_help: false,
@@ -19203,6 +19587,19 @@ mod tests {
                 ranking: RankingMode::MatchQualityHeavy,
                 source_filter: SourceFilter::SourceId("remote-buildbox".to_string()),
             }],
+            analytics_since_ms: Some(111),
+            analytics_until_ms: Some(222),
+            analytics_agents: {
+                let mut set = HashSet::new();
+                set.insert("claude_code".to_string());
+                set
+            },
+            analytics_workspaces: {
+                let mut set = HashSet::new();
+                set.insert("/repo".to_string());
+                set
+            },
+            analytics_source_filter: SourceFilter::Remote,
             fancy_borders: false,
             help_pinned: true,
             has_seen_help: true,
@@ -19230,6 +19627,14 @@ mod tests {
         assert!(matches!(
             loaded.saved_views[0].source_filter,
             SourceFilter::SourceId(ref id) if id == "remote-buildbox"
+        ));
+        assert_eq!(loaded.analytics_since_ms, Some(111));
+        assert_eq!(loaded.analytics_until_ms, Some(222));
+        assert!(loaded.analytics_agents.contains("claude_code"));
+        assert!(loaded.analytics_workspaces.contains("/repo"));
+        assert!(matches!(
+            loaded.analytics_source_filter,
+            SourceFilter::Remote
         ));
     }
 
@@ -19272,35 +19677,36 @@ mod tests {
     }
 
     #[test]
-    fn state_loaded_always_defaults_to_dark_theme() {
+    fn state_loaded_uses_persisted_light_theme_when_no_theme_config() {
         let mut app = CassApp::default();
         let mut state = persisted_state_defaults();
         state.theme_dark = false;
+        state.has_seen_help = true;
 
         let _ = app.update(CassMsg::StateLoaded(Box::new(state)));
 
-        assert!(app.theme_dark);
-        assert_eq!(app.theme_preset, UiThemePreset::Dark);
-        assert!(app.style_options.dark_mode);
-        assert_eq!(app.style_options.preset, UiThemePreset::Dark);
+        assert!(!app.theme_dark);
+        assert_eq!(app.theme_preset, UiThemePreset::Light);
+        assert!(!app.style_options.dark_mode);
+        assert_eq!(app.style_options.preset, UiThemePreset::Light);
     }
 
     #[test]
-    fn refresh_theme_config_coerces_light_startup_to_dark() {
+    fn refresh_theme_config_respects_light_startup_preset() {
         let mut app = CassApp::default();
         app.style_options.preset = UiThemePreset::Light;
         app.style_options.dark_mode = false;
 
         app.refresh_theme_config_from_data_dir();
 
-        assert!(app.theme_dark);
-        assert_eq!(app.theme_preset, UiThemePreset::Dark);
-        assert!(app.style_options.dark_mode);
-        assert_eq!(app.style_options.preset, UiThemePreset::Dark);
+        assert!(!app.theme_dark);
+        assert_eq!(app.theme_preset, UiThemePreset::Light);
+        assert!(!app.style_options.dark_mode);
+        assert_eq!(app.style_options.preset, UiThemePreset::Light);
     }
 
     #[test]
-    fn resolved_style_context_forces_dark_when_theme_config_requests_light() {
+    fn resolved_style_context_honors_theme_config_light_preset() {
         let mut app = CassApp::default();
         app.theme_dark = true;
         app.theme_preset = UiThemePreset::Dark;
@@ -19312,8 +19718,61 @@ mod tests {
         });
 
         let styles = app.resolved_style_context();
-        assert_eq!(styles.options.preset, UiThemePreset::Dark);
-        assert!(styles.options.dark_mode);
+        assert_eq!(styles.options.preset, UiThemePreset::Light);
+        assert!(!styles.options.dark_mode);
+    }
+
+    #[test]
+    fn state_loaded_prefers_theme_config_preset_over_legacy_dark_flag() {
+        let mut app = CassApp::default();
+        app.theme_config = Some(style_system::ThemeConfig {
+            base_preset: Some(UiThemePreset::Nord),
+            ..style_system::ThemeConfig::default()
+        });
+        let mut state = persisted_state_defaults();
+        state.theme_dark = false;
+        state.has_seen_help = true;
+
+        let _ = app.update(CassMsg::StateLoaded(Box::new(state)));
+
+        assert_eq!(app.theme_preset, UiThemePreset::Nord);
+        assert!(app.theme_dark);
+        assert_eq!(app.style_options.preset, UiThemePreset::Nord);
+        assert!(app.style_options.dark_mode);
+    }
+
+    #[test]
+    fn state_loaded_first_run_opens_help_overlay() {
+        let mut app = CassApp::default();
+        let mut state = persisted_state_defaults();
+        state.has_seen_help = false;
+        state.help_pinned = false;
+
+        let _ = app.update(CassMsg::StateLoaded(Box::new(state)));
+
+        assert!(app.show_help, "first run should surface help overlay");
+        assert!(
+            app.has_seen_help,
+            "help should be marked as seen once shown"
+        );
+        assert_eq!(
+            app.focus_manager.current(),
+            Some(focus_ids::HELP_OVERLAY),
+            "help overlay should receive focus on first run"
+        );
+    }
+
+    #[test]
+    fn state_loaded_with_seen_help_keeps_help_closed_when_not_pinned() {
+        let mut app = CassApp::default();
+        let mut state = persisted_state_defaults();
+        state.has_seen_help = true;
+        state.help_pinned = false;
+
+        let _ = app.update(CassMsg::StateLoaded(Box::new(state)));
+
+        assert!(!app.show_help);
+        assert!(app.has_seen_help);
     }
 
     #[test]
@@ -19600,14 +20059,15 @@ mod tests {
         let mut app = CassApp::default();
         assert!(app.theme_dark);
 
-        // Open palette and select "Toggle theme" (first action)
+        // Open palette and select "Toggle theme".
         let _ = app.update(CassMsg::PaletteOpened);
-        app.palette_state.selected = 0;
-        // Verify first action is ToggleTheme
-        assert!(matches!(
-            app.palette_state.filtered[0].action,
-            PaletteAction::ToggleTheme
-        ));
+        let idx = app
+            .palette_state
+            .filtered
+            .iter()
+            .position(|i| matches!(i.action, PaletteAction::ToggleTheme))
+            .expect("toggle theme action should exist");
+        app.palette_state.selected = idx;
 
         // Execute it - should produce ThemeToggled cmd
         let cmd = app.update(CassMsg::PaletteActionExecuted);
@@ -19620,6 +20080,19 @@ mod tests {
             let _ = app.update(msg);
         }
         assert!(!app.theme_dark, "theme should have toggled to light");
+    }
+
+    #[test]
+    fn palette_action_executed_releases_focus_trap() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+        assert!(app.focus_manager.is_trapped());
+
+        let _ = app.update(CassMsg::PaletteActionExecuted);
+        assert!(
+            !app.focus_manager.is_trapped(),
+            "palette execute should always release the palette trap"
+        );
     }
 
     #[test]
@@ -20235,9 +20708,14 @@ mod tests {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::ViewSaved(3));
         let _ = app.update(CassMsg::SavedViewsOpened);
+        assert!(app.focus_manager.is_trapped());
 
         let cmd = app.update(CassMsg::SavedViewLoadedSelected);
         assert!(!app.show_saved_views_modal);
+        assert!(
+            !app.focus_manager.is_trapped(),
+            "loading a saved view from modal should release focus trap"
+        );
         assert!(matches!(extract_msg(cmd), Some(CassMsg::ViewLoaded(3))));
     }
 
@@ -20299,6 +20777,21 @@ mod tests {
         let cmd = app.update(CassMsg::ViewLoaded(9));
         assert!(matches!(cmd, ftui::Cmd::None));
         assert!(app.status.contains("No saved view in slot 9"));
+    }
+
+    #[test]
+    fn view_loaded_releases_saved_views_focus_trap_when_modal_was_open() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::ViewSaved(2));
+        let _ = app.update(CassMsg::SavedViewsOpened);
+        assert!(app.focus_manager.is_trapped());
+
+        let _ = app.update(CassMsg::ViewLoaded(2));
+        assert!(
+            !app.focus_manager.is_trapped(),
+            "direct ViewLoaded should release trap when modal was open"
+        );
+        assert!(!app.show_saved_views_modal);
     }
 
     // ==================== Search bar UX tests (2noh9.3.2) ====================
@@ -21093,20 +21586,33 @@ mod tests {
     }
 
     #[test]
-    fn update_shortcuts_intercept_query_when_banner_visible() {
+    fn update_shortcuts_intercept_shifted_query_when_banner_visible() {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::UpdateCheckCompleted(sample_update_info()));
 
-        let _ = app.update(CassMsg::QueryChanged("u".to_string()));
+        let _ = app.update(CassMsg::QueryChanged("U".to_string()));
         assert!(app.update_upgrade_armed);
         assert!(app.query.is_empty(), "shortcut should not edit query text");
 
-        let _ = app.update(CassMsg::QueryChanged("s".to_string()));
+        let _ = app.update(CassMsg::QueryChanged("S".to_string()));
         assert!(
             app.update_dismissed,
             "skip should dismiss banner in test mode"
         );
         assert!(!app.update_upgrade_armed);
+    }
+
+    #[test]
+    fn update_banner_does_not_hijack_lowercase_query_input() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::UpdateCheckCompleted(sample_update_info()));
+
+        let _ = app.update(CassMsg::QueryChanged("u".to_string()));
+        assert_eq!(app.query, "u");
+        assert!(
+            !app.update_upgrade_armed,
+            "lowercase query text should not trigger update action"
+        );
     }
 
     // ==================== Wildcard fallback toggle tests ====================
@@ -22558,6 +23064,21 @@ mod tests {
     }
 
     #[test]
+    fn source_filter_menu_quit_requested_closes_and_releases_trap() {
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::SourceFilterMenuToggled);
+        assert!(app.source_filter_menu_open);
+        assert!(app.focus_manager.is_trapped());
+
+        let _ = app.update(CassMsg::QuitRequested);
+        assert!(!app.source_filter_menu_open);
+        assert!(
+            !app.focus_manager.is_trapped(),
+            "closing source menu should release modal trap"
+        );
+    }
+
+    #[test]
     fn input_mode_applied_agent_parses_csv() {
         let mut app = CassApp::default();
         app.input_mode = InputMode::Agent;
@@ -23664,6 +24185,24 @@ mod tests {
         let _ = app.update(CassMsg::DetailClosed);
         assert!(!app.show_detail_modal);
         assert_eq!(app.focused_region(), FocusRegion::Results);
+    }
+
+    #[test]
+    fn detail_modal_allows_copy_shortcuts_to_reach_action_handlers() {
+        let mut app = app_with_hits(1);
+        app.show_detail_modal = true;
+
+        let _ = app.update(CassMsg::CopyPath);
+        assert!(
+            app.status.contains("Copied path"),
+            "detail modal should not swallow copy-path action"
+        );
+
+        let _ = app.update(CassMsg::CopySnippet);
+        assert!(
+            app.status.contains("Copied snippet"),
+            "detail modal should not swallow copy-snippet action"
+        );
     }
 
     // =====================================================================
@@ -25835,11 +26374,24 @@ mod tests {
     }
 
     #[test]
+    fn contextual_footer_hints_results_include_search_mode_cycle() {
+        let app = app_with_hits(3);
+        let hints = app.build_contextual_footer_hints(120);
+        assert!(
+            hints.contains("Alt+S=mode"),
+            "results footer should advertise lexical/semantic/hybrid mode cycling"
+        );
+    }
+
+    #[test]
     fn contextual_footer_hints_include_bulk_actions_when_selected() {
         let mut app = app_with_hits(3);
         let _ = app.update(CassMsg::SelectAllToggled);
         let hints = app.build_contextual_footer_hints(120);
-        assert!(hints.contains("A=bulk"));
+        assert!(
+            hints.contains("bulk"),
+            "selected-state hints should surface bulk actions"
+        );
         // Ctrl+O=open may be dropped when TOGGLE_SELECT label is long
         // enough to exhaust the 52-char footer hint budget at this width.
         assert!(hints.contains("select"));
@@ -31246,11 +31798,27 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     fn help_toggle_opens_and_closes() {
         let mut app = test_app();
         assert!(!app.show_help);
+        assert!(!app.has_seen_help);
         let _ = app.update(CassMsg::HelpToggled);
         assert!(app.show_help);
+        assert!(app.has_seen_help);
         assert_eq!(app.help_scroll, 0);
         let _ = app.update(CassMsg::HelpToggled);
         assert!(!app.show_help);
+        assert!(
+            app.has_seen_help,
+            "closing help should not forget seen state"
+        );
+    }
+
+    #[test]
+    fn help_seen_state_persists_after_help_closed() {
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled); // open
+        let _ = app.update(CassMsg::HelpToggled); // close
+
+        let state = app.capture_persisted_state();
+        assert!(state.has_seen_help);
     }
 
     #[test]
@@ -31451,6 +32019,22 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         assert!(
             text.contains(shortcuts::SURFACE_ANALYTICS),
             "Should reference analytics surface shortcut"
+        );
+        assert!(
+            text.contains(shortcuts::COPY),
+            "Should reference copy snippet"
+        );
+        assert!(
+            text.contains(shortcuts::COPY_PATH),
+            "Should reference copy path"
+        );
+        assert!(
+            text.contains(shortcuts::COPY_CONTENT),
+            "Should reference copy content"
+        );
+        assert!(
+            text.contains("clear agent filter"),
+            "Filters section should describe Shift+F3 behavior accurately"
         );
     }
 
