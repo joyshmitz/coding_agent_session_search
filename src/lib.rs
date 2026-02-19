@@ -5531,12 +5531,15 @@ fn run_cli_search(
     // Use search_with_fallback to get full metadata (wildcard_fallback, cache_stats)
     let sparse_threshold = 3; // Threshold for triggering wildcard fallback
 
-    // When aggregating, we need more results for accurate counts
-    // Fetch up to 1000 for aggregation starting at offset 0, then apply offset/limit
+    // When aggregating, we need more results for accurate counts.
+    // For non-aggregation mode, overfetch by one so cursor pagination can reliably
+    // signal whether additional pages exist without a second query.
     let (search_limit, search_offset) = if has_aggregation {
         (1000.max(limit_val + offset_val), 0)
+    } else if limit_val == 0 {
+        (0, offset_val)
     } else {
-        (limit_val, offset_val)
+        (limit_val.saturating_add(1), offset_val)
     };
 
     // Check if we're already past timeout before starting search
@@ -5804,7 +5807,7 @@ fn run_cli_search(
     };
 
     // Compute aggregations and create display result based on mode
-    let (aggregations, display_result, total_matches) = if has_aggregation {
+    let (aggregations, display_result, total_matches, has_more_results) = if has_aggregation {
         // Compute aggregations from all fetched results
         let aggs = compute_aggregations(&result.hits, &agg_fields);
         let total = result.hits.len();
@@ -5825,11 +5828,23 @@ fn run_cli_search(
             suggestions: result.suggestions.clone(),
             ann_stats: result.ann_stats.clone(),
         };
-        (aggs, display, total)
+        let has_more = total > offset_val + display.hits.len();
+        (aggs, display, total, has_more)
     } else {
-        // No aggregation - use result as-is
-        let total = result.hits.len();
-        (Aggregations::default(), result, total)
+        // No aggregation - result was over-fetched by one to derive pagination state.
+        let has_more = limit_val > 0 && result.hits.len() > limit_val;
+        let display_hits: Vec<_> = result.hits.into_iter().take(limit_val).collect();
+        let known_total = offset_val
+            .saturating_add(display_hits.len())
+            .saturating_add(usize::from(has_more));
+        let display = crate::search::query::SearchResult {
+            hits: display_hits,
+            wildcard_fallback: result.wildcard_fallback,
+            cache_stats: result.cache_stats,
+            suggestions: result.suggestions,
+            ann_stats: result.ann_stats,
+        };
+        (Aggregations::default(), display, known_total, has_more)
     };
 
     let elapsed_ms = start_time.elapsed().as_millis() as u64;
@@ -5862,7 +5877,7 @@ fn run_cli_search(
     };
 
     // Build next cursor if more results remain
-    let next_cursor = if total_matches > offset_val + display_result.hits.len() {
+    let next_cursor = if has_more_results && limit_val > 0 {
         let payload = serde_json::json!({
             "offset": offset_val + display_result.hits.len(),
             "limit": limit_val,
@@ -13589,7 +13604,7 @@ fn format_as_html(
                             .map(|v| {
                                 let s = serde_json::to_string_pretty(v).unwrap_or_default();
                                 if s.len() > 400 {
-                                    format!("{}…", &s[..400])
+                                    format!("{}…", &s[..s.floor_char_boundary(400)])
                                 } else {
                                     s
                                 }
@@ -14435,7 +14450,7 @@ fn run_sources_list(verbose: bool, json: bool) -> CliResult<()> {
         for source in &config.sources {
             let host = source.host.as_deref().unwrap_or("-");
             let host_truncated = if host.len() > 30 {
-                format!("{}...", &host[..27])
+                format!("{}...", &host[..host.floor_char_boundary(27)])
             } else {
                 host.to_string()
             };
@@ -14625,19 +14640,14 @@ fn parse_source_url(url: &str, name: Option<&str>) -> Result<(String, String), C
 
 /// Test SSH connectivity to a host.
 fn test_ssh_connectivity(host: &str) -> CliResult<()> {
+    let mut ssh_args = crate::sources::strict_ssh_cli_tokens(5);
+    ssh_args.push("--".to_string());
+    ssh_args.push(host.to_string());
+    ssh_args.push("echo".to_string());
+    ssh_args.push("ok".to_string());
+
     let output = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "--",
-            host,
-            "echo",
-            "ok",
-        ])
+        .args(&ssh_args)
         .output()
         .map_err(|e| CliError {
             code: 12,
@@ -14649,14 +14659,19 @@ fn test_ssh_connectivity(host: &str) -> CliResult<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let hint = if crate::sources::is_host_key_verification_failure(&stderr) {
+            crate::sources::host_key_verification_error(host)
+        } else {
+            format!(
+                "Error: {}. Ensure SSH key is set up for this host.",
+                stderr.trim()
+            )
+        };
         return Err(CliError {
             code: 12,
             kind: "ssh",
             message: format!("SSH connection failed to {host}"),
-            hint: Some(format!(
-                "Error: {}. Ensure SSH key is set up for this host.",
-                stderr.trim()
-            )),
+            hint: Some(hint),
             retryable: true,
         });
     }
@@ -14907,19 +14922,12 @@ fn run_sources_doctor(source_filter: Option<&str>, json_output: bool) -> CliResu
 
 /// Check SSH connectivity to a host
 fn check_ssh_connectivity(host: &str) -> DiagnosticCheck {
-    let output = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "--",
-            host,
-            "true",
-        ])
-        .output();
+    let mut ssh_args = crate::sources::strict_ssh_cli_tokens(5);
+    ssh_args.push("--".to_string());
+    ssh_args.push(host.to_string());
+    ssh_args.push("true".to_string());
+
+    let output = std::process::Command::new("ssh").args(&ssh_args).output();
 
     match output {
         Ok(out) if out.status.success() => DiagnosticCheck {
@@ -14930,7 +14938,9 @@ fn check_ssh_connectivity(host: &str) -> DiagnosticCheck {
         },
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            let remediation = if stderr.contains("Permission denied") {
+            let remediation = if crate::sources::is_host_key_verification_failure(&stderr) {
+                Some(crate::sources::host_key_verification_error(host))
+            } else if stderr.contains("Permission denied") {
                 Some("Ensure SSH key is added to remote authorized_keys".into())
             } else if stderr.contains("Connection refused") {
                 Some("Verify SSH server is running on remote host".into())
@@ -15118,7 +15128,7 @@ fn run_sources_sync(
     json_output: bool,
 ) -> CliResult<()> {
     use crate::sources::config::SourcesConfig;
-    use crate::sources::sync::{SyncEngine, SyncStatus};
+    use crate::sources::sync::{SyncEngine, SyncReport, SyncStatus};
     use colored::Colorize;
 
     let config = SourcesConfig::load().map_err(|e| CliError {
@@ -15218,14 +15228,37 @@ fn run_sources_sync(
         let report = match engine.sync_source(source) {
             Ok(r) => r,
             Err(e) => {
+                let failed_report = SyncReport::failed(source.name.clone(), e);
+                status.update(&source.name, &failed_report);
+
                 if json_output {
                     all_reports.push(serde_json::json!({
                         "source": source.name,
                         "status": "error",
-                        "error": e.to_string()
+                        "method": failed_report.method.to_string(),
+                        "paths": failed_report.path_results.iter().map(|r| serde_json::json!({
+                            "path": r.remote_path,
+                            "success": r.success,
+                            "files": r.files_transferred,
+                            "bytes": r.bytes_transferred,
+                            "error": r.error,
+                        })).collect::<Vec<_>>(),
+                        "total_files": failed_report.total_files(),
+                        "total_bytes": failed_report.total_bytes(),
+                        "duration_ms": failed_report.total_duration_ms,
+                        "error": failed_report
+                            .path_results
+                            .first()
+                            .and_then(|r| r.error.clone())
+                            .unwrap_or_else(|| "sync failed".to_string()),
                     }));
                 } else {
-                    println!("  {} {}", "Error:".red().bold(), e.to_string().red());
+                    let err_msg = failed_report
+                        .path_results
+                        .first()
+                        .and_then(|r| r.error.as_deref())
+                        .unwrap_or("sync failed");
+                    println!("  {} {}", "Error:".red().bold(), err_msg.red());
                 }
                 continue;
             }
