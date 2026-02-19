@@ -320,19 +320,6 @@ pub fn query_status(conn: &Connection, _filter: &AnalyticsFilter) -> AnalyticsRe
             api_token_coverage_pct: (api_coverage_pct * 100.0).round() / 100.0,
             model_name_coverage_pct: (model_coverage_pct * 100.0).round() / 100.0,
             estimate_only_pct: (estimate_only_pct * 100.0).round() / 100.0,
-            pricing_coverage_pct: if has_token_usage && tu.row_count > 0 {
-                let with_cost: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM token_usage WHERE estimated_cost_usd > 0.0",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(0);
-                let pct = (with_cost as f64 / tu.row_count as f64) * 100.0;
-                (pct * 100.0).round() / 100.0
-            } else {
-                0.0
-            },
         },
         drift: DriftInfo {
             signals: drift_signals,

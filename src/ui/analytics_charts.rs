@@ -103,25 +103,11 @@ pub struct AnalyticsChartData {
     pub total_plan_messages: i64,
     /// Daily plan messages: `(label, plan_message_count)`.
     pub daily_plan_messages: Vec<(String, f64)>,
-    /// Total estimated cost (USD).
-    pub total_cost_usd: f64,
-    /// Daily cost: `(label, estimated_cost_usd)`.
-    pub daily_cost: Vec<(String, f64)>,
     /// Per-session points for Explorer scatter (x=messages, y=API tokens).
     pub session_scatter: Vec<crate::analytics::SessionScatterPoint>,
     // ── Tools view (enhanced) ─────────────────────────────────
     /// Full tool report rows (agent → calls, msgs, tokens, derived metrics).
     pub tool_rows: Vec<crate::analytics::ToolRow>,
-
-    // ── Cost / Models view ───────────────────────────────────
-    /// Per-model estimated cost (USD): `(model_family, usd)` sorted desc.
-    pub model_cost: Vec<(String, f64)>,
-    /// Per-model message counts: `(model_family, count)` sorted desc.
-    pub model_messages: Vec<(String, f64)>,
-    /// Models with unknown pricing (from `query_unpriced_models`).
-    pub unpriced_models: Vec<crate::analytics::UnpricedModel>,
-    /// Percentage of token_usage rows with known pricing (0..100).
-    pub pricing_coverage_pct: f64,
 
     // ── Plans view ───────────────────────────────────────────
     /// Per-agent plan message counts: `(agent_slug, plan_message_count)` sorted desc.
@@ -301,14 +287,8 @@ pub fn load_chart_data(
             .iter()
             .map(|(label, bucket)| (label.clone(), bucket.plan_message_count as f64))
             .collect();
-        data.daily_cost = result
-            .buckets
-            .iter()
-            .map(|(label, bucket)| (label.clone(), bucket.estimated_cost_usd))
-            .collect();
         data.total_content_tokens = result.totals.content_tokens_est_total;
         data.total_plan_messages = result.totals.plan_message_count;
-        data.total_cost_usd = result.totals.estimated_cost_usd;
 
         // Build heatmap data (normalize token values to 0..1).
         let max_tokens = data
@@ -345,45 +325,9 @@ pub fn load_chart_data(
             .collect();
     }
 
-    // Model cost breakdown (Track B — EstimatedCostUsd).
-    if let Ok(result) = analytics::query::query_breakdown(
-        conn,
-        &filter,
-        analytics::Dim::Model,
-        analytics::Metric::EstimatedCostUsd,
-        20,
-    ) {
-        data.model_cost = result
-            .rows
-            .iter()
-            .map(|r| (r.key.clone(), r.bucket.estimated_cost_usd))
-            .collect();
-    }
-
-    // Model message counts (Track B).
-    if let Ok(result) = analytics::query::query_breakdown(
-        conn,
-        &filter,
-        analytics::Dim::Model,
-        analytics::Metric::MessageCount,
-        20,
-    ) {
-        data.model_messages = result
-            .rows
-            .iter()
-            .map(|r| (r.key.clone(), r.value as f64))
-            .collect();
-    }
-
-    // Unpriced models — highlights models missing pricing data.
-    if let Ok(report) = analytics::query::query_unpriced_models(conn, 10) {
-        data.unpriced_models = report.models;
-    }
-
     // Coverage percentage.
     if let Ok(status) = analytics::query::query_status(conn, &filter) {
         data.coverage_pct = status.coverage.api_token_coverage_pct;
-        data.pricing_coverage_pct = status.coverage.pricing_coverage_pct;
     }
 
     // Per-agent plan message breakdown.
@@ -717,8 +661,6 @@ pub fn render_explorer(
         format!("{:.1}M", metric_total / 1_000_000.0)
     } else if metric_total >= 10_000.0 {
         format!("{:.1}K", metric_total / 1_000.0)
-    } else if state.metric == ExplorerMetric::Cost {
-        format!("${:.2}", metric_total)
     } else {
         format!("{}", metric_total as i64)
     };
@@ -1259,10 +1201,8 @@ fn dim_color(color: PackedRgba, factor: f32) -> PackedRgba {
 }
 
 fn format_explorer_metric_value(metric: ExplorerMetric, value: f64) -> String {
-    match metric {
-        ExplorerMetric::Cost => format!("${value:.2}"),
-        _ => format_compact(value.round() as i64),
-    }
+    let _ = metric; // keeps call sites readable; metric-specific formatting removed
+    format_compact(value.round() as i64)
 }
 
 fn build_explorer_annotation_line(
@@ -1325,7 +1265,6 @@ fn metric_series(
         ExplorerMetric::Messages => (&data.daily_messages, PackedRgba::rgb(100, 220, 100)),
         ExplorerMetric::ToolCalls => (&data.daily_tool_calls, PackedRgba::rgb(255, 160, 0)),
         ExplorerMetric::PlanMessages => (&data.daily_plan_messages, PackedRgba::rgb(255, 200, 0)),
-        ExplorerMetric::Cost => (&data.daily_cost, PackedRgba::rgb(255, 80, 80)),
     }
 }
 
@@ -1371,7 +1310,6 @@ fn heatmap_series_for_metric(
         HeatmapMetric::Messages => &data.daily_messages,
         HeatmapMetric::ContentTokens => &data.daily_content_tokens,
         HeatmapMetric::ToolCalls => &data.daily_tool_calls,
-        HeatmapMetric::Cost => &data.daily_cost,
         HeatmapMetric::Coverage => &data.daily_tokens, // placeholder; normalized later
     };
     if raw.is_empty() {
@@ -1392,7 +1330,6 @@ fn heatmap_series_for_metric(
 /// Format a raw heatmap value for tooltip display.
 fn format_heatmap_value(val: f64, metric: HeatmapMetric) -> String {
     match metric {
-        HeatmapMetric::Cost => format!("${:.2}", val),
         HeatmapMetric::Coverage => format!("{:.0}%", val),
         _ => {
             let abs = val.abs() as i64;
@@ -1700,7 +1637,6 @@ fn render_heatmap_tabs(active: HeatmapMetric, area: Rect, frame: &mut ftui::Fram
         HeatmapMetric::Messages,
         HeatmapMetric::ContentTokens,
         HeatmapMetric::ToolCalls,
-        HeatmapMetric::Cost,
         HeatmapMetric::Coverage,
     ];
     let mut x = area.x;
@@ -2030,267 +1966,8 @@ fn tools_row_line(row: &crate::analytics::ToolRow, pct_share: f64, width: usize)
     )
 }
 
-/// Render the Cost/Models view: model family token breakdown.
-/// Model-specific color palette for the Cost view.
-const MODEL_COST_COLORS: &[PackedRgba] = &[
-    PackedRgba::rgb(0, 180, 220),   // blue
-    PackedRgba::rgb(220, 120, 0),   // amber
-    PackedRgba::rgb(80, 200, 80),   // green
-    PackedRgba::rgb(200, 60, 180),  // magenta
-    PackedRgba::rgb(255, 200, 60),  // yellow
-    PackedRgba::rgb(120, 120, 255), // indigo
-];
-
-fn cost_model_color(idx: usize) -> PackedRgba {
-    MODEL_COST_COLORS[idx % MODEL_COST_COLORS.len()]
-}
-
-/// Render the Cost view: header + side-by-side model charts + unpriced warning + sparkline.
-pub fn render_cost(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
-    if data.model_tokens.is_empty() {
-        Paragraph::new(
-            " No model data available (Track B). Requires connectors with API token data.",
-        )
-        .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
-        .render(area, frame);
-        return;
-    }
-
-    // Layout: header (3) + charts (fill) + unpriced warning (0-2) + sparkline (0-3)
-    let has_unpriced = !data.unpriced_models.is_empty();
-    let unpriced_h = if has_unpriced && area.height >= 12 {
-        2
-    } else {
-        0
-    };
-    let show_sparkline = area.height >= 10 && !data.daily_cost.is_empty();
-    let spark_h = if show_sparkline { 3 } else { 0 };
-    let chunks = Flex::vertical()
-        .constraints([
-            Constraint::Fixed(3),          // cost summary + pricing coverage
-            Constraint::Min(4),            // side-by-side: tokens | cost
-            Constraint::Fixed(unpriced_h), // unpriced models warning
-            Constraint::Fixed(spark_h),    // daily cost sparkline
-        ])
-        .split(area);
-
-    // ── 1. Cost summary header ──────────────────────────────────────────
-    render_cost_header(data, chunks[0], frame);
-
-    // ── 2. Side-by-side bar charts: Tokens (left) | USD Cost (right) ───
-    render_cost_charts(data, chunks[1], frame);
-
-    // ── 3. Unpriced models warning ──────────────────────────────────────
-    if has_unpriced && unpriced_h > 0 {
-        render_unpriced_warning(data, chunks[2], frame);
-    }
-
-    // ── 4. Daily cost sparkline ─────────────────────────────────────────
-    if show_sparkline {
-        render_cost_sparkline(data, chunks[3], frame);
-    }
-}
-
-/// Number of selectable rows in the Cost view.
-pub fn cost_rows(data: &AnalyticsChartData) -> usize {
-    data.model_tokens.len().min(10)
-}
-
-fn render_cost_header(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
-    let cost_str = if data.total_cost_usd > 0.0 {
-        format!("${:.2}", data.total_cost_usd)
-    } else {
-        "N/A".to_string()
-    };
-    let per_msg = if data.total_messages > 0 && data.total_cost_usd > 0.0 {
-        format!(
-            "${:.4}/msg",
-            data.total_cost_usd / data.total_messages as f64
-        )
-    } else {
-        "\u{2014}".to_string()
-    };
-    let per_1k = if data.total_api_tokens > 0 && data.total_cost_usd > 0.0 {
-        format!(
-            "${:.4}/1K tok",
-            data.total_cost_usd / (data.total_api_tokens as f64 / 1000.0)
-        )
-    } else {
-        "\u{2014}".to_string()
-    };
-    let line1 = format!(
-        " Total Cost: {} | {} models | {} messages",
-        cost_str,
-        data.model_tokens.len(),
-        format_compact(data.total_messages),
-    );
-    let line2 = format!(" {per_msg} | {per_1k}");
-
-    // Pricing coverage bar on line 3.
-    let pricing_pct = data.pricing_coverage_pct;
-    let bar_w = area.width.saturating_sub(26) as usize;
-    let filled = (pricing_pct / 100.0 * bar_w as f64).round() as usize;
-    let empty = bar_w.saturating_sub(filled);
-    let line3 = format!(
-        " Pricing Coverage: {:.0}% [{}{}]",
-        pricing_pct,
-        "\u{2588}".repeat(filled),
-        "\u{2591}".repeat(empty),
-    );
-
-    let rows = Flex::vertical()
-        .constraints([
-            Constraint::Fixed(1),
-            Constraint::Fixed(1),
-            Constraint::Fixed(1),
-        ])
-        .split(area);
-
-    let cost_color = if data.total_cost_usd > 100.0 {
-        PackedRgba::rgb(255, 120, 80)
-    } else if data.total_cost_usd > 10.0 {
-        PackedRgba::rgb(255, 200, 60)
-    } else {
-        PackedRgba::rgb(80, 200, 120)
-    };
-    Paragraph::new(&*line1)
-        .style(ftui::Style::new().fg(cost_color).bold())
-        .render(rows[0], frame);
-    Paragraph::new(&*line2)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(160, 160, 160)))
-        .render(rows[1], frame);
-
-    let cov_color = if pricing_pct >= 80.0 {
-        PackedRgba::rgb(80, 200, 80)
-    } else if pricing_pct >= 50.0 {
-        PackedRgba::rgb(255, 200, 0)
-    } else {
-        PackedRgba::rgb(255, 100, 100)
-    };
-    Paragraph::new(&*line3)
-        .style(ftui::Style::new().fg(cov_color))
-        .render(rows[2], frame);
-}
-
-fn render_cost_charts(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
-    let has_cost = !data.model_cost.is_empty();
-    if !has_cost {
-        // Only token chart (no cost data available).
-        let groups: Vec<BarGroup<'_>> = data
-            .model_tokens
-            .iter()
-            .take(10)
-            .map(|(name, val)| BarGroup::new(name, vec![*val]))
-            .collect();
-        let colors: Vec<PackedRgba> = (0..groups.len()).map(cost_model_color).collect();
-        BarChart::new(groups)
-            .direction(BarDirection::Horizontal)
-            .bar_width(1)
-            .colors(colors)
-            .render(area, frame);
-        return;
-    }
-
-    // Side-by-side: tokens (left) | USD cost (right).
-    let halves = Flex::horizontal()
-        .constraints([Constraint::Percentage(50.0), Constraint::Percentage(50.0)])
-        .split(area);
-
-    // Left: tokens by model.
-    {
-        let groups: Vec<BarGroup<'_>> = data
-            .model_tokens
-            .iter()
-            .take(10)
-            .map(|(name, val)| BarGroup::new(name, vec![*val]))
-            .collect();
-        let colors: Vec<PackedRgba> = (0..groups.len()).map(cost_model_color).collect();
-        BarChart::new(groups)
-            .direction(BarDirection::Horizontal)
-            .bar_width(1)
-            .colors(colors)
-            .render(halves[0], frame);
-    }
-
-    // Right: USD cost by model.
-    {
-        let groups: Vec<BarGroup<'_>> = data
-            .model_cost
-            .iter()
-            .take(10)
-            .map(|(name, val)| {
-                let label = format!("{name} ${val:.2}");
-                BarGroup::new(Box::leak(label.into_boxed_str()) as &str, vec![*val])
-            })
-            .collect();
-        let colors: Vec<PackedRgba> = (0..groups.len())
-            .map(|i| {
-                let model_name = &data.model_cost[i].0;
-                data.model_tokens
-                    .iter()
-                    .position(|t| t.0 == *model_name)
-                    .map(cost_model_color)
-                    .unwrap_or(PackedRgba::rgb(180, 180, 180))
-            })
-            .collect();
-        BarChart::new(groups)
-            .direction(BarDirection::Horizontal)
-            .bar_width(1)
-            .colors(colors)
-            .render(halves[1], frame);
-    }
-}
-
-fn render_unpriced_warning(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
-    let names: Vec<&str> = data
-        .unpriced_models
-        .iter()
-        .take(5)
-        .map(|m| m.model_name.as_str())
-        .collect();
-    let total_unpriced: i64 = data.unpriced_models.iter().map(|m| m.total_tokens).sum();
-    let extra = if data.unpriced_models.len() > 5 {
-        format!(" +{} more", data.unpriced_models.len() - 5)
-    } else {
-        String::new()
-    };
-    let line = format!(
-        " \u{26a0} Unpriced models ({} tokens): {}{}",
-        format_compact(total_unpriced),
-        names.join(", "),
-        extra,
-    );
-    Paragraph::new(&*line)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(255, 180, 60)))
-        .render(area, frame);
-}
-
-fn render_cost_sparkline(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
-    let label = " Daily Cost ";
-    let label_w = label.len() as u16;
-    if area.width <= label_w + 4 {
-        return;
-    }
-    let label_rect = Rect {
-        x: area.x,
-        y: area.y,
-        width: label_w,
-        height: 1,
-    };
-    Paragraph::new(label)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
-        .render(label_rect, frame);
-
-    let spark_inner = Rect {
-        x: area.x + label_w,
-        y: area.y,
-        width: area.width.saturating_sub(label_w),
-        height: area.height,
-    };
-    let vals: Vec<f64> = data.daily_cost.iter().map(|(_, v)| *v).collect();
-    let spark = Sparkline::new(&vals).style(ftui::Style::new().fg(PackedRgba::rgb(255, 200, 60)));
-    spark.render(spark_inner, frame);
-}
+// Cost (USD) UI removed: pricing-derived token costs were misleading and not
+// useful for cass UX. We keep model usage breakdowns via `model_tokens`.
 
 /// Number of selectable rows in the Plans view (per-agent plan breakdown).
 pub fn plans_rows(data: &AnalyticsChartData) -> usize {
@@ -2402,8 +2079,7 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
         "\u{2591}".repeat(api_empty),
     );
     let line2 = format!(
-        " Pricing Coverage:   {:.1}%  \u{2502}  {} agents  \u{2502}  {} total API tokens",
-        data.pricing_coverage_pct,
+        " {} agents  \u{2502}  {} total API tokens",
         data.agent_count,
         format_compact(data.total_api_tokens),
     );
@@ -2627,20 +2303,6 @@ pub fn render_analytics_content(
                 false,
             );
         }
-        AnalyticsView::Cost => {
-            render_cost(data, area, frame);
-            // Selection indicator in the chart area (offset by 3-row header).
-            let row_count = cost_rows(data);
-            if row_count > 0 && area.height > 3 {
-                let chart_area = Rect {
-                    x: area.x,
-                    y: area.y + 3,
-                    width: area.width,
-                    height: area.height.saturating_sub(3),
-                };
-                render_selection_indicator(selection, row_count, chart_area, frame, false);
-            }
-        }
         AnalyticsView::Plans => {
             render_plans(data, selection, area, frame);
         }
@@ -2753,10 +2415,10 @@ mod tests {
     }
 
     #[test]
-    fn format_explorer_metric_value_cost_is_currency() {
+    fn format_explorer_metric_value_is_compact() {
         assert_eq!(
-            format_explorer_metric_value(ExplorerMetric::Cost, 12.3456),
-            "$12.35"
+            format_explorer_metric_value(ExplorerMetric::ApiTokens, 12.3456),
+            "12"
         );
     }
 
@@ -2819,7 +2481,6 @@ mod tests {
                 | AnalyticsView::Heatmap
                 | AnalyticsView::Breakdowns
                 | AnalyticsView::Tools
-                | AnalyticsView::Cost
                 | AnalyticsView::Plans
                 | AnalyticsView::Coverage => {}
             }
@@ -2874,9 +2535,8 @@ mod tests {
     }
 
     #[test]
-    fn format_heatmap_value_cost() {
-        assert_eq!(format_heatmap_value(42.567, HeatmapMetric::Cost), "$42.57");
-        assert_eq!(format_heatmap_value(0.0, HeatmapMetric::Cost), "$0.00");
+    fn format_heatmap_value_coverage_is_percent() {
+        assert_eq!(format_heatmap_value(72.9, HeatmapMetric::Coverage), "73%");
     }
 
     #[test]

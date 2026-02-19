@@ -1039,7 +1039,6 @@ fn palette_analytics_surface_switch() {
         AnalyticsTarget::Heatmap,
         AnalyticsTarget::Breakdowns,
         AnalyticsTarget::Tools,
-        AnalyticsTarget::Cost,
         AnalyticsTarget::Plans,
         AnalyticsTarget::Coverage,
     ];
@@ -1060,7 +1059,7 @@ fn palette_analytics_surface_switch() {
         }
     }
 
-    log.assert_ok("all_analytics_targets", "8", &targets.len().to_string());
+    log.assert_ok("all_analytics_targets", "7", &targets.len().to_string());
 }
 
 // ===========================================================================
@@ -1716,27 +1715,34 @@ fn inline_analytics_badges_match_detail_modal_metrics() {
     let mut log = IntegrationLogger::new("CW-055");
     let mut app = CassApp::default();
 
-    // Two hits from the same session: estimated tokens = 1000 + 500 = 1500.
+    // Two hits from the same session: inline badges should reflect the same message count
+    // as the detail analytics modal (token cost/estimates are intentionally not shown).
     let hits = vec![
         make_session_hit(11, 1, "a".repeat(4_000)),
         make_session_hit(12, 2, "b".repeat(2_000)),
     ];
     let _ = app.update(CassMsg::SearchCompleted {
+        generation: app.search_generation,
         hits,
         elapsed_ms: 7,
         suggestions: vec![],
         wildcard_fallback: false,
+        append: false,
     });
 
     // Search surface should show inline mini-analytics badges for this session.
     let search_text = render_app_text(&app, 320, 30);
     assert!(
-        search_text.contains("● 1,500 tok"),
-        "expected inline token badge, got:\n{search_text}"
-    );
-    assert!(
         search_text.contains("2 msgs"),
         "expected inline message badge, got:\n{search_text}"
+    );
+    assert!(
+        !search_text.contains("tok"),
+        "inline badges should not show token estimates, got:\n{search_text}"
+    );
+    assert!(
+        !search_text.contains('$'),
+        "inline badges should not show token cost, got:\n{search_text}"
     );
 
     // Seed cached detail analytics with matching totals.
@@ -1798,7 +1804,7 @@ fn inline_analytics_badges_match_detail_modal_metrics() {
         "detail analytics should report same token count, got:\n{detail_text}"
     );
 
-    log.assert_ok("inline_badge_tokens", "1.5K tok", "1.5K tok");
+    log.assert_ok("inline_badge_messages", "2 msgs", "2 msgs");
     log.assert_ok("detail_modal_tokens", "1.5K tok", "1.5K tok");
 }
 

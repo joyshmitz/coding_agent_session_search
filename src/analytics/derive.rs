@@ -39,13 +39,6 @@ pub fn compute_derived(bucket: &UsageBucket) -> DerivedMetrics {
     );
     let plan_token_share_api = safe_div(bucket.plan_api_tokens_total, bucket.api_tokens_total);
 
-    let cost_per_message = safe_div_f64(bucket.estimated_cost_usd, bucket.message_count);
-    let cost_per_1k_api_tokens = if bucket.api_tokens_total > 0 {
-        Some(bucket.estimated_cost_usd / (bucket.api_tokens_total as f64 / 1000.0))
-    } else {
-        None
-    };
-
     DerivedMetrics {
         api_coverage_pct,
         api_tokens_per_assistant_msg,
@@ -55,8 +48,6 @@ pub fn compute_derived(bucket: &UsageBucket) -> DerivedMetrics {
         plan_message_pct,
         plan_token_share_content,
         plan_token_share_api,
-        cost_per_message,
-        cost_per_1k_api_tokens,
     }
 }
 
@@ -150,8 +141,6 @@ mod tests {
         assert_eq!(d.plan_message_pct, None);
         assert_eq!(d.plan_token_share_content, None);
         assert_eq!(d.plan_token_share_api, None);
-        assert_eq!(d.cost_per_message, None);
-        assert_eq!(d.cost_per_1k_api_tokens, None);
     }
 
     #[test]
@@ -179,8 +168,6 @@ mod tests {
         assert!((d.plan_message_pct.unwrap() - 5.0).abs() < 0.01);
         assert_eq!(d.plan_token_share_content, Some(0.05));
         assert_eq!(d.plan_token_share_api, Some(0.05));
-        assert_eq!(d.cost_per_message, Some(0.03));
-        assert_eq!(d.cost_per_1k_api_tokens, Some(0.05));
     }
 
     #[test]

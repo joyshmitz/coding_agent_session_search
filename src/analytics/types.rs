@@ -317,11 +317,6 @@ impl UsageBucket {
                 "api_coverage_message_count": self.api_coverage_message_count,
                 "api_coverage_pct": derived.api_coverage_pct,
             },
-            "cost": {
-                "estimated_cost_usd": self.estimated_cost_usd,
-                "cost_per_message": derived.cost_per_message,
-                "cost_per_1k_api_tokens": derived.cost_per_1k_api_tokens,
-            },
             "derived": {
                 "api_tokens_per_assistant_msg": derived.api_tokens_per_assistant_msg,
                 "content_tokens_per_user_msg": derived.content_tokens_per_user_msg,
@@ -404,12 +399,10 @@ impl BreakdownRow {
             "key": self.key,
             "value": self.value,
             "message_count": self.message_count,
-            "estimated_cost_usd": self.bucket.estimated_cost_usd,
             "derived": {
                 "api_coverage_pct": derived.api_coverage_pct,
                 "tool_calls_per_1k_api_tokens": derived.tool_calls_per_1k_api_tokens,
                 "plan_message_pct": derived.plan_message_pct,
-                "cost_per_message": derived.cost_per_message,
             },
         })
     }
@@ -573,7 +566,6 @@ pub struct CoverageInfo {
     pub api_token_coverage_pct: f64,
     pub model_name_coverage_pct: f64,
     pub estimate_only_pct: f64,
-    pub pricing_coverage_pct: f64,
 }
 
 /// Drift detection output.
@@ -625,7 +617,6 @@ impl StatusResult {
                 "api_token_coverage_pct": self.coverage.api_token_coverage_pct,
                 "model_name_coverage_pct": self.coverage.model_name_coverage_pct,
                 "estimate_only_pct": self.coverage.estimate_only_pct,
-                "pricing_coverage_pct": self.coverage.pricing_coverage_pct,
             },
             "drift": {
                 "signals": signals_json,
@@ -678,8 +669,6 @@ pub struct DerivedMetrics {
     pub plan_message_pct: Option<f64>,
     pub plan_token_share_content: Option<f64>,
     pub plan_token_share_api: Option<f64>,
-    pub cost_per_message: Option<f64>,
-    pub cost_per_1k_api_tokens: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -746,7 +735,6 @@ mod tests {
         assert!(json["content_tokens"]["est_total"].is_number());
         assert!(json["api_tokens"]["total"].is_number());
         assert!(json["coverage"]["api_coverage_pct"].is_number());
-        assert!(json["cost"]["estimated_cost_usd"].is_number());
         assert!(json["derived"].is_object());
         assert!(json["derived"]["plan_token_share_content"].is_number());
         assert!(json["derived"]["plan_token_share_api"].is_number());

@@ -770,7 +770,6 @@ fn analytics_help_lists_expected_subcommands() {
         .stdout(contains("tokens"))
         .stdout(contains("tools"))
         .stdout(contains("models"))
-        .stdout(contains("cost"))
         .stdout(contains("rebuild"))
         .stdout(contains("validate"));
 }
@@ -793,7 +792,16 @@ fn analytics_tokens_help_lists_shared_flags_and_group_by() {
 
 #[test]
 fn analytics_subcommands_emit_uniform_json_envelope() {
-    let shared = [
+    let tmp_home = TempDir::new().expect("temp home");
+    let data_dir = tmp_home.path().join("cass_data");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+    let data_dir_str = data_dir.to_string_lossy().to_string();
+    // Create an empty-but-valid SQLite database so analytics commands can open
+    // it without requiring a full `cass index --full` run.
+    let db_path = data_dir.join("agent_search.db");
+    rusqlite::Connection::open(&db_path).expect("create sqlite db");
+
+    let shared: Vec<&str> = vec![
         "--json",
         "--since",
         "2026-01-01",
@@ -807,6 +815,8 @@ fn analytics_subcommands_emit_uniform_json_envelope() {
         "/tmp/project-a",
         "--source",
         "local",
+        "--data-dir",
+        data_dir_str.as_str(),
     ];
 
     let cases: Vec<(&str, Vec<&str>)> = vec![
@@ -823,10 +833,6 @@ fn analytics_subcommands_emit_uniform_json_envelope() {
             "analytics/models",
             vec!["analytics", "models", "--group-by", "month"],
         ),
-        (
-            "analytics/cost",
-            vec!["analytics", "cost", "--group-by", "hour"],
-        ),
         ("analytics/rebuild", vec!["analytics", "rebuild", "--force"]),
         ("analytics/validate", vec!["analytics", "validate", "--fix"]),
     ];
@@ -836,7 +842,7 @@ fn analytics_subcommands_emit_uniform_json_envelope() {
 
     for (expected_command, mut args) in cases {
         args.extend_from_slice(&shared);
-        let mut cmd = simple_cmd();
+        let mut cmd = base_cmd(tmp_home.path());
         cmd.args(&args);
         let output = cmd.output().expect("failed to execute command");
 
@@ -860,7 +866,7 @@ fn analytics_subcommands_emit_uniform_json_envelope() {
         );
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // Note: some analytics subcommands (rebuild, validate, cost, models) emit
+        // Note: some analytics subcommands (rebuild, validate, models) emit
         // human-readable diagnostics to stderr even in --json mode.  This is by design
         // — stderr carries diagnostics, stdout carries structured JSON.
 
@@ -905,20 +911,6 @@ fn analytics_subcommands_emit_uniform_json_envelope() {
                 assert!(
                     data["by_api_tokens"].is_object(),
                     "analytics/models should expose by_api_tokens: {json}"
-                );
-                assert!(
-                    data["by_cost"].is_object(),
-                    "analytics/models should expose by_cost: {json}"
-                );
-            }
-            "analytics/cost" => {
-                assert!(
-                    data["totals"].is_object(),
-                    "analytics/cost should expose totals: {json}"
-                );
-                assert!(
-                    data["buckets"].is_array(),
-                    "analytics/cost should expose buckets: {json}"
                 );
             }
             "analytics/rebuild" => {

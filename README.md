@@ -1,7 +1,7 @@
 # 🔎 coding-agent-search (cass)
 
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
-![Rust](https://img.shields.io/badge/Rust-nightly-orange.svg)
+![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)
 ![Status](https://img.shields.io/badge/status-alpha-purple.svg)
 [![Coverage](https://codecov.io/gh/Dicklesworthstone/coding_agent_session_search/branch/main/graph/badge.svg)](https://codecov.io/gh/Dicklesworthstone/coding_agent_session_search)
 ![License](https://img.shields.io/badge/license-MIT%2BOpenAI%2FAnthropic%20Rider-green.svg)
@@ -183,7 +183,7 @@ AI coding agents are transforming how we write software. Claude Code, Codex, Cur
   - `config.json`
   - `special_tokens_map.json`
   - `tokenizer_config.json`
-- **Vector index**: Stored as `vector_index/index-minilm-384.cvvi` in the data directory.
+- **Vector index**: Stored as `vector_index/index-<embedder>.fsvi` in the data directory.
 
 #### Hash Embedder Fallback
 
@@ -210,36 +210,16 @@ When ML model files are not installed, `cass` uses a deterministic hash-based em
 
 **Override**: Set `CASS_SEMANTIC_EMBEDDER=hash` to force hash mode even when ML model is available.
 
-#### CVVI Vector Index Format
+#### FSVI Vector Index Format
 
-`cass` uses a custom binary format (`.cvvi` - Cass Vector Index) for storing semantic embeddings:
-
-```
-┌─────────────────────────────────────────────────┐
-│ Header (32 bytes)                               │
-│ ├─ Magic: "CVVI" (4 bytes)                      │
-│ ├─ Version: u8                                   │
-│ ├─ Precision: F32 or F16 (1 byte)               │
-│ ├─ Dimension: u16 (e.g., 384)                   │
-│ ├─ Entry count: u64                             │
-│ └─ CRC32 checksum                               │
-├─────────────────────────────────────────────────┤
-│ Entries                                         │
-│ ├─ content_hash: [u8; 32] (SHA-256)             │
-│ ├─ source_id: varint                            │
-│ ├─ agent: u8 (enum)                             │
-│ ├─ timestamp: i64                               │
-│ └─ vector: [f32|f16; dimension]                 │
-└─────────────────────────────────────────────────┘
-```
+`cass` uses the **frankensearch FSVI** vector index format (`.fsvi`) for storing semantic embeddings.
 
 **Features**:
-- **Precision Options**: F32 (full precision) or F16 (half, ~50% smaller, slight accuracy loss)
-- **Memory-Mapped Loading**: Large indexes load efficiently without copying into RAM
-- **CRC32 Validation**: Detects corruption on load
-- **Content Deduplication**: Messages are hashed; identical content shares one vector
+- **Memory-mappable**: large indexes open without copying into RAM
+- **Quantization**: supports `f32` and `f16` storage for smaller on-disk size
+- **Fast search**: brute-force vector search and optional HNSW approximate search
 
-**Index Location**: `~/.local/share/coding-agent-search/vector_index/index-<embedder>-<dim>.cvvi`
+**Index Location**: `~/.local/share/coding-agent-search/vector_index/index-<embedder>.fsvi`
 
 #### Search Modes
 
@@ -290,7 +270,7 @@ Powered by [FrankenTUI (ftui)](https://github.com/Dicklesworthstone/frankentui) 
 - **Mouse Support**: Click to select results, scroll panes, or clear filters.
 - **Theming**: Adaptive Dark/Light modes with role-colored messages (User/Assistant/System). Presets include dark, light, high-contrast, and accessible variants.
 - **Ranking Modes**: Cycle through `recent`/`balanced`/`relevance`/`quality` with `F12`; quality mode penalizes fuzzy matches.
-- **Analytics Dashboard**: 8 views (Dashboard, Explorer, Heatmap, Breakdowns, Tools, Cost, Plans, Coverage) with interactive charts, KPI tiles, and drill-down filtering. Toggle with `A`.
+- **Analytics Dashboard**: 7 views (Dashboard, Explorer, Heatmap, Breakdowns, Tools, Plans, Coverage) with interactive charts, KPI tiles, and drill-down filtering. Toggle with `A`.
 - **Inline Mode**: Run `cass tui --inline` to keep terminal scrollback intact. The UI anchors to a region of the terminal while logs scroll normally. Configure with `--ui-height <rows>` and `--anchor top|bottom`.
 - **Macro Recording**: Capture input sessions with `cass tui --record-macro session.macro` for reproducible bug reports and workflow automation. Events are saved as human-readable JSONL with full timing data.
 - **Asciicast Recording**: Capture reproducible TUI demos and bug repro artifacts with `cass tui --asciicast demo.cast`.

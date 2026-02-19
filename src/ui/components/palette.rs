@@ -24,7 +24,7 @@
 //! | Chrome      | ToggleTheme, ToggleDensity, ToggleHelpStrip, OpenUpdate    |
 //! | Filter      | FilterAgent, FilterWorkspace, FilterToday/Week/CustomDate  |
 //! | View        | OpenSavedViews, SaveViewSlot, LoadViewSlot, BulkActions, ReloadIndex |
-//! | Analytics   | AnalyticsDashboard..AnalyticsCoverage (legacy Cost hidden)  |
+//! | Analytics   | AnalyticsDashboard..AnalyticsCoverage                      |
 //! | Export      | ScreenshotHtml, ScreenshotSvg, ScreenshotText             |
 //! | Recording   | MacroRecordingToggle                                       |
 //! | Sources     | Sources                                                    |
@@ -159,7 +159,6 @@ pub enum PaletteAction {
     AnalyticsHeatmap,
     AnalyticsBreakdowns,
     AnalyticsTools,
-    AnalyticsCost,
     AnalyticsPlans,
     AnalyticsCoverage,
     // -- Screenshot export ------------------------------------------------
@@ -195,7 +194,6 @@ impl PaletteAction {
             | Self::AnalyticsHeatmap
             | Self::AnalyticsBreakdowns
             | Self::AnalyticsTools
-            | Self::AnalyticsCost
             | Self::AnalyticsPlans
             | Self::AnalyticsCoverage => PaletteGroup::Analytics,
             Self::ScreenshotHtml | Self::ScreenshotSvg | Self::ScreenshotText => {
@@ -238,7 +236,6 @@ impl PaletteAction {
                 "batch[AnalyticsEntered, AnalyticsViewChanged(Breakdowns)]"
             }
             Self::AnalyticsTools => "batch[AnalyticsEntered, AnalyticsViewChanged(Tools)]",
-            Self::AnalyticsCost => "batch[AnalyticsEntered, AnalyticsViewChanged(Cost)]",
             Self::AnalyticsPlans => "batch[AnalyticsEntered, AnalyticsViewChanged(Plans)]",
             Self::AnalyticsCoverage => "batch[AnalyticsEntered, AnalyticsViewChanged(Coverage)]",
             // Export
@@ -317,7 +314,6 @@ pub enum AnalyticsTarget {
     Heatmap,
     Breakdowns,
     Tools,
-    Cost,
     Plans,
     Coverage,
 }
@@ -369,7 +365,6 @@ impl PaletteAction {
                 PaletteResult::OpenAnalyticsView(AnalyticsTarget::Breakdowns)
             }
             Self::AnalyticsTools => PaletteResult::OpenAnalyticsView(AnalyticsTarget::Tools),
-            Self::AnalyticsCost => PaletteResult::OpenAnalyticsView(AnalyticsTarget::Cost),
             Self::AnalyticsPlans => PaletteResult::OpenAnalyticsView(AnalyticsTarget::Plans),
             Self::AnalyticsCoverage => PaletteResult::OpenAnalyticsView(AnalyticsTarget::Coverage),
             // Export
@@ -1044,7 +1039,6 @@ mod tests {
             PaletteAction::AnalyticsHeatmap,
             PaletteAction::AnalyticsBreakdowns,
             PaletteAction::AnalyticsTools,
-            PaletteAction::AnalyticsCost,
             PaletteAction::AnalyticsPlans,
             PaletteAction::AnalyticsCoverage,
             PaletteAction::ScreenshotHtml,
@@ -1080,7 +1074,6 @@ mod tests {
             PaletteAction::AnalyticsHeatmap,
             PaletteAction::AnalyticsBreakdowns,
             PaletteAction::AnalyticsTools,
-            PaletteAction::AnalyticsCost,
             PaletteAction::AnalyticsPlans,
             PaletteAction::AnalyticsCoverage,
             PaletteAction::ScreenshotHtml,
@@ -1119,18 +1112,17 @@ mod tests {
     }
 
     #[test]
-    fn analytics_group_has_eight_variants() {
+    fn analytics_group_has_seven_variants() {
         let analytics: Vec<PaletteAction> = vec![
             PaletteAction::AnalyticsDashboard,
             PaletteAction::AnalyticsExplorer,
             PaletteAction::AnalyticsHeatmap,
             PaletteAction::AnalyticsBreakdowns,
             PaletteAction::AnalyticsTools,
-            PaletteAction::AnalyticsCost,
             PaletteAction::AnalyticsPlans,
             PaletteAction::AnalyticsCoverage,
         ];
-        assert_eq!(analytics.len(), 8);
+        assert_eq!(analytics.len(), 7);
         for a in &analytics {
             assert_eq!(a.group(), PaletteGroup::Analytics);
         }
@@ -1189,7 +1181,6 @@ mod tests {
             PaletteAction::AnalyticsHeatmap,
             PaletteAction::AnalyticsBreakdowns,
             PaletteAction::AnalyticsTools,
-            PaletteAction::AnalyticsCost,
             PaletteAction::AnalyticsPlans,
             PaletteAction::AnalyticsCoverage,
             PaletteAction::ScreenshotHtml,
@@ -1326,7 +1317,6 @@ mod tests {
                 AnalyticsTarget::Breakdowns,
             ),
             (PaletteAction::AnalyticsTools, AnalyticsTarget::Tools),
-            (PaletteAction::AnalyticsCost, AnalyticsTarget::Cost),
             (PaletteAction::AnalyticsPlans, AnalyticsTarget::Plans),
             (PaletteAction::AnalyticsCoverage, AnalyticsTarget::Coverage),
         ];
@@ -1391,7 +1381,6 @@ mod tests {
             PaletteAction::AnalyticsHeatmap,
             PaletteAction::AnalyticsBreakdowns,
             PaletteAction::AnalyticsTools,
-            PaletteAction::AnalyticsCost,
             PaletteAction::AnalyticsPlans,
             PaletteAction::AnalyticsCoverage,
             PaletteAction::ScreenshotHtml,

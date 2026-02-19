@@ -716,9 +716,9 @@ pub enum Commands {
     /// Import data from external sources
     #[command(subcommand)]
     Import(ImportCommand),
-    /// Token usage, cost, tool, and model analytics
+    /// Token usage, tool, and model analytics
     ///
-    /// Subcommands: status, tokens, tools, models, cost, rebuild, validate.
+    /// Subcommands: status, tokens, tools, models, rebuild, validate.
     /// All subcommands share time-range, dimensional, and output flags.
     ///
     /// # Examples
@@ -726,7 +726,6 @@ pub enum Commands {
     /// ```bash
     /// cass analytics status --json
     /// cass analytics tokens --days 7 --group-by day --json
-    /// cass analytics cost --agent claude --since 2026-01-01 --json
     /// cass analytics rebuild --json
     /// ```
     #[command(subcommand)]
@@ -1056,7 +1055,7 @@ impl std::fmt::Display for AnalyticsBucketing {
     }
 }
 
-/// Subcommands for analytics (token usage, cost, tool, and model breakdowns).
+/// Subcommands for analytics (token usage, tool, and model breakdowns).
 ///
 /// All subcommands share time-range, dimensional-filter, and output flags
 /// via clap's `flatten` on [`AnalyticsCommon`].
@@ -1089,14 +1088,6 @@ pub enum AnalyticsCommand {
     /// Top models by usage and coverage statistics
     #[command(name = "models")]
     AnalyticsModels {
-        #[command(flatten)]
-        common: AnalyticsCommon,
-        /// Time bucket for aggregation
-        #[arg(long, value_enum, default_value_t = AnalyticsBucketing::Day)]
-        group_by: AnalyticsBucketing,
-    },
-    /// USD cost estimates with pricing coverage
-    Cost {
         #[command(flatten)]
         common: AnalyticsCommon,
         /// Time bucket for aggregation
@@ -3462,7 +3453,6 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>) -> CliResult<(
         AnalyticsCommand::Tokens { common, .. } => ("tokens", common),
         AnalyticsCommand::Tools { common, .. } => ("tools", common),
         AnalyticsCommand::AnalyticsModels { common, .. } => ("models", common),
-        AnalyticsCommand::Cost { common, .. } => ("cost", common),
         AnalyticsCommand::Rebuild { common, .. } => ("rebuild", common),
         AnalyticsCommand::Validate { common, .. } => ("validate", common),
     };
@@ -3488,9 +3478,6 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>) -> CliResult<(
         } => run_analytics_tools(common, *group_by, *limit, db_path.as_ref())?,
         AnalyticsCommand::Validate { common, fix } => {
             run_analytics_validate(common, *fix, db_path.as_ref())?
-        }
-        AnalyticsCommand::Cost { common, group_by } => {
-            run_analytics_cost(common, *group_by, db_path.as_ref())?
         }
         AnalyticsCommand::AnalyticsModels { common, group_by } => {
             run_analytics_models(common, *group_by, db_path.as_ref())?
@@ -3522,7 +3509,6 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>) -> CliResult<(
             | AnalyticsCommand::Rebuild { .. }
             | AnalyticsCommand::Tools { .. }
             | AnalyticsCommand::Validate { .. }
-            | AnalyticsCommand::Cost { .. }
             | AnalyticsCommand::AnalyticsModels { .. } => format!(
                 "{} analytics {}",
                 "cass".cyan().bold(),
@@ -3820,210 +3806,6 @@ fn run_analytics_validate(
 }
 
 // ---------------------------------------------------------------------------
-// analytics cost (br-z9fse.3.7)
-// ---------------------------------------------------------------------------
-
-/// Run `cass analytics cost` — USD cost estimates with pricing coverage.
-fn run_analytics_cost(
-    common: &AnalyticsCommon,
-    group_by: AnalyticsBucketing,
-    db_path_override: Option<&PathBuf>,
-) -> CliResult<serde_json::Value> {
-    let lazy =
-        crate::storage::sqlite::LazyDb::from_overrides(&common.data_dir, db_path_override.cloned());
-    let conn = lazy.get("analytics-cost").map_err(lazy_db_to_cli_error)?;
-    let filter = analytics::AnalyticsFilter::from(common);
-    let db_err = |e: crate::analytics::AnalyticsError| CliError {
-        code: 9,
-        kind: "db-error",
-        message: e.to_string(),
-        hint: Some("Check that the analytics tables exist and are not corrupt.".into()),
-        retryable: false,
-    };
-
-    // Time-bucketed cost from Track B (token_daily_stats has estimated_cost_usd).
-    let ts =
-        analytics::query::query_cost_timeseries(&conn, &filter, group_by.into()).map_err(db_err)?;
-
-    // Model breakdown (cost by model family).
-    let by_model = analytics::query::query_breakdown(
-        &conn,
-        &filter,
-        analytics::Dim::Model,
-        analytics::Metric::EstimatedCostUsd,
-        50,
-    )
-    .map_err(db_err)?;
-
-    // Agent breakdown (cost by agent).
-    let by_agent = analytics::query::query_breakdown(
-        &conn,
-        &filter,
-        analytics::Dim::Agent,
-        analytics::Metric::EstimatedCostUsd,
-        50,
-    )
-    .map_err(db_err)?;
-
-    // Coverage information from status query.
-    let status = analytics::query::query_status(&conn, &filter).map_err(db_err)?;
-
-    // Unknown/unpriced models.
-    let unpriced = analytics::query::query_unpriced_models(&conn, 20).map_err(db_err)?;
-
-    // Totals across all buckets.
-    let total_cost: f64 = ts.buckets.iter().map(|(_, b)| b.estimated_cost_usd).sum();
-    let total_api_tokens: i64 = ts.buckets.iter().map(|(_, b)| b.api_tokens_total).sum();
-    let total_messages: i64 = ts.buckets.iter().map(|(_, b)| b.message_count).sum();
-    let cost_per_1k_api = if total_api_tokens > 0 {
-        Some(total_cost / (total_api_tokens as f64 / 1000.0))
-    } else {
-        None
-    };
-    let cost_per_message = if total_messages > 0 {
-        Some(total_cost / total_messages as f64)
-    } else {
-        None
-    };
-
-    // Period-over-period delta: compare to prior period of same length.
-    let period_delta = compute_cost_period_delta(&ts);
-
-    // Buckets as JSON array (already sorted by key in timeseries result).
-    let buckets_json: Vec<serde_json::Value> = ts
-        .buckets
-        .iter()
-        .map(|(key, b)| {
-            serde_json::json!({
-                "bucket": key,
-                "estimated_cost_usd": b.estimated_cost_usd,
-                "api_tokens_total": b.api_tokens_total,
-                "message_count": b.message_count,
-            })
-        })
-        .collect();
-
-    // Unpriced models JSON.
-    let unpriced_json: Vec<serde_json::Value> = unpriced
-        .models
-        .iter()
-        .map(|m| {
-            serde_json::json!({
-                "model_name": m.model_name,
-                "total_tokens": m.total_tokens,
-                "row_count": m.row_count,
-            })
-        })
-        .collect();
-
-    let total_token_volume = unpriced.total_priced_tokens + unpriced.total_unpriced_tokens;
-    let unpriced_token_share = if total_token_volume > 0 {
-        Some((unpriced.total_unpriced_tokens as f64 / total_token_volume as f64) * 100.0)
-    } else {
-        None
-    };
-
-    // Human-readable stderr summary.
-    {
-        use colored::Colorize;
-        eprintln!(
-            "  total cost: {}",
-            format!("${total_cost:.4}").green().bold()
-        );
-        if let Some(cpm) = cost_per_message {
-            eprintln!("  cost/message: ${cpm:.6}");
-        }
-        if let Some(cpt) = cost_per_1k_api {
-            eprintln!("  cost/1k API tokens: ${cpt:.6}");
-        }
-        if let Some((delta_pct, _)) = &period_delta {
-            let sign = if *delta_pct >= 0.0 { "+" } else { "" };
-            let delta_str = format!("{sign}{delta_pct:.1}%");
-            let colored_delta = if *delta_pct > 10.0 {
-                delta_str.red()
-            } else if *delta_pct < -10.0 {
-                delta_str.green()
-            } else {
-                delta_str.yellow()
-            };
-            eprintln!("  period-over-period: {colored_delta}");
-        }
-        let cov = status.coverage.pricing_coverage_pct;
-        let cov_color = if cov > 80.0 {
-            format!("{cov:.1}%").green()
-        } else if cov > 50.0 {
-            format!("{cov:.1}%").yellow()
-        } else {
-            format!("{cov:.1}%").red()
-        };
-        eprintln!("  pricing coverage: {cov_color}");
-        if !unpriced.models.is_empty() {
-            eprintln!(
-                "  unpriced models: {} ({})",
-                unpriced.models.len().to_string().red(),
-                unpriced_token_share
-                    .map(|s| format!("{s:.1}% of token volume"))
-                    .unwrap_or_default()
-                    .dimmed()
-            );
-        }
-        eprintln!(
-            "  breakdowns: {} models, {} agents",
-            by_model.rows.len().to_string().cyan(),
-            by_agent.rows.len().to_string().cyan()
-        );
-    }
-
-    Ok(serde_json::json!({
-        "totals": {
-            "estimated_cost_usd": total_cost,
-            "api_tokens_total": total_api_tokens,
-            "message_count": total_messages,
-            "cost_per_1k_api_tokens": cost_per_1k_api,
-            "cost_per_message": cost_per_message,
-            "period_delta_pct": period_delta.as_ref().map(|(pct, _)| *pct),
-            "prior_period_cost_usd": period_delta.as_ref().map(|(_, prior)| *prior),
-        },
-        "pricing_coverage": {
-            "pricing_coverage_pct": status.coverage.pricing_coverage_pct,
-            "api_token_coverage_pct": status.coverage.api_token_coverage_pct,
-            "model_name_coverage_pct": status.coverage.model_name_coverage_pct,
-            "estimate_only_pct": status.coverage.estimate_only_pct,
-            "unpriced_token_share_pct": unpriced_token_share,
-            "unpriced_models": unpriced_json,
-        },
-        "buckets": buckets_json,
-        "by_model": by_model.to_cli_json(),
-        "by_agent": by_agent.to_cli_json(),
-    }))
-}
-
-/// Compute period-over-period cost delta from time-bucketed data.
-///
-/// Splits the buckets into two halves (first half = prior, second half = current)
-/// and returns `(delta_pct, prior_cost)`.  Returns `None` when fewer than 2 buckets.
-fn compute_cost_period_delta(ts: &analytics::TimeseriesResult) -> Option<(f64, f64)> {
-    let n = ts.buckets.len();
-    if n < 2 {
-        return None;
-    }
-    let mid = n / 2;
-    let prior_cost: f64 = ts.buckets[..mid]
-        .iter()
-        .map(|(_, b)| b.estimated_cost_usd)
-        .sum();
-    let current_cost: f64 = ts.buckets[mid..]
-        .iter()
-        .map(|(_, b)| b.estimated_cost_usd)
-        .sum();
-    if prior_cost.abs() < f64::EPSILON {
-        return None;
-    }
-    let delta_pct = ((current_cost - prior_cost) / prior_cost) * 100.0;
-    Some((delta_pct, prior_cost))
-}
-
-// ---------------------------------------------------------------------------
 // analytics models (br-z9fse.3.6)
 // ---------------------------------------------------------------------------
 
@@ -4055,16 +3837,6 @@ fn run_analytics_models(
     )
     .map_err(db_err)?;
 
-    // Model breakdown by cost.
-    let by_cost = analytics::query::query_breakdown(
-        &conn,
-        &filter,
-        analytics::Dim::Model,
-        analytics::Metric::EstimatedCostUsd,
-        50,
-    )
-    .map_err(db_err)?;
-
     // Time series for aggregate stats.
     let ts = analytics::query::query_tokens_timeseries(&conn, &filter, group_by.into())
         .map_err(db_err)?;
@@ -4091,7 +3863,6 @@ fn run_analytics_models(
 
     Ok(serde_json::json!({
         "by_api_tokens": by_tokens.to_cli_json(),
-        "by_cost": by_cost.to_cli_json(),
         "timeseries": ts.to_cli_json(),
     }))
 }
@@ -4607,7 +4378,6 @@ fn is_robot_mode(command: &Commands) -> bool {
                 | AnalyticsCommand::Tokens { common, .. }
                 | AnalyticsCommand::Tools { common, .. }
                 | AnalyticsCommand::AnalyticsModels { common, .. }
-                | AnalyticsCommand::Cost { common, .. }
                 | AnalyticsCommand::Rebuild { common, .. }
                 | AnalyticsCommand::Validate { common, .. } => common.json,
             };
@@ -5087,14 +4857,13 @@ fn render_analytics_docs() -> Vec<String> {
     vec![
         "analytics:".into(),
         String::new(),
-        "# cass analytics — Token, Cost, Tool, and Model Analytics".into(),
+        "# cass analytics — Token, Tool, and Model Analytics".into(),
         String::new(),
         "## Subcommands".into(),
         "  status    Row counts, freshness, coverage, drift warnings".into(),
         "  tokens    Token usage over time with dimensional breakdowns".into(),
         "  tools     Per-tool invocation counts and derived metrics".into(),
         "  models    Top models by usage and coverage statistics".into(),
-        "  cost      USD cost estimates with pricing coverage".into(),
         "  rebuild   Rebuild/backfill rollup tables with progress output".into(),
         "  validate  Check rollup invariants and detect data drift".into(),
         String::new(),
@@ -5108,7 +4877,7 @@ fn render_analytics_docs() -> Vec<String> {
         "  --json / --robot     Machine-readable JSON output".into(),
         "  --data-dir <path>    Override data directory".into(),
         String::new(),
-        "## Bucketed Subcommands (tokens, tools, models, cost)".into(),
+        "## Bucketed Subcommands (tokens, tools, models)".into(),
         "  --group-by <bucket>  hour | day (default) | week | month".into(),
         String::new(),
         "## JSON Envelope (all subcommands)".into(),
@@ -5120,20 +4889,20 @@ fn render_analytics_docs() -> Vec<String> {
         "### analytics status".into(),
         "  data.tables: [{ table, exists, row_count, min_day_id, max_day_id, last_updated }]".into(),
         "  data.coverage: { total_messages, message_metrics_coverage_pct, api_token_coverage_pct,".into(),
-        "                   model_name_coverage_pct, estimate_only_pct, pricing_coverage_pct }".into(),
+        "                   model_name_coverage_pct, estimate_only_pct }".into(),
         "  data.drift: { signals: [{ signal, detail, severity }], track_a_fresh, track_b_fresh }".into(),
         "  data.recommended_action: string".into(),
         String::new(),
         "### analytics tokens".into(),
         "  data.buckets: [{ bucket: string, counts: {...}, content_tokens: {...},".into(),
-        "                   api_tokens: {...}, cost: {...}, plan: {...}, derived: {...} }]".into(),
+        "                   api_tokens: {...}, plan: {...}, derived: {...} }]".into(),
         "  data.totals: <same shape as bucket>".into(),
         "  data.source_table: string  ('usage_daily' | 'usage_hourly')".into(),
         "  data.granularity: string   ('hour' | 'day' | 'week' | 'month')".into(),
         "  Bucket keys: counts.{message_count, user_message_count, assistant_message_count,".into(),
         "    tool_call_count, plan_message_count}; api_tokens.{total, input, output,".into(),
         "    cache_read, cache_creation, thinking}; derived.{api_coverage_pct,".into(),
-        "    avg_api_per_message, avg_content_per_message, cost_per_1k_api, cost_per_message}".into(),
+        "    avg_api_per_message, avg_content_per_message}".into(),
         String::new(),
         "### analytics tools".into(),
         "  data.rows: [{ key: string, tool_call_count, message_count, api_tokens_total,".into(),
@@ -5145,22 +4914,9 @@ fn render_analytics_docs() -> Vec<String> {
         String::new(),
         "### analytics models".into(),
         "  data.by_api_tokens: { dim, metric, rows: [{ key, value, message_count, ... }] }".into(),
-        "  data.by_cost: { dim, metric, rows: [{ key, value, estimated_cost_usd, ... }] }".into(),
         "  data.timeseries: <same as analytics tokens>".into(),
         "  Source: token_daily_stats (Track B) — models only available for connectors".into(),
         "    that report model names (claude_code, codex, pi_agent, factory, opencode, cursor).".into(),
-        String::new(),
-        "### analytics cost".into(),
-        "  data.totals: { estimated_cost_usd, api_tokens_total, message_count,".into(),
-        "                 cost_per_1k_api_tokens, cost_per_message,".into(),
-        "                 period_delta_pct: f64|null, prior_period_cost_usd: f64|null }".into(),
-        "  data.pricing_coverage: { pricing_coverage_pct, api_token_coverage_pct,".into(),
-        "    model_name_coverage_pct, estimate_only_pct,".into(),
-        "    unpriced_token_share_pct: f64|null, unpriced_models: [{ model_name, total_tokens, row_count }] }".into(),
-        "  data.buckets: [{ bucket, estimated_cost_usd, api_tokens_total, message_count }]".into(),
-        "  data.by_model: { dim, metric, rows: [...] }".into(),
-        "  IMPORTANT: estimated_cost_usd = 0.0 when pricing_coverage_pct is 0%.".into(),
-        "  Never treat cost=0 as 'free'; check pricing_coverage first.".into(),
         String::new(),
         "### analytics rebuild".into(),
         "  data.track: string ('a')".into(),
@@ -5184,7 +4940,6 @@ fn render_analytics_docs() -> Vec<String> {
         String::new(),
         "## Coverage & Uncertainty Semantics".into(),
         "  - api_token_coverage_pct: % of messages with API token data (from Claude, Codex).".into(),
-        "  - pricing_coverage_pct: % of token_usage rows with cost > 0 (requires model_pricing match).".into(),
         "  - estimate_only_pct: % of messages with content-estimated tokens only (chars/4 heuristic).".into(),
         "  - When coverage is low, derived metrics are unreliable estimates, not ground truth.".into(),
         "  - Content token estimates are always available (heuristic); API tokens are sparse.".into(),
@@ -5207,9 +4962,6 @@ fn render_analytics_docs() -> Vec<String> {
         String::new(),
         "  # Recent usage by agent for last 7 days".into(),
         "  cass analytics tokens --days 7 --json | jq '.data.buckets'".into(),
-        String::new(),
-        "  # Cost analysis by model".into(),
-        "  cass analytics cost --json | jq '.data.by_model.rows[:5]'".into(),
         String::new(),
         "  # Tool usage top-10".into(),
         "  cass analytics tools --limit 10 --json | jq '.data.rows'".into(),
@@ -9016,46 +8768,41 @@ fn run_doctor(
 
     // 4. Check Tantivy index exists and is readable
     if index_path.join("meta.json").exists() {
-        match tantivy::Index::open_in_dir(&index_path) {
-            Ok(index) => {
-                match index.reader() {
-                    Ok(reader) => {
-                        let searcher = reader.searcher();
-                        let num_docs = searcher.num_docs();
-                        add_check!(
-                            "index",
-                            "pass",
-                            format!("Search index OK ({} documents)", num_docs),
-                            false
-                        );
+        match frankensearch::lexical::cass_open_search_reader(
+            &index_path,
+            tantivy::ReloadPolicy::Manual,
+        ) {
+            Ok((reader, _fields)) => {
+                let searcher = reader.searcher();
+                let num_docs = searcher.num_docs();
+                add_check!(
+                    "index",
+                    "pass",
+                    format!("Search index OK ({} documents)", num_docs),
+                    false
+                );
 
-                        // Check if index is empty but database has data
-                        if num_docs == 0 && db_ok {
-                            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                                if let Ok(msg_count) =
-                                    conn.query_row("SELECT COUNT(*) FROM messages", [], |r| {
-                                        r.get::<_, i64>(0)
-                                    })
-                                {
-                                    if msg_count > 0 {
-                                        add_check!(
-                                            "index_sync",
-                                            "warn",
-                                            format!(
-                                                "Index is empty but database has {} messages",
-                                                msg_count
-                                            ),
-                                            true
-                                        );
-                                        needs_rebuild = true;
-                                    }
-                                }
+                // Check if index is empty but database has data
+                if num_docs == 0 && db_ok {
+                    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                        if let Ok(msg_count) =
+                            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| {
+                                r.get::<_, i64>(0)
+                            })
+                        {
+                            if msg_count > 0 {
+                                add_check!(
+                                    "index_sync",
+                                    "warn",
+                                    format!(
+                                        "Index is empty but database has {} messages",
+                                        msg_count
+                                    ),
+                                    true
+                                );
+                                needs_rebuild = true;
                             }
                         }
-                    }
-                    Err(e) => {
-                        add_check!("index", "fail", format!("Cannot read index: {}", e), true);
-                        needs_rebuild = true;
                     }
                 }
             }
