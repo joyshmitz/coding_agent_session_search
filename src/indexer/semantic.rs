@@ -5,7 +5,8 @@ use anyhow::{Result, bail};
 use frankensearch::index::{
     HNSW_DEFAULT_EF_CONSTRUCTION as FS_HNSW_DEFAULT_EF_CONSTRUCTION,
     HNSW_DEFAULT_M as FS_HNSW_DEFAULT_M, HnswConfig as FsHnswConfig, HnswIndex as FsHnswIndex,
-    VectorIndex as FsVectorIndex,
+    Quantization as FsQuantization, VectorIndex as FsVectorIndex,
+    VectorIndexWriter as FsVectorIndexWriter,
 };
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
@@ -13,9 +14,7 @@ use crate::search::canonicalize::{canonicalize_for_embedding, content_hash};
 use crate::search::embedder::Embedder;
 use crate::search::fastembed_embedder::FastEmbedder;
 use crate::search::hash_embedder::HashEmbedder;
-use crate::search::vector_index::{
-    Quantization, ROLE_USER, VECTOR_INDEX_DIR, VectorEntry, VectorIndex, vector_index_path,
-};
+use crate::search::vector_index::{ROLE_USER, SemanticDocId, VECTOR_INDEX_DIR, vector_index_path};
 
 #[derive(Debug, Clone)]
 pub struct EmbeddingInput {
@@ -55,113 +54,6 @@ pub struct EmbeddedMessage {
     pub chunk_idx: u8,
     pub content_hash: [u8; 32],
     pub embedding: Vec<f32>,
-}
-
-impl EmbeddedMessage {
-    pub fn into_vector_entry(self) -> VectorEntry {
-        VectorEntry {
-            message_id: self.message_id,
-            created_at_ms: self.created_at_ms,
-            agent_id: self.agent_id,
-            workspace_id: self.workspace_id,
-            source_id: self.source_id,
-            role: self.role,
-            chunk_idx: self.chunk_idx,
-            content_hash: self.content_hash,
-            vector: self.embedding,
-        }
-    }
-}
-
-fn encode_fs_semantic_doc_id(row: &crate::search::vector_index::VectorRow) -> String {
-    format!(
-        "m|{}|{}|{}|{}|{}|{}|{}",
-        row.message_id,
-        row.chunk_idx,
-        row.agent_id,
-        row.workspace_id,
-        row.source_id,
-        row.role,
-        row.created_at_ms,
-    )
-}
-
-fn sanitize_embedder_id_for_filename(embedder_id: &str) -> String {
-    let slug: String = embedder_id
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect();
-    if slug.is_empty() {
-        "unknown".to_string()
-    } else {
-        slug
-    }
-}
-
-fn fs_semantic_bridge_path(data_dir: &Path, embedder_id: &str) -> PathBuf {
-    let slug = sanitize_embedder_id_for_filename(embedder_id);
-    data_dir
-        .join(VECTOR_INDEX_DIR)
-        .join(format!("frankensearch-bridge-{slug}.fsvi"))
-}
-
-fn fs_semantic_source_cvvi_path(data_dir: &Path, embedder_id: &str) -> PathBuf {
-    data_dir
-        .join(VECTOR_INDEX_DIR)
-        .join(format!("index-{embedder_id}.cvvi"))
-}
-
-fn fs_semantic_bridge_is_fresh(bridge_path: &Path, source_cvvi_path: &Path) -> bool {
-    let Ok(bridge_meta) = std::fs::metadata(bridge_path) else {
-        return false;
-    };
-    let Ok(source_meta) = std::fs::metadata(source_cvvi_path) else {
-        return false;
-    };
-    let Ok(bridge_modified) = bridge_meta.modified() else {
-        return false;
-    };
-    let Ok(source_modified) = source_meta.modified() else {
-        return false;
-    };
-    bridge_modified >= source_modified
-}
-
-fn open_or_build_fs_semantic_index(index: &VectorIndex, data_dir: &Path) -> Result<FsVectorIndex> {
-    let embedder_id = index.header().embedder_id.as_str();
-    let bridge_path = fs_semantic_bridge_path(data_dir, embedder_id);
-    let source_cvvi_path = fs_semantic_source_cvvi_path(data_dir, embedder_id);
-
-    if bridge_path.exists()
-        && fs_semantic_bridge_is_fresh(&bridge_path, &source_cvvi_path)
-        && let Ok(existing) = FsVectorIndex::open(&bridge_path)
-        && existing.dimension() == index.header().dimension as usize
-        && existing.record_count() == index.rows().len()
-    {
-        return Ok(existing);
-    }
-
-    if let Some(parent) = bridge_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut writer =
-        FsVectorIndex::create(&bridge_path, embedder_id, index.header().dimension as usize)
-            .map_err(|err| anyhow::anyhow!("create semantic bridge index failed: {err}"))?;
-
-    for row in index.rows() {
-        let doc_id = encode_fs_semantic_doc_id(row);
-        let vector = index.vector_at_f32(row)?;
-        writer
-            .write_record(&doc_id, &vector)
-            .map_err(|err| anyhow::anyhow!("write semantic bridge record failed: {err}"))?;
-    }
-
-    writer
-        .finish()
-        .map_err(|err| anyhow::anyhow!("finish semantic bridge index failed: {err}"))?;
-    FsVectorIndex::open(&bridge_path)
-        .map_err(|err| anyhow::anyhow!("open semantic bridge index failed: {err}"))
 }
 
 fn hnsw_index_path(data_dir: &Path, embedder_id: &str) -> PathBuf {
@@ -317,46 +209,59 @@ impl SemanticIndexer {
         Ok(embeddings)
     }
 
-    pub fn build_index<I>(&self, embedded_messages: I) -> Result<VectorIndex>
+    pub fn build_and_save_index<I>(
+        &self,
+        embedded_messages: I,
+        data_dir: &Path,
+    ) -> Result<FsVectorIndex>
     where
         I: IntoIterator<Item = EmbeddedMessage>,
     {
-        let entries = embedded_messages
-            .into_iter()
-            .map(|embedded| embedded.into_vector_entry());
-
-        VectorIndex::build(
-            self.embedder_id(),
-            "1.0",
-            self.embedder_dimension(),
-            Quantization::F32,
-            entries,
-        )
-    }
-
-    pub fn save_index(&self, index: &VectorIndex, data_dir: &Path) -> Result<PathBuf> {
-        let header = index.header();
-        if header.embedder_id != self.embedder_id() {
-            bail!(
-                "embedder_id mismatch: index header '{}' vs indexer '{}'",
-                header.embedder_id,
-                self.embedder_id()
-            );
-        }
-        if header.dimension as usize != self.embedder_dimension() {
-            bail!(
-                "dimension mismatch: index header {} vs indexer {}",
-                header.dimension,
-                self.embedder_dimension()
-            );
-        }
-
-        let index_path = vector_index_path(data_dir, header.embedder_id.as_str());
+        let index_path = vector_index_path(data_dir, self.embedder_id());
         if let Some(parent) = index_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        index.save(&index_path)?;
-        Ok(index_path)
+
+        // Store as f16 by default (smaller, faster I/O). Embeddings are validated by the writer.
+        let mut writer: FsVectorIndexWriter = FsVectorIndex::create_with_revision(
+            &index_path,
+            self.embedder_id(),
+            "1.0",
+            self.embedder_dimension(),
+            FsQuantization::F16,
+        )
+        .map_err(|err| anyhow::anyhow!("create fsvi index failed: {err}"))?;
+
+        for embedded in embedded_messages {
+            if embedded.embedding.len() != self.embedder_dimension() {
+                bail!(
+                    "embedding dimension mismatch: expected {}, got {}",
+                    self.embedder_dimension(),
+                    embedded.embedding.len()
+                );
+            }
+            let doc_id = SemanticDocId {
+                message_id: embedded.message_id,
+                chunk_idx: embedded.chunk_idx,
+                agent_id: embedded.agent_id,
+                workspace_id: embedded.workspace_id,
+                source_id: embedded.source_id,
+                role: embedded.role,
+                created_at_ms: embedded.created_at_ms,
+                content_hash: Some(embedded.content_hash),
+            }
+            .to_doc_id_string();
+            writer
+                .write_record(&doc_id, &embedded.embedding)
+                .map_err(|err| anyhow::anyhow!("write fsvi record failed: {err}"))?;
+        }
+
+        writer
+            .finish()
+            .map_err(|err| anyhow::anyhow!("finish fsvi index failed: {err}"))?;
+
+        FsVectorIndex::open(&index_path)
+            .map_err(|err| anyhow::anyhow!("open fsvi index failed: {err}"))
     }
 
     /// Build and save an HNSW index for approximate nearest neighbor search.
@@ -374,7 +279,7 @@ impl SemanticIndexer {
     /// Path to the saved HNSW index file
     pub fn build_hnsw_index(
         &self,
-        vector_index: &VectorIndex,
+        vector_index: &FsVectorIndex,
         data_dir: &Path,
         m: Option<usize>,
         ef_construction: Option<usize>,
@@ -384,19 +289,18 @@ impl SemanticIndexer {
 
         tracing::info!(
             embedder = self.embedder_id(),
-            count = vector_index.rows().len(),
+            count = vector_index.record_count(),
             m,
             ef_construction,
             "Building HNSW index for approximate nearest neighbor search"
         );
 
-        let fs_index = open_or_build_fs_semantic_index(vector_index, data_dir)?;
         let config = FsHnswConfig {
             m,
             ef_construction,
             ..FsHnswConfig::default()
         };
-        let hnsw = FsHnswIndex::build_from_vector_index(&fs_index, config)
+        let hnsw = FsHnswIndex::build_from_vector_index(vector_index, config)
             .map_err(|err| anyhow::anyhow!("build HNSW index failed: {err}"))?;
 
         let hnsw_path = hnsw_index_path(data_dir, self.embedder_id());
@@ -452,17 +356,12 @@ mod tests {
         ];
 
         let embeddings = indexer.embed_messages(&messages).unwrap();
-        let index = indexer.build_index(embeddings).unwrap();
-
         let tmp = tempdir().unwrap();
-        let path = indexer.save_index(&index, tmp.path()).unwrap();
-        assert!(path.is_file());
-
-        let loaded = VectorIndex::load(&path).unwrap();
-        assert_eq!(loaded.header().embedder_id, indexer.embedder_id());
-        assert_eq!(
-            loaded.header().dimension,
-            indexer.embedder_dimension() as u32
-        );
+        let index = indexer
+            .build_and_save_index(embeddings, tmp.path())
+            .unwrap();
+        assert_eq!(index.embedder_id(), indexer.embedder_id());
+        assert_eq!(index.dimension(), indexer.embedder_dimension());
+        assert_eq!(index.record_count(), 2);
     }
 }

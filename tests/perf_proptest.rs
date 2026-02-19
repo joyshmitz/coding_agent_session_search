@@ -1,6 +1,8 @@
 use coding_agent_search::search::canonicalize::{canonicalize_for_embedding, content_hash};
 use coding_agent_search::search::query::{MatchType, SearchHit, rrf_fuse_hits};
-use coding_agent_search::search::vector_index::{Quantization, VectorEntry, VectorIndex};
+use coding_agent_search::search::vector_index::{
+    Quantization, SearchParams, SemanticDocId, VectorIndex, parse_semantic_doc_id,
+};
 use proptest::prelude::*;
 use proptest::test_runner::{TestCaseError, TestRunner};
 use serial_test::serial;
@@ -10,41 +12,49 @@ const VECTOR_DIMENSION: usize = 64;
 const VECTOR_COUNT: usize = 256;
 const TOP_K: usize = 10;
 
-fn build_entries(count: usize, dimension: usize) -> Vec<VectorEntry> {
-    let mut entries = Vec::with_capacity(count);
-    for idx in 0..count {
-        let mut vector = Vec::with_capacity(dimension);
-        for d in 0..dimension {
-            let value = ((idx + d * 31) % 997) as f32 / 997.0;
-            vector.push(value);
+fn normalize_in_place(vec: &mut [f32]) {
+    let norm_sq: f32 = vec.iter().map(|v| v * v).sum();
+    let norm = norm_sq.sqrt();
+    if norm > 0.0 {
+        for v in vec {
+            *v /= norm;
         }
-        entries.push(VectorEntry {
-            message_id: idx as u64,
-            created_at_ms: idx as i64,
-            agent_id: (idx % 8) as u32,
-            workspace_id: 1,
-            source_id: 1,
-            role: 1,
-            chunk_idx: 0,
-            content_hash: [0u8; 32],
-            vector,
-        });
     }
-    entries
 }
 
-fn build_index(path: &std::path::Path) -> VectorIndex {
-    let entries = build_entries(VECTOR_COUNT, VECTOR_DIMENSION);
-    let index = VectorIndex::build(
+fn write_index(path: &std::path::Path) -> VectorIndex {
+    let mut writer = VectorIndex::create_with_revision(
+        path,
         "proptest-embedder",
         "rev",
         VECTOR_DIMENSION,
         Quantization::F16,
-        entries,
     )
-    .expect("build index");
-    index.save(path).expect("save index");
-    index
+    .expect("create writer");
+
+    let mut vec_buf = vec![0.0f32; VECTOR_DIMENSION];
+    for idx in 0..VECTOR_COUNT {
+        for (d, slot) in vec_buf.iter_mut().enumerate() {
+            *slot = ((idx + d * 31) % 997) as f32 / 997.0;
+        }
+        normalize_in_place(&mut vec_buf);
+        let doc_id = SemanticDocId {
+            message_id: idx as u64,
+            chunk_idx: 0,
+            agent_id: (idx % 8) as u32,
+            workspace_id: 1,
+            source_id: 1,
+            role: 1,
+            created_at_ms: idx as i64,
+            content_hash: None,
+        }
+        .to_doc_id_string();
+        writer
+            .write_record(&doc_id, &vec_buf)
+            .expect("write_record");
+    }
+    writer.finish().expect("finish");
+    VectorIndex::open(path).expect("open index")
 }
 
 fn query_vector_strategy() -> impl Strategy<Value = Vec<f32>> {
@@ -84,41 +94,55 @@ fn make_hit(id: &str, score: f32) -> SearchHit {
 #[serial]
 fn vector_search_preconvert_invariant() {
     let dir = TempDir::new().expect("tempdir");
-    let path = dir.path().join("test.cvvi");
-    build_index(&path);
-
-    // Load with default pre-conversion enabled.
-    unsafe { std::env::remove_var("CASS_F16_PRECONVERT") };
-    let preconvert = VectorIndex::load(&path).expect("load preconvert");
-
-    // Load with pre-conversion disabled.
-    unsafe { std::env::set_var("CASS_F16_PRECONVERT", "0") };
-    let mmap = VectorIndex::load(&path).expect("load mmap");
-    unsafe { std::env::remove_var("CASS_F16_PRECONVERT") };
+    let path = dir.path().join("test.fsvi");
+    let index = write_index(&path);
 
     let mut runner = TestRunner::new(ProptestConfig::with_cases(32));
     runner
         .run(&query_vector_strategy(), |query| {
-            let pre_hits = preconvert
-                .search_top_k(&query, TOP_K, None)
-                .map_err(|e| TestCaseError::fail(e.to_string()))?;
-            let mm_hits = mmap
-                .search_top_k(&query, TOP_K, None)
+            let mut q = query.clone();
+            normalize_in_place(&mut q);
+
+            let sequential = index
+                .search_top_k_with_params(
+                    &q,
+                    TOP_K,
+                    None,
+                    SearchParams {
+                        parallel_threshold: usize::MAX,
+                        parallel_chunk_size: 128,
+                        parallel_enabled: false,
+                    },
+                )
                 .map_err(|e| TestCaseError::fail(e.to_string()))?;
 
-            let pre_ids: Vec<u64> = pre_hits.iter().map(|r| r.message_id).collect();
-            let mm_ids: Vec<u64> = mm_hits.iter().map(|r| r.message_id).collect();
-            prop_assert_eq!(pre_ids, mm_ids);
+            let parallel = index
+                .search_top_k_with_params(
+                    &q,
+                    TOP_K,
+                    None,
+                    SearchParams {
+                        parallel_threshold: 0,
+                        parallel_chunk_size: 128,
+                        parallel_enabled: true,
+                    },
+                )
+                .map_err(|e| TestCaseError::fail(e.to_string()))?;
 
-            for (a, b) in pre_hits.iter().zip(mm_hits.iter()) {
+            let seq_ids: Vec<u64> = sequential
+                .iter()
+                .filter_map(|r| parse_semantic_doc_id(&r.doc_id).map(|p| p.message_id))
+                .collect();
+            let par_ids: Vec<u64> = parallel
+                .iter()
+                .filter_map(|r| parse_semantic_doc_id(&r.doc_id).map(|p| p.message_id))
+                .collect();
+
+            prop_assert_eq!(seq_ids, par_ids);
+
+            for (a, b) in sequential.iter().zip(parallel.iter()) {
                 let diff = (a.score - b.score).abs();
-                prop_assert!(
-                    diff < 1e-6,
-                    "score mismatch for message {}: {} vs {}",
-                    a.message_id,
-                    a.score,
-                    b.score
-                );
+                prop_assert!(diff < 1e-6, "score mismatch: {} vs {}", a.score, b.score);
             }
             Ok(())
         })

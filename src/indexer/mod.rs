@@ -965,9 +965,15 @@ pub fn run_index(
         || !index_path.join("meta.json").exists()
         || !schema_matches;
 
-    // Preflight open: if Tantivy can't open, force a rebuild so we do a full scan and
-    // reindex messages into the new Tantivy index (SQLite is incremental-only by default).
-    if !needs_rebuild && let Err(e) = tantivy::Index::open_in_dir(&index_path) {
+    // Preflight open: if the cass-compatible Tantivy reader can't open, force a
+    // rebuild so we do a full scan and reindex messages into the new index
+    // (SQLite is incremental-only by default).
+    if !needs_rebuild
+        && let Err(e) = frankensearch::lexical::cass_open_search_reader(
+            &index_path,
+            tantivy::ReloadPolicy::Manual,
+        )
+    {
         tracing::warn!(
             error = %e,
             path = %index_path.display(),
@@ -1109,8 +1115,12 @@ pub fn run_index(
         );
 
         if !embedded_messages.is_empty() {
-            let vector_index = semantic_indexer.build_index(embedded_messages)?;
-            let index_path = semantic_indexer.save_index(&vector_index, &opts.data_dir)?;
+            let vector_index =
+                semantic_indexer.build_and_save_index(embedded_messages, &opts.data_dir)?;
+            let index_path = crate::search::vector_index::vector_index_path(
+                &opts.data_dir,
+                semantic_indexer.embedder_id(),
+            );
             tracing::info!(
                 path = %index_path.display(),
                 embedder = semantic_indexer.embedder_id(),
@@ -1534,8 +1544,8 @@ fn reindex_paths(
     for (kind, root, min_ts, max_ts) in triggers {
         let conn = kind.create_connector();
         let detect = conn.detect();
-        if !detect.detected && root.origin.source_id == "local" {
-            // For local roots, if detection fails (e.g. root deleted), skip.
+        if !detect.detected && root.origin.source_id == "local" && !root.path.exists() {
+            // For local roots, if detection fails and the root is gone, skip.
             // For remote roots, detection might fail but we should still try scanning
             // if it's a brute-force attempt.
             continue;

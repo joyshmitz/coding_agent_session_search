@@ -1,6 +1,6 @@
-use coding_agent_search::search::query::{regex_query_cached, regex_query_uncached};
 use coding_agent_search::search::tantivy::{build_schema, fields_from_schema};
 use criterion::{Criterion, criterion_group, criterion_main};
+use frankensearch::lexical::{cass_regex_query_cached, cass_regex_query_uncached};
 use std::hint::black_box;
 use tantivy::schema::Field;
 
@@ -19,10 +19,10 @@ fn bench_regex_cache_hits(c: &mut Criterion) {
     ];
 
     for (name, pattern) in patterns {
-        let _ = regex_query_cached(field, pattern).expect("warm cache");
+        let _ = cass_regex_query_cached(field, pattern).expect("warm cache");
         c.bench_function(name, |b| {
             b.iter(|| {
-                let query = regex_query_cached(field, pattern).expect("cached");
+                let query = cass_regex_query_cached(field, pattern).expect("cached");
                 black_box(query);
             });
         });
@@ -37,7 +37,7 @@ fn bench_regex_cache_misses(c: &mut Criterion) {
         b.iter(|| {
             counter += 1;
             let pattern = format!("test{}.*", counter);
-            let query = regex_query_cached(field, &pattern).expect("cache miss");
+            let query = cass_regex_query_cached(field, &pattern).expect("cache miss");
             black_box(query);
         });
     });
@@ -47,7 +47,7 @@ fn bench_regex_cache_misses(c: &mut Criterion) {
         b.iter(|| {
             counter += 1;
             let pattern = format!(".*file{}\\.rs", counter);
-            let query = regex_query_cached(field, &pattern).expect("cache miss");
+            let query = cass_regex_query_cached(field, &pattern).expect("cache miss");
             black_box(query);
         });
     });
@@ -57,7 +57,7 @@ fn bench_regex_cache_misses(c: &mut Criterion) {
         b.iter(|| {
             counter += 1;
             let pattern = format!(".*error{}.*", counter);
-            let query = regex_query_cached(field, &pattern).expect("cache miss");
+            let query = cass_regex_query_cached(field, &pattern).expect("cache miss");
             black_box(query);
         });
     });
@@ -67,7 +67,7 @@ fn bench_regex_cache_misses(c: &mut Criterion) {
         b.iter(|| {
             counter += 1;
             let pattern = format!(".*foo{}.*bar{}.*", counter, counter + 1);
-            let query = regex_query_cached(field, &pattern).expect("cache miss");
+            let query = cass_regex_query_cached(field, &pattern).expect("cache miss");
             black_box(query);
         });
     });
@@ -85,7 +85,7 @@ fn bench_regex_uncached(c: &mut Criterion) {
     for (name, pattern) in patterns {
         c.bench_function(name, |b| {
             b.iter(|| {
-                let query = regex_query_uncached(field, pattern).expect("uncached");
+                let query = cass_regex_query_uncached(field, pattern).expect("uncached");
                 black_box(query);
             });
         });
@@ -97,12 +97,12 @@ fn bench_regex_typing_sequence(c: &mut Criterion) {
     let sequence = [".*err.*", ".*erro.*", ".*error.*", ".*erro.*", ".*err.*"];
 
     // Pre-warm the first pattern so the sequence mixes hits and misses like real typing.
-    let _ = regex_query_cached(field, sequence[0]).expect("warm");
+    let _ = cass_regex_query_cached(field, sequence[0]).expect("warm");
 
     c.bench_function("regex_cache_typing_sequence", |b| {
         b.iter(|| {
             for pattern in &sequence {
-                let query = regex_query_cached(field, pattern).expect("sequence");
+                let query = cass_regex_query_cached(field, pattern).expect("sequence");
                 black_box(query);
             }
         });
@@ -111,7 +111,7 @@ fn bench_regex_typing_sequence(c: &mut Criterion) {
     c.bench_function("regex_uncached_typing_sequence", |b| {
         b.iter(|| {
             for pattern in &sequence {
-                let query = regex_query_uncached(field, pattern).expect("sequence");
+                let query = cass_regex_query_uncached(field, pattern).expect("sequence");
                 black_box(query);
             }
         });

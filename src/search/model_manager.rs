@@ -319,7 +319,7 @@ pub fn load_hash_semantic_context(data_dir: &Path, db_path: &Path) -> SemanticSe
         }
     };
 
-    let index = match VectorIndex::load(&index_path) {
+    let index = match VectorIndex::open(&index_path) {
         Ok(index) => index,
         Err(err) => {
             return SemanticSetup {
@@ -427,7 +427,7 @@ fn load_semantic_context_inner(
         }
     };
 
-    let index = match VectorIndex::load(&index_path) {
+    let index = match VectorIndex::open(&index_path) {
         Ok(index) => index,
         Err(err) => {
             return SemanticSetup {
@@ -482,12 +482,12 @@ pub fn needs_index_rebuild(data_dir: &Path) -> bool {
     }
 
     // Try to load the index and check its embedder ID
-    match VectorIndex::load(&index_path) {
+    match VectorIndex::open(&index_path) {
         Ok(index) => {
             // Check if the index was built with a different embedder
             // The vector index stores the embedder ID in its header
             let expected_id = FastEmbedder::embedder_id_static();
-            index.header().embedder_id != expected_id
+            index.embedder_id() != expected_id
         }
         Err(_) => {
             // Index is corrupted or unreadable, needs rebuild

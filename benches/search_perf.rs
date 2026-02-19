@@ -10,13 +10,14 @@ use coding_agent_search::search::query::{
 };
 use coding_agent_search::search::tantivy::index_dir;
 use coding_agent_search::search::vector_index::{
-    Quantization, SemanticFilter, VectorEntry, VectorIndex, dot_product_f16_scalar_bench,
+    Quantization, SemanticDocId, SemanticFilter, VectorIndex, dot_product_f16_scalar_bench,
     dot_product_f16_simd_bench, dot_product_scalar_bench, dot_product_simd_bench,
 };
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use half::f16;
 use std::collections::HashSet;
 use std::hint::black_box;
+use tempfile::TempDir;
 
 // =============================================================================
 // Hash Embedder Benchmarks
@@ -233,15 +234,8 @@ fn bench_empty_search(c: &mut Criterion) {
 fn bench_vector_index_search_10k(c: &mut Criterion) {
     let dimension = 384;
     let count = 10_000;
-    let entries = build_entries(count, dimension);
-    let index = VectorIndex::build(
-        "bench-embedder",
-        "rev",
-        dimension,
-        Quantization::F16,
-        entries,
-    )
-    .unwrap();
+    let (_tmp, index) =
+        build_temp_fsvi_index("bench-embedder", dimension, Quantization::F16, count);
     let query = build_query(dimension);
 
     c.bench_function("vector_index_search_10k", |b| {
@@ -259,15 +253,8 @@ fn bench_vector_index_search_10k(c: &mut Criterion) {
 fn bench_vector_index_search_50k(c: &mut Criterion) {
     let dimension = 384;
     let count = 50_000;
-    let entries = build_entries(count, dimension);
-    let index = VectorIndex::build(
-        "bench-embedder",
-        "rev",
-        dimension,
-        Quantization::F16,
-        entries,
-    )
-    .unwrap();
+    let (_tmp, index) =
+        build_temp_fsvi_index("bench-embedder", dimension, Quantization::F16, count);
     let query = build_query(dimension);
 
     c.bench_function("vector_index_search_50k", |b| {
@@ -285,15 +272,8 @@ fn bench_vector_index_search_50k(c: &mut Criterion) {
 fn bench_vector_index_search_50k_filtered(c: &mut Criterion) {
     let dimension = 384;
     let count = 50_000;
-    let entries = build_entries(count, dimension);
-    let index = VectorIndex::build(
-        "bench-embedder",
-        "rev",
-        dimension,
-        Quantization::F16,
-        entries,
-    )
-    .unwrap();
+    let (_tmp, index) =
+        build_temp_fsvi_index("bench-embedder", dimension, Quantization::F16, count);
     let query = build_query(dimension);
 
     // Filter to agents 0, 1, 2 (out of 8 possible)
@@ -327,15 +307,8 @@ fn bench_vector_search_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_search_scaling");
 
     for size in [1_000, 5_000, 10_000, 25_000, 50_000] {
-        let entries = build_entries(size, dimension);
-        let index = VectorIndex::build(
-            "bench-embedder",
-            "rev",
-            dimension,
-            Quantization::F16,
-            entries,
-        )
-        .unwrap();
+        let (_tmp, index) =
+            build_temp_fsvi_index("bench-embedder", dimension, Quantization::F16, size);
         let query = build_query(dimension);
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
@@ -350,27 +323,55 @@ fn bench_vector_search_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-fn build_entries(count: usize, dimension: usize) -> Vec<VectorEntry> {
-    let mut entries = Vec::with_capacity(count);
+fn build_temp_fsvi_index(
+    embedder_id: &str,
+    dimension: usize,
+    quantization: Quantization,
+    count: usize,
+) -> (TempDir, VectorIndex) {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("bench.fsvi");
+    let mut writer =
+        VectorIndex::create_with_revision(&path, embedder_id, "bench", dimension, quantization)
+            .expect("create fsvi writer");
+
+    let mut vec_buf = vec![0.0f32; dimension];
     for idx in 0..count {
-        let mut vector = Vec::with_capacity(dimension);
-        for d in 0..dimension {
-            let value = ((idx + d * 31) % 997) as f32 / 997.0;
-            vector.push(value);
+        for (d, slot) in vec_buf.iter_mut().enumerate() {
+            *slot = ((idx + d * 31) % 997) as f32 / 997.0;
         }
-        entries.push(VectorEntry {
+        normalize_in_place(&mut vec_buf);
+
+        let doc_id = SemanticDocId {
             message_id: idx as u64,
-            created_at_ms: idx as i64,
+            chunk_idx: 0,
             agent_id: (idx % 8) as u32,
             workspace_id: 1,
             source_id: 1,
             role: 1,
-            chunk_idx: 0,
-            content_hash: [0u8; 32],
-            vector,
-        });
+            created_at_ms: idx as i64,
+            content_hash: None,
+        }
+        .to_doc_id_string();
+
+        writer
+            .write_record(&doc_id, &vec_buf)
+            .expect("write_record");
     }
-    entries
+    writer.finish().expect("finish fsvi");
+
+    let index = VectorIndex::open(&path).expect("open fsvi");
+    (temp, index)
+}
+
+fn normalize_in_place(vec: &mut [f32]) {
+    let norm_sq: f32 = vec.iter().map(|v| v * v).sum();
+    let norm = norm_sq.sqrt();
+    if norm > 0.0 {
+        for v in vec {
+            *v /= norm;
+        }
+    }
 }
 
 fn build_query(dimension: usize) -> Vec<f32> {
@@ -378,6 +379,7 @@ fn build_query(dimension: usize) -> Vec<f32> {
     for d in 0..dimension {
         query.push((d % 17) as f32 / 17.0);
     }
+    normalize_in_place(&mut query);
     query
 }
 
@@ -385,27 +387,10 @@ fn build_query(dimension: usize) -> Vec<f32> {
 /// This tests P0 Opt 1: Pre-Convert F16→F32 Slab at Load Time.
 /// Target (local, 2026-01-11): ~1.8ms with pre-conversion, ~4.6ms without.
 fn bench_vector_index_search_50k_loaded(c: &mut Criterion) {
-    use tempfile::TempDir;
-
     let dimension = 384;
     let count = 50_000;
-    let entries = build_entries(count, dimension);
-
-    // Build and save the F16 index.
-    let index = VectorIndex::build(
-        "bench-embedder",
-        "rev",
-        dimension,
-        Quantization::F16,
-        entries,
-    )
-    .unwrap();
-    let temp = TempDir::new().unwrap();
-    let path = temp.path().join("bench.cvvi");
-    index.save(&path).unwrap();
-
-    // Load the index (triggers F16 pre-conversion if CASS_F16_PRECONVERT != 0).
-    let loaded = VectorIndex::load(&path).unwrap();
+    let (temp, loaded) =
+        build_temp_fsvi_index("bench-embedder", dimension, Quantization::F16, count);
     let query = build_query(dimension);
 
     c.bench_function("vector_index_search_50k_loaded", |b| {
@@ -416,6 +401,7 @@ fn bench_vector_index_search_50k_loaded(c: &mut Criterion) {
             black_box(results);
         });
     });
+    drop(temp);
 }
 
 // =============================================================================

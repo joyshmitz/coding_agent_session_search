@@ -52,7 +52,7 @@ fn make_codex_session(root: &Path, date_path: &str, filename: &str, content: &st
     fs::write(file, sample).unwrap();
 }
 
-/// Check if any vector index (.cvvi) file exists in data_dir/vector_index/
+/// Check if any vector index (.fsvi) file exists in data_dir/vector_index/
 fn has_vector_index(data_dir: &Path) -> bool {
     let vector_dir = data_dir.join("vector_index");
     if !vector_dir.exists() {
@@ -62,7 +62,7 @@ fn has_vector_index(data_dir: &Path) -> bool {
         .map(|entries| {
             entries
                 .filter_map(|e| e.ok())
-                .any(|e| e.path().extension().is_some_and(|ext| ext == "cvvi"))
+                .any(|e| e.path().extension().is_some_and(|ext| ext == "fsvi"))
         })
         .unwrap_or(false)
 }
@@ -157,7 +157,7 @@ fn semantic_index_builds_vector_file() {
         "verify_vector_index",
         Some("Check vector index file exists"),
     );
-    // Hash embedder creates index at vector_index/index-fnv1a-384.cvvi
+    // Hash embedder creates index at vector_index/index-fnv1a-384.fsvi
     let vector_dir = data_dir.join("vector_index");
     assert!(
         vector_dir.exists(),
@@ -168,11 +168,11 @@ fn semantic_index_builds_vector_file() {
     let vector_files: Vec<_> = fs::read_dir(&vector_dir)
         .expect("read vector_index dir")
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "cvvi"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "fsvi"))
         .collect();
     assert!(
         !vector_files.is_empty(),
-        "Vector index directory should contain .cvvi files"
+        "Vector index directory should contain .fsvi files"
     );
     let metadata = fs::metadata(vector_files[0].path()).unwrap();
     assert!(metadata.len() > 0, "Vector index file should not be empty");

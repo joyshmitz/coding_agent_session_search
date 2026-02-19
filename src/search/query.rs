@@ -1,7 +1,14 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use frankensearch::lexical::{
-    SnippetConfig as FsSnippetConfig, execute_query_with_offset as fs_execute_query_with_offset,
-    load_doc as fs_load_doc, render_snippet_html as fs_render_snippet_html,
+    CassQueryFilters as FsCassQueryFilters, CassQueryToken as FsCassQueryToken,
+    CassSourceFilter as FsCassSourceFilter, CassWildcardPattern as FsCassWildcardPattern,
+    SnippetConfig as FsSnippetConfig, cass_build_tantivy_query as fs_cass_build_tantivy_query,
+    cass_has_boolean_operators as fs_cass_has_boolean_operators,
+    cass_open_search_reader as fs_cass_open_search_reader,
+    cass_parse_boolean_query as fs_cass_parse_boolean_query,
+    cass_sanitize_query as fs_cass_sanitize_query,
+    execute_query_with_offset as fs_execute_query_with_offset, load_doc as fs_load_doc,
+    render_snippet_html as fs_render_snippet_html,
     try_build_snippet_generator as fs_try_build_snippet_generator,
 };
 use frankensearch::{
@@ -18,7 +25,6 @@ use frankensearch::{
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
@@ -28,11 +34,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tantivy::collector::TopDocs;
-use tantivy::query::{
-    AllQuery, BooleanQuery, Occur, PhraseQuery, Query, RangeQuery, RegexQuery, TermQuery,
-};
-use tantivy::schema::{Field, IndexRecordOption, Term, Value};
-use tantivy::{Index, IndexReader, ReloadPolicy, Searcher, TantivyDocument};
+use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+use tantivy::schema::{IndexRecordOption, Term, Value};
+use tantivy::{IndexReader, ReloadPolicy, Searcher, TantivyDocument};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -41,7 +45,6 @@ use rusqlite::Connection;
 
 use crate::search::canonicalize::canonicalize_for_embedding;
 use crate::search::embedder::Embedder;
-use crate::search::tantivy::fields_from_schema;
 use crate::search::vector_index::{
     SemanticFilter, SemanticFilterMaps, VectorIndex, VectorSearchResult,
 };
@@ -377,9 +380,9 @@ pub struct FiltersSummary {
 impl QueryExplanation {
     /// Build explanation from query string and filters
     pub fn analyze(query: &str, filters: &SearchFilters) -> Self {
-        let sanitized = sanitize_query(query);
+        let sanitized = fs_cass_sanitize_query(query);
         // Parse original query to preserve quotes for phrases
-        let tokens = parse_boolean_query(query);
+        let tokens = fs_cass_parse_boolean_query(query);
 
         // Extract terms, phrases, and operators
         let mut parsed = ParsedQuery::default();
@@ -388,21 +391,24 @@ impl QueryExplanation {
 
         for token in &tokens {
             match token {
-                QueryToken::Term(t) => {
-                    let parts = normalize_term_parts(t);
+                FsCassQueryToken::Term(t) => {
+                    let parts: Vec<String> = fs_cass_sanitize_query(t)
+                        .split_whitespace()
+                        .map(|s| s.to_string())
+                        .collect();
                     if parts.is_empty() {
                         next_negated = false;
                         continue;
                     }
                     let mut subterms = Vec::new();
                     for part in parts {
-                        let pattern = WildcardPattern::parse(&part);
+                        let pattern = FsCassWildcardPattern::parse(&part);
                         let pattern_str = match &pattern {
-                            WildcardPattern::Exact(_) => "exact",
-                            WildcardPattern::Prefix(_) => "prefix (*)",
-                            WildcardPattern::Suffix(_) => "suffix (*)",
-                            WildcardPattern::Substring(_) => "substring (*)",
-                            WildcardPattern::Complex(_) => "complex (*)",
+                            FsCassWildcardPattern::Exact(_) => "exact",
+                            FsCassWildcardPattern::Prefix(_) => "prefix (*)",
+                            FsCassWildcardPattern::Suffix(_) => "suffix (*)",
+                            FsCassWildcardPattern::Substring(_) => "substring (*)",
+                            FsCassWildcardPattern::Complex(_) => "complex (*)",
                         };
                         subterms.push(ParsedSubTerm {
                             text: part,
@@ -416,22 +422,26 @@ impl QueryExplanation {
                     });
                     next_negated = false;
                 }
-                QueryToken::Phrase(p) => {
-                    let parts = normalize_phrase_terms(p);
+                FsCassQueryToken::Phrase(p) => {
+                    let parts: Vec<String> = fs_cass_sanitize_query(p)
+                        .split_whitespace()
+                        .map(|s| s.trim_matches('*').to_lowercase())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                     if !parts.is_empty() {
                         parsed.phrases.push(parts.join(" "));
                     }
                     next_negated = false;
                 }
-                QueryToken::And => {
+                FsCassQueryToken::And => {
                     parsed.operators.push("AND".to_string());
                     has_explicit_operator = true;
                 }
-                QueryToken::Or => {
+                FsCassQueryToken::Or => {
                     parsed.operators.push("OR".to_string());
                     has_explicit_operator = true;
                 }
-                QueryToken::Not => {
+                FsCassQueryToken::Not => {
                     parsed.operators.push("NOT".to_string());
                     has_explicit_operator = true;
                     next_negated = true;
@@ -1252,19 +1262,6 @@ struct FsSemanticDocId {
     created_at_ms: i64,
 }
 
-fn encode_fs_semantic_doc_id(row: &crate::search::vector_index::VectorRow) -> String {
-    format!(
-        "m|{}|{}|{}|{}|{}|{}|{}",
-        row.message_id,
-        row.chunk_idx,
-        row.agent_id,
-        row.workspace_id,
-        row.source_id,
-        row.role,
-        row.created_at_ms,
-    )
-}
-
 fn parse_fs_semantic_doc_id(doc_id: &str) -> Option<FsSemanticDocId> {
     let mut parts = doc_id.split('|');
     if parts.next()? != "m" {
@@ -1279,9 +1276,6 @@ fn parse_fs_semantic_doc_id(doc_id: &str) -> Option<FsSemanticDocId> {
         role: parts.next()?.parse().ok()?,
         created_at_ms: parts.next()?.parse().ok()?,
     };
-    if parts.next().is_some() {
-        return None;
-    }
     Some(parsed)
 }
 
@@ -1357,92 +1351,6 @@ fn build_fs_semantic_filter_adapter<'a>(
         return None;
     }
     Some(FsSemanticFilterAdapter { filter })
-}
-
-fn sanitize_embedder_id_for_filename(embedder_id: &str) -> String {
-    let slug: String = embedder_id
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect();
-    if slug.is_empty() {
-        "unknown".to_string()
-    } else {
-        slug
-    }
-}
-
-fn fs_semantic_bridge_path(ann_path: Option<&Path>, embedder_id: &str) -> Option<PathBuf> {
-    let parent = ann_path?.parent()?;
-    let slug = sanitize_embedder_id_for_filename(embedder_id);
-    Some(parent.join(format!("frankensearch-bridge-{slug}.fsvi")))
-}
-
-fn fs_semantic_source_cvvi_path(ann_path: Option<&Path>, embedder_id: &str) -> Option<PathBuf> {
-    let parent = ann_path?.parent()?;
-    Some(parent.join(format!("index-{embedder_id}.cvvi")))
-}
-
-fn fs_semantic_bridge_is_fresh(bridge_path: &Path, source_cvvi_path: Option<&Path>) -> bool {
-    let Ok(bridge_meta) = std::fs::metadata(bridge_path) else {
-        return false;
-    };
-    let Some(source_path) = source_cvvi_path else {
-        return true;
-    };
-    let Ok(source_meta) = std::fs::metadata(source_path) else {
-        return false;
-    };
-    let Ok(bridge_modified) = bridge_meta.modified() else {
-        return false;
-    };
-    let Ok(source_modified) = source_meta.modified() else {
-        return false;
-    };
-    bridge_modified >= source_modified
-}
-
-fn open_or_build_fs_semantic_index(
-    index: &VectorIndex,
-    ann_path: Option<&Path>,
-) -> Result<Option<FsVectorIndex>> {
-    let embedder_id = index.header().embedder_id.as_str();
-    let Some(bridge_path) = fs_semantic_bridge_path(ann_path, embedder_id) else {
-        return Ok(None);
-    };
-    let source_cvvi_path = fs_semantic_source_cvvi_path(ann_path, embedder_id);
-
-    if bridge_path.exists()
-        && fs_semantic_bridge_is_fresh(&bridge_path, source_cvvi_path.as_deref())
-        && let Ok(existing) = FsVectorIndex::open(&bridge_path)
-        && existing.dimension() == index.header().dimension as usize
-        && existing.record_count() == index.rows().len()
-    {
-        return Ok(Some(existing));
-    }
-
-    if let Some(parent) = bridge_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create semantic bridge dir {}", parent.display()))?;
-    }
-
-    let mut writer =
-        FsVectorIndex::create(&bridge_path, embedder_id, index.header().dimension as usize)
-            .map_err(|err| anyhow!("create semantic bridge index failed: {err}"))?;
-
-    for row in index.rows() {
-        let doc_id = encode_fs_semantic_doc_id(row);
-        let vector = index.vector_at_f32(row)?;
-        writer
-            .write_record(&doc_id, &vector)
-            .map_err(|err| anyhow!("write semantic bridge record failed: {err}"))?;
-    }
-
-    writer
-        .finish()
-        .map_err(|err| anyhow!("finish semantic bridge index failed: {err}"))?;
-    let opened = FsVectorIndex::open(&bridge_path)
-        .map_err(|err| anyhow!("open bridge index failed: {err}"))?;
-    Ok(Some(opened))
 }
 
 fn open_fs_semantic_ann_index(fs_index: &FsVectorIndex, ann_path: &Path) -> Result<FsHnswIndex> {
@@ -1573,50 +1481,6 @@ static WARM_DEBOUNCE_MS: Lazy<u64> = Lazy::new(|| {
         .filter(|v| *v > 0)
         .unwrap_or(120)
 });
-
-const DEFAULT_REGEX_CACHE_SIZE: usize = 100;
-
-static REGEX_CACHE_ENABLED: Lazy<bool> = Lazy::new(|| {
-    dotenvy::var("CASS_REGEX_CACHE")
-        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-        .unwrap_or(true)
-});
-
-static REGEX_CACHE_SIZE: Lazy<NonZeroUsize> = Lazy::new(|| {
-    let parsed = dotenvy::var("CASS_REGEX_CACHE_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|v| *v > 0)
-        .and_then(NonZeroUsize::new);
-    parsed.unwrap_or_else(|| NonZeroUsize::new(DEFAULT_REGEX_CACHE_SIZE).unwrap())
-});
-
-type RegexCacheKey = (Field, String);
-
-struct RegexCache {
-    cache: RwLock<LruCache<RegexCacheKey, RegexQuery>>,
-}
-
-impl RegexCache {
-    fn new(capacity: NonZeroUsize) -> Self {
-        Self {
-            cache: RwLock::new(LruCache::new(capacity)),
-        }
-    }
-
-    fn get_or_insert(&self, field: Field, pattern: &str) -> Result<RegexQuery> {
-        let key = (field, pattern.to_string());
-        if let Some(cached) = self.cache.read().peek(&key) {
-            return Ok(cached.clone());
-        }
-        let query = RegexQuery::from_pattern(pattern, field)
-            .map_err(|e| anyhow!("regex query build failed: {e}"))?;
-        self.cache.write().put(key, query.clone());
-        Ok(query)
-    }
-}
-
-static REGEX_CACHE: Lazy<RegexCache> = Lazy::new(|| RegexCache::new(*REGEX_CACHE_SIZE));
 
 #[derive(Clone)]
 struct CachedHit {
@@ -1775,32 +1639,6 @@ thread_local! {
     static THREAD_SEARCHER: RefCell<Option<SearcherCacheEntry>> = const { RefCell::new(None) };
 }
 
-/// Sanitize query string to match Tantivy's `SimpleTokenizer` behavior.
-///
-/// `SimpleTokenizer` splits text on any character that is not alphanumeric.
-/// To ensure query terms match indexed tokens, we replace non-alphanumeric characters
-/// with spaces here (preserving `*` for wildcards and `"` for phrases).
-///
-/// Note: This causes precision loss for code symbols (e.g. `user-id` becomes `user` AND `id`,
-/// matching documents containing both terms anywhere, not necessarily adjacent).
-/// This is a known limitation of the current v6 schema using `SimpleTokenizer`.
-fn sanitize_query(raw: &str) -> String {
-    // Replace any character that is not alphanumeric, asterisk, or double quote with a space.
-    // Asterisks are preserved for wildcard query support (*foo, foo*, *bar*).
-    // Double quotes are preserved for phrase query support ("exact phrase").
-    // This ensures that the input tokens match how SimpleTokenizer splits content.
-    // e.g. "c++" -> "c  ", "foo.bar" -> "foo bar", "*config*" -> "*config*"
-    raw.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '*' || c == '"' {
-                c
-            } else {
-                ' '
-            }
-        })
-        .collect()
-}
-
 /// Calculate Levenshtein edit distance between two strings.
 /// Used for typo detection in did-you-mean suggestions.
 fn levenshtein_distance(a: &str, b: &str) -> usize {
@@ -1834,226 +1672,10 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     prev_row[b_len]
 }
 
-/// Escape special regex characters in a string
-fn escape_regex(s: &str) -> String {
-    let mut escaped = String::with_capacity(s.len() * 2);
-    for c in s.chars() {
-        match c {
-            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' => {
-                escaped.push('\\');
-                escaped.push(c);
-            }
-            _ => escaped.push(c),
-        }
-    }
-    escaped
-}
-
-/// Represents different wildcard patterns for a search term
-#[derive(Debug, Clone, PartialEq)]
-enum WildcardPattern {
-    /// No wildcards - exact term match (through edge n-grams)
-    Exact(String),
-    /// Trailing wildcard: foo* (prefix match)
-    Prefix(String),
-    /// Leading wildcard: *foo (suffix match - requires regex)
-    Suffix(String),
-    /// Both wildcards: *foo* (substring match - requires regex)
-    Substring(String),
-    /// Complex wildcard: f*o, *f*o, f*o* (requires regex)
-    Complex(String),
-}
-
-impl WildcardPattern {
-    fn parse(term: &str) -> Self {
-        let starts_with_star = term.starts_with('*');
-        let ends_with_star = term.ends_with('*');
-
-        let core = term.trim_matches('*').to_lowercase();
-        if core.is_empty() {
-            return WildcardPattern::Exact(String::new());
-        }
-
-        // Check for internal wildcards (e.g. f*o)
-        // If the core itself contains stars, it's a complex pattern
-        if core.contains('*') {
-            return WildcardPattern::Complex(term.to_lowercase());
-        }
-
-        match (starts_with_star, ends_with_star) {
-            (true, true) => WildcardPattern::Substring(core),
-            (true, false) => WildcardPattern::Suffix(core),
-            (false, true) => WildcardPattern::Prefix(core),
-            (false, false) => WildcardPattern::Exact(core),
-        }
-    }
-
-    /// Convert to regex pattern for Tantivy `RegexQuery`
-    fn to_regex(&self) -> Option<String> {
-        match self {
-            WildcardPattern::Suffix(core) => Some(format!(".*{}$", escape_regex(core))),
-            WildcardPattern::Substring(core) => Some(format!(".*{}.*", escape_regex(core))),
-            WildcardPattern::Complex(full_term) => {
-                let mut regex = String::with_capacity(full_term.len() * 2 + 2);
-
-                // If the pattern doesn't start with *, anchor it to start
-                if !full_term.starts_with('*') {
-                    regex.push('^');
-                } else {
-                    regex.push_str(".*");
-                }
-
-                let trimmed_start = full_term.trim_start_matches('*');
-                let trimmed = trimmed_start.trim_end_matches('*');
-
-                // Internal parts
-                for c in trimmed.chars() {
-                    if c == '*' {
-                        regex.push_str(".*");
-                    } else {
-                        match c {
-                            '\\' | '.' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
-                            | '^' | '$' => {
-                                regex.push('\\');
-                                regex.push(c);
-                            }
-                            _ => regex.push(c),
-                        }
-                    }
-                }
-
-                // If the pattern doesn't end with *, anchor it to end
-                if !full_term.ends_with('*') {
-                    regex.push('$');
-                } else {
-                    regex.push_str(".*");
-                }
-
-                Some(regex)
-            }
-            _ => None,
-        }
-    }
-
-    /// Convert to the corresponding public `MatchType`
-    fn to_match_type(&self) -> MatchType {
-        match self {
-            WildcardPattern::Exact(_) => MatchType::Exact,
-            WildcardPattern::Prefix(_) => MatchType::Prefix,
-            WildcardPattern::Suffix(_) => MatchType::Suffix,
-            WildcardPattern::Substring(_) => MatchType::Substring,
-            WildcardPattern::Complex(_) => MatchType::Wildcard,
-        }
-    }
-}
-
-/// Token types for boolean query parsing
-#[derive(Debug, Clone, PartialEq)]
-enum QueryToken {
-    /// A search term (may include wildcards)
-    Term(String),
-    /// Quoted phrase for exact matching
-    Phrase(String),
-    /// AND operator (explicit)
-    And,
-    /// OR operator
-    Or,
-    /// NOT operator (next term is excluded)
-    Not,
-}
-
-/// Type alias for query token list - most queries with operators have up to 8 tokens (Opt 4.4)
-/// SmallVec keeps small lists on the stack, avoiding heap allocation.
-type QueryTokenList = SmallVec<[QueryToken; 8]>;
-
-/// Parse a query string into boolean tokens.
-/// Supports:
-/// - AND, && for explicit AND (implicit between terms)
-/// - OR, || for OR
-/// - NOT, - prefix for exclusion
-/// - "quoted phrases" for exact matching
-fn parse_boolean_query(query: &str) -> QueryTokenList {
-    let mut tokens = SmallVec::new();
-    let mut chars = query.chars().peekable();
-    let mut current_word = String::new();
-
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => {
-                // Flush any pending word
-                if !current_word.is_empty() {
-                    tokens.push(QueryToken::Term(std::mem::take(&mut current_word)));
-                }
-                // Collect quoted phrase
-                let mut phrase = String::new();
-                while let Some(&next) = chars.peek() {
-                    if next == '"' {
-                        chars.next();
-                        break;
-                    }
-                    if let Some(c) = chars.next() {
-                        phrase.push(c);
-                    }
-                }
-                if !phrase.is_empty() {
-                    tokens.push(QueryToken::Phrase(phrase));
-                }
-            }
-            '&' if chars.peek() == Some(&'&') => {
-                chars.next(); // consume second &
-                if !current_word.is_empty() {
-                    tokens.push(QueryToken::Term(std::mem::take(&mut current_word)));
-                }
-                tokens.push(QueryToken::And);
-            }
-            '|' if chars.peek() == Some(&'|') => {
-                chars.next(); // consume second |
-                if !current_word.is_empty() {
-                    tokens.push(QueryToken::Term(std::mem::take(&mut current_word)));
-                }
-                tokens.push(QueryToken::Or);
-            }
-            '-' if current_word.is_empty() => {
-                // Prefix minus for NOT (at start of a term)
-                // Works at query start: "-foo" or mid-query: "bar -foo"
-                tokens.push(QueryToken::Not);
-            }
-            ' ' | '\t' | '\n' => {
-                if !current_word.is_empty() {
-                    let word = std::mem::take(&mut current_word);
-                    let upper = word.to_uppercase();
-                    match upper.as_str() {
-                        "AND" => tokens.push(QueryToken::And),
-                        "OR" => tokens.push(QueryToken::Or),
-                        "NOT" => tokens.push(QueryToken::Not),
-                        _ => tokens.push(QueryToken::Term(word)),
-                    }
-                }
-            }
-            _ => {
-                current_word.push(c);
-            }
-        }
-    }
-
-    // Flush final word
-    if !current_word.is_empty() {
-        let upper = current_word.to_uppercase();
-        match upper.as_str() {
-            "AND" => tokens.push(QueryToken::And),
-            "OR" => tokens.push(QueryToken::Or),
-            "NOT" => tokens.push(QueryToken::Not),
-            _ => tokens.push(QueryToken::Term(current_word)),
-        }
-    }
-
-    tokens
-}
-
 /// Normalize a term into tokenizer-aligned parts.
 /// Splits on punctuation to match SimpleTokenizer behavior, preserving `*` for wildcards.
 fn normalize_term_parts(raw: &str) -> Vec<String> {
-    sanitize_query(raw)
+    fs_cass_sanitize_query(raw)
         .split_whitespace()
         .map(|s| s.to_string())
         .collect()
@@ -2061,261 +1683,11 @@ fn normalize_term_parts(raw: &str) -> Vec<String> {
 
 /// Normalize phrase text into tokenizer-aligned terms (lowercased, no wildcards).
 fn normalize_phrase_terms(raw: &str) -> Vec<String> {
-    sanitize_query(raw)
+    fs_cass_sanitize_query(raw)
         .split_whitespace()
         .map(|s| s.trim_matches('*').to_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
-}
-
-/// Build a compound query that requires all term parts to match (implicit AND).
-fn build_compound_term_query(
-    parts: &[String],
-    fields: &crate::search::tantivy::Fields,
-) -> Option<Box<dyn Query>> {
-    let mut subqueries: Vec<Box<dyn Query>> = Vec::new();
-    for part in parts {
-        let pattern = WildcardPattern::parse(part);
-        let term_shoulds = build_term_query_clauses(&pattern, fields);
-        if !term_shoulds.is_empty() {
-            subqueries.push(Box::new(BooleanQuery::new(term_shoulds)));
-        }
-    }
-
-    match subqueries.len() {
-        0 => None,
-        1 => subqueries.pop(),
-        _ => {
-            let musts = subqueries.into_iter().map(|q| (Occur::Must, q)).collect();
-            Some(Box::new(BooleanQuery::new(musts)))
-        }
-    }
-}
-
-/// Build a phrase query (exact order) across title/content fields.
-fn build_phrase_query(
-    terms: &[String],
-    fields: &crate::search::tantivy::Fields,
-) -> Option<Box<dyn Query>> {
-    if terms.is_empty() {
-        return None;
-    }
-    if terms.len() == 1 {
-        return build_compound_term_query(terms, fields);
-    }
-
-    let mut shoulds: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-    for field in [fields.title, fields.content] {
-        let phrase_terms = terms
-            .iter()
-            .map(|t| Term::from_field_text(field, t))
-            .collect::<Vec<_>>();
-        shoulds.push((Occur::Should, Box::new(PhraseQuery::new(phrase_terms))));
-    }
-    Some(Box::new(BooleanQuery::new(shoulds)))
-}
-
-/// Check if a query string contains boolean operators
-fn has_boolean_operators(query: &str) -> bool {
-    let tokens = parse_boolean_query(query);
-    tokens.iter().any(|t| {
-        matches!(
-            t,
-            QueryToken::And | QueryToken::Or | QueryToken::Not | QueryToken::Phrase(_)
-        )
-    })
-}
-
-/// Build Tantivy query clauses from boolean tokens.
-/// Returns clauses for use in a `BooleanQuery`.
-///
-/// # Operator Precedence
-/// This implementation uses a non-standard precedence where `OR` binds tighter than `AND`.
-/// `A OR B AND C` is interpreted as `(A OR B) AND C`.
-///
-/// This design is intentional for search queries, facilitating "term OR synonym" patterns
-/// combined with other filter terms (e.g., "error OR failure login" -> "(error OR failure) AND login").
-/// Standard boolean logic would interpret this as "error OR (failure AND login)", which is
-/// rarely the user's intent in a log search context.
-fn build_boolean_query_clauses(
-    tokens: &[QueryToken],
-    fields: &crate::search::tantivy::Fields,
-) -> Vec<(Occur, Box<dyn Query>)> {
-    let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-    let mut pending_or_group: Vec<Box<dyn Query>> = Vec::new();
-    let mut next_occur = Occur::Must;
-    let mut in_or_sequence = false;
-    let mut just_saw_or = false;
-
-    for token in tokens {
-        match token {
-            QueryToken::And => {
-                // Flush any OR group
-                if !pending_or_group.is_empty() {
-                    let or_clauses: Vec<_> = pending_or_group
-                        .drain(..)
-                        .map(|q| (Occur::Should, q))
-                        .collect();
-                    clauses.push((Occur::Must, Box::new(BooleanQuery::new(or_clauses))));
-                }
-                in_or_sequence = false;
-                just_saw_or = false;
-                next_occur = Occur::Must;
-            }
-            QueryToken::Or => {
-                in_or_sequence = true;
-                just_saw_or = true;
-                // Don't change next_occur; OR will group with previous term
-            }
-            QueryToken::Not => {
-                if just_saw_or {
-                    // "OR NOT" case: Treat as "OR (NOT ...)"
-                    // Keep just_saw_or = true so the next term knows it's joining the OR group.
-                    just_saw_or = true;
-                } else {
-                    // Standard "AND NOT" case
-                    // Flush any OR group
-                    if !pending_or_group.is_empty() {
-                        let or_clauses: Vec<_> = pending_or_group
-                            .drain(..)
-                            .map(|q| (Occur::Should, q))
-                            .collect();
-                        clauses.push((Occur::Must, Box::new(BooleanQuery::new(or_clauses))));
-                    }
-                    in_or_sequence = false;
-                    just_saw_or = false;
-                }
-                next_occur = Occur::MustNot;
-            }
-            QueryToken::Term(term) => {
-                let parts = normalize_term_parts(term);
-                let term_query = build_compound_term_query(&parts, fields);
-                if term_query.is_none() {
-                    continue;
-                }
-                let term_query = term_query.unwrap();
-
-                if in_or_sequence && just_saw_or {
-                    // Extending OR group
-                    if pending_or_group.is_empty() {
-                        // Start of group: Pull last clause into OR group if exists
-                        // We allow Must and MustNot clauses. MustNot is converted to (All AND Not).
-                        let can_pull = clauses
-                            .last()
-                            .is_some_and(|(occ, _)| *occ == Occur::Must || *occ == Occur::MustNot);
-
-                        if can_pull && let Some((occ, last_q)) = clauses.pop() {
-                            let q_to_push = if occ == Occur::MustNot {
-                                // Convert NOT A to (All AND NOT A) so it works in OR
-                                Box::new(BooleanQuery::new(vec![
-                                    (Occur::Must, Box::new(AllQuery)),
-                                    (Occur::MustNot, last_q),
-                                ]))
-                            } else {
-                                last_q
-                            };
-                            pending_or_group.push(q_to_push);
-                        }
-                    }
-
-                    if next_occur == Occur::MustNot {
-                        // "OR NOT B" -> Add (All AND NOT B) to group
-                        // We need to wrap B in a query that effectively means "NOT B"
-                        // inside a Should clause.
-                        let neg_query = BooleanQuery::new(vec![
-                            (Occur::Must, Box::new(AllQuery)),
-                            (Occur::MustNot, term_query),
-                        ]);
-                        pending_or_group.push(Box::new(neg_query));
-                    } else {
-                        pending_or_group.push(term_query);
-                    }
-                } else {
-                    // Not in OR sequence OR implicit AND breaking the sequence
-                    // Flush any pending OR group first
-                    if !pending_or_group.is_empty() {
-                        let or_clauses: Vec<_> = pending_or_group
-                            .drain(..)
-                            .map(|q| (Occur::Should, q))
-                            .collect();
-                        clauses.push((Occur::Must, Box::new(BooleanQuery::new(or_clauses))));
-                    }
-                    in_or_sequence = false;
-
-                    clauses.push((next_occur, term_query));
-                }
-
-                just_saw_or = false;
-                next_occur = Occur::Must; // Reset for next term
-            }
-            QueryToken::Phrase(phrase) => {
-                let terms = normalize_phrase_terms(phrase);
-                let phrase_query = build_phrase_query(&terms, fields);
-                if phrase_query.is_none() {
-                    continue;
-                }
-                let phrase_query = phrase_query.unwrap();
-
-                if in_or_sequence && just_saw_or {
-                    if pending_or_group.is_empty() {
-                        // Start of group: Pull last clause into OR group if exists
-                        // We allow Must and MustNot clauses. MustNot is converted to (All AND Not).
-                        let can_pull = clauses
-                            .last()
-                            .is_some_and(|(occ, _)| *occ == Occur::Must || *occ == Occur::MustNot);
-
-                        if can_pull && let Some((occ, last_q)) = clauses.pop() {
-                            let q_to_push = if occ == Occur::MustNot {
-                                // Convert NOT A to (All AND NOT A) so it works in OR
-                                Box::new(BooleanQuery::new(vec![
-                                    (Occur::Must, Box::new(AllQuery)),
-                                    (Occur::MustNot, last_q),
-                                ]))
-                            } else {
-                                last_q
-                            };
-                            pending_or_group.push(q_to_push);
-                        }
-                    }
-
-                    if next_occur == Occur::MustNot {
-                        let neg_query = BooleanQuery::new(vec![
-                            (Occur::Must, Box::new(AllQuery)),
-                            (Occur::MustNot, phrase_query),
-                        ]);
-                        pending_or_group.push(Box::new(neg_query));
-                    } else {
-                        pending_or_group.push(phrase_query);
-                    }
-                } else {
-                    if !pending_or_group.is_empty() {
-                        let or_clauses: Vec<_> = pending_or_group
-                            .drain(..)
-                            .map(|q| (Occur::Should, q))
-                            .collect();
-                        clauses.push((Occur::Must, Box::new(BooleanQuery::new(or_clauses))));
-                    }
-                    in_or_sequence = false;
-
-                    clauses.push((next_occur, phrase_query));
-                }
-
-                just_saw_or = false;
-                next_occur = Occur::Must;
-            }
-        }
-    }
-
-    // Flush any remaining OR group
-    if !pending_or_group.is_empty() {
-        let or_clauses: Vec<_> = pending_or_group
-            .drain(..)
-            .map(|q| (Occur::Should, q))
-            .collect();
-        clauses.push((Occur::Must, Box::new(BooleanQuery::new(or_clauses))));
-    }
-
-    clauses
 }
 
 /// Determine the dominant match type from a query string.
@@ -2323,99 +1695,20 @@ fn build_boolean_query_clauses(
 fn dominant_match_type(query: &str) -> MatchType {
     let mut worst = MatchType::Exact;
     for term in query.split_whitespace() {
-        let pattern = WildcardPattern::parse(term);
-        let mt = pattern.to_match_type();
+        let pattern = FsCassWildcardPattern::parse(term);
+        let mt = match pattern {
+            FsCassWildcardPattern::Exact(_) => MatchType::Exact,
+            FsCassWildcardPattern::Prefix(_) => MatchType::Prefix,
+            FsCassWildcardPattern::Suffix(_) => MatchType::Suffix,
+            FsCassWildcardPattern::Substring(_) => MatchType::Substring,
+            FsCassWildcardPattern::Complex(_) => MatchType::Wildcard,
+        };
         // Lower quality factor = "looser" match = dominant
         if mt.quality_factor() < worst.quality_factor() {
             worst = mt;
         }
     }
     worst
-}
-
-fn regex_query_for_pattern(field: Field, pattern: &str) -> Result<RegexQuery> {
-    if !*REGEX_CACHE_ENABLED {
-        return RegexQuery::from_pattern(pattern, field)
-            .map_err(|e| anyhow!("regex query build failed: {e}"));
-    }
-    REGEX_CACHE.get_or_insert(field, pattern)
-}
-
-#[doc(hidden)]
-pub fn regex_query_cached(field: Field, pattern: &str) -> Result<RegexQuery> {
-    regex_query_for_pattern(field, pattern)
-}
-
-#[doc(hidden)]
-pub fn regex_query_uncached(field: Field, pattern: &str) -> Result<RegexQuery> {
-    RegexQuery::from_pattern(pattern, field).map_err(|e| anyhow!("regex query build failed: {e}"))
-}
-
-/// Build query clauses for a single term based on its wildcard pattern.
-/// Returns a Vec of (`Occur::Should`, Query) for use in a `BooleanQuery`.
-fn build_term_query_clauses(
-    pattern: &WildcardPattern,
-    fields: &crate::search::tantivy::Fields,
-) -> Vec<(Occur, Box<dyn Query>)> {
-    let mut shoulds: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-
-    match pattern {
-        WildcardPattern::Exact(term) | WildcardPattern::Prefix(term) => {
-            // For exact and prefix patterns, use TermQuery on all fields
-            // (edge n-grams already handle prefix matching)
-            if term.is_empty() {
-                return shoulds;
-            }
-            shoulds.push((
-                Occur::Should,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.title, term),
-                    IndexRecordOption::WithFreqsAndPositions,
-                )),
-            ));
-            shoulds.push((
-                Occur::Should,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.content, term),
-                    IndexRecordOption::WithFreqsAndPositions,
-                )),
-            ));
-            shoulds.push((
-                Occur::Should,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.title_prefix, term),
-                    IndexRecordOption::WithFreqsAndPositions,
-                )),
-            ));
-            shoulds.push((
-                Occur::Should,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.content_prefix, term),
-                    IndexRecordOption::WithFreqsAndPositions,
-                )),
-            ));
-        }
-        WildcardPattern::Suffix(term)
-        | WildcardPattern::Substring(term)
-        | WildcardPattern::Complex(term) => {
-            // For suffix, substring, and complex patterns, use RegexQuery
-            if term.is_empty() {
-                return shoulds;
-            }
-            if let Some(regex_pattern) = pattern.to_regex() {
-                // Try to create RegexQuery for content field
-                if let Ok(rq) = regex_query_for_pattern(fields.content, &regex_pattern) {
-                    shoulds.push((Occur::Should, Box::new(rq)));
-                }
-                // Also try for title field
-                if let Ok(rq) = regex_query_for_pattern(fields.title, &regex_pattern) {
-                    shoulds.push((Occur::Should, Box::new(rq)));
-                }
-            }
-        }
-    }
-
-    shoulds
 }
 
 /// Check if content is primarily a tool invocation (noise that shouldn't appear in search results).
@@ -2521,22 +1814,7 @@ impl SearchClient {
         db_path: Option<&Path>,
         options: SearchClientOptions,
     ) -> Result<Option<Self>> {
-        let tantivy = Index::open_in_dir(index_path).ok().and_then(|mut idx| {
-            // Register custom tokenizer so searches work
-            crate::search::tantivy::ensure_tokenizer(&mut idx);
-            let schema = idx.schema();
-            let fields = fields_from_schema(&schema).ok()?;
-            let reader = idx
-                .reader_builder()
-                .reload_policy(ReloadPolicy::Manual)
-                .try_into()
-                .ok()?;
-            // Force initial reload to pick up any segments committed before we opened.
-            // With Manual policy, the reader starts with stale view; reload() ensures
-            // we see the latest committed state.
-            let _ = reader.reload();
-            Some((reader, fields))
-        });
+        let tantivy = fs_cass_open_search_reader(index_path, ReloadPolicy::Manual).ok();
 
         let sqlite_path = db_path.map(Path::to_path_buf).filter(|path| path.exists());
 
@@ -2619,7 +1897,7 @@ impl SearchClient {
         offset: usize,
         field_mask: FieldMask,
     ) -> Result<Vec<SearchHit>> {
-        let sanitized = sanitize_query(query);
+        let sanitized = fs_cass_sanitize_query(query);
         let field_mask = effective_field_mask(field_mask);
         let limit = if limit == 0 {
             self.total_docs().max(1)
@@ -2642,7 +1920,11 @@ impl SearchClient {
         // Only use cache for simple queries (no wildcards, no boolean operators) because
         // the cache matching logic enforces strict prefix AND semantics which is incorrect
         // for suffixes, substrings, OR, NOT, or phrases.
-        if can_use_cache && offset == 0 && !query.contains('*') && !has_boolean_operators(query) {
+        if can_use_cache
+            && offset == 0
+            && !query.contains('*')
+            && !fs_cass_has_boolean_operators(query)
+        {
             if let Some(cached) = self.cached_prefix_hits(&sanitized, &filters) {
                 // Opt 2.4: Pre-compute lowercase query terms once, reuse for all hits
                 let query_terms = QueryTermsLower::from_query(&sanitized);
@@ -2817,14 +2099,13 @@ impl SearchClient {
     pub fn set_semantic_context(
         &self,
         embedder: Arc<dyn Embedder>,
-        index: VectorIndex,
+        fs_semantic_index: VectorIndex,
         filter_maps: SemanticFilterMaps,
         roles: Option<HashSet<u8>>,
         ann_path: Option<PathBuf>,
     ) -> Result<()> {
-        let header = index.header();
-        let embedder_id = header.embedder_id.clone();
-        let dimension = header.dimension as usize;
+        let embedder_id = fs_semantic_index.embedder_id().to_string();
+        let dimension = fs_semantic_index.dimension();
         if embedder_id != embedder.id() {
             bail!(
                 "embedder mismatch: index uses {}, embedder is {}",
@@ -2839,14 +2120,6 @@ impl SearchClient {
                 embedder.dimension()
             );
         }
-
-        let fs_semantic_index = open_or_build_fs_semantic_index(&index, ann_path.as_deref())
-            .map_err(|err| anyhow!("failed to initialize frankensearch semantic bridge index: {err}"))?
-            .ok_or_else(|| {
-                anyhow!(
-                    "semantic bridge path unavailable; set ann_path to vector_index/hnsw-<embedder>.chsw and run 'cass index --semantic'"
-                )
-            })?;
 
         let capacity = NonZeroUsize::new(100).ok_or_else(|| anyhow!("invalid cache size"))?;
         let mut state_guard = self
@@ -3189,7 +2462,7 @@ impl SearchClient {
 
         // Check if we should try wildcard fallback
         let query_has_wildcards = query.contains('*');
-        let has_boolean_or_phrase = has_boolean_operators(query);
+        let has_boolean_or_phrase = fs_cass_has_boolean_operators(query);
         let is_sparse = hits.len() < sparse_threshold && offset == 0;
 
         if !is_sparse || query_has_wildcards || has_boolean_or_phrase || query.trim().is_empty() {
@@ -3458,126 +2731,25 @@ impl SearchClient {
         self.track_generation(searcher.generation().generation_id());
 
         let needs_content = field_mask.needs_content() || field_mask.wants_snippet();
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
-        // Parse query with boolean operator support (AND, OR, NOT, "phrases").
-        // Use the raw query so "-" and quotes are preserved for parsing, but
-        // normalize terms before building Tantivy clauses.
-        let tokens = parse_boolean_query(raw_query);
-        if tokens.is_empty() {
-            clauses.push((Occur::Must, Box::new(AllQuery)));
-        } else if has_boolean_operators(raw_query) {
-            // Use boolean query builder for complex queries
-            let bool_clauses = build_boolean_query_clauses(&tokens, fields);
-            clauses.extend(bool_clauses);
-        } else {
-            // Simple query: treat each term as MUST (implicit AND)
-            for token in tokens {
-                if let QueryToken::Term(term_str) = token {
-                    let parts = normalize_term_parts(&term_str);
-                    if let Some(term_query) = build_compound_term_query(&parts, fields) {
-                        clauses.push((Occur::Must, term_query));
-                    }
-                }
-            }
-        }
-
-        if !filters.agents.is_empty() {
-            let terms = filters
-                .agents
-                .into_iter()
-                .map(|agent| {
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(fields.agent, &agent),
-                            IndexRecordOption::Basic,
-                        )) as Box<dyn Query>,
-                    )
-                })
-                .collect();
-            clauses.push((Occur::Must, Box::new(BooleanQuery::new(terms))));
-        }
-
-        if !filters.workspaces.is_empty() {
-            let terms = filters
-                .workspaces
-                .into_iter()
-                .map(|ws| {
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(fields.workspace, &ws),
-                            IndexRecordOption::Basic,
-                        )) as Box<dyn Query>,
-                    )
-                })
-                .collect();
-            clauses.push((Occur::Must, Box::new(BooleanQuery::new(terms))));
-        }
-
-        if filters.created_from.is_some() || filters.created_to.is_some() {
-            use std::ops::Bound::{Included, Unbounded};
-            let lower = filters.created_from.map_or(Unbounded, |v| {
-                Included(Term::from_field_i64(fields.created_at, v))
-            });
-            let upper = filters.created_to.map_or(Unbounded, |v| {
-                Included(Term::from_field_i64(fields.created_at, v))
-            });
-            let range = RangeQuery::new(lower, upper);
-            clauses.push((Occur::Must, Box::new(range)));
-        }
-
-        // Source filter (P3.1)
-        match &filters.source_filter {
-            SourceFilter::All => {
-                // No filtering needed
-            }
-            SourceFilter::Local => {
-                // Filter to local sources only (origin_kind == "local")
-                let term = Term::from_field_text(fields.origin_kind, "local");
-                clauses.push((
-                    Occur::Must,
-                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
-                ));
-            }
-            SourceFilter::Remote => {
-                // Filter to remote sources only (origin_kind == "ssh")
-                // We use "ssh" since that's the only remote kind currently
-                let term = Term::from_field_text(fields.origin_kind, "ssh");
-                clauses.push((
-                    Occur::Must,
-                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
-                ));
-            }
-            SourceFilter::SourceId(source_id) => {
-                // Filter to specific source by ID
-                let term = Term::from_field_text(fields.source_id, source_id);
-                clauses.push((
-                    Occur::Must,
-                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
-                ));
-            }
-        }
+        // Delegate cass-compatible query parsing + Tantivy clause construction to frankensearch.
+        // cass retains ownership of paging/fallback orchestration and stored-field hydration.
+        let fs_filters = FsCassQueryFilters {
+            agents: filters.agents.into_iter().collect(),
+            workspaces: filters.workspaces.into_iter().collect(),
+            created_from: filters.created_from,
+            created_to: filters.created_to,
+            source_filter: match filters.source_filter {
+                SourceFilter::All => FsCassSourceFilter::All,
+                SourceFilter::Local => FsCassSourceFilter::Local,
+                SourceFilter::Remote => FsCassSourceFilter::Remote,
+                SourceFilter::SourceId(id) => FsCassSourceFilter::SourceId(id),
+            },
+        };
 
         // NOTE: session_paths filtering is applied post-search since source_path
         // is STORED but not indexed. See apply_session_paths_filter().
-
-        let q: Box<dyn Query> = if clauses.is_empty() {
-            Box::new(AllQuery)
-        } else if clauses.len() == 1 {
-            let (occur, query_box) = clauses.pop().unwrap();
-            match occur {
-                // For Must, we can safely unwrap and use the inner query directly
-                Occur::Must => query_box,
-                // For MustNot or Should, we must preserve the Occur by wrapping
-                // in a BooleanQuery. A lone MustNot (e.g., "NOT foo") should match
-                // nothing, not match "foo".
-                _ => Box::new(BooleanQuery::new(vec![(occur, query_box)])),
-            }
-        } else {
-            Box::new(BooleanQuery::new(clauses))
-        };
+        let q: Box<dyn Query> = fs_cass_build_tantivy_query(raw_query, &fs_filters, fields);
 
         let prefix_only = is_prefix_only(sanitized_query);
         let snippet_generator = if prefix_only || !field_mask.wants_snippet() {
@@ -3812,7 +2984,7 @@ impl SearchClient {
 /// Preserves custom precedence (OR > AND) by adding parentheses.
 /// Returns None if the query contains features unsupported by FTS5 (e.g. leading wildcards).
 fn transpile_to_fts5(raw_query: &str) -> Option<String> {
-    let tokens = parse_boolean_query(raw_query);
+    let tokens = fs_cass_parse_boolean_query(raw_query);
     if tokens.is_empty() {
         return Some("".to_string());
     }
@@ -3821,10 +2993,11 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
     let mut pending_or_group: Vec<String> = Vec::new();
     let mut next_op = "AND";
     let mut in_or_sequence = false;
+    let mut pending_unary_not = false;
 
     for token in tokens {
         match token {
-            QueryToken::And => {
+            FsCassQueryToken::And => {
                 if !pending_or_group.is_empty() {
                     let group = if pending_or_group.len() > 1 {
                         format!("({})", pending_or_group.join(" OR "))
@@ -3836,15 +3009,28 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                 }
                 in_or_sequence = false;
                 next_op = "AND";
+                pending_unary_not = false;
             }
-            QueryToken::Or => {
-                in_or_sequence = true;
+            FsCassQueryToken::Or => {
+                // Our FTS5 fallback cannot reliably represent `NOT A OR B`
+                // (leading unary NOT inside OR groups). Degrade `OR` to `AND`
+                // in that narrow case to preserve Tantivy's practical behavior.
+                in_or_sequence = !(pending_or_group.is_empty()
+                    && fts_clauses.len() == 1
+                    && fts_clauses
+                        .first()
+                        .is_some_and(|(op, text)| *op == "AND" && text.starts_with("NOT ")));
             }
-            QueryToken::Not => {
-                // FTS5 supports binary `A NOT B` but not unary leading `NOT`
-                // and not `OR NOT` groupings.
-                if (fts_clauses.is_empty() && pending_or_group.is_empty()) || in_or_sequence {
+            FsCassQueryToken::Not => {
+                // FTS5 supports both unary (`NOT foo`) and binary (`foo NOT bar`) NOT,
+                // but we reject `OR NOT` groupings in the fallback transpiler.
+                if in_or_sequence {
                     return None;
+                }
+
+                if fts_clauses.is_empty() && pending_or_group.is_empty() {
+                    pending_unary_not = true;
+                    continue;
                 }
 
                 if !pending_or_group.is_empty() {
@@ -3859,14 +3045,14 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                 in_or_sequence = false;
                 next_op = "NOT";
             }
-            QueryToken::Term(t) => {
+            FsCassQueryToken::Term(t) => {
                 // Check for unsupported wildcards
-                let pattern = WildcardPattern::parse(&t);
+                let pattern = FsCassWildcardPattern::parse(&t);
                 if matches!(
                     pattern,
-                    WildcardPattern::Suffix(_)
-                        | WildcardPattern::Substring(_)
-                        | WildcardPattern::Complex(_)
+                    FsCassWildcardPattern::Suffix(_)
+                        | FsCassWildcardPattern::Substring(_)
+                        | FsCassWildcardPattern::Complex(_)
                 ) {
                     return None;
                 }
@@ -3900,11 +3086,17 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                     pending_or_group.push(fts_term);
                     in_or_sequence = true;
                 } else {
-                    fts_clauses.push((next_op, fts_term));
+                    let term = if pending_unary_not {
+                        pending_unary_not = false;
+                        format!("NOT {fts_term}")
+                    } else {
+                        fts_term
+                    };
+                    fts_clauses.push((next_op, term));
                 }
                 next_op = "AND";
             }
-            QueryToken::Phrase(p) => {
+            FsCassQueryToken::Phrase(p) => {
                 let phrase_parts = normalize_phrase_terms(&p);
                 if phrase_parts.is_empty() {
                     continue;
@@ -3925,7 +3117,13 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                     pending_or_group.push(fts_phrase);
                     in_or_sequence = true;
                 } else {
-                    fts_clauses.push((next_op, fts_phrase));
+                    let phrase = if pending_unary_not {
+                        pending_unary_not = false;
+                        format!("NOT {fts_phrase}")
+                    } else {
+                        fts_phrase
+                    };
+                    fts_clauses.push((next_op, phrase));
                 }
                 next_op = "AND";
             }
@@ -3945,7 +3143,8 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
         return Some("".to_string());
     }
 
-    // Safety guard: unary leading NOT is not valid FTS5 syntax.
+    // Safety guard: the fallback transpiler cannot represent a binary NOT as the
+    // very first operator (there is no left operand).
     if fts_clauses.first().is_some_and(|(op, _)| *op == "NOT") {
         return None;
     }
@@ -4497,6 +3696,18 @@ mod tests {
     use crate::connectors::{NormalizedConversation, NormalizedMessage, NormalizedSnippet};
     use crate::search::tantivy::TantivyIndex;
     use tempfile::TempDir;
+
+    fn sanitize_query(raw: &str) -> String {
+        fs_cass_sanitize_query(raw)
+    }
+
+    fn parse_boolean_query(query: &str) -> Vec<FsCassQueryToken> {
+        fs_cass_parse_boolean_query(query)
+    }
+
+    type QueryToken = FsCassQueryToken;
+    type WildcardPattern = FsCassWildcardPattern;
+    type QueryTokenList = Vec<QueryToken>;
 
     // ==========================================================================
     // StringInterner Tests (Opt 2.3)
@@ -5981,16 +5192,16 @@ mod tests {
     fn wildcard_pattern_parse_exact() {
         // No wildcards - exact match
         assert_eq!(
-            WildcardPattern::parse("hello"),
-            WildcardPattern::Exact("hello".into())
+            FsCassWildcardPattern::parse("hello"),
+            FsCassWildcardPattern::Exact("hello".into())
         );
         assert_eq!(
-            WildcardPattern::parse("HELLO"),
-            WildcardPattern::Exact("hello".into()) // lowercased
+            FsCassWildcardPattern::parse("HELLO"),
+            FsCassWildcardPattern::Exact("hello".into()) // lowercased
         );
         assert_eq!(
-            WildcardPattern::parse("FooBar123"),
-            WildcardPattern::Exact("foobar123".into())
+            FsCassWildcardPattern::parse("FooBar123"),
+            FsCassWildcardPattern::Exact("foobar123".into())
         );
     }
 
@@ -5998,16 +5209,16 @@ mod tests {
     fn wildcard_pattern_parse_prefix() {
         // Trailing wildcard: foo*
         assert_eq!(
-            WildcardPattern::parse("foo*"),
-            WildcardPattern::Prefix("foo".into())
+            FsCassWildcardPattern::parse("foo*"),
+            FsCassWildcardPattern::Prefix("foo".into())
         );
         assert_eq!(
-            WildcardPattern::parse("CONFIG*"),
-            WildcardPattern::Prefix("config".into())
+            FsCassWildcardPattern::parse("CONFIG*"),
+            FsCassWildcardPattern::Prefix("config".into())
         );
         assert_eq!(
-            WildcardPattern::parse("test*"),
-            WildcardPattern::Prefix("test".into())
+            FsCassWildcardPattern::parse("test*"),
+            FsCassWildcardPattern::Prefix("test".into())
         );
     }
 
@@ -6015,16 +5226,16 @@ mod tests {
     fn wildcard_pattern_parse_suffix() {
         // Leading wildcard: *foo
         assert_eq!(
-            WildcardPattern::parse("*foo"),
-            WildcardPattern::Suffix("foo".into())
+            FsCassWildcardPattern::parse("*foo"),
+            FsCassWildcardPattern::Suffix("foo".into())
         );
         assert_eq!(
-            WildcardPattern::parse("*Error"),
-            WildcardPattern::Suffix("error".into())
+            FsCassWildcardPattern::parse("*Error"),
+            FsCassWildcardPattern::Suffix("error".into())
         );
         assert_eq!(
-            WildcardPattern::parse("*Handler"),
-            WildcardPattern::Suffix("handler".into())
+            FsCassWildcardPattern::parse("*Handler"),
+            FsCassWildcardPattern::Suffix("handler".into())
         );
     }
 
@@ -6032,16 +5243,16 @@ mod tests {
     fn wildcard_pattern_parse_substring() {
         // Both wildcards: *foo*
         assert_eq!(
-            WildcardPattern::parse("*foo*"),
-            WildcardPattern::Substring("foo".into())
+            FsCassWildcardPattern::parse("*foo*"),
+            FsCassWildcardPattern::Substring("foo".into())
         );
         assert_eq!(
-            WildcardPattern::parse("*CONFIG*"),
-            WildcardPattern::Substring("config".into())
+            FsCassWildcardPattern::parse("*CONFIG*"),
+            FsCassWildcardPattern::Substring("config".into())
         );
         assert_eq!(
-            WildcardPattern::parse("*test*"),
-            WildcardPattern::Substring("test".into())
+            FsCassWildcardPattern::parse("*test*"),
+            FsCassWildcardPattern::Substring("test".into())
         );
     }
 
@@ -6049,59 +5260,59 @@ mod tests {
     fn wildcard_pattern_parse_edge_cases() {
         // Empty after trimming wildcards
         assert_eq!(
-            WildcardPattern::parse("*"),
-            WildcardPattern::Exact(String::new())
+            FsCassWildcardPattern::parse("*"),
+            FsCassWildcardPattern::Exact(String::new())
         );
         assert_eq!(
-            WildcardPattern::parse("**"),
-            WildcardPattern::Exact(String::new())
+            FsCassWildcardPattern::parse("**"),
+            FsCassWildcardPattern::Exact(String::new())
         );
         assert_eq!(
-            WildcardPattern::parse("***"),
-            WildcardPattern::Exact(String::new())
+            FsCassWildcardPattern::parse("***"),
+            FsCassWildcardPattern::Exact(String::new())
         );
 
         // Single char with wildcards
         assert_eq!(
-            WildcardPattern::parse("*a*"),
-            WildcardPattern::Substring("a".into())
+            FsCassWildcardPattern::parse("*a*"),
+            FsCassWildcardPattern::Substring("a".into())
         );
         assert_eq!(
-            WildcardPattern::parse("a*"),
-            WildcardPattern::Prefix("a".into())
+            FsCassWildcardPattern::parse("a*"),
+            FsCassWildcardPattern::Prefix("a".into())
         );
         assert_eq!(
-            WildcardPattern::parse("*a"),
-            WildcardPattern::Suffix("a".into())
+            FsCassWildcardPattern::parse("*a"),
+            FsCassWildcardPattern::Suffix("a".into())
         );
 
         // Multiple asterisks get trimmed
         assert_eq!(
-            WildcardPattern::parse("***foo***"),
-            WildcardPattern::Substring("foo".into())
+            FsCassWildcardPattern::parse("***foo***"),
+            FsCassWildcardPattern::Substring("foo".into())
         );
     }
 
     #[test]
     fn wildcard_pattern_to_regex_suffix() {
-        let pattern = WildcardPattern::Suffix("foo".into());
+        let pattern = FsCassWildcardPattern::Suffix("foo".into());
         // Suffix patterns need $ anchor to ensure "ends with" semantics
         assert_eq!(pattern.to_regex(), Some(".*foo$".into()));
     }
 
     #[test]
     fn wildcard_pattern_to_regex_substring() {
-        let pattern = WildcardPattern::Substring("bar".into());
+        let pattern = FsCassWildcardPattern::Substring("bar".into());
         assert_eq!(pattern.to_regex(), Some(".*bar.*".into()));
     }
 
     #[test]
     fn wildcard_pattern_to_regex_exact_prefix_none() {
         // Exact and Prefix patterns don't need regex
-        let exact = WildcardPattern::Exact("foo".into());
+        let exact = FsCassWildcardPattern::Exact("foo".into());
         assert_eq!(exact.to_regex(), None);
 
-        let prefix = WildcardPattern::Prefix("bar".into());
+        let prefix = FsCassWildcardPattern::Prefix("bar".into());
         assert_eq!(prefix.to_regex(), None);
     }
 
@@ -6117,26 +5328,6 @@ mod tests {
         assert_eq!(MatchType::Substring.quality_factor(), 0.7);
         // Implicit wildcard is lowest
         assert_eq!(MatchType::ImplicitWildcard.quality_factor(), 0.6);
-    }
-
-    #[test]
-    fn wildcard_pattern_to_match_type() {
-        assert_eq!(
-            WildcardPattern::Exact("foo".into()).to_match_type(),
-            MatchType::Exact
-        );
-        assert_eq!(
-            WildcardPattern::Prefix("foo".into()).to_match_type(),
-            MatchType::Prefix
-        );
-        assert_eq!(
-            WildcardPattern::Suffix("foo".into()).to_match_type(),
-            MatchType::Suffix
-        );
-        assert_eq!(
-            WildcardPattern::Substring("foo".into()).to_match_type(),
-            MatchType::Substring
-        );
     }
 
     #[test]
@@ -6166,41 +5357,35 @@ mod tests {
     }
 
     #[test]
-    fn escape_regex_basic() {
-        // Plain text should pass through unchanged
-        assert_eq!(escape_regex("hello"), "hello");
-        assert_eq!(escape_regex("foo123"), "foo123");
-        assert_eq!(escape_regex(""), "");
+    fn wildcard_pattern_to_regex_escapes_special_chars() {
+        assert_eq!(
+            FsCassWildcardPattern::Suffix("foo.bar".into()).to_regex(),
+            Some(".*foo\\.bar$".into())
+        );
+        assert_eq!(
+            FsCassWildcardPattern::Substring("a+b*c?".into()).to_regex(),
+            Some(".*a\\+b\\*c\\?.*".into())
+        );
     }
 
     #[test]
-    fn escape_regex_special_chars() {
-        // All special regex chars should be escaped
-        assert_eq!(escape_regex("."), "\\.");
-        assert_eq!(escape_regex("*"), "\\*");
-        assert_eq!(escape_regex("+"), "\\+");
-        assert_eq!(escape_regex("?"), "\\?");
-        assert_eq!(escape_regex("("), "\\(");
-        assert_eq!(escape_regex(")"), "\\)");
-        assert_eq!(escape_regex("["), "\\[");
-        assert_eq!(escape_regex("]"), "\\]");
-        assert_eq!(escape_regex("{"), "\\{");
-        assert_eq!(escape_regex("}"), "\\}");
-        assert_eq!(escape_regex("|"), "\\|");
-        assert_eq!(escape_regex("^"), "\\^");
-        assert_eq!(escape_regex("$"), "\\$");
-        assert_eq!(escape_regex("\\"), "\\\\");
-    }
-
-    #[test]
-    fn escape_regex_complex_patterns() {
-        // Complex patterns with multiple special chars
-        assert_eq!(escape_regex("foo.bar"), "foo\\.bar");
-        assert_eq!(escape_regex("test[0-9]+"), "test\\[0-9\\]\\+");
-        assert_eq!(escape_regex("(a|b)"), "\\(a\\|b\\)");
-        assert_eq!(escape_regex("end$"), "end\\$");
-        assert_eq!(escape_regex("^start"), "\\^start");
-        assert_eq!(escape_regex("a*b+c?"), "a\\*b\\+c\\?");
+    fn wildcard_pattern_to_regex_escapes_complex_patterns() {
+        assert_eq!(
+            FsCassWildcardPattern::Suffix("test[0-9]+".into()).to_regex(),
+            Some(".*test\\[0-9\\]\\+$".into())
+        );
+        assert_eq!(
+            FsCassWildcardPattern::Substring("(a|b)".into()).to_regex(),
+            Some(".*\\(a\\|b\\).*".into())
+        );
+        assert_eq!(
+            FsCassWildcardPattern::Substring("end$".into()).to_regex(),
+            Some(".*end\\$.*".into())
+        );
+        assert_eq!(
+            FsCassWildcardPattern::Substring("^start".into()).to_regex(),
+            Some(".*\\^start.*".into())
+        );
     }
 
     #[test]
@@ -6940,124 +6125,130 @@ mod tests {
     #[test]
     fn sanitize_query_preserves_wildcards() {
         // Wildcards should be preserved
-        assert_eq!(sanitize_query("*foo*"), "*foo*");
-        assert_eq!(sanitize_query("foo*"), "foo*");
-        assert_eq!(sanitize_query("*bar"), "*bar");
-        assert_eq!(sanitize_query("*config*"), "*config*");
+        assert_eq!(fs_cass_sanitize_query("*foo*"), "*foo*");
+        assert_eq!(fs_cass_sanitize_query("foo*"), "foo*");
+        assert_eq!(fs_cass_sanitize_query("*bar"), "*bar");
+        assert_eq!(fs_cass_sanitize_query("*config*"), "*config*");
     }
 
     #[test]
     fn sanitize_query_strips_other_special_chars() {
         // Non-wildcard special chars become spaces
-        assert_eq!(sanitize_query("foo.bar"), "foo bar");
-        assert_eq!(sanitize_query("c++"), "c  ");
-        assert_eq!(sanitize_query("foo-bar"), "foo bar");
-        assert_eq!(sanitize_query("test_case"), "test case");
+        assert_eq!(fs_cass_sanitize_query("foo.bar"), "foo bar");
+        assert_eq!(fs_cass_sanitize_query("c++"), "c  ");
+        assert_eq!(fs_cass_sanitize_query("foo-bar"), "foo bar");
+        assert_eq!(fs_cass_sanitize_query("test_case"), "test case");
     }
 
     #[test]
     fn sanitize_query_combined() {
         // Mix of wildcards and special chars
-        assert_eq!(sanitize_query("*foo.bar*"), "*foo bar*");
-        assert_eq!(sanitize_query("test-*"), "test *");
-        assert_eq!(sanitize_query("*c++*"), "*c  *");
+        assert_eq!(fs_cass_sanitize_query("*foo.bar*"), "*foo bar*");
+        assert_eq!(fs_cass_sanitize_query("test-*"), "test *");
+        assert_eq!(fs_cass_sanitize_query("*c++*"), "*c  *");
     }
 
     // Boolean query parsing tests
     #[test]
     fn parse_boolean_query_simple_terms() {
-        let tokens = parse_boolean_query("foo bar baz");
+        let tokens = fs_cass_parse_boolean_query("foo bar baz");
         assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0], QueryToken::Term("foo".to_string()));
-        assert_eq!(tokens[1], QueryToken::Term("bar".to_string()));
-        assert_eq!(tokens[2], QueryToken::Term("baz".to_string()));
+        assert_eq!(tokens[0], FsCassQueryToken::Term("foo".to_string()));
+        assert_eq!(tokens[1], FsCassQueryToken::Term("bar".to_string()));
+        assert_eq!(tokens[2], FsCassQueryToken::Term("baz".to_string()));
     }
 
     #[test]
     fn parse_boolean_query_and_operator() {
-        let tokens = parse_boolean_query("foo AND bar");
+        let tokens = fs_cass_parse_boolean_query("foo AND bar");
         assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0], QueryToken::Term("foo".to_string()));
-        assert_eq!(tokens[1], QueryToken::And);
-        assert_eq!(tokens[2], QueryToken::Term("bar".to_string()));
+        assert_eq!(tokens[0], FsCassQueryToken::Term("foo".to_string()));
+        assert_eq!(tokens[1], FsCassQueryToken::And);
+        assert_eq!(tokens[2], FsCassQueryToken::Term("bar".to_string()));
 
         // Also test && syntax
-        let tokens2 = parse_boolean_query("foo && bar");
+        let tokens2 = fs_cass_parse_boolean_query("foo && bar");
         assert_eq!(tokens2.len(), 3);
-        assert_eq!(tokens2[1], QueryToken::And);
+        assert_eq!(tokens2[1], FsCassQueryToken::And);
     }
 
     #[test]
     fn parse_boolean_query_or_operator() {
-        let tokens = parse_boolean_query("foo OR bar");
+        let tokens = fs_cass_parse_boolean_query("foo OR bar");
         assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0], QueryToken::Term("foo".to_string()));
-        assert_eq!(tokens[1], QueryToken::Or);
-        assert_eq!(tokens[2], QueryToken::Term("bar".to_string()));
+        assert_eq!(tokens[0], FsCassQueryToken::Term("foo".to_string()));
+        assert_eq!(tokens[1], FsCassQueryToken::Or);
+        assert_eq!(tokens[2], FsCassQueryToken::Term("bar".to_string()));
 
         // Also test || syntax
-        let tokens2 = parse_boolean_query("foo || bar");
+        let tokens2 = fs_cass_parse_boolean_query("foo || bar");
         assert_eq!(tokens2.len(), 3);
-        assert_eq!(tokens2[1], QueryToken::Or);
+        assert_eq!(tokens2[1], FsCassQueryToken::Or);
     }
 
     #[test]
     fn parse_boolean_query_not_operator() {
-        let tokens = parse_boolean_query("foo NOT bar");
+        let tokens = fs_cass_parse_boolean_query("foo NOT bar");
         assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0], QueryToken::Term("foo".to_string()));
-        assert_eq!(tokens[1], QueryToken::Not);
-        assert_eq!(tokens[2], QueryToken::Term("bar".to_string()));
+        assert_eq!(tokens[0], FsCassQueryToken::Term("foo".to_string()));
+        assert_eq!(tokens[1], FsCassQueryToken::Not);
+        assert_eq!(tokens[2], FsCassQueryToken::Term("bar".to_string()));
     }
 
     #[test]
     fn parse_boolean_query_quoted_phrase() {
-        let tokens = parse_boolean_query(r#"foo "exact phrase" bar"#);
+        let tokens = fs_cass_parse_boolean_query(r#"foo "exact phrase" bar"#);
         assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0], QueryToken::Term("foo".to_string()));
-        assert_eq!(tokens[1], QueryToken::Phrase("exact phrase".to_string()));
-        assert_eq!(tokens[2], QueryToken::Term("bar".to_string()));
+        assert_eq!(tokens[0], FsCassQueryToken::Term("foo".to_string()));
+        assert_eq!(
+            tokens[1],
+            FsCassQueryToken::Phrase("exact phrase".to_string())
+        );
+        assert_eq!(tokens[2], FsCassQueryToken::Term("bar".to_string()));
     }
 
     #[test]
     fn parse_boolean_query_complex() {
-        let tokens = parse_boolean_query(r#"error OR warning NOT "false positive""#);
+        let tokens = fs_cass_parse_boolean_query(r#"error OR warning NOT "false positive""#);
         assert_eq!(tokens.len(), 5);
-        assert_eq!(tokens[0], QueryToken::Term("error".to_string()));
-        assert_eq!(tokens[1], QueryToken::Or);
-        assert_eq!(tokens[2], QueryToken::Term("warning".to_string()));
-        assert_eq!(tokens[3], QueryToken::Not);
-        assert_eq!(tokens[4], QueryToken::Phrase("false positive".to_string()));
+        assert_eq!(tokens[0], FsCassQueryToken::Term("error".to_string()));
+        assert_eq!(tokens[1], FsCassQueryToken::Or);
+        assert_eq!(tokens[2], FsCassQueryToken::Term("warning".to_string()));
+        assert_eq!(tokens[3], FsCassQueryToken::Not);
+        assert_eq!(
+            tokens[4],
+            FsCassQueryToken::Phrase("false positive".to_string())
+        );
     }
 
     #[test]
     fn has_boolean_operators_detection() {
-        assert!(!has_boolean_operators("foo bar"));
-        assert!(has_boolean_operators("foo AND bar"));
-        assert!(has_boolean_operators("foo OR bar"));
-        assert!(has_boolean_operators("foo NOT bar"));
-        assert!(has_boolean_operators(r#""exact phrase""#));
-        assert!(has_boolean_operators("foo && bar"));
-        assert!(has_boolean_operators("foo || bar"));
+        assert!(!fs_cass_has_boolean_operators("foo bar"));
+        assert!(fs_cass_has_boolean_operators("foo AND bar"));
+        assert!(fs_cass_has_boolean_operators("foo OR bar"));
+        assert!(fs_cass_has_boolean_operators("foo NOT bar"));
+        assert!(fs_cass_has_boolean_operators(r#""exact phrase""#));
+        assert!(fs_cass_has_boolean_operators("foo && bar"));
+        assert!(fs_cass_has_boolean_operators("foo || bar"));
     }
 
     #[test]
     fn parse_boolean_query_case_insensitive_operators() {
         // Operators should be case-insensitive
-        let tokens = parse_boolean_query("foo and bar or baz not qux");
+        let tokens = fs_cass_parse_boolean_query("foo and bar or baz not qux");
         assert_eq!(tokens.len(), 7);
-        assert_eq!(tokens[1], QueryToken::And);
-        assert_eq!(tokens[3], QueryToken::Or);
-        assert_eq!(tokens[5], QueryToken::Not);
+        assert_eq!(tokens[1], FsCassQueryToken::And);
+        assert_eq!(tokens[3], FsCassQueryToken::Or);
+        assert_eq!(tokens[5], FsCassQueryToken::Not);
     }
 
     #[test]
     fn parse_boolean_query_with_wildcards() {
-        let tokens = parse_boolean_query("*config* OR env*");
+        let tokens = fs_cass_parse_boolean_query("*config* OR env*");
         assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0], QueryToken::Term("*config*".to_string()));
-        assert_eq!(tokens[1], QueryToken::Or);
-        assert_eq!(tokens[2], QueryToken::Term("env*".to_string()));
+        assert_eq!(tokens[0], FsCassQueryToken::Term("*config*".to_string()));
+        assert_eq!(tokens[1], FsCassQueryToken::Or);
+        assert_eq!(tokens[2], FsCassQueryToken::Term("env*".to_string()));
     }
 
     // ============================================================
@@ -7532,16 +6723,16 @@ mod tests {
     #[test]
     fn sanitize_query_preserves_unicode_alphanumeric() {
         // Unicode letters and digits should be preserved
-        assert_eq!(sanitize_query("こんにちは"), "こんにちは");
-        assert_eq!(sanitize_query("café"), "café");
-        assert_eq!(sanitize_query("日本語123"), "日本語123");
+        assert_eq!(fs_cass_sanitize_query("こんにちは"), "こんにちは");
+        assert_eq!(fs_cass_sanitize_query("café"), "café");
+        assert_eq!(fs_cass_sanitize_query("日本語123"), "日本語123");
     }
 
     #[test]
     fn sanitize_query_handles_multiple_consecutive_special_chars() {
-        assert_eq!(sanitize_query("foo---bar"), "foo   bar");
+        assert_eq!(fs_cass_sanitize_query("foo---bar"), "foo   bar");
         // a!@#$%^&()b has 9 special chars between a and b: ! @ # $ % ^ & ( )
-        assert_eq!(sanitize_query("a!@#$%^&()b"), "a         b");
+        assert_eq!(fs_cass_sanitize_query("a!@#$%^&()b"), "a         b");
     }
 
     // --- Additional WildcardPattern::parse tests (edge cases) ---
@@ -7549,67 +6740,34 @@ mod tests {
     #[test]
     fn wildcard_pattern_empty_after_trim_returns_exact_empty() {
         assert_eq!(
-            WildcardPattern::parse("*"),
-            WildcardPattern::Exact(String::new())
+            FsCassWildcardPattern::parse("*"),
+            FsCassWildcardPattern::Exact(String::new())
         );
         assert_eq!(
-            WildcardPattern::parse("**"),
-            WildcardPattern::Exact(String::new())
+            FsCassWildcardPattern::parse("**"),
+            FsCassWildcardPattern::Exact(String::new())
         );
         assert_eq!(
-            WildcardPattern::parse("***"),
-            WildcardPattern::Exact(String::new())
+            FsCassWildcardPattern::parse("***"),
+            FsCassWildcardPattern::Exact(String::new())
         );
     }
 
     #[test]
     fn wildcard_pattern_to_regex_generation() {
         // Exact and prefix patterns don't need regex
-        assert_eq!(WildcardPattern::Exact("foo".into()).to_regex(), None);
-        assert_eq!(WildcardPattern::Prefix("foo".into()).to_regex(), None);
+        assert_eq!(FsCassWildcardPattern::Exact("foo".into()).to_regex(), None);
+        assert_eq!(FsCassWildcardPattern::Prefix("foo".into()).to_regex(), None);
         // Suffix and substring need regex
         // Suffix needs $ anchor for "ends with" semantics
         assert_eq!(
-            WildcardPattern::Suffix("foo".into()).to_regex(),
+            FsCassWildcardPattern::Suffix("foo".into()).to_regex(),
             Some(".*foo$".into())
         );
         assert_eq!(
-            WildcardPattern::Substring("foo".into()).to_regex(),
+            FsCassWildcardPattern::Substring("foo".into()).to_regex(),
             Some(".*foo.*".into())
         );
-    }
-
-    // --- escape_regex tests ---
-
-    #[test]
-    fn escape_regex_escapes_all_special_chars() {
-        assert_eq!(escape_regex("."), "\\.");
-        assert_eq!(escape_regex("*"), "\\*");
-        assert_eq!(escape_regex("+"), "\\+");
-        assert_eq!(escape_regex("?"), "\\?");
-        assert_eq!(escape_regex("["), "\\[");
-        assert_eq!(escape_regex("]"), "\\]");
-        assert_eq!(escape_regex("("), "\\(");
-        assert_eq!(escape_regex(")"), "\\)");
-        assert_eq!(escape_regex("{"), "\\{");
-        assert_eq!(escape_regex("}"), "\\}");
-        assert_eq!(escape_regex("|"), "\\|");
-        assert_eq!(escape_regex("^"), "\\^");
-        assert_eq!(escape_regex("$"), "\\$");
-        assert_eq!(escape_regex("\\"), "\\\\");
-    }
-
-    #[test]
-    fn escape_regex_preserves_alphanumeric() {
-        assert_eq!(escape_regex("hello"), "hello");
-        assert_eq!(escape_regex("abc123"), "abc123");
-    }
-
-    #[test]
-    fn escape_regex_mixed_content() {
-        assert_eq!(escape_regex("foo.bar"), "foo\\.bar");
-        assert_eq!(escape_regex("a+b*c"), "a\\+b\\*c");
-        assert_eq!(escape_regex("(test)"), "\\(test\\)");
     }
 
     // --- Additional parse_boolean_query tests (edge cases) ---
@@ -7617,18 +6775,20 @@ mod tests {
     #[test]
     fn parse_boolean_query_prefix_minus_not() {
         // Prefix minus at start of query should trigger NOT
-        let tokens = parse_boolean_query("-world");
-        let expected: QueryTokenList =
-            SmallVec::from_vec(vec![QueryToken::Not, QueryToken::Term("world".into())]);
+        let tokens = fs_cass_parse_boolean_query("-world");
+        let expected = vec![
+            FsCassQueryToken::Not,
+            FsCassQueryToken::Term("world".into()),
+        ];
         assert_eq!(tokens, expected);
 
         // Prefix minus after space should trigger NOT
-        let tokens = parse_boolean_query("hello -world");
-        let expected: QueryTokenList = SmallVec::from_vec(vec![
-            QueryToken::Term("hello".into()),
-            QueryToken::Not,
-            QueryToken::Term("world".into()),
-        ]);
+        let tokens = fs_cass_parse_boolean_query("hello -world");
+        let expected = vec![
+            FsCassQueryToken::Term("hello".into()),
+            FsCassQueryToken::Not,
+            FsCassQueryToken::Term("world".into()),
+        ];
         assert_eq!(tokens, expected);
     }
 
@@ -7638,10 +6798,10 @@ mod tests {
         assert!(tokens.is_empty());
 
         let tokens = parse_boolean_query("foo \"\" bar");
-        let expected: QueryTokenList = SmallVec::from_vec(vec![
+        let expected: QueryTokenList = vec![
             QueryToken::Term("foo".into()),
             QueryToken::Term("bar".into()),
-        ]);
+        ];
         assert_eq!(tokens, expected);
     }
 
@@ -7649,15 +6809,14 @@ mod tests {
     fn parse_boolean_query_unclosed_quote() {
         // Unclosed quote should collect until end
         let tokens = parse_boolean_query("\"hello world");
-        let expected: QueryTokenList =
-            SmallVec::from_vec(vec![QueryToken::Phrase("hello world".into())]);
+        let expected: QueryTokenList = vec![QueryToken::Phrase("hello world".into())];
         assert_eq!(tokens, expected);
     }
 
     #[test]
     fn transpile_to_fts5_rejects_unary_not_queries() {
-        assert_eq!(transpile_to_fts5("NOT foo"), None);
-        assert_eq!(transpile_to_fts5("-foo"), None);
+        assert_eq!(transpile_to_fts5("NOT foo").as_deref(), Some("NOT foo"));
+        assert_eq!(transpile_to_fts5("-foo").as_deref(), Some("NOT foo"));
     }
 
     #[test]
@@ -9034,47 +8193,37 @@ mod tests {
     }
 
     // ==========================================================================
-    // QueryTokenList SmallVec Tests (Opt 4.4)
+    // QueryTokenList Behavior Tests (Opt 4.4)
     // ==========================================================================
 
     #[test]
-    fn query_token_list_stays_on_stack_for_small_queries() {
-        // Single term - should not spill
+    fn query_token_list_parses_small_queries() {
+        // Single term
         let tokens = parse_boolean_query("hello");
-        assert!(!tokens.spilled(), "Single term should stay on stack");
         assert_eq!(tokens.len(), 1);
 
-        // Two terms - should not spill
+        // Two terms
         let tokens = parse_boolean_query("hello world");
-        assert!(!tokens.spilled(), "Two terms should stay on stack");
         assert_eq!(tokens.len(), 2);
 
-        // Three terms with operator - should not spill
+        // Three tokens with operator
         let tokens = parse_boolean_query("hello AND world");
-        assert!(!tokens.spilled(), "Three tokens should stay on stack");
         assert_eq!(tokens.len(), 3);
 
-        // Four tokens - exactly at capacity
+        // Four tokens
         let tokens = parse_boolean_query("hello world foo bar");
-        assert!(
-            !tokens.spilled(),
-            "Four terms at capacity should stay on stack"
-        );
         assert_eq!(tokens.len(), 4);
     }
 
     #[test]
-    fn query_token_list_spills_to_heap_for_large_queries() {
-        // More than 8 tokens should spill to heap
+    fn query_token_list_parses_large_queries() {
         let tokens = parse_boolean_query("a b c d e f g h i");
-        assert!(tokens.spilled(), "Nine terms should spill to heap");
         assert_eq!(tokens.len(), 9);
     }
 
     #[test]
     fn query_token_list_handles_quoted_phrases() {
         let tokens = parse_boolean_query("\"hello world\" test");
-        assert!(!tokens.spilled(), "Phrase and term should stay on stack");
         assert_eq!(tokens.len(), 2);
 
         // Verify the phrase is correctly parsed
@@ -9087,10 +8236,6 @@ mod tests {
     #[test]
     fn query_token_list_handles_operators() {
         let tokens = parse_boolean_query("foo AND bar OR baz");
-        assert!(
-            !tokens.spilled(),
-            "Query with operators should stay on stack"
-        );
         assert_eq!(tokens.len(), 5);
         assert_eq!(tokens[1], QueryToken::And);
         assert_eq!(tokens[3], QueryToken::Or);
@@ -9099,7 +8244,6 @@ mod tests {
     #[test]
     fn query_token_list_empty_query() {
         let tokens = parse_boolean_query("");
-        assert!(!tokens.spilled());
         assert!(tokens.is_empty());
     }
 
@@ -10890,26 +10034,16 @@ mod tests {
 
     #[test]
     fn fs_semantic_doc_id_roundtrip() {
-        let row = crate::search::vector_index::VectorRow {
-            message_id: 42,
-            created_at_ms: 1_700_000_000_000,
-            agent_id: 3,
-            workspace_id: 7,
-            source_id: 11,
-            role: 1,
-            chunk_idx: 2,
-            vec_offset: 0,
-            content_hash: [0u8; 32],
-        };
-        let encoded = encode_fs_semantic_doc_id(&row);
-        let parsed = parse_fs_semantic_doc_id(&encoded).expect("roundtrip parse");
-        assert_eq!(parsed.message_id, row.message_id);
-        assert_eq!(parsed.chunk_idx, row.chunk_idx);
-        assert_eq!(parsed.agent_id, row.agent_id);
-        assert_eq!(parsed.workspace_id, row.workspace_id);
-        assert_eq!(parsed.source_id, row.source_id);
-        assert_eq!(parsed.role, row.role);
-        assert_eq!(parsed.created_at_ms, row.created_at_ms);
+        let hash_hex = "00".repeat(32);
+        let doc_id = format!("m|42|2|3|7|11|1|1700000000000|{hash_hex}");
+        let parsed = parse_fs_semantic_doc_id(&doc_id).expect("roundtrip parse");
+        assert_eq!(parsed.message_id, 42);
+        assert_eq!(parsed.chunk_idx, 2);
+        assert_eq!(parsed.agent_id, 3);
+        assert_eq!(parsed.workspace_id, 7);
+        assert_eq!(parsed.source_id, 11);
+        assert_eq!(parsed.role, 1);
+        assert_eq!(parsed.created_at_ms, 1_700_000_000_000);
     }
 
     #[test]
@@ -10931,49 +10065,38 @@ mod tests {
     }
 
     #[test]
-    fn fs_semantic_bridge_builds_and_runs_filtered_search() -> Result<()> {
-        use crate::search::vector_index::{Quantization, VectorEntry};
-
+    fn fs_semantic_index_runs_filtered_search() -> Result<()> {
         let temp = TempDir::new()?;
-        let vector_dir = temp.path().join("vector_index");
-        std::fs::create_dir_all(&vector_dir)?;
-        // Source CVVI marker path used by freshness checks.
-        std::fs::write(vector_dir.join("index-embed-fast.cvvi"), b"stub")?;
-        let ann_path = vector_dir.join("hnsw-embed-fast.chsw");
+        let index_path = crate::search::vector_index::vector_index_path(temp.path(), "embed-fast");
+        if let Some(parent) = index_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
-        let index = VectorIndex::build(
+        let hash_a = "00".repeat(32);
+        let hash_b = "11".repeat(32);
+        let doc_a = format!("m|101|0|1|10|100|1|1700000000001|{hash_a}");
+        let doc_b = format!("m|202|0|2|20|200|1|1700000000002|{hash_b}");
+
+        let mut writer = VectorIndex::create_with_revision(
+            &index_path,
             "embed-fast",
             "rev-1",
             2,
-            Quantization::F32,
-            vec![
-                VectorEntry {
-                    message_id: 101,
-                    created_at_ms: 1_700_000_000_001,
-                    agent_id: 1,
-                    workspace_id: 10,
-                    source_id: 100,
-                    role: 1,
-                    chunk_idx: 0,
-                    content_hash: [0u8; 32],
-                    vector: vec![1.0, 0.0],
-                },
-                VectorEntry {
-                    message_id: 202,
-                    created_at_ms: 1_700_000_000_002,
-                    agent_id: 2,
-                    workspace_id: 20,
-                    source_id: 200,
-                    role: 1,
-                    chunk_idx: 0,
-                    content_hash: [0u8; 32],
-                    vector: vec![0.0, 1.0],
-                },
-            ],
-        )?;
+            frankensearch::index::Quantization::F16,
+        )
+        .map_err(|err| anyhow!("create fsvi index failed: {err}"))?;
+        writer
+            .write_record(&doc_a, &[1.0, 0.0])
+            .map_err(|err| anyhow!("write_record failed: {err}"))?;
+        writer
+            .write_record(&doc_b, &[0.0, 1.0])
+            .map_err(|err| anyhow!("write_record failed: {err}"))?;
+        writer
+            .finish()
+            .map_err(|err| anyhow!("finish fsvi index failed: {err}"))?;
 
-        let fs_index = open_or_build_fs_semantic_index(&index, Some(&ann_path))?
-            .expect("bridge should be created");
+        let fs_index =
+            VectorIndex::open(&index_path).map_err(|err| anyhow!("open fsvi failed: {err}"))?;
         let filter = SemanticFilter {
             agents: Some(HashSet::from([1])),
             workspaces: None,
@@ -10985,7 +10108,7 @@ mod tests {
         let adapter = build_fs_semantic_filter_adapter(&filter).expect("expected active filter");
         let hits = fs_index
             .search_top_k(&[1.0, 0.0], 5, Some(&adapter))
-            .map_err(|err| anyhow!("frankensearch bridge search failed: {err}"))?;
+            .map_err(|err| anyhow!("frankensearch search failed: {err}"))?;
         assert_eq!(hits.len(), 1);
         let parsed = parse_fs_semantic_doc_id(&hits[0].doc_id).expect("parse bridged doc_id");
         assert_eq!(parsed.message_id, 101);

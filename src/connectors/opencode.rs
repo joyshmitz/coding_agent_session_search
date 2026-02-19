@@ -272,7 +272,16 @@ fn looks_like_opencode_storage(path: &std::path::Path) -> bool {
 }
 
 fn normalize_opencode_timestamp(ts: Option<i64>) -> Option<i64> {
-    ts.and_then(|raw| crate::connectors::parse_timestamp(&serde_json::Value::from(raw)))
+    ts.map(|raw| {
+        // OpenCode appears to store epoch timestamps in milliseconds (see fixtures),
+        // but some sources may emit epoch seconds. We treat "plausible epoch seconds"
+        // as seconds and otherwise assume milliseconds (including small synthetic test values).
+        if (1_000_000_000..10_000_000_000).contains(&raw) {
+            raw.saturating_mul(1000)
+        } else {
+            raw
+        }
+    })
 }
 
 fn session_has_updates(

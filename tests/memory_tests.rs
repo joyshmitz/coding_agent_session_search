@@ -245,44 +245,61 @@ fn test_indexing_memory_no_leak() {
 #[test]
 fn test_vector_search_memory_no_leak() {
     let _guard = memory_test_guard();
-    use coding_agent_search::search::vector_index::{Quantization, VectorEntry, VectorIndex};
+    use coding_agent_search::search::vector_index::{Quantization, SemanticDocId, VectorIndex};
 
     let dimension = 384;
     let count = 10_000;
 
-    // Build index
-    let entries: Vec<VectorEntry> = (0..count)
-        .map(|idx| {
-            let mut vector = Vec::with_capacity(dimension);
-            for d in 0..dimension {
-                let value = ((idx + d * 31) % 997) as f32 / 997.0;
-                vector.push(value);
+    fn normalize_in_place(vec: &mut [f32]) {
+        let norm_sq: f32 = vec.iter().map(|v| v * v).sum();
+        let norm = norm_sq.sqrt();
+        if norm > 0.0 {
+            for v in vec {
+                *v /= norm;
             }
-            VectorEntry {
-                message_id: idx as u64,
-                created_at_ms: idx as i64,
-                agent_id: (idx % 8) as u32,
-                workspace_id: 1,
-                source_id: 1,
-                role: 1,
-                chunk_idx: 0,
-                content_hash: [0u8; 32],
-                vector,
-            }
-        })
-        .collect();
+        }
+    }
 
-    let index = VectorIndex::build(
+    // Build on-disk index (FSVI) so memory measurements reflect real behavior.
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("mem.fsvi");
+    let mut writer = VectorIndex::create_with_revision(
+        &path,
         "test-embedder",
         "rev1",
         dimension,
         Quantization::F16,
-        entries,
     )
-    .expect("build index");
+    .expect("create writer");
+
+    let mut vec_buf = vec![0.0f32; dimension];
+    for idx in 0..count {
+        for (d, slot) in vec_buf.iter_mut().enumerate() {
+            *slot = ((idx + d * 31) % 997) as f32 / 997.0;
+        }
+        normalize_in_place(&mut vec_buf);
+        let doc_id = SemanticDocId {
+            message_id: idx as u64,
+            chunk_idx: 0,
+            agent_id: (idx % 8) as u32,
+            workspace_id: 1,
+            source_id: 1,
+            role: 1,
+            created_at_ms: idx as i64,
+            content_hash: None,
+        }
+        .to_doc_id_string();
+        writer
+            .write_record(&doc_id, &vec_buf)
+            .expect("write_record");
+    }
+    writer.finish().expect("finish");
+
+    let index = VectorIndex::open(&path).expect("open");
 
     // Generate query vector
-    let query: Vec<f32> = (0..dimension).map(|d| (d % 17) as f32 / 17.0).collect();
+    let mut query: Vec<f32> = (0..dimension).map(|d| (d % 17) as f32 / 17.0).collect();
+    normalize_in_place(&mut query);
 
     // Warm up
     for _ in 0..10 {

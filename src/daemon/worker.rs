@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::indexer::semantic::{EmbeddingInput, SemanticIndexer};
 use crate::search::canonicalize::{canonicalize_for_embedding, content_hash};
-use crate::search::vector_index::{VectorIndex, role_code_from_str};
+use crate::search::vector_index::{VectorIndex, role_code_from_str, vector_index_path};
 use crate::storage::sqlite::SqliteStorage;
 
 /// Configuration for a single embedding job.
@@ -360,9 +360,9 @@ impl EmbeddingWorker {
         let final_completed = i64::try_from(messages.len()).unwrap_or(i64::MAX);
         let _ = storage.update_job_progress(job_id, final_completed);
 
-        // Build and save vector index
-        let index = indexer.build_index(embedded)?;
-        let save_path = indexer.save_index(&index, index_path)?;
+        // Build and save vector index (FSVI)
+        let _index = indexer.build_and_save_index(embedded, index_path)?;
+        let save_path = vector_index_path(index_path, indexer.embedder_id());
 
         info!(
             model = model_name,
@@ -385,22 +385,43 @@ impl EmbeddingWorker {
             WorkerEmbedderKind::FastEmbed => "minilm-384",
         };
 
-        let cvvi_path = index_path
-            .join("vector_index")
-            .join(format!("index-{embedder_id}.cvvi"));
+        let fsvi_path = vector_index_path(index_path, embedder_id);
 
-        if !cvvi_path.exists() {
+        if !fsvi_path.exists() {
             return HashMap::new();
         }
 
-        match VectorIndex::load(&cvvi_path) {
+        match VectorIndex::open(&fsvi_path) {
             Ok(index) => {
                 let mut hashes = HashMap::new();
-                for row in index.rows() {
-                    hashes.insert(row.message_id, row.content_hash);
+                for idx in 0..index.record_count() {
+                    let doc_id = match index.doc_id_at(idx) {
+                        Ok(doc_id) => doc_id,
+                        Err(_) => continue,
+                    };
+                    let mut parts = doc_id.split('|');
+                    if parts.next() != Some("m") {
+                        continue;
+                    }
+                    let message_id: u64 = match parts.next().and_then(|s| s.parse().ok()) {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                    // Skip chunk_idx, agent_id, workspace_id, source_id, role, created_at_ms
+                    for _ in 0..6 {
+                        let _ = parts.next();
+                    }
+                    let hash_hex = match parts.next() {
+                        Some(h) if h.len() == 64 => h,
+                        _ => continue,
+                    };
+                    let mut hash = [0u8; 32];
+                    if hex::decode_to_slice(hash_hex, &mut hash).is_ok() {
+                        hashes.insert(message_id, hash);
+                    }
                 }
                 debug!(
-                    path = %cvvi_path.display(),
+                    path = %fsvi_path.display(),
                     count = hashes.len(),
                     "Loaded existing hashes for dedup"
                 );
@@ -408,7 +429,7 @@ impl EmbeddingWorker {
             }
             Err(e) => {
                 warn!(
-                    path = %cvvi_path.display(),
+                    path = %fsvi_path.display(),
                     error = %e,
                     "Failed to load existing index for dedup"
                 );

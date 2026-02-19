@@ -1362,9 +1362,10 @@ mod tests {
         let disk_mb = {
             let out = Command::new("bash")
                 .arg("-c")
-                .arg("df -k ~ 2>/dev/null | awk 'NR==2 {print $4}'")
+                // Avoid `~` tilde expansion since other tests mutate HOME concurrently.
+                .arg("df -k / 2>/dev/null | awk 'NR==2 {print $4}'")
                 .output()
-                .expect("df -k ~");
+                .expect("df -k /");
             let kb: u64 = String::from_utf8_lossy(&out.stdout)
                 .trim()
                 .parse()

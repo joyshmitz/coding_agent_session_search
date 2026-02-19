@@ -343,7 +343,7 @@ if [[ "${ACTIVE_EMBEDDER}" == "hash" ]]; then
 fi
 
 INDEX_DIR="${DATA_DIR}/vector_index"
-if ls "${INDEX_DIR}"/index-*.cvvi >/dev/null 2>&1; then
+if ls "${INDEX_DIR}"/index-*.fsvi >/dev/null 2>&1; then
     log "OK" "Vector index file present in ${INDEX_DIR}"
 else
     log "FAIL" "Vector index file missing in ${INDEX_DIR}"
