@@ -50,3 +50,38 @@
 - `tests/util/mod.rs`
 - `benches/crypto_perf.rs`
 - `benches/export_perf.rs`
+
+---
+
+## 2026-02-18 Follow-up Update
+
+### Summary
+- Ran `cargo update --verbose` in `coding_agent_session_search`
+- Updated lockfile to latest compatible crates available in this environment
+- Re-validated code quality gates and targeted regression tests after updates
+
+### Lockfile updates applied
+- `aws-lc-rs`: `1.15.4 -> 1.16.0`
+- `bumpalo`: `3.19.1 -> 3.20.1`
+- `hnsw_rs`: `0.3.2 -> 0.3.3`
+- `native-tls`: `0.2.16 -> 0.2.18`
+- `toml`: `1.0.2+spec-1.1.0 -> 1.0.3+spec-1.1.0`
+- resolver-selected transitive adjustment: `indexmap 2.13.0 -> 2.12.1`
+
+### Remaining behind absolute latest (from cargo update output)
+- `generic-array 0.14.7` (latest `0.14.9`)
+- `libc 0.2.180` (latest `0.2.182`)
+
+### Post-update validation
+- `cargo fmt --check` ✅
+- `cargo check --all-targets` ✅
+- `cargo clippy --all-targets -- -D warnings` ✅
+- Targeted regressions:
+  - `cargo test --test connector_aider aider_detect_` ✅
+  - `cargo test --test connector_codex codex_detect_` ✅
+  - `cargo test --test connector_opencode opencode_computes_started_ended_at` ✅
+  - `cargo test --test cross_workstream_integration inline_analytics_badges_match_detail_modal_metrics` ✅
+
+### Full-suite note
+- `cargo test` now advances deep into the suite and all newly touched regression areas pass.
+- There is still an existing long-running/hanging case in `tests/e2e_error_recovery.rs` (`test_corrupted_index_triggers_rebuild`) that prevented a clean single-command completion in this session.
