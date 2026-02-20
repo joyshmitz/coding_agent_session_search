@@ -16430,7 +16430,7 @@ impl super::ftui_adapter::Model for CassApp {
                     info.current_version, info.latest_version
                 )
             };
-            if banner_text.chars().count() > banner_area.width as usize {
+            if display_width(&banner_text) > banner_area.width as usize {
                 banner_text = elide_text(&banner_text, banner_area.width as usize);
             }
             Paragraph::new(banner_text)

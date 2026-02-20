@@ -1606,7 +1606,7 @@ pub fn render_heatmap(
         };
         let val_str = format_heatmap_value(raw_val, metric);
         let tip = format!(" {} : {} ", label, val_str);
-        let tip_w = tip.len() as u16;
+        let tip_w = display_width(&tip) as u16;
         // Place tooltip at bottom-right of grid area.
         if grid_inner.width >= tip_w {
             let tip_rect = Rect {

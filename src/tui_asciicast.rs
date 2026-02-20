@@ -20,9 +20,23 @@ mod posix {
     pub const F_SETFL: c_int = 4;
 
     // O_NONBLOCK varies across platforms — must use the right constant.
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     pub const O_NONBLOCK: c_int = 0x0004;
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
     pub const O_NONBLOCK: c_int = 0o4000;
 
     unsafe extern "C" {
