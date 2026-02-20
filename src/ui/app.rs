@@ -7049,7 +7049,7 @@ impl CassApp {
                 Vec::with_capacity(msg_count);
             for (msg_idx, msg) in cv.messages.iter().enumerate() {
                 // Record line offset for message-level navigation
-                msg_offsets.push((lines.len() as u16, msg.role.clone()));
+                msg_offsets.push(((lines.len().min(u16::MAX as usize)) as u16, msg.role.clone()));
                 let msg_line_from_idx = (msg.idx >= 0).then_some((msg.idx as usize) + 1);
                 let msg_line_from_pos = msg_idx + 1;
                 let msg_is_session_hit = msg_line_from_idx
@@ -7104,7 +7104,7 @@ impl CassApp {
                     ""
                 };
                 if msg_is_session_hit {
-                    session_hit_offsets.push(lines.len() as u16);
+                    session_hit_offsets.push((lines.len().min(u16::MAX as usize)) as u16);
                 }
                 let header_gutter = if msg_is_current_session_hit {
                     "\u{258c}\u{25b6}"
@@ -8261,7 +8261,7 @@ impl CassApp {
             let total_lines = lines.len();
 
             // Store content metrics for scroll clamping in update handlers
-            self.detail_content_lines.set(total_lines as u16);
+            self.detail_content_lines.set((total_lines.min(u16::MAX as usize)) as u16);
             self.detail_visible_height.set(content_area.height);
 
             // Clamp scroll
