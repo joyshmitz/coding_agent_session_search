@@ -71,7 +71,7 @@ memmap2 = "*"
 bytemuck = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries"] }
 frankensearch = { version = "0.1.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "lexical", "ann", "fastembed-reranker"] }
-franken-agent-detection = { version = "0.1.0", path = "../franken_agent_detection", features = ["connectors"] }
+franken-agent-detection = { version = "0.1.0", path = "../franken_agent_detection", features = ["connectors", "chatgpt"] }
 wide = "*"  # Portable SIMD for P0 Opt 2: SIMD dot product
 arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
 bloomfilter = "*"  # Probabilistic membership testing for P2 Opt 3.3: Workspace Cache

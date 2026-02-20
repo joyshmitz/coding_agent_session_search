@@ -1811,7 +1811,9 @@ dependencies = [
 name = "franken-agent-detection"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
+ "base64 0.13.1",
  "bloomfilter",
  "chrono",
  "dirs",
