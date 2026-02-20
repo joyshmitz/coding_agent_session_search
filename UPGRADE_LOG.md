@@ -85,3 +85,37 @@
 ### Full-suite note
 - `cargo test` now advances deep into the suite and all newly touched regression areas pass.
 - There is still an existing long-running/hanging case in `tests/e2e_error_recovery.rs` (`test_corrupted_index_triggers_rebuild`) that prevented a clean single-command completion in this session.
+
+---
+
+## 2026-02-19 Dependency Update
+
+### Summary
+- Ran `cargo update` in `coding_agent_session_search`
+- **Updated:** 4 crates | **Unchanged behind latest:** 3 (transitive constraints)
+- Build verification via code review (full `cargo check` blocked by pre-existing ftui-widgets errors in sibling repo)
+
+### Lockfile updates applied
+
+| Crate | Old | New | Type | Notes |
+|-------|-----|-----|------|-------|
+| bumpalo | 3.20.1 | 3.20.2 | Patch | Internal arena allocator (transitive). No API changes. |
+| clap | 4.5.59 | 4.5.60 | Patch | Bug fixes only. Includes clap_builder 4.5.59→4.5.60. |
+| fastembed | 5.9.0 | 5.11.0 | Minor | New `external_initializers` field on `UserDefinedEmbeddingModel` (v5.10). TLS backend selection (v5.9). Nomic v2 MoE support (v5.11). |
+| security-framework | 3.6.0 | 3.7.0 | Minor | macOS-only. Includes security-framework-sys 2.16.0→2.17.0. |
+
+### fastembed 5.9→5.11 compatibility verification
+- v5.10 added `external_initializers` field to `UserDefinedEmbeddingModel` — breaks struct-literal construction
+- Our code uses `UserDefinedEmbeddingModel::new()` constructor (not struct literals) in both `src/search/fastembed_embedder.rs` and `frankensearch-embed` — **not affected**
+- `pooling` field remains `pub` with type `Option<Pooling>` — field assignment pattern unchanged
+
+### Remaining behind absolute latest
+| Crate | Current | Available | Reason |
+|-------|---------|-----------|--------|
+| generic-array | 0.14.7 | 0.14.9 | Transitive constraint |
+| indexmap | 2.12.1 | 2.13.0 | Transitive constraint |
+| libc | 0.2.180 | 0.2.182 | Transitive constraint |
+
+### Build verification
+- Full `cargo check` blocked by **pre-existing** compilation errors in `frankentui` sibling repo (`ftui-widgets`: 27 errors — missing lifetime specifiers, missing variables, unstable features). These errors exist independently of this update.
+- Compatibility verified through code review of all 4 updated crates' changelogs and our usage patterns.
