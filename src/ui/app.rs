@@ -9418,9 +9418,26 @@ impl CassApp {
         }
 
         let lines = self.build_help_lines(styles);
-        let line_count = lines.len();
+        // Estimate the number of *wrapped* screen rows rather than
+        // logical lines, since the Paragraph uses WrapMode::Word.
+        // For each line, estimate ceil(line_width / inner.width).
+        let wrapped_count: usize = if inner.width > 1 {
+            lines
+                .iter()
+                .map(|line| {
+                    let w: usize = line.spans().iter().map(|s| display_width(&s.content)).sum();
+                    if w == 0 {
+                        1
+                    } else {
+                        (w.div_ceil(inner.width as usize)).max(1)
+                    }
+                })
+                .sum()
+        } else {
+            lines.len()
+        };
         self.help_content_lines
-            .set((line_count.min(u16::MAX as usize)) as u16);
+            .set((wrapped_count.min(u16::MAX as usize)) as u16);
         self.help_visible_height.set(inner.height);
         let text = ftui::text::Text::from_lines(lines_into_static(lines));
         Paragraph::new(text)
