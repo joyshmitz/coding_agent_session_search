@@ -60,12 +60,12 @@ impl UpdateState {
     /// Load state from disk (asynchronous)
     pub async fn load_async() -> Self {
         let path = state_path();
-        match tokio::fs::read_to_string(&path).await {
+        match asupersync::fs::read_to_string(&path).await {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => {
                 let legacy = legacy_state_path();
                 if legacy != path
-                    && let Ok(content) = tokio::fs::read_to_string(&legacy).await
+                    && let Ok(content) = asupersync::fs::read_to_string(&legacy).await
                 {
                     return serde_json::from_str(&content).unwrap_or_default();
                 }
@@ -90,12 +90,12 @@ impl UpdateState {
     pub async fn save_async(&self) -> Result<()> {
         let path = state_path();
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
+            asupersync::fs::create_dir_all(parent)
                 .await
                 .with_context(|| format!("creating update state directory {}", parent.display()))?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        tokio::fs::write(&path, json)
+        asupersync::fs::write(&path, json)
             .await
             .with_context(|| format!("writing {}", path.display()))?;
         Ok(())
@@ -988,9 +988,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn integration_async_fetch_release_success() {
+    fn integration_blocking_fetch_release_success_v1() {
+        // Validates the blocking HTTP client path with a v1.0.0 tag.
+        // (The async reqwest client requires a tokio reactor, so we test
+        // the blocking path which is what the production TUI uses.)
         let release_json = r#"{
             "tag_name": "v1.0.0",
             "html_url": "https://github.com/test/repo/releases/tag/v1.0.0"
@@ -1002,7 +1005,7 @@ mod tests {
             std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
         }
 
-        let result = fetch_latest_release().await;
+        let result = fetch_latest_release_blocking();
 
         unsafe {
             std::env::remove_var("CASS_UPDATE_API_BASE_URL");
@@ -1010,20 +1013,20 @@ mod tests {
 
         handle.join().expect("server thread");
 
-        let release = result.expect("async fetch should succeed");
+        let release = result.expect("blocking fetch should succeed");
         assert_eq!(release.tag_name, "v1.0.0");
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn integration_async_fetch_release_error() {
+    fn integration_blocking_fetch_release_403_error() {
         let (addr, handle) = start_test_server(r#"{"error": "forbidden"}"#, 403);
 
         unsafe {
             std::env::set_var("CASS_UPDATE_API_BASE_URL", format!("http://{}", addr));
         }
 
-        let result = fetch_latest_release().await;
+        let result = fetch_latest_release_blocking();
 
         unsafe {
             std::env::remove_var("CASS_UPDATE_API_BASE_URL");

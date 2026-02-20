@@ -6,8 +6,8 @@ use tempfile::TempDir;
 
 /// Regression test for "NOT ... OR ..." boolean query semantics.
 /// Ensures a query like `NOT apple OR orange` does not regress to `apple OR orange`.
-#[tokio::test]
-async fn test_not_or_semantics_regression() -> anyhow::Result<()> {
+#[test]
+fn test_not_or_semantics_regression() -> anyhow::Result<()> {
     let dir = TempDir::new()?;
     let mut index = TantivyIndex::open_or_create(dir.path())?;
 

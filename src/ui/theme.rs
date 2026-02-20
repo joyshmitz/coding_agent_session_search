@@ -531,10 +531,17 @@ fn build_stylesheet(palette: &ThemePalette, is_dark: bool, flags: &ThemeFlags) -
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Check if an env var is set and truthy (non-empty, not "0", not "false").
+/// Check if an env var is set and truthy (non-empty, not "0"/"false"/"off"/"no").
 fn env_truthy(name: &str) -> bool {
     match dotenvy::var(name) {
-        Ok(val) => !val.is_empty() && val != "0" && val.to_lowercase() != "false",
+        Ok(val) => {
+            let normalized = val.trim().to_ascii_lowercase();
+            !normalized.is_empty()
+                && normalized != "0"
+                && normalized != "false"
+                && normalized != "off"
+                && normalized != "no"
+        }
         Err(_) => false,
     }
 }

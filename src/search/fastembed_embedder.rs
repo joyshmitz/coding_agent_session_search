@@ -194,8 +194,7 @@ impl FastEmbedder {
             });
         }
 
-        let model_file =
-            Self::read_required(onnx_path, "model.onnx", &config.embedder_id)?;
+        let model_file = Self::read_required(onnx_path, "model.onnx", &config.embedder_id)?;
         let tokenizer_file = Self::read_required(
             model_dir.join(TOKENIZER_JSON),
             TOKENIZER_JSON,

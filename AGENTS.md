@@ -54,9 +54,9 @@ We only use **Cargo** in this project, NEVER any other package manager.
 - **Configuration:** Cargo.toml only (single-crate project, no workspace)
 - **Unsafe code:** Forbidden
 
-### Async Runtime: Tokio
+### Async Runtime: asupersync
 
-This project uses **tokio** as its async runtime (`rt-multi-thread`, `macros`, `fs`, `process`, `io-util`, `time`, `signal`).
+This project uses **asupersync** as its async runtime (path dep at `../asupersync`). It provides `RuntimeBuilder`, `spawn_blocking`, `fs` ops, `net`, `signal`, and structured concurrency via `Cx`.
 
 ### Environment Variables
 
@@ -80,7 +80,7 @@ The `.env` file exists and **MUST NEVER be overwritten**.
 
 | Crate | Purpose |
 |-------|---------|
-| `tokio` | Async runtime (multi-thread, fs, process, signals) |
+| `asupersync` | Async runtime (multi-thread, fs, spawn_blocking, signals) |
 | `clap` | CLI argument parsing with derive macros |
 | `serde` + `serde_json` | Serialization |
 | `rusqlite` | SQLite database (bundled, modern) |

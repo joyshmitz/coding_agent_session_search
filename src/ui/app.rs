@@ -3114,6 +3114,16 @@ fn build_styled_hints(
     spans
 }
 
+/// Convert a `Line<'_>` to `Line<'static>` by making all spans owned.
+fn line_into_static(line: ftui::text::Line<'_>) -> ftui::text::Line<'static> {
+    ftui::text::Line::from_spans(line.into_iter().map(|s| s.into_owned()).collect::<Vec<_>>())
+}
+
+/// Convert a `Vec<Line<'_>>` to owned lines suitable for `Paragraph::new`.
+fn lines_into_static(lines: Vec<ftui::text::Line<'_>>) -> Vec<ftui::text::Line<'static>> {
+    lines.into_iter().map(line_into_static).collect()
+}
+
 #[derive(Clone)]
 struct FooterHudLane {
     key: &'static str,
@@ -6352,9 +6362,11 @@ impl CassApp {
         let inner = if self.show_stats_bar && !self.panes.is_empty() && inner.height >= 4 {
             let stats_row = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
             let stats_line = self.build_results_stats_line(inner.width, styles);
-            Paragraph::new(ftui::text::Text::from_lines(vec![stats_line]))
-                .style(styles.style(style_system::STYLE_TEXT_MUTED))
-                .render(stats_row, frame);
+            Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                stats_line,
+            )]))
+            .style(styles.style(style_system::STYLE_TEXT_MUTED))
+            .render(stats_row, frame);
             Rect::new(inner.x, inner.y, inner.width, inner.height - 1)
         } else {
             inner
@@ -6363,9 +6375,11 @@ impl CassApp {
             let overview_row = Rect::new(inner.x, inner.y, inner.width, 1);
             let overview =
                 self.build_results_overview_line(inner.width, total_hits, pane_count, styles);
-            Paragraph::new(ftui::text::Text::from_lines(vec![overview]))
-                .style(styles.style(style_system::STYLE_TEXT_MUTED))
-                .render(overview_row, frame);
+            Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                overview,
+            )]))
+            .style(styles.style(style_system::STYLE_TEXT_MUTED))
+            .render(overview_row, frame);
             Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1)
         } else {
             inner
@@ -6696,7 +6710,7 @@ impl CassApp {
         hit: &SearchHit,
         inner_width: u16,
         styles: &StyleContext,
-    ) -> Vec<ftui::text::Line> {
+    ) -> Vec<ftui::text::Line<'static>> {
         let label_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
         let value_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
         let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
@@ -6854,7 +6868,7 @@ impl CassApp {
             ftui::text::Span::styled(sep_line, label_style),
         ]));
 
-        lines
+        lines_into_static(lines)
     }
 
     /// Build a text-based sparkline from message timestamps.
@@ -7531,7 +7545,11 @@ impl CassApp {
         let mut match_idx = 0usize;
 
         for (line_no, line) in lines.iter_mut().enumerate() {
-            let spans: Vec<ftui::text::Span<'static>> = line.spans().to_vec();
+            let spans: Vec<ftui::text::Span<'static>> = line
+                .spans()
+                .iter()
+                .map(|s| s.clone().into_owned())
+                .collect();
             let mut rebuilt: Vec<ftui::text::Span<'static>> = Vec::with_capacity(spans.len() + 4);
 
             for span in spans {
@@ -8231,10 +8249,11 @@ impl CassApp {
 
             // Clamp scroll
             let effective_scroll = scroll.min(total_lines.saturating_sub(1));
-            let visible_lines: Vec<ftui::text::Line> = lines
+            let visible_lines: Vec<ftui::text::Line<'static>> = lines
                 .into_iter()
                 .skip(effective_scroll)
                 .take(visible_height)
+                .map(line_into_static)
                 .collect();
 
             // Render the text
@@ -8256,7 +8275,7 @@ impl CassApp {
                 let ind_y = content_area.y + content_area.height.saturating_sub(1);
                 let ind_area = Rect::new(ind_x, ind_y, ind_w as u16, 1);
                 let ind_style = styles.style(style_system::STYLE_TEXT_MUTED);
-                Paragraph::new(&*indicator)
+                Paragraph::new(indicator)
                     .style(ind_style)
                     .render(ind_area, frame);
             }
@@ -8306,7 +8325,7 @@ impl CassApp {
                         match_active_style,
                         match_inactive_style,
                     );
-                    Paragraph::new(ftui::text::Text::from_lines(vec![line]))
+                    Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(line)]))
                         .style(container_style)
                         .render(text_area, frame);
                 }
@@ -8319,7 +8338,7 @@ impl CassApp {
                     match_active_style,
                     match_inactive_style,
                 );
-                Paragraph::new(ftui::text::Text::from_lines(vec![line]))
+                Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(line)]))
                     .style(container_style)
                     .render(find_rect, frame);
             }
@@ -8582,7 +8601,9 @@ impl CassApp {
                     } else {
                         value_style
                     };
-                    Paragraph::new(line.as_str()).style(st).render(row, frame);
+                    Paragraph::new(line.to_string())
+                        .style(st)
+                        .render(row, frame);
                     y += 1;
                 }
             }
@@ -8620,7 +8641,7 @@ impl CassApp {
                         break;
                     }
                     let row = Rect::new(inner.x, y, inner.width, 1);
-                    Paragraph::new(line.as_str())
+                    Paragraph::new(line.to_string())
                         .style(value_style)
                         .render(row, frame);
                     y += 1;
@@ -8652,7 +8673,7 @@ impl CassApp {
                     } else {
                         muted_style
                     };
-                    Paragraph::new(&*text).style(st).render(row, frame);
+                    Paragraph::new(text).style(st).render(row, frame);
                     y += 1;
                 }
 
@@ -8662,7 +8683,7 @@ impl CassApp {
                     let pane_count = self.last_pane_rects.borrow().len();
                     let text = format!("Pills: {pill_count}  Panes: {pane_count}");
                     let row = Rect::new(inner.x, y, inner.width, 1);
-                    Paragraph::new(&*text).style(muted_style).render(row, frame);
+                    Paragraph::new(text).style(muted_style).render(row, frame);
                 }
             }
             InspectorTab::Resize => {
@@ -8713,7 +8734,7 @@ impl CassApp {
                             break;
                         }
                         let row = Rect::new(inner.x, y, inner.width, 1);
-                        Paragraph::new(line.as_str())
+                        Paragraph::new(line.to_string())
                             .style(value_style)
                             .render(row, frame);
                         y += 1;
@@ -9323,7 +9344,7 @@ impl CassApp {
         }
 
         let lines = self.build_help_lines(styles);
-        let text = ftui::text::Text::from_lines(lines);
+        let text = ftui::text::Text::from_lines(lines_into_static(lines));
         Paragraph::new(text)
             .style(styles.style(style_system::STYLE_TEXT_PRIMARY))
             .wrap(ftui::text::WrapMode::Word)
@@ -9391,7 +9412,7 @@ impl CassApp {
             } else {
                 text_style
             };
-            Paragraph::new(&*line).style(style).render(row_area, frame);
+            Paragraph::new(line).style(style).render(row_area, frame);
         }
     }
 
@@ -9543,7 +9564,7 @@ impl CassApp {
                 } else {
                     text_style
                 };
-                Paragraph::new(&*line).style(style).render(row_area, frame);
+                Paragraph::new(line).style(style).render(row_area, frame);
             }
         }
 
@@ -9557,7 +9578,7 @@ impl CassApp {
                     " "
                 }
             );
-            Paragraph::new(&*prompt).style(text_style).render(
+            Paragraph::new(prompt).style(text_style).render(
                 Rect::new(footer_area.x, footer_area.y, footer_area.width, 1),
                 frame,
             );
@@ -9636,19 +9657,19 @@ impl CassApp {
             let badge = format!(" {} ", state.agent_name);
             let location = format!("  {} | {}", state.workspace, state.timestamp);
             let badge_line = format!("{badge}{location}");
-            Paragraph::new(&*badge_line)
+            Paragraph::new(badge_line)
                 .style(accent_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
 
             let title_text = &state.title_preview;
-            Paragraph::new(title_text.as_str())
+            Paragraph::new(title_text.to_string())
                 .style(text_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
 
             let stats = format!("{} messages", state.message_count);
-            Paragraph::new(&*stats)
+            Paragraph::new(stats)
                 .style(muted_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
@@ -9661,7 +9682,7 @@ impl CassApp {
         // Separator.
         if y < inner.y + inner.height {
             let sep = "\u{2500}".repeat(w as usize);
-            Paragraph::new(&*sep)
+            Paragraph::new(sep)
                 .style(muted_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
@@ -9696,7 +9717,7 @@ impl CassApp {
             };
             let line = format!(" Output: {truncated}{cursor}{hint}");
             let row_style = if focused { accent_style } else { text_style };
-            Paragraph::new(&*line)
+            Paragraph::new(line)
                 .style(row_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
@@ -9719,7 +9740,7 @@ impl CassApp {
             let focused = state.focused == field;
             let row_style = if focused { accent_style } else { text_style };
             let line = format!(" {mark} {label}");
-            Paragraph::new(&*line)
+            Paragraph::new(line)
                 .style(row_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
@@ -9741,7 +9762,7 @@ impl CassApp {
             };
             let line = format!("     Password: {display}{cursor} {vis_hint}");
             let row_style = if focused { accent_style } else { text_style };
-            Paragraph::new(&*line)
+            Paragraph::new(line)
                 .style(row_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
@@ -9753,7 +9774,7 @@ impl CassApp {
             let focused = state.focused == ExportField::ShowTimestamps;
             let row_style = if focused { accent_style } else { text_style };
             let line = format!(" {mark} Show timestamps");
-            Paragraph::new(&*line)
+            Paragraph::new(line)
                 .style(row_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
@@ -9765,14 +9786,14 @@ impl CassApp {
         // ── Preview section ────────────────────────────────────────
         if y < inner.y + inner.height {
             let sep2 = "\u{2500}".repeat(w as usize);
-            Paragraph::new(&*sep2)
+            Paragraph::new(sep2)
                 .style(muted_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
         }
 
         if y < inner.y + inner.height {
-            Paragraph::new(state.filename_preview.as_str())
+            Paragraph::new(state.filename_preview.clone())
                 .style(text_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
@@ -9795,7 +9816,7 @@ impl CassApp {
                 size_str,
                 features.join(" | ")
             );
-            Paragraph::new(&*preview)
+            Paragraph::new(preview)
                 .style(muted_style)
                 .render(Rect::new(x, y, w, 1), frame);
             y += 1;
@@ -9818,7 +9839,7 @@ impl CassApp {
                 ExportProgress::Error(msg) => (format!("Error: {msg}"), error_style),
             };
             if !progress_text.is_empty() {
-                Paragraph::new(&*progress_text)
+                Paragraph::new(progress_text)
                     .style(pstyle)
                     .render(Rect::new(x, y, w, 1), frame);
             }
@@ -9845,7 +9866,7 @@ impl CassApp {
 
             // Build hint string with consistent spacing.
             let hints = format!(" Tab=Navigate  Space=Toggle {export_label} Esc=Cancel");
-            Paragraph::new(&*hints)
+            Paragraph::new(hints)
                 .style(btn_style)
                 .render(Rect::new(x, footer_y, w, 1), frame);
         }
@@ -16395,7 +16416,7 @@ impl super::ftui_adapter::Model for CassApp {
             if banner_text.chars().count() > banner_area.width as usize {
                 banner_text = elide_text(&banner_text, banner_area.width as usize);
             }
-            Paragraph::new(&*banner_text)
+            Paragraph::new(banner_text)
                 .style(if self.update_upgrade_armed {
                     danger_style
                 } else {
@@ -16416,9 +16437,11 @@ impl super::ftui_adapter::Model for CassApp {
             };
             Block::new().style(shell_bg_style).render(shell_area, frame);
             let shell_line = self.build_surface_shell_line(shell_area.width, &styles, apply_style);
-            Paragraph::new(ftui::text::Text::from_lines(vec![shell_line]))
-                .style(shell_bg_style)
-                .render(shell_area, frame);
+            Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                shell_line,
+            )]))
+            .style(shell_bg_style)
+            .render(shell_area, frame);
             layout_area = Rect::new(
                 layout_area.x,
                 layout_area.y + 1,
@@ -16596,7 +16619,10 @@ impl super::ftui_adapter::Model for CassApp {
                             ftui::text::Span::styled("\u{2502}", caret_style),
                         ]),
                     };
-                    Paragraph::new(query_line).render(query_row, frame);
+                    Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                        query_line,
+                    )]))
+                    .render(query_row, frame);
 
                     if rows.len() > 1 {
                         let pills = self.filter_pills();
@@ -16612,7 +16638,10 @@ impl super::ftui_adapter::Model for CassApp {
                             text_muted_style,
                         );
                         *self.last_pill_rects.borrow_mut() = pill_rects;
-                        Paragraph::new(pill_line).render(rows[1], frame);
+                        Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                            pill_line,
+                        )]))
+                        .render(rows[1], frame);
                     }
 
                     if rows.len() > 2 {
@@ -16625,7 +16654,10 @@ impl super::ftui_adapter::Model for CassApp {
                             crumb_inactive_style,
                             crumb_sep_style,
                         );
-                        Paragraph::new(crumb_line).render(rows[2], frame);
+                        Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                            crumb_line,
+                        )]))
+                        .render(rows[2], frame);
                     }
                 }
 
@@ -16733,7 +16765,7 @@ impl super::ftui_adapter::Model for CassApp {
                             }
                         }
                         let divider: String = (0..handle.height).map(|_| "\u{2502}\n").collect();
-                        Paragraph::new(divider.trim_end())
+                        Paragraph::new(divider.trim_end().to_string())
                             .style(handle_style)
                             .render(handle, frame);
                     }
@@ -16945,18 +16977,22 @@ impl super::ftui_adapter::Model for CassApp {
                     let row1 = Rect::new(footer_area.x, footer_area.y, footer_area.width, 1);
                     let status_line =
                         build_footer_hud_line(&hud_lanes, row1.width, kbd_key_s, text_muted_style);
-                    Paragraph::new(ftui::text::Text::from_lines(vec![status_line]))
-                        .style(text_muted_style)
-                        .render(row1, frame);
+                    Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                        status_line,
+                    )]))
+                    .style(text_muted_style)
+                    .render(row1, frame);
 
                     // Row 2: Styled key hints
                     let row2 = Rect::new(footer_area.x, footer_area.y + 1, footer_area.width, 1);
                     let hints_text = self.build_contextual_footer_hints(footer_area.width);
                     let hint_spans = build_styled_hints(&hints_text, kbd_key_s, kbd_desc_s);
                     let hints_line = ftui::text::Line::from_spans(hint_spans);
-                    Paragraph::new(ftui::text::Text::from_lines(vec![hints_line]))
-                        .style(text_muted_style)
-                        .render(row2, frame);
+                    Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                        hints_line,
+                    )]))
+                    .style(text_muted_style)
+                    .render(row2, frame);
                 } else {
                     // Fallback: single row HUD line.
                     let status_line = build_footer_hud_line(
@@ -16965,9 +17001,11 @@ impl super::ftui_adapter::Model for CassApp {
                         kbd_key_s,
                         text_muted_style,
                     );
-                    Paragraph::new(ftui::text::Text::from_lines(vec![status_line]))
-                        .style(text_muted_style)
-                        .render(footer_area, frame);
+                    Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                        status_line,
+                    )]))
+                    .style(text_muted_style)
+                    .render(footer_area, frame);
                 }
             }
 
@@ -17042,9 +17080,11 @@ impl super::ftui_adapter::Model for CassApp {
                         ftui::Style::new().fg(dim_packed_color(analytics_accent, 0.70)),
                         text_muted_style,
                     );
-                    Paragraph::new(tab_line)
-                        .style(text_muted_style)
-                        .render(header_rows[0], frame);
+                    Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                        tab_line,
+                    )]))
+                    .style(text_muted_style)
+                    .render(header_rows[0], frame);
 
                     if header_rows.len() > 1 {
                         let metrics_line = self.analytics_metrics_line(
@@ -17053,14 +17093,16 @@ impl super::ftui_adapter::Model for CassApp {
                             ftui::Style::new().fg(analytics_accent).bold(),
                             text_muted_style,
                         );
-                        Paragraph::new(metrics_line)
-                            .style(text_muted_style)
-                            .render(header_rows[1], frame);
+                        Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+                            metrics_line,
+                        )]))
+                        .style(text_muted_style)
+                        .render(header_rows[1], frame);
                     }
 
                     if header_rows.len() > 2 && atopo.show_filter_summary {
                         let filter_desc = self.analytics_filter_summary();
-                        Paragraph::new(&*filter_desc)
+                        Paragraph::new(filter_desc)
                             .style(text_muted_style)
                             .render(header_rows[2], frame);
                     }
@@ -17267,7 +17309,7 @@ impl super::ftui_adapter::Model for CassApp {
                             } else {
                                 styles.style(style_system::STYLE_TEXT_PRIMARY)
                             };
-                            Paragraph::new(&*display)
+                            Paragraph::new(display)
                                 .style(row_style)
                                 .render(row_area, frame);
                         }
@@ -17281,7 +17323,7 @@ impl super::ftui_adapter::Model for CassApp {
                     self.sources_view.items.len(),
                     self.sources_view.status
                 );
-                Paragraph::new(&*sources_status)
+                Paragraph::new(sources_status)
                     .style(text_muted_style)
                     .render(vertical[2], frame);
             }
@@ -17388,7 +17430,7 @@ impl super::ftui_adapter::Model for CassApp {
                     } else {
                         text_muted_style
                     };
-                    Paragraph::new(&*line)
+                    Paragraph::new(line)
                         .style(row_style_here)
                         .render(row_area, frame);
                 }
@@ -30883,7 +30925,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
 
         // Render with dark theme
         let dark_styles = StyleContext::from_options(StyleOptions::default());
-        let dark_lines = app.build_messages_lines(&hit, 120, &dark_styles);
+        let dark_lines = lines_into_static(app.build_messages_lines(&hit, 120, &dark_styles));
 
         // Switch to light
         let _ = app.update(CassMsg::ThemeToggled);
@@ -34411,13 +34453,18 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             "inactive slots:",
         )]))
         .render(rows[0], &mut frame);
-        Paragraph::new(ftui::text::Text::from_lines(vec![inactive_line]))
-            .render(rows[1], &mut frame);
+        Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+            inactive_line,
+        )]))
+        .render(rows[1], &mut frame);
         Paragraph::new(ftui::text::Text::from_lines(vec![ftui::text::Line::from(
             "active filters:",
         )]))
         .render(rows[2], &mut frame);
-        Paragraph::new(ftui::text::Text::from_lines(vec![active_line])).render(rows[3], &mut frame);
+        Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
+            active_line,
+        )]))
+        .render(rows[3], &mut frame);
 
         frame.buffer
     }

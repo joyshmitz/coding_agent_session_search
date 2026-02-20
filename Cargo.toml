@@ -14,7 +14,7 @@ anyhow = "*"
 thiserror = "*"
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter", "fmt", "ansi"] }
-tokio = { version = "*", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "signal"] }
+asupersync = { version = "0.2.0", path = "../asupersync", features = ["test-internals"] }
 clap = { version = "*", features = ["derive", "cargo", "env", "unicode", "wrap_help"] }
 clap_complete = "*"
 clap_mangen = "*"
@@ -77,9 +77,6 @@ arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
 bloomfilter = "*"  # Probabilistic membership testing for P2 Opt 3.3: Workspace Cache
 hnsw_rs = "*"  # Opt 9: Approximate Nearest Neighbor with HNSW
 ouroboros = "*"  # Safe self-referential wrapper for HNSW loader lifetime
-
-# Unix system calls for daemon resource management
-libc = "*"
 
 # Crypto for ChatGPT encrypted conversations and HTML export encryption
 aes-gcm = "*"

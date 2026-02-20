@@ -11,8 +11,6 @@
 
 use anyhow::Result;
 use std::net::TcpListener;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 mod util;
@@ -429,13 +427,36 @@ fn preview_error_display() {
     tracker.complete();
 }
 
-/// Test preview server can serve static files (requires async runtime)
-#[tokio::test]
-async fn preview_serves_static_files() -> Result<()> {
+/// Helper to start a preview server in a background thread.
+/// Returns the thread handle and a port to connect to.
+fn start_preview_server_background(
+    site_dir: &std::path::Path,
+    port: u16,
+) -> std::thread::JoinHandle<()> {
     use coding_agent_search::pages::preview::PreviewConfig;
-    use std::fs;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+
+    let config = PreviewConfig {
+        site_dir: site_dir.to_path_buf(),
+        port,
+        open_browser: false,
+    };
+
+    // Run the server in a background thread with its own runtime.
+    std::thread::spawn(move || {
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        let _ = rt.block_on(coding_agent_search::pages::preview::start_preview_server(
+            config,
+        ));
+    })
+}
+
+/// Test preview server can serve static files
+#[test]
+fn preview_serves_static_files() -> Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
 
     let tracker = tracker_for("preview_serves_static_files");
     let _trace_guard = tracker.trace_env_guard();
@@ -445,50 +466,34 @@ async fn preview_serves_static_files() -> Result<()> {
     let temp = tempfile::TempDir::new()?;
     let site_dir = temp.path();
 
-    fs::write(
+    std::fs::write(
         site_dir.join("index.html"),
         "<!doctype html><html><body>Test</body></html>",
     )?;
-    fs::write(site_dir.join("styles.css"), "body { color: red; }")?;
-    fs::write(site_dir.join("app.js"), "console.log('test');")?;
-    fs::create_dir(site_dir.join("payload"))?;
-    fs::write(site_dir.join("payload/chunk.bin"), [0u8; 1024])?;
+    std::fs::write(site_dir.join("styles.css"), "body { color: red; }")?;
+    std::fs::write(site_dir.join("app.js"), "console.log('test');")?;
+    std::fs::create_dir(site_dir.join("payload"))?;
+    std::fs::write(site_dir.join("payload/chunk.bin"), [0u8; 1024])?;
 
     tracker.end("setup", Some("Create test site"), phase_start);
 
     // Start preview server on ephemeral port
     let phase_start = tracker.start("start_server", Some("Start preview server"));
     let port = get_ephemeral_port();
-
-    let config = PreviewConfig {
-        site_dir: site_dir.to_path_buf(),
-        port,
-        open_browser: false, // Don't try to open browser in test
-    };
-
-    // Start server in background task
-    let server_running = Arc::new(AtomicBool::new(true));
-    let server_running_clone = server_running.clone();
-
-    let server_handle = tokio::spawn(async move {
-        let _ = coding_agent_search::pages::preview::start_preview_server(config).await;
-        server_running_clone.store(false, Ordering::SeqCst);
-    });
+    let _server_handle = start_preview_server_background(site_dir, port);
 
     // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    std::thread::sleep(Duration::from_millis(200));
     tracker.end("start_server", Some("Start preview server"), phase_start);
 
     // Test: Fetch index.html
     let phase_start = tracker.start("fetch_index", Some("Fetch index.html"));
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
-    stream
-        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await?;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
+    stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
 
     let mut response = vec![0u8; 4096];
-    let n = stream.read(&mut response).await?;
+    let n = stream.read(&mut response)?;
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     assert!(
@@ -514,13 +519,11 @@ async fn preview_serves_static_files() -> Result<()> {
     // Test: Fetch CSS file
     let phase_start = tracker.start("fetch_css", Some("Fetch CSS file"));
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
-    stream
-        .write_all(b"GET /styles.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await?;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
+    stream.write_all(b"GET /styles.css HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
 
     let mut response = vec![0u8; 4096];
-    let n = stream.read(&mut response).await?;
+    let n = stream.read(&mut response)?;
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     assert!(
@@ -537,13 +540,11 @@ async fn preview_serves_static_files() -> Result<()> {
     // Test: 404 for non-existent file
     let phase_start = tracker.start("fetch_404", Some("Verify 404 handling"));
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
-    stream
-        .write_all(b"GET /nonexistent.txt HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await?;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
+    stream.write_all(b"GET /nonexistent.txt HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
 
     let mut response = vec![0u8; 4096];
-    let n = stream.read(&mut response).await?;
+    let n = stream.read(&mut response)?;
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     assert!(
@@ -553,20 +554,15 @@ async fn preview_serves_static_files() -> Result<()> {
 
     tracker.end("fetch_404", Some("Verify 404 handling"), phase_start);
 
-    // Cleanup: Abort server
-    server_handle.abort();
-
     tracker.complete();
     Ok(())
 }
 
 /// Test preview server blocks directory traversal
-#[tokio::test]
-async fn preview_blocks_traversal() -> Result<()> {
-    use coding_agent_search::pages::preview::PreviewConfig;
-    use std::fs;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+#[test]
+fn preview_blocks_traversal() -> Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
 
     let tracker = tracker_for("preview_blocks_traversal");
     let _trace_guard = tracker.trace_env_guard();
@@ -574,33 +570,19 @@ async fn preview_blocks_traversal() -> Result<()> {
     let temp = tempfile::TempDir::new()?;
     let site_dir = temp.path();
 
-    // Create a file outside site_dir that we'll try to access
-    let _outside_file = temp.path().join("../sensitive.txt");
-    // Can't actually create a file outside tempdir, so just test the traversal is blocked
-
-    fs::write(site_dir.join("index.html"), "<html></html>")?;
+    std::fs::write(site_dir.join("index.html"), "<html></html>")?;
 
     let port = get_ephemeral_port();
-    let config = PreviewConfig {
-        site_dir: site_dir.to_path_buf(),
-        port,
-        open_browser: false,
-    };
+    let _server_handle = start_preview_server_background(site_dir, port);
 
-    let server_handle = tokio::spawn(async move {
-        let _ = coding_agent_search::pages::preview::start_preview_server(config).await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    std::thread::sleep(Duration::from_millis(200));
 
     // Try directory traversal
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
-    stream
-        .write_all(b"GET /../etc/passwd HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await?;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
+    stream.write_all(b"GET /../etc/passwd HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
 
     let mut response = vec![0u8; 4096];
-    let n = stream.read(&mut response).await?;
+    let n = stream.read(&mut response)?;
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     assert!(
@@ -608,8 +590,6 @@ async fn preview_blocks_traversal() -> Result<()> {
         "Directory traversal should be blocked: {}",
         &response_str[..200.min(n)]
     );
-
-    server_handle.abort();
 
     tracker.complete();
     Ok(())
@@ -620,14 +600,12 @@ async fn preview_blocks_traversal() -> Result<()> {
 // ============================================
 
 /// Full integration: build bundle then serve via preview
-#[tokio::test]
-async fn integration_build_and_preview() -> Result<()> {
+#[test]
+fn integration_build_and_preview() -> Result<()> {
     use coding_agent_search::pages::bundle::BundleBuilder;
     use coding_agent_search::pages::encrypt::EncryptionEngine;
-    use coding_agent_search::pages::preview::PreviewConfig;
-    use std::fs;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
 
     let tracker = tracker_for("integration_build_and_preview");
     let _trace_guard = tracker.trace_env_guard();
@@ -638,15 +616,15 @@ async fn integration_build_and_preview() -> Result<()> {
     let encrypted_dir = temp.path().join("encrypted");
     let bundle_dir = temp.path().join("bundle");
 
-    fs::create_dir_all(&encrypted_dir)?;
+    std::fs::create_dir_all(&encrypted_dir)?;
 
     let test_file = temp.path().join("test.db");
-    fs::write(&test_file, b"Integration test database content")?;
+    std::fs::write(&test_file, b"Integration test database content")?;
 
     let mut engine = EncryptionEngine::default();
     engine.add_password_slot("integration-test-password")?;
     engine.encrypt_file(&test_file, &encrypted_dir, |_, _| {})?;
-    fs::remove_file(&test_file)?;
+    std::fs::remove_file(&test_file)?;
 
     let builder = BundleBuilder::new()
         .title("Integration Test Bundle")
@@ -658,17 +636,9 @@ async fn integration_build_and_preview() -> Result<()> {
     // Phase 2: Start preview server
     let phase_start = tracker.start("start_preview", Some("Start preview server"));
     let port = get_ephemeral_port();
-    let config = PreviewConfig {
-        site_dir: result.site_dir.clone(),
-        port,
-        open_browser: false,
-    };
+    let _server_handle = start_preview_server_background(&result.site_dir, port);
 
-    let server_handle = tokio::spawn(async move {
-        let _ = coding_agent_search::pages::preview::start_preview_server(config).await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    std::thread::sleep(Duration::from_millis(250));
     tracker.end("start_preview", Some("Start preview server"), phase_start);
 
     // Phase 3: Verify all bundle files are served correctly
@@ -685,12 +655,12 @@ async fn integration_build_and_preview() -> Result<()> {
     ];
 
     for (path, expected_type) in files_to_check {
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).await?;
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
         let request = format!("GET {} HTTP/1.1\r\nHost: localhost\r\n\r\n", path);
-        stream.write_all(request.as_bytes()).await?;
+        stream.write_all(request.as_bytes())?;
 
         let mut response = vec![0u8; 8192];
-        let n = stream.read(&mut response).await?;
+        let n = stream.read(&mut response)?;
         let response_str = String::from_utf8_lossy(&response[..n]);
 
         assert!(
@@ -713,8 +683,6 @@ async fn integration_build_and_preview() -> Result<()> {
         Some("Verify files served correctly"),
         phase_start,
     );
-
-    server_handle.abort();
 
     tracker.metrics(
         "integration",

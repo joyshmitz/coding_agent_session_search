@@ -40,13 +40,9 @@ fn main() -> anyhow::Result<()> {
         Some(coding_agent_search::Commands::Search { .. })
     );
     let runtime = if use_current_thread {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
+        asupersync::runtime::RuntimeBuilder::current_thread().build()?
     } else {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
+        asupersync::runtime::RuntimeBuilder::multi_thread().build()?
     };
 
     match runtime.block_on(coding_agent_search::run_with_parsed(parsed)) {

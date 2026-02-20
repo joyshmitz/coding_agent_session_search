@@ -10,6 +10,18 @@ use std::process::Command;
 
 use tracing::{debug, warn};
 
+// Inline POSIX constants and FFI for sysconf / setpriority — avoids a direct `libc` dependency.
+#[cfg(target_os = "linux")]
+mod posix {
+    use std::ffi::{c_int, c_long, c_uint};
+    pub const _SC_PAGESIZE: c_int = 30;
+    pub const PRIO_PROCESS: c_int = 0;
+    unsafe extern "C" {
+        pub fn sysconf(name: c_int) -> c_long;
+        pub fn setpriority(which: c_int, who: c_uint, prio: c_int) -> c_int;
+    }
+}
+
 /// Resource monitor for tracking daemon resource usage.
 #[derive(Debug, Default)]
 pub struct ResourceMonitor {
@@ -68,7 +80,7 @@ impl ResourceMonitor {
     #[cfg(target_os = "linux")]
     fn page_size() -> u64 {
         // SAFETY: sysconf has no pointer arguments and is thread-safe for this key.
-        let raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let raw = unsafe { posix::sysconf(posix::_SC_PAGESIZE) };
         if raw > 0 { raw as u64 } else { 4096 }
     }
 
@@ -90,7 +102,11 @@ impl ResourceMonitor {
             // SAFETY: setpriority operates on the current process id and does not
             // retain pointers. We pass scalar values only.
             let result = unsafe {
-                libc::setpriority(libc::PRIO_PROCESS, self.pid as libc::id_t, nice_value)
+                posix::setpriority(
+                    posix::PRIO_PROCESS,
+                    self.pid as std::ffi::c_uint,
+                    nice_value,
+                )
             };
             if result != 0 {
                 let err = std::io::Error::last_os_error();

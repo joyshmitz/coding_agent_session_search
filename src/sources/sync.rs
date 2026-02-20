@@ -465,7 +465,15 @@ impl SyncEngine {
         if !is_openrsync() {
             cmd.arg("--protect-args");
         }
-        cmd.args(["--timeout", &timeout_str, "-e", &ssh_opts, "--", &remote_spec, local_path_str]);
+        cmd.args([
+            "--timeout",
+            &timeout_str,
+            "-e",
+            &ssh_opts,
+            "--",
+            &remote_spec,
+            local_path_str,
+        ]);
 
         tracing::debug!(
             host = %host,

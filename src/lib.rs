@@ -23,7 +23,6 @@ use base64::prelude::*;
 use chrono::Utc;
 use clap::{Arg, ArgAction, Command, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use indexer::IndexOptions;
-use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -3403,18 +3402,9 @@ async fn execute_cli(
                 }
                 Commands::Models(subcmd) => {
                     let subcmd = subcmd.clone();
-                    let result = tokio::task::spawn_blocking(move || run_models_command(subcmd))
-                        .await
-                        .map_err(|err| CliError {
-                            code: 70,
-                            kind: "runtime",
-                            message: format!("models command panicked: {err}"),
-                            hint: Some(
-                                "Retry the command; if it persists, report the panic output."
-                                    .into(),
-                            ),
-                            retryable: true,
-                        })?;
+                    let result =
+                        asupersync::runtime::spawn_blocking(move || run_models_command(subcmd))
+                            .await;
                     result?;
                 }
                 Commands::Import(subcmd) => {
@@ -11454,12 +11444,12 @@ async fn maybe_prompt_for_update(once: bool) -> Result<()> {
         return Ok(());
     }
 
-    let client = Client::builder()
-        .user_agent("coding-agent-search (update-check)")
-        .timeout(Duration::from_secs(3))
-        .build()?;
+    // Use spawn_blocking so the network I/O doesn't block the async worker.
+    // reqwest's async client requires a tokio reactor we no longer have.
+    let update_result =
+        asupersync::runtime::spawn_blocking(|| latest_release_version_blocking()).await;
 
-    let Some((latest_tag, latest_ver)) = latest_release_version(&client).await else {
+    let Some((latest_tag, latest_ver)) = update_result else {
         return Ok(());
     };
 
@@ -11500,13 +11490,18 @@ async fn maybe_prompt_for_update(once: bool) -> Result<()> {
     Ok(())
 }
 
-async fn latest_release_version(client: &Client) -> Option<(String, Version)> {
+fn latest_release_version_blocking() -> Option<(String, Version)> {
     let url = format!("https://api.github.com/repos/{OWNER}/{REPO}/releases/latest");
-    let resp = client.get(url).send().await.ok()?;
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("coding-agent-search (update-check)")
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let resp = client.get(url).send().ok()?;
     if !resp.status().is_success() {
         return None;
     }
-    let info: ReleaseInfo = resp.json().await.ok()?;
+    let info: ReleaseInfo = resp.json().ok()?;
     let tag = info.tag_name;
     let version_str = tag.trim_start_matches('v');
     let version = Version::parse(version_str).ok()?;

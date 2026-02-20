@@ -542,7 +542,7 @@ fn render_kpi_tile(
         width: area.width,
         height: 1,
     };
-    Paragraph::new(&*format!(" {label}"))
+    Paragraph::new(format!(" {label}"))
         .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 130)))
         .render(label_area, frame);
 
@@ -557,7 +557,7 @@ fn render_kpi_tile(
         width: area.width.min(value_width),
         height: 1,
     };
-    Paragraph::new(&*value_str)
+    Paragraph::new(value_str)
         .style(ftui::Style::new().fg(fg_color).bold())
         .render(value_area, frame);
 
@@ -579,8 +579,9 @@ fn render_kpi_tile(
         }
     }
 
-    // Optional Row 3: burn rate or delta (if height allows)
-    if area.height >= 3 && sparkline_data.len() >= 2 {
+    // Optional Row 3: burn rate or delta (if height allows).
+    // Require >= 14 data points so both 7-day windows are fully populated.
+    if area.height >= 3 && sparkline_data.len() >= 14 {
         let recent: f64 = sparkline_data
             .iter()
             .rev()
@@ -610,7 +611,7 @@ fn render_kpi_tile(
                 ("\u{25c6}", PackedRgba::rgb(150, 150, 150)) // ◆ gray (flat)
             };
             let delta_text = format!(" {arrow} {pct:+.0}% vs prior 7d");
-            Paragraph::new(&*delta_text)
+            Paragraph::new(delta_text)
                 .style(ftui::Style::new().fg(color))
                 .render(delta_area, frame);
         }
@@ -693,7 +694,7 @@ pub fn render_explorer(
         ),
         chunks[0].width as usize,
     );
-    Paragraph::new(&*header_text)
+    Paragraph::new(header_text)
         .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 200)))
         .render(chunks[0], frame);
 
@@ -1463,7 +1464,7 @@ pub fn render_heatmap(
     };
 
     let rows = 7u16; // days of week
-    let day_count = series.len() as u16;
+    let day_count = (series.len().min(u16::MAX as usize)) as u16;
     let cols = day_count.div_ceil(rows);
 
     // Determine how many weeks we can show given available width.
@@ -1571,8 +1572,8 @@ pub fn render_heatmap(
         if sel_col < visible_cols {
             let sx = grid_inner.x + sel_col * cell_w;
             let sy = grid_inner.y + sel_row * cell_h;
-            let sw = cell_w.min(grid_inner.x + grid_inner.width - sx);
-            let sh = cell_h.min(grid_inner.y + grid_inner.height - sy);
+            let sw = cell_w.min((grid_inner.x + grid_inner.width).saturating_sub(sx));
+            let sh = cell_h.min((grid_inner.y + grid_inner.height).saturating_sub(sy));
             if sw > 0 && sh > 0 {
                 let sel_rect = Rect {
                     x: sx,
@@ -1596,7 +1597,13 @@ pub fn render_heatmap(
     // ── 7. Tooltip: show selected day's date + value ────────────────────
     if selection < series.len() {
         let (label, norm) = &series[selection];
-        let raw_val = norm * max_raw;
+        // For Coverage the series values are raw fractions (0..1 = 0%..100%),
+        // not values normalised against max_raw. Reconstruct accordingly.
+        let raw_val = if matches!(metric, HeatmapMetric::Coverage) {
+            norm * 100.0
+        } else {
+            norm * max_raw
+        };
         let val_str = format_heatmap_value(raw_val, metric);
         let tip = format!(" {} : {} ", label, val_str);
         let tip_w = tip.len() as u16;
@@ -1741,7 +1748,7 @@ pub fn render_breakdowns(
             " No {} breakdown data for the current filters.",
             tab.label()
         );
-        Paragraph::new(&*msg)
+        Paragraph::new(msg)
             .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
             .render(area, frame);
         return;
@@ -1880,7 +1887,7 @@ fn breakdown_tabs_line(active: BreakdownTab, width: usize) -> String {
 fn render_breakdown_tabs(active: BreakdownTab, area: Rect, frame: &mut ftui::Frame) {
     let text = breakdown_tabs_line(active, area.width as usize);
     let style = ftui::Style::new().fg(PackedRgba::rgb(180, 200, 255)).bold();
-    Paragraph::new(&*text).style(style).render(area, frame);
+    Paragraph::new(text).style(style).render(area, frame);
 }
 
 /// Shorten a label (e.g., workspace path) to fit in `max_len` characters.
@@ -1946,7 +1953,7 @@ pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
     // ── Header ──
     let header_style = ftui::Style::new().fg(PackedRgba::rgb(180, 200, 255)).bold();
     let header = tools_header_line(chunks[0].width as usize);
-    Paragraph::new(&*header)
+    Paragraph::new(header)
         .style(header_style)
         .render(chunks[0], frame);
 
@@ -1968,7 +1975,7 @@ pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         let pct_share = (row.tool_call_count as f64 / total_calls) * 100.0;
         let line = tools_row_line(row, pct_share, row_rect.width as usize);
         let color = agent_color(i);
-        Paragraph::new(&*line)
+        Paragraph::new(line)
             .style(ftui::Style::new().fg(color))
             .render(row_rect, frame);
     }
@@ -1998,7 +2005,7 @@ pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         ),
         chunks[summary_idx].width as usize,
     );
-    Paragraph::new(&*summary)
+    Paragraph::new(summary)
         .style(ftui::Style::new().fg(PackedRgba::rgb(150, 150, 150)))
         .render(chunks[summary_idx], frame);
 }
@@ -2098,7 +2105,7 @@ fn render_plans(data: &AnalyticsChartData, selection: usize, area: Rect, frame: 
         ),
         area.width as usize,
     );
-    Paragraph::new(&*header)
+    Paragraph::new(header)
         .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 200)))
         .render(
             Rect {
@@ -2159,7 +2166,7 @@ fn render_plans(data: &AnalyticsChartData, selection: usize, area: Rect, frame: 
             .style(ftui::Style::new().bg(PackedRgba::rgb(80, 60, 0)))
             .render(bar_area, frame);
         // Label on top
-        Paragraph::new(&*label)
+        Paragraph::new(label)
             .style(ftui::Style::new().fg(fg))
             .render(row_area, frame);
     }
@@ -2205,7 +2212,7 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
         chunks[0].width as usize,
     );
     let cov_color = coverage_color(data.coverage_pct);
-    Paragraph::new(&*line1)
+    Paragraph::new(line1)
         .style(ftui::Style::new().fg(cov_color))
         .render(chunks[0], frame);
     if chunks[0].height > 1 {
@@ -2215,7 +2222,7 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
             width: chunks[0].width,
             height: 1,
         };
-        Paragraph::new(&*line2)
+        Paragraph::new(line2)
             .style(ftui::Style::new().fg(PackedRgba::rgb(160, 160, 160)))
             .render(line2_area, frame);
     }
@@ -2239,7 +2246,7 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
             width: chunks[1].width,
             height: 1,
         };
-        Paragraph::new(&*header_trunc)
+        Paragraph::new(header_trunc)
             .style(ftui::Style::new().fg(PackedRgba::rgb(200, 200, 200)).bold())
             .render(header_area, frame);
 
@@ -2289,7 +2296,7 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
                 width: chunks[1].width,
                 height: 1,
             };
-            Paragraph::new(&*row_trunc)
+            Paragraph::new(row_trunc)
                 .style(ftui::Style::new().fg(agent_color(i)))
                 .render(row_area, frame);
             // Overlay data indicator in its own color at the right edge.
@@ -2306,7 +2313,7 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
                     data_indicator,
                     width = (indicator_len + 1) as usize
                 );
-                Paragraph::new(&*ind_text)
+                Paragraph::new(ind_text)
                     .style(ftui::Style::new().fg(indicator_color))
                     .render(ind_area, frame);
             }
@@ -2510,15 +2517,20 @@ fn render_selection_indicator(
 
 /// Format a large number with comma separators (e.g. 1234567 → "1,234,567").
 fn format_number(n: i64) -> String {
-    let s = n.to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().rev().enumerate() {
+    let (prefix, abs_str) = if n < 0 {
+        ("-", n.unsigned_abs().to_string())
+    } else {
+        ("", n.to_string())
+    };
+    let mut result = String::with_capacity(abs_str.len() + abs_str.len() / 3 + prefix.len());
+    for (i, c) in abs_str.chars().rev().enumerate() {
         if i > 0 && i % 3 == 0 {
             result.push(',');
         }
         result.push(c);
     }
-    result.chars().rev().collect()
+    let grouped: String = result.chars().rev().collect();
+    format!("{prefix}{grouped}")
 }
 
 // ---------------------------------------------------------------------------

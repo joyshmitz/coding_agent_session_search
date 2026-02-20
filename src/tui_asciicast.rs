@@ -11,6 +11,25 @@ use std::sync::{
 };
 use std::time::Duration;
 
+// Inline POSIX constants and FFI for fcntl / EIO — avoids a direct `libc` dependency.
+#[cfg(unix)]
+mod posix {
+    use std::ffi::c_int;
+    pub const EIO: c_int = 5;
+    pub const F_GETFL: c_int = 3;
+    pub const F_SETFL: c_int = 4;
+
+    // O_NONBLOCK varies across platforms — must use the right constant.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+    pub const O_NONBLOCK: c_int = 0x0004;
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly")))]
+    pub const O_NONBLOCK: c_int = 0o4000;
+
+    unsafe extern "C" {
+        pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    }
+}
+
 /// Run the current `cass tui` invocation inside a PTY and mirror output to an
 /// asciicast v2 file.
 ///
@@ -262,7 +281,7 @@ fn is_pty_eof_error(err: &io::Error) -> bool {
     }
     #[cfg(unix)]
     {
-        err.raw_os_error() == Some(libc::EIO)
+        err.raw_os_error() == Some(posix::EIO)
     }
     #[cfg(not(unix))]
     {
@@ -307,7 +326,7 @@ impl Drop for RawModeGuard {
 #[cfg(unix)]
 struct StdinNonBlockingGuard {
     fd: RawFd,
-    old_flags: libc::c_int,
+    old_flags: std::ffi::c_int,
 }
 
 #[cfg(unix)]
@@ -315,13 +334,13 @@ impl StdinNonBlockingGuard {
     fn new(fd: RawFd) -> io::Result<Self> {
         // SAFETY: fcntl does not outlive `fd` and is called with valid command
         // constants; errors are surfaced via last_os_error.
-        let old_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        let old_flags = unsafe { posix::fcntl(fd, posix::F_GETFL) };
         if old_flags < 0 {
             return Err(io::Error::last_os_error());
         }
 
         // SAFETY: same as above; we preserve and later restore original flags.
-        let set_result = unsafe { libc::fcntl(fd, libc::F_SETFL, old_flags | libc::O_NONBLOCK) };
+        let set_result = unsafe { posix::fcntl(fd, posix::F_SETFL, old_flags | posix::O_NONBLOCK) };
         if set_result < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -335,7 +354,7 @@ impl Drop for StdinNonBlockingGuard {
     fn drop(&mut self) {
         // SAFETY: best-effort restoration of original descriptor flags.
         unsafe {
-            let _ = libc::fcntl(self.fd, libc::F_SETFL, self.old_flags);
+            let _ = posix::fcntl(self.fd, posix::F_SETFL, self.old_flags);
         }
     }
 }

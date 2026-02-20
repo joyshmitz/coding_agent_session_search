@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow, bail};
+use crossbeam_channel as mpsc;
 use frankensearch::lexical::{
     CassQueryFilters as FsCassQueryFilters, CassQueryToken as FsCassQueryToken,
     CassSourceFilter as FsCassSourceFilter, CassWildcardPattern as FsCassWildcardPattern,
@@ -37,9 +38,6 @@ use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Term, Value};
 use tantivy::{IndexReader, ReloadPolicy, Searcher, TantivyDocument};
-use tokio::runtime::Handle;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use rusqlite::Connection;
 
@@ -1395,8 +1393,8 @@ pub struct SearchClient {
     last_reload: Mutex<Option<Instant>>,
     last_generation: Mutex<Option<u64>>,
     reload_epoch: Arc<AtomicU64>,
-    warm_tx: Option<mpsc::UnboundedSender<WarmJob>>,
-    _warm_handle: Option<JoinHandle<()>>,
+    warm_tx: Option<mpsc::Sender<WarmJob>>,
+    _warm_handle: Option<std::thread::JoinHandle<()>>,
     // Shared for warm worker to read cache/filter logic; keep Arc to avoid clones of big data
     _shared_filters: Arc<Mutex<()>>, // placeholder lock to ensure Send/Sync; future warm prefill state
     metrics: Metrics,
@@ -3216,68 +3214,66 @@ fn maybe_spawn_warm_worker(
     filters_guard: std::sync::Weak<Mutex<()>>,
     reload_epoch: Arc<AtomicU64>,
     metrics: Metrics,
-) -> Option<(mpsc::UnboundedSender<WarmJob>, JoinHandle<()>)> {
-    // Only spawn if a Tokio runtime is available (tests may call without one).
-    if Handle::try_current().is_err() {
-        return None;
-    }
-
-    let (tx, mut rx) = mpsc::unbounded_channel::<WarmJob>();
-    let handle = tokio::spawn(async move {
-        // Simple debounce: process at most one warmup every WARM_DEBOUNCE_MS.
-        let mut last_run = Instant::now();
-        while let Some(job) = rx.recv().await {
-            let now = Instant::now();
-            if now.duration_since(last_run) < Duration::from_millis(*WARM_DEBOUNCE_MS) {
-                continue;
+) -> Option<(mpsc::Sender<WarmJob>, std::thread::JoinHandle<()>)> {
+    let (tx, rx) = mpsc::unbounded::<WarmJob>();
+    let handle = std::thread::Builder::new()
+        .name("cass-warm-worker".into())
+        .spawn(move || {
+            // Simple debounce: process at most one warmup every WARM_DEBOUNCE_MS.
+            let mut last_run = Instant::now();
+            while let Ok(job) = rx.recv() {
+                let now = Instant::now();
+                if now.duration_since(last_run) < Duration::from_millis(*WARM_DEBOUNCE_MS) {
+                    continue;
+                }
+                last_run = now;
+                if filters_guard.upgrade().is_none() {
+                    break;
+                }
+                let reload_started = Instant::now();
+                if let Err(err) = reader.reload() {
+                    tracing::warn!(error = ?err, "warm_worker_reload_failed");
+                    continue;
+                }
+                let elapsed = reload_started.elapsed();
+                let epoch = reload_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+                metrics.record_reload(elapsed);
+                tracing::debug!(
+                    duration_ms = elapsed.as_millis() as u64,
+                    reload_epoch = epoch,
+                    "warm_worker_reload"
+                );
+                // Run a tiny warm search to prefill OS cache and hit the Tantivy reader
+                // without allocating full result sets. Limit 1 doc.
+                let searcher = reader.searcher();
+                let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                for term_str in job.query.split_whitespace() {
+                    let term_lower = term_str.to_lowercase();
+                    let term_shoulds: Vec<(Occur, Box<dyn Query>)> = vec![
+                        (
+                            Occur::Should,
+                            Box::new(TermQuery::new(
+                                Term::from_field_text(fields.title, &term_lower),
+                                IndexRecordOption::WithFreqsAndPositions,
+                            )),
+                        ),
+                        (
+                            Occur::Should,
+                            Box::new(TermQuery::new(
+                                Term::from_field_text(fields.content, &term_lower),
+                                IndexRecordOption::WithFreqsAndPositions,
+                            )),
+                        ),
+                    ];
+                    clauses.push((Occur::Must, Box::new(BooleanQuery::new(term_shoulds))));
+                }
+                if !clauses.is_empty() {
+                    let q: Box<dyn Query> = Box::new(BooleanQuery::new(clauses));
+                    let _ = searcher.search(&q, &TopDocs::with_limit(1));
+                }
             }
-            last_run = now;
-            if filters_guard.upgrade().is_none() {
-                break;
-            }
-            let reload_started = Instant::now();
-            if let Err(err) = reader.reload() {
-                tracing::warn!(error = ?err, "warm_worker_reload_failed");
-                continue;
-            }
-            let elapsed = reload_started.elapsed();
-            let epoch = reload_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-            metrics.record_reload(elapsed);
-            tracing::debug!(
-                duration_ms = elapsed.as_millis() as u64,
-                reload_epoch = epoch,
-                "warm_worker_reload"
-            );
-            // Run a tiny warm search to prefill OS cache and hit the Tantivy reader
-            // without allocating full result sets. Limit 1 doc.
-            let searcher = reader.searcher();
-            let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-            for term_str in job.query.split_whitespace() {
-                let term_lower = term_str.to_lowercase();
-                let term_shoulds: Vec<(Occur, Box<dyn Query>)> = vec![
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(fields.title, &term_lower),
-                            IndexRecordOption::WithFreqsAndPositions,
-                        )),
-                    ),
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(fields.content, &term_lower),
-                            IndexRecordOption::WithFreqsAndPositions,
-                        )),
-                    ),
-                ];
-                clauses.push((Occur::Must, Box::new(BooleanQuery::new(term_shoulds))));
-            }
-            if !clauses.is_empty() {
-                let q: Box<dyn Query> = Box::new(BooleanQuery::new(clauses));
-                let _ = searcher.search(&q, &TopDocs::with_limit(1));
-            }
-        }
-    });
+        })
+        .ok()?;
     Some((tx, handle))
 }
 

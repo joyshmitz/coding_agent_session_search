@@ -414,9 +414,9 @@ impl ThemePalette {
         Style::new().fg(self.border)
     }
 
-    /// Focused border style - for active elements
+    /// Focused border style - for active elements (theme-aware)
     pub fn border_focus_style(self) -> Style {
-        Style::new().fg(colors::BORDER_FOCUS)
+        Style::new().fg(self.accent)
     }
 
     /// Surface style - for cards, modals, elevated content
@@ -561,16 +561,14 @@ impl ThemePalette {
             .bold()
     }
 
-    /// Selected item style - for list selections
+    /// Selected item style - for list selections (theme-aware)
     pub fn selected_style(self) -> Style {
-        Style::new().bg(colors::BG_HIGHLIGHT).bold()
+        Style::new().bg(self.surface).bold()
     }
 
-    /// Code block background style
+    /// Code block background style (theme-aware)
     pub fn code_style(self) -> Style {
-        Style::new()
-            .bg(colors::BG_SURFACE)
-            .fg(colors::TEXT_SECONDARY)
+        Style::new().bg(self.surface).fg(self.hint)
     }
 }
 

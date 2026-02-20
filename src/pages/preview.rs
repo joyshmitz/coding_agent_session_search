@@ -12,8 +12,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::net::TcpListener;
-use tokio::sync::watch;
 use tracing::debug;
 
 /// Error type for preview server operations.
@@ -172,7 +170,7 @@ enum HeadLengthSource {
 /// Resolve representation length for HEAD requests without eagerly reading file bytes.
 ///
 /// Falls back to reading the file if metadata is unavailable or does not fit usize.
-async fn head_content_length_with_metadata_hint(
+fn head_content_length_with_metadata_hint(
     file_path: &std::path::Path,
     metadata_length: std::io::Result<u64>,
 ) -> std::io::Result<(usize, HeadLengthSource)> {
@@ -180,41 +178,36 @@ async fn head_content_length_with_metadata_hint(
         Ok(metadata_length) => match usize::try_from(metadata_length) {
             Ok(length) => Ok((length, HeadLengthSource::Metadata)),
             Err(_) => {
-                let bytes = tokio::fs::read(file_path).await?;
+                let bytes = std::fs::read(file_path)?;
                 Ok((bytes.len(), HeadLengthSource::FallbackRead))
             }
         },
         Err(_) => {
-            let bytes = tokio::fs::read(file_path).await?;
+            let bytes = std::fs::read(file_path)?;
             Ok((bytes.len(), HeadLengthSource::FallbackRead))
         }
     }
 }
 
-async fn head_content_length(
-    file_path: &std::path::Path,
-) -> std::io::Result<(usize, HeadLengthSource)> {
-    let metadata_length = tokio::fs::metadata(file_path).await.map(|meta| meta.len());
-    head_content_length_with_metadata_hint(file_path, metadata_length).await
+fn head_content_length(file_path: &std::path::Path) -> std::io::Result<(usize, HeadLengthSource)> {
+    let metadata_length = std::fs::metadata(file_path).map(|meta| meta.len());
+    head_content_length_with_metadata_hint(file_path, metadata_length)
 }
 
-async fn head_content_length_from_hint_or_fs(
+fn head_content_length_from_hint_or_fs(
     file_path: &std::path::Path,
     metadata_length_hint: Option<u64>,
 ) -> std::io::Result<(usize, HeadLengthSource)> {
     match metadata_length_hint {
         Some(metadata_length) => {
-            head_content_length_with_metadata_hint(file_path, Ok(metadata_length)).await
+            head_content_length_with_metadata_hint(file_path, Ok(metadata_length))
         }
-        None => head_content_length(file_path).await,
+        None => head_content_length(file_path),
     }
 }
 
 /// Handle a single HTTP request against an already-canonicalized site root.
-async fn handle_request_with_site_root(
-    site_root_canonical: &std::path::Path,
-    request: &str,
-) -> Vec<u8> {
+fn handle_request_with_site_root(site_root_canonical: &std::path::Path, request: &str) -> Vec<u8> {
     // Parse the request line
     let request_line = request.lines().next().unwrap_or("");
     let parts: Vec<&str> = request_line.split_whitespace().collect();
@@ -277,7 +270,7 @@ async fn handle_request_with_site_root(
     // Check if it's a directory and append index.html if so
     let mut file_to_read = canonical.clone();
     let mut metadata_length_hint = None;
-    if let Ok(meta) = tokio::fs::metadata(&canonical).await {
+    if let Ok(meta) = std::fs::metadata(&canonical) {
         if meta.is_dir() {
             file_to_read = canonical.join("index.html");
         } else {
@@ -288,7 +281,7 @@ async fn handle_request_with_site_root(
     let request_started = Instant::now();
 
     if method == "HEAD" {
-        match head_content_length_from_hint_or_fs(&file_to_read, metadata_length_hint).await {
+        match head_content_length_from_hint_or_fs(&file_to_read, metadata_length_hint) {
             Ok((content_length, length_source)) => {
                 let mime = guess_mime_type(&file_to_read);
                 debug!(
@@ -317,7 +310,7 @@ async fn handle_request_with_site_root(
             }
         }
     } else {
-        match tokio::fs::read(&file_to_read).await {
+        match std::fs::read(&file_to_read) {
             Ok(contents) => {
                 let content_length = contents.len();
                 let mime = guess_mime_type(&file_to_read);
@@ -354,14 +347,32 @@ async fn handle_request_with_site_root(
 /// This wrapper canonicalizes the provided site directory once per call and then
 /// delegates to the canonical-root hot path handler.
 #[cfg(test)]
-async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
+fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
     let site_root_canonical = match site_dir.canonicalize() {
         Ok(p) => p,
         Err(_) => {
             return build_response(500, "text/plain", b"Internal Server Error".to_vec());
         }
     };
-    handle_request_with_site_root(&site_root_canonical, request).await
+    handle_request_with_site_root(&site_root_canonical, request)
+}
+
+/// Handle a single TCP connection using blocking I/O.
+fn handle_connection(mut stream: std::net::TcpStream, site_dir: &std::path::Path) {
+    use std::io::{Read, Write};
+
+    let mut buf = vec![0u8; 8192];
+    let n = match stream.read(&mut buf) {
+        Ok(n) if n > 0 => n,
+        _ => return,
+    };
+
+    let request = String::from_utf8_lossy(&buf[..n]);
+    let response = handle_request_with_site_root(site_dir, &request);
+
+    let _ = stream.write_all(&response);
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 /// Start the preview server.
@@ -388,17 +399,12 @@ pub async fn start_preview_server(config: PreviewConfig) -> Result<(), PreviewEr
             .map_err(|_| PreviewError::SiteDirectoryNotFound(config.site_dir.clone()))?,
     );
 
-    // Bind to the address
+    // Bind to the address (synchronous — preview is a simple dev server)
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|e| PreviewError::BindFailed {
-            port: config.port,
-            source: e,
-        })?;
-
-    // Create shutdown signal channel
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let listener = std::net::TcpListener::bind(addr).map_err(|e| PreviewError::BindFailed {
+        port: config.port,
+        source: e,
+    })?;
 
     // Print startup message
     eprintln!();
@@ -419,55 +425,24 @@ pub async fn start_preview_server(config: PreviewConfig) -> Result<(), PreviewEr
         }
     }
 
-    // Setup Ctrl+C handler
-    let shutdown_tx_clone = shutdown_tx.clone();
-    tokio::spawn(async move {
-        if let Ok(()) = tokio::signal::ctrl_c().await {
-            eprintln!();
-            eprintln!("\x1b[33mShutting down preview server...\x1b[0m");
-            let _ = shutdown_tx_clone.send(true);
-        }
-    });
-
-    // Main server loop
-    loop {
-        tokio::select! {
-            result = listener.accept() => {
-                match result {
-                    Ok((mut stream, _addr)) => {
-                        let site_dir = Arc::clone(&site_dir);
-                        tokio::spawn(async move {
-                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-                            // Read the request
-                            let mut buf = vec![0u8; 8192];
-                            let n = match stream.read(&mut buf).await {
-                                Ok(n) if n > 0 => n,
-                                _ => return,
-                            };
-
-                            let request = String::from_utf8_lossy(&buf[..n]);
-
-                            // Handle the request
-                            let response = handle_request_with_site_root(&site_dir, &request).await;
-
-                            // Send the response
-                            let _ = stream.write_all(&response).await;
-                            let _ = stream.shutdown().await;
-                        });
-                    }
-                    Err(e) => {
-                        eprintln!("Accept error: {}", e);
-                    }
+    // Run blocking accept loop on the blocking pool. The process terminates
+    // on SIGINT via the default handler, which is fine for a dev preview server.
+    asupersync::runtime::spawn_blocking(move || {
+        for stream_result in listener.incoming() {
+            match stream_result {
+                Ok(stream) => {
+                    let site_dir = Arc::clone(&site_dir);
+                    std::thread::spawn(move || {
+                        handle_connection(stream, &site_dir);
+                    });
                 }
-            }
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    break;
+                Err(e) => {
+                    eprintln!("Accept error: {}", e);
                 }
             }
         }
-    }
+    })
+    .await;
 
     eprintln!("\x1b[32mPreview server stopped.\x1b[0m");
     Ok(())
@@ -594,25 +569,25 @@ mod tests {
         assert!(response_str.contains("Cross-Origin-Resource-Policy: same-origin"));
     }
 
-    #[tokio::test]
-    async fn test_handle_request_bad_method() {
+    #[test]
+    fn test_handle_request_bad_method() {
         let site_dir = std::path::Path::new("/tmp");
-        let response = handle_request(site_dir, "POST / HTTP/1.1\r\n").await;
+        let response = handle_request(site_dir, "POST / HTTP/1.1\r\n");
         let response_str = String::from_utf8_lossy(&response);
         assert!(response_str.contains("HTTP/1.1 405 Method Not Allowed"));
         assert!(response_str.contains("Method Not Allowed"));
     }
 
-    #[tokio::test]
-    async fn test_handle_request_bad_path() {
+    #[test]
+    fn test_handle_request_bad_path() {
         let site_dir = std::path::Path::new("/tmp");
-        let response = handle_request(site_dir, "GET /../etc/passwd HTTP/1.1\r\n").await;
+        let response = handle_request(site_dir, "GET /../etc/passwd HTTP/1.1\r\n");
         let response_str = String::from_utf8_lossy(&response);
         assert!(response_str.contains("400") || response_str.contains("Invalid"));
     }
 
-    #[tokio::test]
-    async fn test_handle_request_serves_index_with_coi_headers() {
+    #[test]
+    fn test_handle_request_serves_index_with_coi_headers() {
         let temp_dir = TempDir::new().expect("temp dir");
         let site_dir = temp_dir.path();
 
@@ -627,7 +602,7 @@ mod tests {
         )
         .expect("write sw.js");
 
-        let index_response = handle_request(site_dir, "GET / HTTP/1.1\r\n").await;
+        let index_response = handle_request(site_dir, "GET / HTTP/1.1\r\n");
         let index_str = String::from_utf8_lossy(&index_response);
 
         assert!(index_str.contains("HTTP/1.1 200 OK"));
@@ -636,21 +611,21 @@ mod tests {
         assert!(index_str.contains("Cross-Origin-Embedder-Policy: require-corp"));
         assert!(index_str.contains("Cross-Origin-Resource-Policy: same-origin"));
 
-        let sw_response = handle_request(site_dir, "GET /sw.js HTTP/1.1\r\n").await;
+        let sw_response = handle_request(site_dir, "GET /sw.js HTTP/1.1\r\n");
         let sw_str = String::from_utf8_lossy(&sw_response);
         assert!(sw_str.contains("HTTP/1.1 200 OK"));
         assert!(sw_str.contains("Content-Type: application/javascript; charset=utf-8"));
     }
 
-    #[tokio::test]
-    async fn test_handle_request_head_preserves_content_length() {
+    #[test]
+    fn test_handle_request_head_preserves_content_length() {
         let temp_dir = TempDir::new().expect("temp dir");
         let site_dir = temp_dir.path();
         let body = "<!doctype html><html>head-check</html>";
         std::fs::write(site_dir.join("index.html"), body).expect("write index");
 
-        let get_response = handle_request(site_dir, "GET / HTTP/1.1\r\n").await;
-        let head_response = handle_request(site_dir, "HEAD / HTTP/1.1\r\n").await;
+        let get_response = handle_request(site_dir, "GET / HTTP/1.1\r\n");
+        let head_response = handle_request(site_dir, "HEAD / HTTP/1.1\r\n");
 
         let get_str = String::from_utf8_lossy(&get_response);
         let head_str = String::from_utf8_lossy(&head_response);
@@ -662,8 +637,8 @@ mod tests {
         assert!(!head_str.contains("head-check"));
     }
 
-    #[tokio::test]
-    async fn test_head_content_length_prefers_metadata() {
+    #[test]
+    fn test_head_content_length_prefers_metadata() {
         let temp_dir = TempDir::new().expect("temp dir");
         let file_path = temp_dir.path().join("asset.bin");
         let body = vec![b'x'; 4096];
@@ -671,15 +646,14 @@ mod tests {
 
         let (length, source) =
             head_content_length_with_metadata_hint(&file_path, Ok(body.len() as u64))
-                .await
                 .expect("metadata length");
 
         assert_eq!(length, body.len());
         assert_eq!(source, HeadLengthSource::Metadata);
     }
 
-    #[tokio::test]
-    async fn test_head_content_length_falls_back_when_metadata_missing() {
+    #[test]
+    fn test_head_content_length_falls_back_when_metadata_missing() {
         let temp_dir = TempDir::new().expect("temp dir");
         let file_path = temp_dir.path().join("asset.bin");
         let body = vec![b'y'; 8192];
@@ -692,21 +666,20 @@ mod tests {
                 "metadata unavailable",
             )),
         )
-        .await
         .expect("fallback length");
 
         assert_eq!(length, body.len());
         assert_eq!(source, HeadLengthSource::FallbackRead);
     }
 
-    #[tokio::test]
-    async fn test_handle_request_head_large_file_content_length() {
+    #[test]
+    fn test_handle_request_head_large_file_content_length() {
         let temp_dir = TempDir::new().expect("temp dir");
         let site_dir = temp_dir.path();
         let body = vec![b'z'; 512 * 1024];
         std::fs::write(site_dir.join("index.html"), &body).expect("write index");
 
-        let head_response = handle_request(site_dir, "HEAD / HTTP/1.1\r\n").await;
+        let head_response = handle_request(site_dir, "HEAD / HTTP/1.1\r\n");
         let head_str = String::from_utf8_lossy(&head_response);
 
         assert_eq!(
@@ -716,37 +689,36 @@ mod tests {
         assert!(head_str.ends_with("\r\n\r\n"));
     }
 
-    #[tokio::test]
-    async fn test_head_content_length_from_hint_or_fs_with_hint_skips_fs_lookup() {
+    #[test]
+    fn test_head_content_length_from_hint_or_fs_with_hint_skips_fs_lookup() {
         let missing_path = std::path::Path::new("/tmp/cass-preview-nonexistent-file-for-hint-test");
         let (length, source) = head_content_length_from_hint_or_fs(missing_path, Some(777))
-            .await
             .expect("metadata hint should succeed without filesystem access");
         assert_eq!(length, 777);
         assert_eq!(source, HeadLengthSource::Metadata);
     }
 
-    #[tokio::test]
-    async fn test_handle_request_with_site_root_precanonicalized() {
+    #[test]
+    fn test_handle_request_with_site_root_precanonicalized() {
         let temp_dir = TempDir::new().expect("temp dir");
         let site_dir = temp_dir.path();
         std::fs::write(site_dir.join("index.html"), "<html>canonical</html>").expect("write index");
         let canonical_root = site_dir.canonicalize().expect("canonicalize root");
 
-        let response = handle_request_with_site_root(&canonical_root, "GET / HTTP/1.1\r\n").await;
+        let response = handle_request_with_site_root(&canonical_root, "GET / HTTP/1.1\r\n");
         let response_str = String::from_utf8_lossy(&response);
         assert!(response_str.contains("HTTP/1.1 200 OK"));
         assert!(response_str.contains("canonical"));
     }
 
-    #[tokio::test]
-    async fn test_handle_request_wrapper_accepts_uncanonicalized_site_dir() {
+    #[test]
+    fn test_handle_request_wrapper_accepts_uncanonicalized_site_dir() {
         let temp_dir = TempDir::new().expect("temp dir");
         let site_dir = temp_dir.path();
         std::fs::write(site_dir.join("index.html"), "<html>wrapper</html>").expect("write index");
         let dotted = site_dir.join(".");
 
-        let response = handle_request(&dotted, "GET / HTTP/1.1\r\n").await;
+        let response = handle_request(&dotted, "GET / HTTP/1.1\r\n");
         let response_str = String::from_utf8_lossy(&response);
         assert!(response_str.contains("HTTP/1.1 200 OK"));
         assert!(response_str.contains("wrapper"));
