@@ -2325,17 +2325,34 @@ fn autocomplete_csv_suffix(input: &str, candidates: &BTreeSet<String>) -> Option
     Some(format!("{prefix}{leading_ws}{candidate}"))
 }
 
-fn elide_text(text: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
+/// Measure the terminal display width of a string, accounting for CJK
+/// double-width characters and zero-width marks.
+fn display_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+fn elide_text(text: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
         return String::new();
     }
-    if text.chars().count() <= max_chars {
+    if display_width(text) <= max_cols {
         return text.to_string();
     }
-    if max_chars <= 3 {
-        return ".".repeat(max_chars);
+    if max_cols <= 3 {
+        return ".".repeat(max_cols);
     }
-    let kept: String = text.chars().take(max_chars - 3).collect();
+    // Take characters until we fill the budget (minus 3 for "...").
+    let budget = max_cols - 3;
+    let mut kept = String::new();
+    let mut w = 0;
+    for ch in text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        kept.push(ch);
+        w += cw;
+    }
     format!("{kept}...")
 }
 
@@ -2394,15 +2411,15 @@ fn move_cursor_by_chars(text: &str, cursor: usize, delta: i32) -> usize {
 }
 
 /// Elide long paths while preserving their tail for faster row-level scanning.
-fn elide_path_for_metadata(path: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
+fn elide_path_for_metadata(path: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
         return String::new();
     }
-    if path.chars().count() <= max_chars {
+    if display_width(path) <= max_cols {
         return path.to_string();
     }
-    if max_chars <= 6 {
-        return elide_text(path, max_chars);
+    if max_cols <= 6 {
+        return elide_text(path, max_cols);
     }
 
     let trimmed = path.trim();
@@ -2411,13 +2428,13 @@ fn elide_path_for_metadata(path: &str, max_chars: usize) -> String {
         .find(|segment| !segment.is_empty())
         .unwrap_or(trimmed);
     let compact = format!(".../{tail}");
-    if compact.chars().count() <= max_chars {
+    if display_width(&compact) <= max_cols {
         return compact;
     }
 
-    let tail_budget = max_chars.saturating_sub(4);
+    let tail_budget = max_cols.saturating_sub(4);
     if tail_budget == 0 {
-        return elide_text(path, max_chars);
+        return elide_text(path, max_cols);
     }
     format!(".../{}", elide_text(tail, tail_budget))
 }
@@ -2553,7 +2570,7 @@ impl ResultItem {
                 if out.len() >= max_lines {
                     return out;
                 }
-                if remaining.chars().count() <= width {
+                if display_width(remaining) <= width {
                     out.push(remaining.to_string());
                     break;
                 }
@@ -2716,9 +2733,9 @@ impl RenderItem for ResultItem {
 
         // Line 2: score bar + source badge + metadata
         let score_bar = score_bar_str(hit.score);
-        let score_bar_chars = score_bar.chars().count();
+        let score_bar_chars = display_width(&score_bar);
         let source_badge = self.source_badge();
-        let source_badge_chars = source_badge.chars().count();
+        let source_badge_chars = display_width(&source_badge);
         let source_is_remote = self.source_kind() == "remote";
         let match_chip_style = match hit.match_type {
             MatchType::Exact => self.success_style.bold(),
@@ -3152,11 +3169,11 @@ fn build_footer_hud_line(
     let mut spans = Vec::new();
 
     for lane in lanes {
-        let lane_chars = lane.key.chars().count() + 3 + lane.value.chars().count();
+        let lane_chars = display_width(&lane.key) + 3 + display_width(&lane.value);
         let prefix = 1;
 
         if rendered == 0 && used + prefix + lane_chars > max_chars {
-            let max_value = max_chars.saturating_sub(prefix + lane.key.chars().count() + 3);
+            let max_value = max_chars.saturating_sub(prefix + display_width(&lane.key) + 3);
             if max_value == 0 {
                 continue;
             }
@@ -3218,19 +3235,19 @@ fn build_detail_find_bar_line(
         if text.is_empty() || *used >= max_width {
             return false;
         }
-        let chars = text.chars().count();
-        if *used + chars > max_width {
+        let cols = display_width(text);
+        if *used + cols > max_width {
             return false;
         }
         spans.push(ftui::text::Span::styled(text.to_string(), style));
-        *used += chars;
+        *used += cols;
         true
     };
     let push_segments_if_fit = |spans: &mut Vec<ftui::text::Span<'static>>,
                                 used: &mut usize,
                                 segments: &[(&str, ftui::Style)]|
      -> bool {
-        let chars: usize = segments.iter().map(|(text, _)| text.chars().count()).sum();
+        let chars: usize = segments.iter().map(|(text, _)| display_width(text)).sum();
         if *used + chars > max_width {
             return false;
         }
@@ -3279,7 +3296,7 @@ fn build_detail_find_bar_line(
     };
     let suffix_chars: usize = match_segments
         .iter()
-        .map(|(text, _)| text.chars().count())
+        .map(|(text, _)| display_width(text))
         .sum();
     let query_budget = max_width.saturating_sub(1 + suffix_chars);
     if query_budget == 0 {
@@ -3332,7 +3349,7 @@ fn build_detail_find_bar_line(
     let rendered_len: usize = line
         .spans()
         .iter()
-        .map(|span| span.content.chars().count())
+        .map(|span| display_width(&span.content))
         .sum();
     if rendered_len > max_width {
         let plain: String = line
@@ -4964,11 +4981,11 @@ impl CassApp {
         let mut used = 0usize;
         let mut spans: Vec<ftui::text::Span<'static>> = Vec::new();
         let mut try_push = |text: String, style: ftui::Style| -> bool {
-            let chars = text.chars().count();
-            if used + chars > max_chars {
+            let cols = display_width(&text);
+            if used + cols > max_chars {
                 return false;
             }
-            used += chars;
+            used += cols;
             spans.push(ftui::text::Span::styled(text, style));
             true
         };
@@ -5608,7 +5625,7 @@ impl CassApp {
             if rendered.is_empty() {
                 break;
             }
-            let base_width = rendered.chars().count() as u16;
+            let base_width = display_width(&rendered) as u16;
             // Editable inactive pills get a 1-char pencil glyph; account for
             // it in both hit-rect width and x-advance so click targets stay
             // accurate and subsequent pills don't overlap.
@@ -5733,7 +5750,7 @@ impl CassApp {
                 if elided.is_empty() {
                     break;
                 }
-                used += elided.chars().count();
+                used += display_width(&elided);
                 let style = if *is_active {
                     active_style
                 } else {
@@ -5992,7 +6009,7 @@ impl CassApp {
             .render(Rect::new(edge_x, area.y, 1, area.height), frame);
 
         let label = format!(" {} -> {} ", transition.from_label, transition.to_label);
-        let label_w = label.chars().count() as u16;
+        let label_w = display_width(&label) as u16;
         if label_w > 0 && label_w < area.width {
             let label_x = area
                 .x
@@ -6226,7 +6243,7 @@ impl CassApp {
         let mut used = 0usize;
         let mut spans: Vec<ftui::text::Span<'static>> = Vec::new();
         for (key, value, style) in lanes {
-            let lane_chars = key.chars().count() + value.chars().count() + 3; // [k:v]
+            let lane_chars = display_width(key) + display_width(value) + 3; // [k:v]
             let prefix = 1;
             if used + prefix + lane_chars > max_chars {
                 break;
@@ -6648,7 +6665,7 @@ impl CassApp {
         if visible_end < self.panes.len() {
             let hidden_right = self.panes.len() - visible_end;
             let text = format!("+{hidden_right} \u{25b6}");
-            let width = text.chars().count() as u16;
+            let width = display_width(&text) as u16;
             let start_x = inner.x + inner.width.saturating_sub(width);
             Paragraph::new(text).style(title_focused_style).render(
                 Rect::new(start_x, inner.y, width.min(inner.width), 1),

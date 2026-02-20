@@ -2372,7 +2372,7 @@ fn coverage_truncate(s: &str, max_len: usize) -> String {
 }
 
 fn display_width(input: &str) -> usize {
-    input.chars().count()
+    unicode_width::UnicodeWidthStr::width(input)
 }
 
 /// Explorer view state passed to the render function.
