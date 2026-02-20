@@ -114,3 +114,4 @@ user_requests_output.txt
 ci-artifacts/
 proptest-regressions/
 test_meminfo
+path_test
