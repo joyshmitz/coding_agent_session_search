@@ -49,6 +49,61 @@ fn agent_color(idx: usize) -> PackedRgba {
 }
 
 // ---------------------------------------------------------------------------
+// Theme-adaptive structural colors for chart chrome
+// ---------------------------------------------------------------------------
+
+/// Structural colors for chart axes, labels, gridlines, and text that adapt
+/// to dark vs. light backgrounds. All chart renderers should use these
+/// instead of hardcoding gray tones.
+#[derive(Clone, Copy)]
+struct ChartColors {
+    /// Primary axis / legend text (e.g. axis labels, table headers).
+    axis: PackedRgba,
+    /// Secondary / muted text (e.g. row labels, small metadata).
+    muted: PackedRgba,
+    /// Tertiary / very subtle text (e.g. grid lines, separators).
+    subtle: PackedRgba,
+    /// Bright emphasis text (e.g. highlighted values, headers).
+    emphasis: PackedRgba,
+    /// Tooltip background.
+    tooltip_bg: PackedRgba,
+    /// Tooltip foreground.
+    tooltip_fg: PackedRgba,
+    /// Highlight/selected marker (yellow tones).
+    highlight: PackedRgba,
+    /// Highlight dimmed variant.
+    highlight_dim: PackedRgba,
+}
+
+impl ChartColors {
+    fn for_theme(dark_mode: bool) -> Self {
+        if dark_mode {
+            Self {
+                axis: PackedRgba::rgb(190, 200, 220),
+                muted: PackedRgba::rgb(140, 140, 160),
+                subtle: PackedRgba::rgb(100, 100, 110),
+                emphasis: PackedRgba::rgb(200, 200, 200),
+                tooltip_bg: PackedRgba::rgb(60, 60, 80),
+                tooltip_fg: PackedRgba::rgb(255, 255, 255),
+                highlight: PackedRgba::rgb(255, 255, 80),
+                highlight_dim: PackedRgba::rgb(255, 200, 0),
+            }
+        } else {
+            Self {
+                axis: PackedRgba::rgb(60, 60, 80),
+                muted: PackedRgba::rgb(100, 100, 120),
+                subtle: PackedRgba::rgb(160, 160, 175),
+                emphasis: PackedRgba::rgb(40, 40, 50),
+                tooltip_bg: PackedRgba::rgb(240, 240, 245),
+                tooltip_fg: PackedRgba::rgb(20, 20, 30),
+                highlight: PackedRgba::rgb(180, 140, 0),
+                highlight_dim: PackedRgba::rgb(160, 120, 0),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AnalyticsChartData — pre-computed chart data
 // ---------------------------------------------------------------------------
 
@@ -374,7 +429,12 @@ pub fn load_chart_data(
 // ---------------------------------------------------------------------------
 
 /// Render the Dashboard view: KPI tile wall with sparklines + top agents.
-pub fn render_dashboard(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
+pub fn render_dashboard(
+    data: &AnalyticsChartData,
+    area: Rect,
+    frame: &mut ftui::Frame,
+    dark_mode: bool,
+) {
     if area.height < 4 || area.width < 20 {
         return; // too small to render
     }
@@ -402,7 +462,7 @@ pub fn render_dashboard(data: &AnalyticsChartData, area: Rect, frame: &mut ftui:
     };
 
     // ── KPI Tile Grid ──────────────────────────────────────────
-    render_kpi_tiles(data, chunks[0], frame);
+    render_kpi_tiles(data, chunks[0], frame, dark_mode);
 
     // ── Top Agents Bar Chart ────────────────────────────────────
     if has_bar {
@@ -422,8 +482,9 @@ pub fn render_dashboard(data: &AnalyticsChartData, area: Rect, frame: &mut ftui:
                 .colors(colors);
             chart.render(chunks[1], frame);
         } else {
+            let cc = ChartColors::for_theme(dark_mode);
             Paragraph::new(" No agent data")
-                .style(ftui::Style::new().fg(PackedRgba::rgb(100, 100, 100)))
+                .style(ftui::Style::new().fg(cc.subtle))
                 .render(chunks[1], frame);
         }
     }
@@ -439,7 +500,14 @@ pub fn render_dashboard(data: &AnalyticsChartData, area: Rect, frame: &mut ftui:
 }
 
 /// Render the KPI tile grid: 2 rows × 3 columns of metric tiles.
-fn render_kpi_tiles(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
+fn render_kpi_tiles(
+    data: &AnalyticsChartData,
+    area: Rect,
+    frame: &mut ftui::Frame,
+    dark_mode: bool,
+) {
+    let cc = ChartColors::for_theme(dark_mode);
+
     // 2 rows of tiles, 3 tiles per row
     let rows = Flex::vertical()
         .constraints([Constraint::Fixed(3), Constraint::Fixed(3)])
@@ -460,6 +528,7 @@ fn render_kpi_tiles(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         &data.daily_tokens,
         PackedRgba::rgb(0, 180, 255), // cyan
         PackedRgba::rgb(0, 100, 200), // dark cyan
+        cc.muted,
         cols1[0],
         frame,
     );
@@ -469,6 +538,7 @@ fn render_kpi_tiles(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         &data.daily_messages,
         PackedRgba::rgb(100, 220, 100), // green
         PackedRgba::rgb(40, 150, 40),   // dark green
+        cc.muted,
         cols1[1],
         frame,
     );
@@ -478,6 +548,7 @@ fn render_kpi_tiles(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         &data.daily_tool_calls,
         PackedRgba::rgb(255, 160, 0), // orange
         PackedRgba::rgb(200, 100, 0), // dark orange
+        cc.muted,
         cols1[2],
         frame,
     );
@@ -497,6 +568,7 @@ fn render_kpi_tiles(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         &data.daily_content_tokens,
         PackedRgba::rgb(180, 130, 255), // lavender
         PackedRgba::rgb(120, 60, 200),  // dark lavender
+        cc.muted,
         cols2[0],
         frame,
     );
@@ -506,6 +578,7 @@ fn render_kpi_tiles(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         &data.daily_plan_messages,
         PackedRgba::rgb(255, 200, 0), // gold
         PackedRgba::rgb(180, 140, 0), // dark gold
+        cc.muted,
         cols2[1],
         frame,
     );
@@ -516,6 +589,7 @@ fn render_kpi_tiles(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         &[],                            // no sparkline for coverage
         PackedRgba::rgb(150, 200, 255), // light blue
         PackedRgba::rgb(80, 120, 180),  // muted blue
+        cc.muted,
         cols2[2],
         frame,
     );
@@ -528,6 +602,7 @@ fn render_kpi_tile(
     sparkline_data: &[(String, f64)],
     fg_color: PackedRgba,
     spark_color: PackedRgba,
+    label_muted: PackedRgba,
     area: Rect,
     frame: &mut ftui::Frame,
 ) {
@@ -543,7 +618,7 @@ fn render_kpi_tile(
         height: 1,
     };
     Paragraph::new(format!(" {label}"))
-        .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 130)))
+        .style(ftui::Style::new().fg(label_muted))
         .render(label_area, frame);
 
     // Row 2: big value + inline sparkline
@@ -608,7 +683,7 @@ fn render_kpi_tile(
             } else if pct < -5.0 {
                 ("\u{25bc}", PackedRgba::rgb(80, 200, 80)) // ▼ green (down)
             } else {
-                ("\u{25c6}", PackedRgba::rgb(150, 150, 150)) // ◆ gray (flat)
+                ("\u{25c6}", label_muted) // ◆ muted (flat)
             };
             let delta_text = format!(" {arrow} {pct:+.0}% vs prior 7d");
             Paragraph::new(delta_text)
@@ -638,6 +713,7 @@ pub fn render_explorer(
     state: &ExplorerState,
     area: Rect,
     frame: &mut ftui::Frame,
+    dark_mode: bool,
 ) {
     if area.height < 4 || area.width < 20 {
         return;
@@ -646,11 +722,13 @@ pub fn render_explorer(
     // Select the data series based on the active metric.
     let (metric_data, metric_color) = metric_series(data, state.metric);
 
+    let cc = ChartColors::for_theme(dark_mode);
+
     if metric_data.is_empty() {
         Paragraph::new(
             " No analytics timeseries yet. If data exists, cass is rebuilding automatically.",
         )
-        .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
+        .style(ftui::Style::new().fg(cc.subtle))
         .render(area, frame);
         return;
     }
@@ -695,7 +773,7 @@ pub fn render_explorer(
         chunks[0].width as usize,
     );
     Paragraph::new(header_text)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 200)))
+        .style(ftui::Style::new().fg(cc.emphasis))
         .render(chunks[0], frame);
 
     // ── Build primary + overlay series ──────────────────────────
@@ -769,8 +847,9 @@ pub fn render_explorer(
             &x_labels,
             sub[0],
             frame,
+            cc,
         );
-        render_explorer_scatter(&data.session_scatter, sub[1], frame);
+        render_explorer_scatter(&data.session_scatter, sub[1], frame, cc);
     } else {
         render_explorer_line_canvas(
             state.metric,
@@ -783,6 +862,7 @@ pub fn render_explorer(
             &x_labels,
             chart_body,
             frame,
+            cc,
         );
     }
 }
@@ -799,6 +879,7 @@ fn render_explorer_line_canvas(
     x_labels: &[&str],
     area: Rect,
     frame: &mut ftui::Frame,
+    cc: ChartColors,
 ) {
     if area.height < 5 || area.width < 20 {
         let mut series = vec![ChartSeries::new(
@@ -835,7 +916,7 @@ fn render_explorer_line_canvas(
         chunks[0].width as usize,
     );
     Paragraph::new(annotation)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(150, 160, 180)))
+        .style(ftui::Style::new().fg(cc.muted))
         .render(chunks[0], frame);
 
     let chart_outer = chunks[1];
@@ -950,13 +1031,7 @@ fn render_explorer_line_canvas(
     if !primary_points.is_empty() {
         let avg = primary_points.iter().map(|(_, y)| *y).sum::<f64>() / primary_points.len() as f64;
         let (_, avg_y) = to_px(0.0, avg);
-        painter.line_colored(
-            0,
-            avg_y,
-            px_w - 1,
-            avg_y,
-            Some(PackedRgba::rgb(100, 100, 100)),
-        );
+        painter.line_colored(0, avg_y, px_w - 1, avg_y, Some(cc.subtle));
         if let Some((peak_idx, (_, peak_val))) = primary_points.iter().enumerate().max_by(|a, b| {
             a.1.1
                 .partial_cmp(&b.1.1)
@@ -964,17 +1039,16 @@ fn render_explorer_line_canvas(
         }) {
             let (peak_x, peak_y) = to_px(peak_idx as f64, *peak_val);
             for d in -1..=1 {
-                painter.point_colored(peak_x + d, peak_y, PackedRgba::rgb(255, 220, 90));
-                painter.point_colored(peak_x, peak_y + d, PackedRgba::rgb(255, 220, 90));
+                painter.point_colored(peak_x + d, peak_y, cc.highlight);
+                painter.point_colored(peak_x, peak_y + d, cc.highlight);
             }
         }
     }
 
-    let canvas = CanvasRef::from_painter(&painter)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(190, 200, 220)));
+    let canvas = CanvasRef::from_painter(&painter).style(ftui::Style::new().fg(cc.axis));
     canvas.render(plot_area, frame);
 
-    let axis_color = PackedRgba::rgb(120, 130, 145);
+    let axis_color = cc.muted;
     let y_axis_x = plot_area.x.saturating_sub(1);
     for y in plot_area.y..plot_area.y + plot_area.height {
         Paragraph::new("│")
@@ -1016,7 +1090,7 @@ fn render_explorer_line_canvas(
         );
 
     Paragraph::new(top_label)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(170, 170, 185)))
+        .style(ftui::Style::new().fg(cc.muted))
         .render(
             Rect {
                 x: chart_outer.x,
@@ -1027,7 +1101,7 @@ fn render_explorer_line_canvas(
             frame,
         );
     Paragraph::new(bottom_label)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 160)))
+        .style(ftui::Style::new().fg(cc.muted))
         .render(
             Rect {
                 x: chart_outer.x,
@@ -1068,7 +1142,7 @@ fn render_explorer_line_canvas(
                 continue;
             }
             Paragraph::new(label_text)
-                .style(ftui::Style::new().fg(PackedRgba::rgb(150, 150, 170)))
+                .style(ftui::Style::new().fg(cc.muted))
                 .render(
                     Rect {
                         x,
@@ -1087,13 +1161,14 @@ fn render_explorer_scatter(
     points: &[crate::analytics::SessionScatterPoint],
     area: Rect,
     frame: &mut ftui::Frame,
+    cc: ChartColors,
 ) {
     if area.height < 4 || area.width < 24 {
         return;
     }
     if points.is_empty() {
         Paragraph::new(" Scatter: no per-session data")
-            .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
+            .style(ftui::Style::new().fg(cc.subtle))
             .render(area, frame);
         return;
     }
@@ -1108,7 +1183,7 @@ fn render_explorer_scatter(
         .collect();
     if valid.is_empty() {
         Paragraph::new(" Scatter: no positive session points")
-            .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
+            .style(ftui::Style::new().fg(cc.subtle))
             .render(area, frame);
         return;
     }
@@ -1131,7 +1206,7 @@ fn render_explorer_scatter(
         chunks[0].width as usize,
     );
     Paragraph::new(header)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(160, 170, 185)))
+        .style(ftui::Style::new().fg(cc.axis))
         .render(chunks[0], frame);
 
     let plot_area = chunks[1];
@@ -1166,29 +1241,11 @@ fn render_explorer_scatter(
 
     // Axes and average guides.
     let baseline = px_h - 1;
-    painter.line_colored(
-        0,
-        baseline,
-        px_w - 1,
-        baseline,
-        Some(PackedRgba::rgb(90, 95, 110)),
-    );
-    painter.line_colored(0, 0, 0, px_h - 1, Some(PackedRgba::rgb(90, 95, 110)));
+    painter.line_colored(0, baseline, px_w - 1, baseline, Some(cc.subtle));
+    painter.line_colored(0, 0, 0, px_h - 1, Some(cc.subtle));
     let (avg_x, avg_y) = to_px(avg_messages, avg_tokens);
-    painter.line_colored(
-        avg_x,
-        0,
-        avg_x,
-        px_h - 1,
-        Some(PackedRgba::rgb(110, 120, 135)),
-    );
-    painter.line_colored(
-        0,
-        avg_y,
-        px_w - 1,
-        avg_y,
-        Some(PackedRgba::rgb(110, 120, 135)),
-    );
+    painter.line_colored(avg_x, 0, avg_x, px_h - 1, Some(cc.muted));
+    painter.line_colored(0, avg_y, px_w - 1, avg_y, Some(cc.muted));
 
     for point in valid {
         let ratio = point.api_tokens_total as f64 / point.message_count.max(1) as f64;
@@ -1209,8 +1266,7 @@ fn render_explorer_scatter(
         }
     }
 
-    let canvas = CanvasRef::from_painter(&painter)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(170, 180, 200)));
+    let canvas = CanvasRef::from_painter(&painter).style(ftui::Style::new().fg(cc.axis));
     canvas.render(plot_area, frame);
 }
 
@@ -1415,12 +1471,14 @@ pub fn render_heatmap(
     selection: usize,
     area: Rect,
     frame: &mut ftui::Frame,
+    dark_mode: bool,
 ) {
     let (series, min_raw, max_raw) = heatmap_series_for_metric(data, metric);
+    let cc = ChartColors::for_theme(dark_mode);
 
     if series.is_empty() {
         Paragraph::new(" No daily data available for this view yet.")
-            .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
+            .style(ftui::Style::new().fg(cc.subtle))
             .render(area, frame);
         return;
     }
@@ -1452,7 +1510,7 @@ pub fn render_heatmap(
     let legend_area = chunks[3];
 
     // ── 1. Metric tab bar ───────────────────────────────────────────────
-    render_heatmap_tabs(metric, tab_area, frame);
+    render_heatmap_tabs(metric, tab_area, frame, cc);
 
     // ── 2. Compute grid geometry ────────────────────────────────────────
     let left_gutter = 4u16; // "Mon " = 4 chars
@@ -1490,7 +1548,7 @@ pub fn render_heatmap(
                 height: 1,
             };
             Paragraph::new(*label)
-                .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
+                .style(ftui::Style::new().fg(cc.muted))
                 .render(label_rect, frame);
         }
     }
@@ -1531,7 +1589,7 @@ pub fn render_heatmap(
                         height: 1,
                     };
                     Paragraph::new(*mname)
-                        .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 180)))
+                        .style(ftui::Style::new().fg(cc.emphasis))
                         .render(mr, frame);
                 }
             }
@@ -1560,8 +1618,7 @@ pub fn render_heatmap(
         }
     }
 
-    let canvas = CanvasRef::from_painter(&painter)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(200, 200, 200)));
+    let canvas = CanvasRef::from_painter(&painter).style(ftui::Style::new().fg(cc.emphasis));
     canvas.render(grid_inner, frame);
 
     // ── 6. Selection highlight ──────────────────────────────────────────
@@ -1588,7 +1645,7 @@ pub fn render_heatmap(
                     "\u{25b6}".to_string() // arrow
                 };
                 Paragraph::new(marker)
-                    .style(ftui::Style::new().fg(PackedRgba::rgb(255, 255, 80)).bold())
+                    .style(ftui::Style::new().fg(cc.highlight).bold())
                     .render(sel_rect, frame);
             }
         }
@@ -1616,11 +1673,7 @@ pub fn render_heatmap(
                 height: 1,
             };
             Paragraph::new(tip)
-                .style(
-                    ftui::Style::new()
-                        .fg(PackedRgba::rgb(255, 255, 255))
-                        .bg(PackedRgba::rgb(60, 60, 80)),
-                )
+                .style(ftui::Style::new().fg(cc.tooltip_fg).bg(cc.tooltip_bg))
                 .render(tip_rect, frame);
         }
     }
@@ -1642,7 +1695,7 @@ pub fn render_heatmap(
             height: 1,
         };
         Paragraph::new(label_left)
-            .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
+            .style(ftui::Style::new().fg(cc.muted))
             .render(left_rect, frame);
 
         // Gradient ramp in the middle
@@ -1674,14 +1727,19 @@ pub fn render_heatmap(
                 height: 1,
             };
             Paragraph::new(label_right)
-                .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
+                .style(ftui::Style::new().fg(cc.muted))
                 .render(right_rect, frame);
         }
     }
 }
 
 /// Render the heatmap metric tab bar.
-fn render_heatmap_tabs(active: HeatmapMetric, area: Rect, frame: &mut ftui::Frame) {
+fn render_heatmap_tabs(
+    active: HeatmapMetric,
+    area: Rect,
+    frame: &mut ftui::Frame,
+    cc: ChartColors,
+) {
     let metrics = [
         HeatmapMetric::ApiTokens,
         HeatmapMetric::Messages,
@@ -1703,9 +1761,9 @@ fn render_heatmap_tabs(active: HeatmapMetric, area: Rect, frame: &mut ftui::Fram
             break;
         }
         let style = if is_active {
-            ftui::Style::new().fg(PackedRgba::rgb(255, 255, 80)).bold()
+            ftui::Style::new().fg(cc.highlight).bold()
         } else {
-            ftui::Style::new().fg(PackedRgba::rgb(160, 160, 160))
+            ftui::Style::new().fg(cc.muted)
         };
         let tab_rect = Rect {
             x,
@@ -1724,6 +1782,7 @@ pub fn render_breakdowns(
     tab: BreakdownTab,
     area: Rect,
     frame: &mut ftui::Frame,
+    dark_mode: bool,
 ) {
     type BreakdownSeries<'a> = (
         &'a [(String, f64)],
@@ -1743,13 +1802,15 @@ pub fn render_breakdowns(
         BreakdownTab::Model => (&data.model_tokens, &data.model_tokens, model_color),
     };
 
+    let cc = ChartColors::for_theme(dark_mode);
+
     if tokens.is_empty() {
         let msg = format!(
             " No {} breakdown data for the current filters.",
             tab.label()
         );
         Paragraph::new(msg)
-            .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
+            .style(ftui::Style::new().fg(cc.subtle))
             .render(area, frame);
         return;
     }
@@ -1760,7 +1821,7 @@ pub fn render_breakdowns(
         .split(area);
 
     // ── Tab bar ──────────────────────────────────────────
-    render_breakdown_tabs(tab, layout[0], frame);
+    render_breakdown_tabs(tab, layout[0], frame, cc);
 
     // ── Content: side-by-side bar charts (tokens | messages) ─
     let content = layout[1];
@@ -1884,9 +1945,14 @@ fn breakdown_tabs_line(active: BreakdownTab, width: usize) -> String {
 }
 
 /// Render the tab selector bar for the Breakdowns view.
-fn render_breakdown_tabs(active: BreakdownTab, area: Rect, frame: &mut ftui::Frame) {
+fn render_breakdown_tabs(
+    active: BreakdownTab,
+    area: Rect,
+    frame: &mut ftui::Frame,
+    cc: ChartColors,
+) {
     let text = breakdown_tabs_line(active, area.width as usize);
-    let style = ftui::Style::new().fg(PackedRgba::rgb(180, 200, 255)).bold();
+    let style = ftui::Style::new().fg(cc.axis).bold();
     Paragraph::new(text).style(style).render(area, frame);
 }
 
@@ -1924,10 +1990,17 @@ pub fn coverage_row_count(data: &AnalyticsChartData) -> usize {
 }
 
 /// Render the Tools view: per-agent table with calls, messages, tokens, calls/1K, and trend.
-pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
+pub fn render_tools(
+    data: &AnalyticsChartData,
+    area: Rect,
+    frame: &mut ftui::Frame,
+    dark_mode: bool,
+) {
+    let cc = ChartColors::for_theme(dark_mode);
+
     if data.tool_rows.is_empty() {
         Paragraph::new(" No tool usage data available for the current filters.")
-            .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
+            .style(ftui::Style::new().fg(cc.subtle))
             .render(area, frame);
         return;
     }
@@ -1951,7 +2024,7 @@ pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
     let chunks = Flex::vertical().constraints(constraints).split(area);
 
     // ── Header ──
-    let header_style = ftui::Style::new().fg(PackedRgba::rgb(180, 200, 255)).bold();
+    let header_style = ftui::Style::new().fg(cc.axis).bold();
     let header = tools_header_line(chunks[0].width as usize);
     Paragraph::new(header)
         .style(header_style)
@@ -2006,7 +2079,7 @@ pub fn render_tools(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Fra
         chunks[summary_idx].width as usize,
     );
     Paragraph::new(summary)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(150, 150, 150)))
+        .style(ftui::Style::new().fg(cc.muted))
         .render(chunks[summary_idx], frame);
 }
 
@@ -2082,10 +2155,17 @@ pub fn plans_rows(data: &AnalyticsChartData) -> usize {
 }
 
 /// Render the Plans view: plan message breakdown by agent + plan token share.
-fn render_plans(data: &AnalyticsChartData, selection: usize, area: Rect, frame: &mut ftui::Frame) {
+fn render_plans(
+    data: &AnalyticsChartData,
+    selection: usize,
+    area: Rect,
+    frame: &mut ftui::Frame,
+    dark_mode: bool,
+) {
     if area.height < 3 || area.width < 20 {
         return;
     }
+    let cc = ChartColors::for_theme(dark_mode);
 
     let total_plan = data.total_plan_messages;
     let total_msgs = data.total_messages;
@@ -2106,7 +2186,7 @@ fn render_plans(data: &AnalyticsChartData, selection: usize, area: Rect, frame: 
         area.width as usize,
     );
     Paragraph::new(header)
-        .style(ftui::Style::new().fg(PackedRgba::rgb(180, 180, 200)))
+        .style(ftui::Style::new().fg(cc.emphasis))
         .render(
             Rect {
                 x: area.x,
@@ -2145,9 +2225,9 @@ fn render_plans(data: &AnalyticsChartData, selection: usize, area: Rect, frame: 
             area.width as usize,
         );
         let fg = if i == selection {
-            PackedRgba::rgb(255, 255, 100)
+            cc.highlight
         } else {
-            PackedRgba::rgb(255, 200, 0)
+            cc.highlight_dim
         };
         let row_area = Rect {
             x: area.x,
@@ -2162,8 +2242,13 @@ fn render_plans(data: &AnalyticsChartData, selection: usize, area: Rect, frame: 
             width: bar_width.min(area.width),
             height: 1,
         };
+        let bar_bg = if dark_mode {
+            PackedRgba::rgb(80, 60, 0)
+        } else {
+            PackedRgba::rgb(255, 235, 180)
+        };
         Paragraph::new("")
-            .style(ftui::Style::new().bg(PackedRgba::rgb(80, 60, 0)))
+            .style(ftui::Style::new().bg(bar_bg))
             .render(bar_area, frame);
         // Label on top
         Paragraph::new(label)
@@ -2173,7 +2258,14 @@ fn render_plans(data: &AnalyticsChartData, selection: usize, area: Rect, frame: 
 }
 
 /// Render the Coverage view: overall bar + per-agent breakdown + daily sparkline.
-pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::Frame) {
+pub fn render_coverage(
+    data: &AnalyticsChartData,
+    area: Rect,
+    frame: &mut ftui::Frame,
+    dark_mode: bool,
+) {
+    let cc = ChartColors::for_theme(dark_mode);
+
     // Agent rows to show (up to 10).
     let agent_row_count = data.agent_tokens.len().min(10);
     let table_height = if agent_row_count > 0 {
@@ -2223,7 +2315,7 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
             height: 1,
         };
         Paragraph::new(line2)
-            .style(ftui::Style::new().fg(PackedRgba::rgb(160, 160, 160)))
+            .style(ftui::Style::new().fg(cc.muted))
             .render(line2_area, frame);
     }
 
@@ -2247,7 +2339,7 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
             height: 1,
         };
         Paragraph::new(header_trunc)
-            .style(ftui::Style::new().fg(PackedRgba::rgb(200, 200, 200)).bold())
+            .style(ftui::Style::new().fg(cc.emphasis).bold())
             .render(header_area, frame);
 
         // Agent rows.
@@ -2332,7 +2424,7 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
                 height: 1,
             };
             Paragraph::new(label_text)
-                .style(ftui::Style::new().fg(PackedRgba::rgb(140, 140, 140)))
+                .style(ftui::Style::new().fg(cc.muted))
                 .render(label_area, frame);
         }
 
@@ -2352,7 +2444,7 @@ pub fn render_coverage(data: &AnalyticsChartData, area: Rect, frame: &mut ftui::
         sparkline.render(spark_area, frame);
     } else {
         Paragraph::new(" No daily data for sparkline")
-            .style(ftui::Style::new().fg(PackedRgba::rgb(120, 120, 120)))
+            .style(ftui::Style::new().fg(cc.subtle))
             .render(chunks[2], frame);
     }
 }
@@ -2396,13 +2488,16 @@ pub fn render_analytics_content(
     selection: usize,
     area: Rect,
     frame: &mut ftui::Frame,
+    dark_mode: bool,
 ) {
     match view {
-        AnalyticsView::Dashboard => render_dashboard(data, area, frame),
-        AnalyticsView::Explorer => render_explorer(data, explorer, area, frame),
-        AnalyticsView::Heatmap => render_heatmap(data, heatmap_metric, selection, area, frame),
+        AnalyticsView::Dashboard => render_dashboard(data, area, frame, dark_mode),
+        AnalyticsView::Explorer => render_explorer(data, explorer, area, frame, dark_mode),
+        AnalyticsView::Heatmap => {
+            render_heatmap(data, heatmap_metric, selection, area, frame, dark_mode)
+        }
         AnalyticsView::Breakdowns => {
-            render_breakdowns(data, breakdown_tab, area, frame);
+            render_breakdowns(data, breakdown_tab, area, frame, dark_mode);
             let row_count = breakdown_rows(data, breakdown_tab);
             // Offset by 1 for the tab bar row.
             let content_area = if area.height > 1 {
@@ -2421,10 +2516,11 @@ pub fn render_analytics_content(
                 content_area,
                 frame,
                 !matches!(breakdown_tab, BreakdownTab::Model),
+                dark_mode,
             );
         }
         AnalyticsView::Tools => {
-            render_tools(data, area, frame);
+            render_tools(data, area, frame, dark_mode);
             // Selection indicator offset by 1 for the header row.
             let tools_content = if area.height > 1 {
                 Rect {
@@ -2442,13 +2538,14 @@ pub fn render_analytics_content(
                 tools_content,
                 frame,
                 false,
+                dark_mode,
             );
         }
         AnalyticsView::Plans => {
-            render_plans(data, selection, area, frame);
+            render_plans(data, selection, area, frame, dark_mode);
         }
         AnalyticsView::Coverage => {
-            render_coverage(data, area, frame);
+            render_coverage(data, area, frame, dark_mode);
             // Selection indicator offset by 2 for the coverage bar + 1 for table header.
             let row_count = coverage_row_count(data);
             if row_count > 0 && area.height > 3 {
@@ -2458,7 +2555,14 @@ pub fn render_analytics_content(
                     width: area.width,
                     height: area.height.saturating_sub(3),
                 };
-                render_selection_indicator(selection, row_count, cov_content, frame, false);
+                render_selection_indicator(
+                    selection,
+                    row_count,
+                    cov_content,
+                    frame,
+                    false,
+                    dark_mode,
+                );
             }
         }
     }
@@ -2484,6 +2588,7 @@ fn render_selection_indicator(
     area: Rect,
     frame: &mut ftui::Frame,
     half_width: bool,
+    dark_mode: bool,
 ) {
     if max_rows == 0 || selection >= max_rows {
         return;
@@ -2506,8 +2611,9 @@ fn render_selection_indicator(
         width: 1,
         height: 1,
     };
+    let cc = ChartColors::for_theme(dark_mode);
     Paragraph::new("\u{25b6}")
-        .style(ftui::Style::new().fg(PackedRgba::rgb(255, 255, 80)).bold())
+        .style(ftui::Style::new().fg(cc.highlight).bold())
         .render(indicator, frame);
 }
 

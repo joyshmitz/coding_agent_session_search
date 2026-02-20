@@ -2654,15 +2654,23 @@ impl RenderItem for ResultItem {
         let bg_style = if selected {
             self.selected_style
         } else if self.hovered {
-            // Subtle hover highlight: blend stripe bg 8% toward white to
-            // indicate the mouse cursor is on this row.
+            // Subtle hover highlight: blend stripe bg 8% toward a
+            // contrasting direction to indicate the mouse cursor is on
+            // this row.  On dark backgrounds blend toward white; on
+            // light backgrounds blend toward black so the shift stays
+            // perceptible regardless of theme.
             let base = self.stripe_style;
             if let Some(bg) = base.bg {
                 let t = 0.08;
+                // Simple perceived-luminance test (rec. 601 approximation).
+                let luma = 0.299 * f32::from(bg.r())
+                    + 0.587 * f32::from(bg.g())
+                    + 0.114 * f32::from(bg.b());
+                let target: u8 = if luma > 128.0 { 0 } else { 255 };
                 base.bg(ftui::PackedRgba::rgb(
-                    lerp_u8(bg.r(), 255, t),
-                    lerp_u8(bg.g(), 255, t),
-                    lerp_u8(bg.b(), 255, t),
+                    lerp_u8(bg.r(), target, t),
+                    lerp_u8(bg.g(), target, t),
+                    lerp_u8(bg.b(), target, t),
                 ))
             } else {
                 base
@@ -3818,6 +3826,10 @@ pub struct CassApp {
     pub show_help: bool,
     /// Scroll position within the help overlay.
     pub help_scroll: u16,
+    /// Total content lines in the help overlay (set during render).
+    pub help_content_lines: Cell<u16>,
+    /// Visible height of the help overlay viewport (set during render).
+    pub help_visible_height: Cell<u16>,
     /// Whether the help strip is pinned.
     pub help_pinned: bool,
     /// Whether help has been shown at least once for this profile.
@@ -4070,6 +4082,8 @@ impl Default for CassApp {
             peek_window_saved: None,
             show_help: false,
             help_scroll: 0,
+            help_content_lines: Cell::new(0),
+            help_visible_height: Cell::new(0),
             help_pinned: false,
             has_seen_help: false,
             show_export_modal: false,
@@ -5298,7 +5312,7 @@ impl CassApp {
             if pane.hits.is_empty() {
                 pane.selected = 0;
             } else if pane.selected >= pane.hits.len() {
-                pane.selected = pane.hits.len() - 1;
+                pane.selected = pane.hits.len().saturating_sub(1);
             }
         }
 
@@ -5728,8 +5742,12 @@ impl CassApp {
         ];
 
         // Check total width — if it fits, render with spans; if not, elide
-        let total_len: usize =
-            segments.iter().map(|(t, _)| t.len()).sum::<usize>() + sep.len() * (segments.len() - 1);
+        let sep_w = display_width(sep);
+        let total_len: usize = segments
+            .iter()
+            .map(|(t, _)| display_width(t))
+            .sum::<usize>()
+            + sep_w * (segments.len() - 1);
 
         if total_len > width as usize {
             // Fall back to elided flat text with per-crumb styling
@@ -5739,11 +5757,11 @@ impl CassApp {
 
             for (i, (text, is_active)) in segments.iter().enumerate() {
                 if i > 0 {
-                    if used + sep.len() > budget {
+                    if used + sep_w > budget {
                         break;
                     }
                     spans.push(ftui::text::Span::styled(sep, separator_style));
-                    used += sep.len();
+                    used += sep_w;
                 }
                 let remaining = budget.saturating_sub(used);
                 let elided = elide_text(text, remaining);
@@ -5979,14 +5997,20 @@ impl CassApp {
         if edge_mix <= 0.01 {
             return;
         }
-        let accent = styles
-            .style(style_system::STYLE_STATUS_INFO)
-            .fg
-            .unwrap_or(ftui::PackedRgba::rgb(80, 160, 240));
-        let pane_bg = styles
-            .style(style_system::STYLE_PANE_BASE)
-            .bg
-            .unwrap_or(ftui::PackedRgba::rgb(10, 12, 16));
+        let accent = styles.style(style_system::STYLE_STATUS_INFO).fg.unwrap_or(
+            if self.style_options.dark_mode {
+                ftui::PackedRgba::rgb(80, 160, 240)
+            } else {
+                ftui::PackedRgba::rgb(30, 100, 200)
+            },
+        );
+        let pane_bg = styles.style(style_system::STYLE_PANE_BASE).bg.unwrap_or(
+            if self.style_options.dark_mode {
+                ftui::PackedRgba::rgb(10, 12, 16)
+            } else {
+                ftui::PackedRgba::rgb(245, 245, 248)
+            },
+        );
         let edge_color = ftui::PackedRgba::rgb(
             lerp_u8(pane_bg.r(), accent.r(), 0.35 + edge_mix * 0.45),
             lerp_u8(pane_bg.g(), accent.g(), 0.35 + edge_mix * 0.45),
@@ -6243,7 +6267,7 @@ impl CassApp {
         let mut used = 0usize;
         let mut spans: Vec<ftui::text::Span<'static>> = Vec::new();
         for (key, value, style) in lanes {
-            let lane_chars = display_width(key) + display_width(value) + 3; // [k:v]
+            let lane_chars = display_width(key) + display_width(&value) + 3; // [k:v]
             let prefix = 1;
             if used + prefix + lane_chars > max_chars {
                 break;
@@ -6586,10 +6610,16 @@ impl CassApp {
                 continue;
             }
 
-            let selected_row_style = row_selected_style
-                .bg(accent_color)
-                .fg(ftui::PackedRgba::rgb(14, 16, 24))
-                .bold();
+            // Use the app root background as fg so selected rows contrast
+            // correctly in both dark and light themes.
+            let sel_fg = styles.style(style_system::STYLE_APP_ROOT).bg.unwrap_or(
+                if self.style_options.dark_mode {
+                    ftui::PackedRgba::rgb(14, 16, 24)
+                } else {
+                    ftui::PackedRgba::rgb(250, 250, 252)
+                },
+            );
+            let selected_row_style = row_selected_style.bg(accent_color).fg(sel_fg).bold();
             let items: Vec<ResultItem> = pane
                 .hits
                 .iter()
@@ -7049,7 +7079,10 @@ impl CassApp {
                 Vec::with_capacity(msg_count);
             for (msg_idx, msg) in cv.messages.iter().enumerate() {
                 // Record line offset for message-level navigation
-                msg_offsets.push(((lines.len().min(u16::MAX as usize)) as u16, msg.role.clone()));
+                msg_offsets.push((
+                    (lines.len().min(u16::MAX as usize)) as u16,
+                    msg.role.clone(),
+                ));
                 let msg_line_from_idx = (msg.idx >= 0).then_some((msg.idx as usize) + 1);
                 let msg_line_from_pos = msg_idx + 1;
                 let msg_is_session_hit = msg_line_from_idx
@@ -7622,7 +7655,7 @@ impl CassApp {
                         };
 
                         rebuilt.push(ftui::text::Span::styled(text[pos..end].to_string(), merged));
-                        match_positions.push(line_no as u16);
+                        match_positions.push(line_no.min(u16::MAX as usize) as u16);
                         match_idx += 1;
                         pos = end;
                         continue;
@@ -8003,27 +8036,50 @@ impl CassApp {
         } else {
             0.0
         };
+        let dark = self.style_options.dark_mode;
         let tab_semantic_accent = match self.detail_tab {
-            DetailTab::Messages => styles
-                .style(style_system::STYLE_STATUS_INFO)
-                .fg
-                .unwrap_or(ftui::PackedRgba::rgb(90, 180, 255)),
+            DetailTab::Messages => {
+                styles
+                    .style(style_system::STYLE_STATUS_INFO)
+                    .fg
+                    .unwrap_or(if dark {
+                        ftui::PackedRgba::rgb(90, 180, 255)
+                    } else {
+                        ftui::PackedRgba::rgb(20, 100, 200)
+                    })
+            }
             DetailTab::Snippets => styles
                 .style(style_system::STYLE_STATUS_SUCCESS)
                 .fg
-                .unwrap_or(ftui::PackedRgba::rgb(120, 220, 160)),
+                .unwrap_or(if dark {
+                    ftui::PackedRgba::rgb(120, 220, 160)
+                } else {
+                    ftui::PackedRgba::rgb(30, 140, 60)
+                }),
             DetailTab::Raw => styles
                 .style(style_system::STYLE_STATUS_WARNING)
                 .fg
-                .unwrap_or(ftui::PackedRgba::rgb(255, 195, 110)),
+                .unwrap_or(if dark {
+                    ftui::PackedRgba::rgb(255, 195, 110)
+                } else {
+                    ftui::PackedRgba::rgb(180, 110, 20)
+                }),
             DetailTab::Json => styles
                 .style(style_system::STYLE_ROLE_TOOL)
                 .fg
-                .unwrap_or(ftui::PackedRgba::rgb(190, 175, 255)),
+                .unwrap_or(if dark {
+                    ftui::PackedRgba::rgb(190, 175, 255)
+                } else {
+                    ftui::PackedRgba::rgb(100, 70, 200)
+                }),
             DetailTab::Analytics => styles
                 .style(style_system::STYLE_ROLE_ASSISTANT)
                 .fg
-                .unwrap_or(ftui::PackedRgba::rgb(120, 220, 220)),
+                .unwrap_or(if dark {
+                    ftui::PackedRgba::rgb(120, 220, 220)
+                } else {
+                    ftui::PackedRgba::rgb(30, 130, 130)
+                }),
         };
         let detail_accent = if let Some(hit) = self.selected_hit() {
             let agent_accent = legacy_agent_color(&hit.agent);
@@ -8261,7 +8317,8 @@ impl CassApp {
             let total_lines = lines.len();
 
             // Store content metrics for scroll clamping in update handlers
-            self.detail_content_lines.set((total_lines.min(u16::MAX as usize)) as u16);
+            self.detail_content_lines
+                .set((total_lines.min(u16::MAX as usize)) as u16);
             self.detail_visible_height.set(content_area.height);
 
             // Clamp scroll
@@ -8287,7 +8344,7 @@ impl CassApp {
                     (effective_scroll * 100) / (total_lines.saturating_sub(visible_height))
                 };
                 let indicator = format!(" {}/{} ({pct}%) ", effective_scroll + 1, total_lines);
-                let ind_w = indicator.len().min(content_area.width as usize);
+                let ind_w = display_width(&indicator).min(content_area.width as usize);
                 let ind_x = content_area.x + content_area.width.saturating_sub(ind_w as u16);
                 let ind_y = content_area.y + content_area.height.saturating_sub(1);
                 let ind_area = Rect::new(ind_x, ind_y, ind_w as u16, 1);
@@ -9361,6 +9418,10 @@ impl CassApp {
         }
 
         let lines = self.build_help_lines(styles);
+        let line_count = lines.len();
+        self.help_content_lines
+            .set((line_count.min(u16::MAX as usize)) as u16);
+        self.help_visible_height.set(inner.height);
         let text = ftui::text::Text::from_lines(lines_into_static(lines));
         Paragraph::new(text)
             .style(styles.style(style_system::STYLE_TEXT_PRIMARY))
@@ -9863,7 +9924,7 @@ impl CassApp {
         }
 
         // ── Footer (keyboard hints) ──────────────────────────────
-        let footer_y = modal_area.y + modal_area.height - 2;
+        let footer_y = modal_area.y + modal_area.height.saturating_sub(2);
         if footer_y > y {
             let can_export = state.can_export();
             let export_label = if can_export && state.focused == ExportField::ExportButton {
@@ -11597,7 +11658,8 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::Char('r') if ctrl && shift => CassMsg::IndexRefreshRequested,
                     KeyCode::Char('r') if ctrl => CassMsg::HistoryCycled,
                     KeyCode::Char('n') if ctrl => CassMsg::HistoryNavigated { forward: true },
-                    KeyCode::Char('p') if ctrl => CassMsg::HistoryNavigated { forward: false },
+                    // Ctrl+P / Alt+P are used by PaletteOpened; history backward
+                    // is available via HistoryNavigated in tests and programmatically.
 
                     // -- Saved views (Ctrl+1..9 save, Shift+1..9 load) -----------
                     KeyCode::Char(c @ '1'..='9') if ctrl => CassMsg::ViewSaved(c as u8 - b'0'),
@@ -14173,8 +14235,12 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::HelpScrolled { delta } => {
-                let new_scroll = self.help_scroll as i32 + delta;
-                self.help_scroll = new_scroll.max(0) as u16;
+                let max_scroll = self
+                    .help_content_lines
+                    .get()
+                    .saturating_sub(self.help_visible_height.get());
+                let new_scroll = (self.help_scroll as i32 + delta).clamp(0, max_scroll as i32);
+                self.help_scroll = new_scroll as u16;
                 ftui::Cmd::none()
             }
             CassMsg::HelpPinToggled => {
@@ -16740,7 +16806,11 @@ impl super::ftui_adapter::Model for CassApp {
                                 .get(self.active_pane)
                                 .map(|pane| legacy_agent_color(&pane.agent))
                                 .or_else(|| styles.style(style_system::STYLE_STATUS_INFO).fg)
-                                .unwrap_or(ftui::PackedRgba::rgb(100, 170, 240));
+                                .unwrap_or(if self.style_options.dark_mode {
+                                    ftui::PackedRgba::rgb(100, 170, 240)
+                                } else {
+                                    ftui::PackedRgba::rgb(30, 100, 200)
+                                });
                             let handle_focused = matches!(
                                 self.focused_region(),
                                 FocusRegion::Results | FocusRegion::Detail
@@ -16750,12 +16820,22 @@ impl super::ftui_adapter::Model for CassApp {
                             } else {
                                 0.0
                             };
-                            let base_fg = split_handle_style
-                                .fg
-                                .unwrap_or(ftui::PackedRgba::rgb(90, 96, 118));
-                            let base_bg = split_handle_style
-                                .bg
-                                .unwrap_or(ftui::PackedRgba::rgb(14, 18, 28));
+                            let base_fg =
+                                split_handle_style
+                                    .fg
+                                    .unwrap_or(if self.style_options.dark_mode {
+                                        ftui::PackedRgba::rgb(90, 96, 118)
+                                    } else {
+                                        ftui::PackedRgba::rgb(160, 165, 180)
+                                    });
+                            let base_bg =
+                                split_handle_style
+                                    .bg
+                                    .unwrap_or(if self.style_options.dark_mode {
+                                        ftui::PackedRgba::rgb(14, 18, 28)
+                                    } else {
+                                        ftui::PackedRgba::rgb(240, 242, 246)
+                                    });
                             let fg_mix = if handle_focused {
                                 (0.38 + pulse * 0.24).clamp(0.0, 0.75)
                             } else {
@@ -17051,14 +17131,29 @@ impl super::ftui_adapter::Model for CassApp {
 
                 let empty_data = super::analytics_charts::AnalyticsChartData::default();
                 let chart_data = self.analytics_cache.as_ref().unwrap_or(&empty_data);
-                let analytics_accent = match self.analytics_view {
-                    AnalyticsView::Dashboard => ftui::PackedRgba::rgb(90, 180, 255),
-                    AnalyticsView::Explorer => ftui::PackedRgba::rgb(120, 220, 140),
-                    AnalyticsView::Heatmap => ftui::PackedRgba::rgb(255, 180, 90),
-                    AnalyticsView::Breakdowns => ftui::PackedRgba::rgb(210, 140, 255),
-                    AnalyticsView::Tools => ftui::PackedRgba::rgb(255, 120, 160),
-                    AnalyticsView::Plans => ftui::PackedRgba::rgb(140, 220, 220),
-                    AnalyticsView::Coverage => ftui::PackedRgba::rgb(190, 220, 130),
+                // Analytics view accent palette: dark themes use bright
+                // pastels; light themes use deeper, more saturated tones
+                // to maintain readable contrast against pale backgrounds.
+                let analytics_accent = if self.style_options.dark_mode {
+                    match self.analytics_view {
+                        AnalyticsView::Dashboard => ftui::PackedRgba::rgb(90, 180, 255),
+                        AnalyticsView::Explorer => ftui::PackedRgba::rgb(120, 220, 140),
+                        AnalyticsView::Heatmap => ftui::PackedRgba::rgb(255, 180, 90),
+                        AnalyticsView::Breakdowns => ftui::PackedRgba::rgb(210, 140, 255),
+                        AnalyticsView::Tools => ftui::PackedRgba::rgb(255, 120, 160),
+                        AnalyticsView::Plans => ftui::PackedRgba::rgb(140, 220, 220),
+                        AnalyticsView::Coverage => ftui::PackedRgba::rgb(190, 220, 130),
+                    }
+                } else {
+                    match self.analytics_view {
+                        AnalyticsView::Dashboard => ftui::PackedRgba::rgb(20, 100, 200),
+                        AnalyticsView::Explorer => ftui::PackedRgba::rgb(30, 140, 60),
+                        AnalyticsView::Heatmap => ftui::PackedRgba::rgb(200, 120, 20),
+                        AnalyticsView::Breakdowns => ftui::PackedRgba::rgb(140, 60, 200),
+                        AnalyticsView::Tools => ftui::PackedRgba::rgb(200, 50, 90),
+                        AnalyticsView::Plans => ftui::PackedRgba::rgb(40, 140, 140),
+                        AnalyticsView::Coverage => ftui::PackedRgba::rgb(100, 140, 40),
+                    }
                 };
 
                 // ── Analytics header with tab strip + KPI ribbon ──────────
@@ -17158,6 +17253,7 @@ impl super::ftui_adapter::Model for CassApp {
                             self.analytics_selection,
                             content_inner,
                             frame,
+                            self.style_options.dark_mode,
                         );
                     }
                 }
@@ -17203,7 +17299,11 @@ impl super::ftui_adapter::Model for CassApp {
                     footer_spans.push(ftui::text::Span::styled("  \u{2502} ", text_muted_style));
                     footer_spans.push(ftui::text::Span::styled(
                         format!("deg:{}", degradation.as_str()),
-                        ftui::Style::new().fg(ftui::PackedRgba::rgb(255, 190, 90)),
+                        ftui::Style::new().fg(if self.style_options.dark_mode {
+                            ftui::PackedRgba::rgb(255, 190, 90)
+                        } else {
+                            ftui::PackedRgba::rgb(180, 110, 20)
+                        }),
                     ));
                 }
                 if self.loading_context == Some(LoadingContext::Analytics) {
