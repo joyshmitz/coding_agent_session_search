@@ -1,4 +1,7 @@
 //! Connectors for agent histories.
+//!
+//! All connector implementations live in `franken_agent_detection`.
+//! This module provides re-export stubs for backward-compatible import paths.
 
 // Re-export normalized types and connector infrastructure from franken_agent_detection.
 pub use franken_agent_detection::{
@@ -28,11 +31,13 @@ pub use franken_agent_detection::{
     file_modified_since,
     flatten_content,
     franken_detection_for_connector,
+    get_connector_factories,
     normalize_model,
     parse_timestamp,
     reindex_messages,
 };
 
+// Connector re-export stubs — each module file re-exports from FAD.
 pub mod aider;
 pub mod amp;
 pub mod chatgpt;
