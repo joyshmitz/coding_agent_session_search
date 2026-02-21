@@ -1,3 +1,9 @@
+// NOTE: Direct tantivy imports below will be replaced by frankensearch::lexical
+// re-exports once the rch sync constraint is resolved.  frankensearch-lexical
+// now re-exports all needed tantivy types (Schema, Index, IndexReader, etc.).
+// Migration path:
+//   use tantivy::schema::Schema;        → use frankensearch::lexical::Schema;
+//   use tantivy::{Index, IndexReader};   → use frankensearch::lexical::{Index, IndexReader};
 use std::path::Path;
 
 use anyhow::{Error, Result};

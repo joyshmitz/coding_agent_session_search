@@ -34,6 +34,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+// NOTE: Direct tantivy imports below will be replaced by frankensearch::lexical
+// re-exports once the rch sync constraint is resolved.  frankensearch-lexical
+// now re-exports all needed tantivy types.
+// Migration: s/use tantivy::/use frankensearch::lexical::/
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Term, Value};

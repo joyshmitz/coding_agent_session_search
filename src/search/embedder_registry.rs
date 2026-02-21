@@ -6,6 +6,13 @@
 //! - Validating model availability before use
 //! - Providing a sensible default model
 //!
+//! **Note**: The core types ([`RegisteredEmbedder`], [`EmbedderRegistry`]) are
+//! structurally identical to those in `frankensearch_embed::model_registry`.
+//! They are kept locally for now due to build-system sync constraints (rch does
+//! not sync sibling path dependencies).  See frankensearch-embed for the
+//! canonical definitions, which additionally include reranker support, two
+//! additional Potion embedders, and richer directory-resolution helpers.
+//!
 //! # Supported Embedders
 //!
 //! | Name | ID | Dimension | Type | Notes |
@@ -43,6 +50,8 @@ pub const DEFAULT_EMBEDDER: &str = "minilm";
 pub const HASH_EMBEDDER: &str = "hash";
 
 /// Information about a registered embedder.
+///
+/// Structurally identical to `frankensearch_embed::model_registry::RegisteredEmbedder`.
 #[derive(Debug, Clone)]
 pub struct RegisteredEmbedder {
     /// Short name for CLI/config (e.g., "minilm", "hash").
@@ -191,7 +200,7 @@ pub static EMBEDDERS: &[RegisteredEmbedder] = &[
         requires_model_files: true,
         release_date: "2025-11-10",
         huggingface_id: "Snowflake/snowflake-arctic-embed-s",
-        size_bytes: 110_000_000,
+        size_bytes: 130_000_000,
         is_baseline: false,
     },
     RegisteredEmbedder {
@@ -217,7 +226,7 @@ pub static EMBEDDERS: &[RegisteredEmbedder] = &[
         release_date: "2020-01-01",
         huggingface_id: "",
         size_bytes: 0,
-        is_baseline: false,
+        is_baseline: true,
     },
 ];
 

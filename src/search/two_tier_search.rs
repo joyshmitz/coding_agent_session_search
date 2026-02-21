@@ -4,6 +4,20 @@
 //! 1. Returns instant results using a fast embedding model (in-process)
 //! 2. Refines rankings in the background using a quality model (daemon)
 //!
+//! **Relationship to frankensearch**: `frankensearch_fusion::searcher::TwoTierSearcher`
+//! is the canonical library-level search orchestrator (async, file-backed FSVI index,
+//! 21+ fields including lexical search, reranking, PRF, MMR, graph ranking, etc.).
+//! This module is the lightweight sync TUI-specific variant with:
+//! - Synchronous `Iterator`-based search (vs async callbacks)
+//! - In-memory flat vector storage with f16 quantization (vs file-backed FSVI)
+//! - Direct `DaemonClient` generic (vs `Arc<dyn Embedder>` + `DaemonFallbackEmbedder`)
+//! - Cass-specific types: `DocumentId` (Session/Turn/CodeBlock), `message_id` for SQLite
+//! - Inline SIMD dot product (`wide::f32x8`)
+//!
+//! Full consolidation requires solving the rch sync constraint (sibling path
+//! dependencies not synced to build workers).  The blending formula is shared:
+//! `blended = (1 - weight) * fast + weight * quality` with min-max normalization.
+//!
 //! # Architecture
 //!
 //! ```text

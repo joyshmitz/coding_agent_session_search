@@ -8,6 +8,11 @@
 //! - Atomic installation (temp dir -> rename)
 //! - Model version upgrade detection
 //!
+//! **Note**: The core types (`ModelState`, `ModelFile`, `ModelManifest`) are
+//! structurally identical to those in `frankensearch_embed::model_manifest`.
+//! They are kept locally for now due to build-system sync constraints.
+//! See frankensearch-embed for the canonical definitions.
+//!
 //! **Network Policy**: No network calls occur without explicit user consent.
 //! The download system is consent-gated via [`ModelState::NeedsConsent`].
 
@@ -32,6 +37,8 @@ use sha2::{Digest, Sha256};
 ///
 /// Ready ──> UpdateAvailable ──> Downloading (upgrade) ──> Verifying ──> Ready
 /// ```
+///
+/// Structurally identical to `frankensearch_embed::ModelState`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelState {
     /// Model not installed on disk.
@@ -106,6 +113,8 @@ impl ModelState {
 }
 
 /// A file in the model manifest.
+///
+/// Structurally identical to `frankensearch_embed::ModelFile`.
 #[derive(Debug, Clone)]
 pub struct ModelFile {
     /// File path relative to repo root (e.g., "model.onnx" or "onnx/model.onnx").
@@ -127,6 +136,10 @@ impl ModelFile {
 }
 
 /// Model manifest describing a downloadable model.
+///
+/// Structurally compatible with `frankensearch_embed::ModelManifest`
+/// (which has additional optional fields: version, display_name, description,
+/// dimension, tier, download_size_bytes).
 #[derive(Debug, Clone)]
 pub struct ModelManifest {
     /// Model identifier (e.g., "all-minilm-l6-v2").
@@ -226,6 +239,8 @@ impl ModelManifest {
     // ==================== Bake-off Eligible Models ====================
     // These models were released after 2025-11-01 and are candidates for
     // the CPU-optimized embedding bake-off.
+    //
+    // Canonical definitions also available via `frankensearch_embed::ModelManifest`.
 
     /// Snowflake Arctic Embed S manifest.
     ///
