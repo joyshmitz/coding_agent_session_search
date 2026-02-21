@@ -1276,26 +1276,9 @@ fn ingest_batch(
 }
 
 /// Get all available connector factories.
-#[allow(clippy::type_complexity)]
-pub fn get_connector_factories() -> Vec<(&'static str, fn() -> Box<dyn Connector + Send>)> {
-    vec![
-        ("codex", || Box::new(CodexConnector::new())),
-        ("cline", || Box::new(ClineConnector::new())),
-        ("gemini", || Box::new(GeminiConnector::new())),
-        ("claude", || Box::new(ClaudeCodeConnector::new())),
-        ("clawdbot", || Box::new(ClawdbotConnector::new())),
-        ("vibe", || Box::new(VibeConnector::new())),
-        ("opencode", || Box::new(OpenCodeConnector::new())),
-        ("amp", || Box::new(AmpConnector::new())),
-        ("aider", || Box::new(AiderConnector::new())),
-        ("cursor", || Box::new(CursorConnector::new())),
-        ("chatgpt", || Box::new(ChatGptConnector::new())),
-        ("pi_agent", || Box::new(PiAgentConnector::new())),
-        ("factory", || Box::new(FactoryConnector::new())),
-        ("openclaw", || Box::new(OpenClawConnector::new())),
-        ("copilot", || Box::new(CopilotConnector::new())),
-    ]
-}
+///
+/// Delegates to `franken_agent_detection::get_connector_factories()`.
+pub use crate::connectors::get_connector_factories;
 
 /// Detect all active roots for watching/scanning.
 ///

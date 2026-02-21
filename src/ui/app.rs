@@ -128,6 +128,7 @@ use crate::ui::time_parser::parse_time_input;
 use crate::update_check::{UpdateInfo, open_in_browser, skip_version};
 #[cfg(not(test))]
 use crate::update_check::{run_self_update, spawn_update_check};
+use ftui::render::drawing::Draw;
 use ftui::widgets::Widget;
 use ftui::widgets::block::{Alignment, Block};
 use ftui::widgets::borders::{BorderType, Borders};
@@ -2285,6 +2286,25 @@ fn format_number_with_grouping(n: i64) -> String {
     grouped
 }
 
+/// Smart timestamp conversion: detects seconds vs milliseconds automatically.
+/// Values >= 10 billion are treated as milliseconds; smaller values as seconds.
+fn smart_timestamp(ts: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+    if ts.abs() >= 10_000_000_000 {
+        chrono::DateTime::from_timestamp_millis(ts)
+    } else {
+        chrono::DateTime::from_timestamp(ts, 0)
+    }
+}
+
+/// Normalize a raw timestamp (seconds or milliseconds) to seconds.
+fn ts_to_secs(ts: i64) -> i64 {
+    if ts.abs() >= 10_000_000_000 {
+        ts / 1000
+    } else {
+        ts
+    }
+}
+
 fn format_compact_metric(n: i64) -> String {
     let abs = n.unsigned_abs();
     if abs >= 1_000_000_000 {
@@ -2805,7 +2825,7 @@ impl RenderItem for ResultItem {
             ));
             if let Some(ts) = hit
                 .created_at
-                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .and_then(smart_timestamp)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
             {
                 meta_spans.push(ftui::text::Span::styled(
@@ -2836,10 +2856,15 @@ impl RenderItem for ResultItem {
         }
 
         if self.row_height >= 5 {
+            let source_text = format!("{} {}", self.source_kind_icon(), self.source_kind());
+            let score_text = format!("score {}", score_display_label(hit.score));
+            let idx_text = format!("idx {}", self.index);
+            // Core: "    ╰─ ⌂ local · score 10.0/10"
+            let core_w = 7 + source_text.len() + 3 + score_text.len();
             let mut signal_spans = vec![
                 ftui::text::Span::styled("    \u{2570}\u{2500} ", self.text_subtle_style),
                 ftui::text::Span::styled(
-                    format!("{} {}", self.source_kind_icon(), self.source_kind()),
+                    source_text,
                     if source_is_remote {
                         self.source_remote_style.bold()
                     } else {
@@ -2847,17 +2872,25 @@ impl RenderItem for ResultItem {
                     },
                 ),
                 ftui::text::Span::styled(" · ", self.text_subtle_style),
-                ftui::text::Span::styled(
-                    format!("score {}", score_display_label(hit.score)),
-                    self.score_style,
-                ),
-                ftui::text::Span::styled(" · ", self.text_subtle_style),
-                ftui::text::Span::styled(format!("idx {}", self.index), self.text_muted_style),
+                ftui::text::Span::styled(score_text, self.score_style),
             ];
+            let mut used_w = core_w;
+            // Optional: " · idx N"
+            let idx_w = 3 + idx_text.len();
+            if used_w + idx_w <= content_width {
+                signal_spans.push(ftui::text::Span::styled(" · ", self.text_subtle_style));
+                signal_spans
+                    .push(ftui::text::Span::styled(idx_text, self.text_muted_style));
+                used_w += idx_w;
+            }
             let analytics_spans = self.mini_analytics_spans();
             if !analytics_spans.is_empty() {
-                signal_spans.push(ftui::text::Span::styled(" · ", self.text_subtle_style));
-                signal_spans.extend(analytics_spans);
+                let analytics_w: usize =
+                    3 + analytics_spans.iter().map(|s| s.content.len()).sum::<usize>();
+                if used_w + analytics_w <= content_width {
+                    signal_spans.push(ftui::text::Span::styled(" · ", self.text_subtle_style));
+                    signal_spans.extend(analytics_spans);
+                }
             }
             lines.push(ftui::text::Line::from_spans(signal_spans));
         }
@@ -3223,6 +3256,7 @@ fn build_footer_hud_line(
 /// Build the detail-pane find bar line with styled query + match-state segments.
 fn build_detail_find_bar_line(
     find: &DetailFindState,
+    cached_match_count: usize,
     width: u16,
     query_style: ftui::Style,
     match_active_style: ftui::Style,
@@ -3287,7 +3321,7 @@ fn build_detail_find_bar_line(
         return ftui::text::Line::from_spans(spans);
     }
 
-    let match_segments: Vec<(String, ftui::Style)> = if find.matches.is_empty() {
+    let match_segments: Vec<(String, ftui::Style)> = if cached_match_count == 0 {
         vec![
             (" (".to_string(), match_inactive_style),
             ("0".to_string(), match_active_style),
@@ -3298,7 +3332,7 @@ fn build_detail_find_bar_line(
         vec![
             (" (".to_string(), match_inactive_style),
             ((find.current + 1).to_string(), match_active_style),
-            (format!("/{}", find.matches.len()), match_inactive_style),
+            (format!("/{cached_match_count}"), match_inactive_style),
             (")".to_string(), match_inactive_style),
         ]
     };
@@ -5825,10 +5859,6 @@ impl CassApp {
     }
 
     fn schedule_analytics_reload(&mut self) -> ftui::Cmd<CassMsg> {
-        if self.db_reader.is_none() {
-            self.clear_loading_context(LoadingContext::Analytics);
-            return ftui::Cmd::none();
-        }
         self.set_loading_context(LoadingContext::Analytics);
         ftui::Cmd::msg(CassMsg::AnalyticsLoadRequested)
     }
@@ -6122,11 +6152,7 @@ impl CassApp {
         if !timestamps.is_empty() {
             timestamps.sort_unstable();
             let newest = timestamps.last().copied().unwrap_or(0);
-            let newest_dt = if newest.abs() >= 10_000_000_000 {
-                chrono::DateTime::from_timestamp_millis(newest)
-            } else {
-                chrono::DateTime::from_timestamp(newest, 0)
-            };
+            let newest_dt = smart_timestamp(newest);
             if let Some(dt) = newest_dt {
                 spans.push(sep.clone());
                 spans.push(ftui::text::Span::styled(
@@ -6372,14 +6398,21 @@ impl CassApp {
             } else {
                 results_border_style.fg(dim_packed_color(accent, 0.62))
             };
-            results_surface_style = results_surface_style.bg(dim_packed_color(
-                accent,
-                if focused {
-                    (0.10 + focus_pulse * 0.08).clamp(0.0, 0.22)
+            {
+                let surf = results_surface_style
+                    .bg
+                    .unwrap_or(ftui::PackedRgba::rgb(30, 30, 30));
+                let tint = if focused {
+                    (0.06 + focus_pulse * 0.04).clamp(0.0, 0.12)
                 } else {
-                    0.05
-                },
-            ));
+                    0.03
+                };
+                results_surface_style = results_surface_style.bg(ftui::PackedRgba::rgb(
+                    lerp_u8(surf.r(), accent.r(), tint),
+                    lerp_u8(surf.g(), accent.g(), tint),
+                    lerp_u8(surf.b(), accent.b(), tint),
+                ));
+            }
         }
         let results_block = Block::new()
             .borders(borders)
@@ -6568,13 +6601,18 @@ impl CassApp {
             } else {
                 dimmed_pane_color
             };
-            let pane_bg = if is_focused {
-                dim_packed_color(
-                    pane_color,
-                    (0.10 + pane_focus_pulse * 0.08).clamp(0.0, 0.20),
+            let pane_bg = {
+                let surf = pane_style.bg.unwrap_or(ftui::PackedRgba::rgb(30, 30, 30));
+                let tint = if is_focused {
+                    (0.06 + pane_focus_pulse * 0.04).clamp(0.0, 0.12)
+                } else {
+                    0.03
+                };
+                ftui::PackedRgba::rgb(
+                    lerp_u8(surf.r(), pane_color.r(), tint),
+                    lerp_u8(surf.g(), pane_color.g(), tint),
+                    lerp_u8(surf.b(), pane_color.b(), tint),
                 )
-            } else {
-                dim_packed_color(pane_color, 0.06)
             };
             let pane_border_style = if is_focused {
                 title_focused_style.fg(accent_color)
@@ -6830,7 +6868,14 @@ impl CassApp {
 
         let mut line2_spans: Vec<ftui::text::Span> =
             vec![ftui::text::Span::styled(" ", label_style)];
+        let mut line2_width: usize = 1; // leading space
+        let max_chip_width = inner_width as usize;
         let mut push_chip = |key: &str, value: String, value_style_chip: ftui::Style| {
+            let chip_w = key.len() + value.len() + 4; // "[" + key + ":" + value + "] "
+            if line2_width + chip_w > max_chip_width {
+                return;
+            }
+            line2_width += chip_w;
             line2_spans.push(ftui::text::Span::styled("[", label_style));
             line2_spans.push(ftui::text::Span::styled(key.to_string(), label_style));
             line2_spans.push(ftui::text::Span::styled(":", label_style));
@@ -6841,12 +6886,11 @@ impl CassApp {
         let mut sparkline_data: Option<(String, usize)> = None;
         if let Some((_, ref cv)) = self.cached_detail {
             if let Some(started) = cv.convo.started_at {
-                let ts_s = started / 1000; // ms → s
-                if let Some(dt) = chrono::DateTime::from_timestamp(ts_s, 0) {
+                if let Some(dt) = smart_timestamp(started) {
                     push_chip("at", dt.format("%Y-%m-%d %H:%M").to_string(), value_style);
                 }
                 if let Some(ended) = cv.convo.ended_at {
-                    let dur_secs = (ended.saturating_sub(started)) / 1000;
+                    let dur_secs = ts_to_secs(ended).saturating_sub(ts_to_secs(started));
                     let dur_str = if dur_secs >= 3600 {
                         format!("{}h {}m", dur_secs / 3600, (dur_secs % 3600) / 60)
                     } else if dur_secs >= 60 {
@@ -6857,7 +6901,7 @@ impl CassApp {
                     push_chip("dur", dur_str, muted_style);
                 }
             } else if let Some(ts) = hit.created_at
-                && let Some(dt) = chrono::DateTime::from_timestamp(ts, 0)
+                && let Some(dt) = smart_timestamp(ts)
             {
                 push_chip("at", dt.format("%Y-%m-%d %H:%M").to_string(), value_style);
             }
@@ -6889,7 +6933,7 @@ impl CassApp {
                 }
             }
         } else if let Some(ts) = hit.created_at
-            && let Some(dt) = chrono::DateTime::from_timestamp(ts, 0)
+            && let Some(dt) = smart_timestamp(ts)
         {
             push_chip("at", dt.format("%Y-%m-%d %H:%M").to_string(), value_style);
             push_chip("score", score_display_label(hit.score), score_style);
@@ -7037,7 +7081,7 @@ impl CassApp {
             ));
         }
         if let Some(ts) = hit.created_at.map(|ts| {
-            chrono::DateTime::from_timestamp(ts, 0)
+            smart_timestamp(ts)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_else(|| ts.to_string())
         }) {
@@ -7070,8 +7114,11 @@ impl CassApp {
 
         // If we have a cached conversation, render full messages
         if let Some((_, ref cv)) = self.cached_detail {
+            let md_width = inner_width.saturating_sub(4);
             let md_renderer = MarkdownRenderer::new(styles.markdown_theme())
-                .with_syntax_theme(styles.syntax_highlight_theme());
+                .with_syntax_theme(styles.syntax_highlight_theme())
+                .rule_width(md_width)
+                .table_max_width(md_width);
 
             let msg_count = cv.messages.len();
             let subtle_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
@@ -7104,7 +7151,7 @@ impl CassApp {
                     .unwrap_or_default();
                 let ts_label = msg
                     .created_at
-                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                    .and_then(smart_timestamp)
                     .map(|dt| format!(" {}", dt.format("%H:%M:%S")))
                     .unwrap_or_default();
 
@@ -7262,8 +7309,11 @@ impl CassApp {
                 &hit.content
             };
             if self.show_detail_modal || is_likely_markdown(content).is_likely() {
+                let md_w = inner_width.saturating_sub(4);
                 let md_renderer = MarkdownRenderer::new(styles.markdown_theme())
-                    .with_syntax_theme(styles.syntax_highlight_theme());
+                    .with_syntax_theme(styles.syntax_highlight_theme())
+                    .rule_width(md_w)
+                    .table_max_width(md_w);
                 let rendered = md_renderer.render(content);
                 for line in rendered.into_iter() {
                     lines.push(line);
@@ -7747,7 +7797,7 @@ impl CassApp {
 
         // Duration
         if let (Some(started), Some(ended)) = (cv.convo.started_at, cv.convo.ended_at) {
-            let dur_secs = (ended.saturating_sub(started)) / 1000;
+            let dur_secs = ts_to_secs(ended).saturating_sub(ts_to_secs(started));
             let dur_str = if dur_secs >= 3600 {
                 format!(
                     "{}h {}m {}s",
@@ -8112,13 +8162,20 @@ impl CassApp {
             } else {
                 detail_accent
             };
-            block_style = block_style.bg(dim_packed_color(
-                detail_accent,
-                if detail_focused {
-                    (0.11 + detail_focus_pulse * 0.07).clamp(0.0, 0.22)
-                } else {
-                    0.06
-                },
+            // Tint the surface background with the accent at low opacity so the
+            // detail pane gets a subtle hue without becoming illegibly dark.
+            // Previous approach used `dim_packed_color(accent, 0.06)` which
+            // multiplied accent RGB by 0.06, producing near-black backgrounds.
+            let surface_bg = block_style.bg.unwrap_or(ftui::PackedRgba::rgb(30, 30, 30));
+            let tint = if detail_focused {
+                (0.06 + detail_focus_pulse * 0.04).clamp(0.0, 0.12)
+            } else {
+                0.03
+            };
+            block_style = block_style.bg(ftui::PackedRgba::rgb(
+                lerp_u8(surface_bg.r(), detail_accent.r(), tint),
+                lerp_u8(surface_bg.g(), detail_accent.g(), tint),
+                lerp_u8(surface_bg.b(), detail_accent.b(), tint),
             ));
             detail_border_style = if detail_focused {
                 detail_border_style.fg(border_accent).bold()
@@ -8149,15 +8206,20 @@ impl CassApp {
             let mut tab_divider_s = text_muted_style;
             let mut tab_row_style = block_style;
             if styleful {
+                // Blend accent into the surface for tab backgrounds so they
+                // remain legible instead of being nearly black.
+                let tab_surface = block_style.bg.unwrap_or(ftui::PackedRgba::rgb(30, 30, 30));
+                let active_tint = if detail_focused {
+                    (0.15 + detail_focus_pulse * 0.08).clamp(0.0, 0.28)
+                } else {
+                    0.10
+                };
                 tab_active_s = tab_active_s
                     .fg(detail_accent)
-                    .bg(dim_packed_color(
-                        detail_accent,
-                        if detail_focused {
-                            (0.22 + detail_focus_pulse * 0.10).clamp(0.0, 0.34)
-                        } else {
-                            0.16
-                        },
+                    .bg(ftui::PackedRgba::rgb(
+                        lerp_u8(tab_surface.r(), detail_accent.r(), active_tint),
+                        lerp_u8(tab_surface.g(), detail_accent.g(), active_tint),
+                        lerp_u8(tab_surface.b(), detail_accent.b(), active_tint),
                     ))
                     .bold()
                     .underline();
@@ -8170,13 +8232,15 @@ impl CassApp {
                         0.52
                     },
                 ));
-                tab_row_style = tab_row_style.bg(dim_packed_color(
-                    detail_accent,
-                    if detail_focused {
-                        (0.13 + detail_focus_pulse * 0.07).clamp(0.0, 0.24)
-                    } else {
-                        0.08
-                    },
+                let row_tint = if detail_focused {
+                    (0.08 + detail_focus_pulse * 0.04).clamp(0.0, 0.15)
+                } else {
+                    0.05
+                };
+                tab_row_style = tab_row_style.bg(ftui::PackedRgba::rgb(
+                    lerp_u8(tab_surface.r(), detail_accent.r(), row_tint),
+                    lerp_u8(tab_surface.g(), detail_accent.g(), row_tint),
+                    lerp_u8(tab_surface.b(), detail_accent.b(), row_tint),
                 ));
             }
             let tab_items = [
@@ -8266,8 +8330,16 @@ impl CassApp {
                     let header_rect =
                         Rect::new(content_area.x, content_area.y, content_area.width, header_h);
                     let header_text = ftui::text::Text::from_lines(header_lines);
+                    let header_s = {
+                        let base = styles.style(style_system::STYLE_TEXT_PRIMARY);
+                        if base.bg.is_some() {
+                            base
+                        } else {
+                            base.bg(block_style.bg.unwrap_or(ftui::PackedRgba::rgb(30, 30, 30)))
+                        }
+                    };
                     Paragraph::new(header_text)
-                        .style(styles.style(style_system::STYLE_TEXT_PRIMARY))
+                        .style(header_s)
                         .render(header_rect, frame);
                     Rect::new(
                         content_area.x,
@@ -8330,11 +8402,25 @@ impl CassApp {
                 .map(line_into_static)
                 .collect();
 
-            // Render the text
+            // Render the text.  Carry the block's bg forward so cells not
+            // covered by a span keep the correct surface color instead of
+            // reverting to the terminal default.
             let text = ftui::text::Text::from_lines(visible_lines);
-            Paragraph::new(text)
-                .style(styles.style(style_system::STYLE_TEXT_PRIMARY))
-                .render(content_area, frame);
+            let content_style = {
+                let base = styles.style(style_system::STYLE_TEXT_PRIMARY);
+                if base.bg.is_some() {
+                    base
+                } else {
+                    base.bg(block_style.bg.unwrap_or(ftui::PackedRgba::rgb(30, 30, 30)))
+                }
+            };
+            let para = Paragraph::new(text).style(content_style);
+            let para = if self.detail_wrap {
+                para.wrap(ftui::text::WrapMode::Word)
+            } else {
+                para
+            };
+            para.render(content_area, frame);
 
             // Scroll position indicator in bottom-right if content exceeds viewport
             if total_lines > visible_height {
@@ -8365,6 +8451,7 @@ impl CassApp {
             let query_style = styles.style(style_system::STYLE_DETAIL_FIND_QUERY);
             let match_active_style = styles.style(style_system::STYLE_DETAIL_FIND_MATCH_ACTIVE);
             let match_inactive_style = styles.style(style_system::STYLE_DETAIL_FIND_MATCH_INACTIVE);
+            let cached_match_count = self.detail_find_matches_cache.borrow().len();
 
             if find_rect.height > 1 {
                 let find_block = Block::new()
@@ -8394,6 +8481,7 @@ impl CassApp {
                     };
                     let line = build_detail_find_bar_line(
                         find,
+                        cached_match_count,
                         text_area.width,
                         query_style,
                         match_active_style,
@@ -8407,6 +8495,7 @@ impl CassApp {
                 Block::new().style(container_style).render(find_rect, frame);
                 let line = build_detail_find_bar_line(
                     find,
+                    cached_match_count,
                     find_rect.width,
                     query_style,
                     match_active_style,
@@ -13429,8 +13518,8 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::DetailLoadRequested { source_path } => {
                 let loaded_path = source_path.clone();
-                if let Some(db) = self.db_reader.as_ref() {
-                    match load_conversation(db, &source_path) {
+                match crate::storage::sqlite::SqliteStorage::open_readonly(&self.db_path) {
+                    Ok(db) => match load_conversation(&db, &source_path) {
                         Ok(Some(view)) => {
                             self.cached_detail = Some((loaded_path.clone(), view));
                         }
@@ -13440,6 +13529,9 @@ impl super::ftui_adapter::Model for CassApp {
                         Err(err) => {
                             self.status = format!("Failed to load conversation detail: {err}");
                         }
+                    },
+                    Err(err) => {
+                        self.status = format!("Failed to open database for detail: {err}");
                     }
                 }
 
@@ -15672,10 +15764,6 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsLoadRequested => {
-                if self.db_reader.is_none() {
-                    self.clear_loading_context(LoadingContext::Analytics);
-                    return ftui::Cmd::none();
-                }
                 let db_path = self.db_path.clone();
                 let filters = self.analytics_filters.clone();
                 let group_by = self.explorer_group_by;
@@ -17180,7 +17268,16 @@ impl super::ftui_adapter::Model for CassApp {
                     .title("cass analytics")
                     .title_alignment(Alignment::Left)
                     .border_style(pane_focused_style.fg(analytics_accent).bold())
-                    .style(pane_focused_style.bg(dim_packed_color(analytics_accent, 0.08)));
+                    .style({
+                        let surf = pane_focused_style
+                            .bg
+                            .unwrap_or(ftui::PackedRgba::rgb(30, 30, 30));
+                        pane_focused_style.bg(ftui::PackedRgba::rgb(
+                            lerp_u8(surf.r(), analytics_accent.r(), 0.06),
+                            lerp_u8(surf.g(), analytics_accent.g(), 0.06),
+                            lerp_u8(surf.b(), analytics_accent.b(), 0.06),
+                        ))
+                    });
                 let header_inner = header_block.inner(vertical[0]);
                 header_block.render(vertical[0], frame);
                 if render_content && !header_inner.is_empty() {
@@ -17202,10 +17299,19 @@ impl super::ftui_adapter::Model for CassApp {
 
                     let tab_line = self.analytics_tabs_line(
                         atopo.show_tab_bar,
-                        ftui::Style::new()
-                            .fg(analytics_accent)
-                            .bg(dim_packed_color(analytics_accent, 0.20))
-                            .bold(),
+                        {
+                            let surf = pane_focused_style
+                                .bg
+                                .unwrap_or(ftui::PackedRgba::rgb(30, 30, 30));
+                            ftui::Style::new()
+                                .fg(analytics_accent)
+                                .bg(ftui::PackedRgba::rgb(
+                                    lerp_u8(surf.r(), analytics_accent.r(), 0.15),
+                                    lerp_u8(surf.g(), analytics_accent.g(), 0.15),
+                                    lerp_u8(surf.b(), analytics_accent.b(), 0.15),
+                                ))
+                                .bold()
+                        },
                         ftui::Style::new().fg(dim_packed_color(analytics_accent, 0.70)),
                         text_muted_style,
                     );
@@ -17244,7 +17350,14 @@ impl super::ftui_adapter::Model for CassApp {
                     .title(self.analytics_view.label())
                     .title_alignment(Alignment::Left)
                     .border_style(pane_focused_style.fg(analytics_accent).bold())
-                    .style(pane_style.bg(dim_packed_color(analytics_accent, 0.04)));
+                    .style({
+                        let surf = pane_style.bg.unwrap_or(ftui::PackedRgba::rgb(30, 30, 30));
+                        pane_style.bg(ftui::PackedRgba::rgb(
+                            lerp_u8(surf.r(), analytics_accent.r(), 0.03),
+                            lerp_u8(surf.g(), analytics_accent.g(), 0.03),
+                            lerp_u8(surf.b(), analytics_accent.b(), 0.03),
+                        ))
+                    });
                 let content_inner = content_block.inner(vertical[1]);
                 content_block.render(vertical[1], frame);
                 if render_content && !content_inner.is_empty() {
@@ -17492,21 +17605,28 @@ impl super::ftui_adapter::Model for CassApp {
                     lerp_u8(root_bg_color.g(), dim_bg.g(), spring_t),
                     lerp_u8(root_bg_color.b(), dim_bg.b(), spring_t),
                 );
-                Block::new()
-                    .style(ftui::Style::new().bg(blended))
-                    .render(area, frame);
+                // Use draw_rect_filled to overwrite both characters and
+                // styles — Block::style only applies bg without clearing
+                // the foreground text, which causes underlying content to
+                // bleed through the backdrop.
+                let dim_cell = ftui::Cell::from_char(' ').with_bg(blended);
+                frame.draw_rect_filled(area, dim_cell);
             }
         }
 
         // ── Detail modal overlay ─────────────────────────────────────
         if self.show_detail_modal {
-            // Render as a large near-fullscreen overlay.
-            let margin_x = if area.width > 8 { 2 } else { 0 };
+            // Cap the modal at a readable width (120 cols) and center it.
+            let max_modal_w: u16 = 120;
             let margin_y = if area.height > 6 { 1 } else { 0 };
-            let modal_w = area.width.saturating_sub(margin_x * 2).max(1);
+            let inner_w = area.width.saturating_sub(4).min(max_modal_w).max(1);
+            let margin_x = (area.width.saturating_sub(inner_w)) / 2;
+            let modal_w = inner_w;
             let modal_h = area.height.saturating_sub(margin_y * 2).max(1);
             let modal_area = Rect::new(area.x + margin_x, area.y + margin_y, modal_w, modal_h);
-            Block::new().style(pane_style).render(modal_area, frame);
+            Block::new()
+                .style(pane_focused_style)
+                .render(modal_area, frame);
             self.render_detail_pane(
                 frame,
                 modal_area,
@@ -22876,6 +22996,7 @@ mod tests {
         };
         let line = build_detail_find_bar_line(
             &find,
+            find.matches.len(),
             80,
             ftui::Style::default(),
             ftui::Style::default(),
@@ -22905,6 +23026,7 @@ mod tests {
         let find = DetailFindState::default();
         let line = build_detail_find_bar_line(
             &find,
+            find.matches.len(),
             24,
             ftui::Style::default(),
             ftui::Style::default(),
@@ -22930,6 +23052,7 @@ mod tests {
         };
         let line = build_detail_find_bar_line(
             &find,
+            find.matches.len(),
             28,
             ftui::Style::default(),
             ftui::Style::default(),
@@ -22959,6 +23082,7 @@ mod tests {
         };
         let line = build_detail_find_bar_line(
             &find,
+            find.matches.len(),
             34,
             ftui::Style::default(),
             ftui::Style::default(),
@@ -22992,6 +23116,7 @@ mod tests {
         };
         let line = build_detail_find_bar_line(
             &find,
+            find.matches.len(),
             18,
             ftui::Style::default(),
             ftui::Style::default(),
@@ -23341,6 +23466,7 @@ mod tests {
             });
             let line = build_detail_find_bar_line(
                 &find,
+                find.matches.len(),
                 80,
                 ctx.style(style_system::STYLE_DETAIL_FIND_QUERY),
                 ctx.style(style_system::STYLE_DETAIL_FIND_MATCH_ACTIVE),
@@ -23371,6 +23497,7 @@ mod tests {
         };
         let line = build_detail_find_bar_line(
             &find,
+            find.matches.len(),
             80,
             ftui::Style::default(),
             ftui::Style::default(),
@@ -23390,6 +23517,7 @@ mod tests {
         };
         let line_empty = build_detail_find_bar_line(
             &find_empty,
+            find_empty.matches.len(),
             80,
             ftui::Style::default(),
             ftui::Style::default(),
@@ -23414,6 +23542,7 @@ mod tests {
             };
             let line = build_detail_find_bar_line(
                 &find,
+                find.matches.len(),
                 80,
                 ftui::Style::default(),
                 ftui::Style::default(),
@@ -23439,6 +23568,7 @@ mod tests {
         for width in [1, 2, 3, 5, 10] {
             let line = build_detail_find_bar_line(
                 &find,
+                find.matches.len(),
                 width,
                 ftui::Style::default(),
                 ftui::Style::default(),
@@ -23472,6 +23602,7 @@ mod tests {
             let match_active_style = ctx.style(style_system::STYLE_DETAIL_FIND_MATCH_ACTIVE);
             let line = build_detail_find_bar_line(
                 &find,
+                find.matches.len(),
                 80,
                 query_style,
                 match_active_style,
@@ -31534,6 +31665,9 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     fn help_scroll_increments_and_clamps() {
         let mut app = test_app();
         let _ = app.update(CassMsg::HelpToggled);
+        // Simulate realistic help content dimensions (set after first render)
+        app.help_content_lines.set(100);
+        app.help_visible_height.set(20);
         assert_eq!(app.help_scroll, 0);
         let _ = app.update(CassMsg::HelpScrolled { delta: 5 });
         assert_eq!(app.help_scroll, 5);
@@ -31556,6 +31690,9 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     fn help_toggle_resets_scroll() {
         let mut app = test_app();
         let _ = app.update(CassMsg::HelpToggled);
+        // Simulate realistic help content dimensions (set after first render)
+        app.help_content_lines.set(100);
+        app.help_visible_height.set(20);
         let _ = app.update(CassMsg::HelpScrolled { delta: 20 });
         assert_eq!(app.help_scroll, 20);
         // Close and reopen — scroll should reset to 0
