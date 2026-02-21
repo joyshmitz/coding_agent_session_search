@@ -443,7 +443,11 @@ pub fn render_dashboard(
 
     // Compute exact height needed for agent bar chart (1 row per agent).
     let agent_count = data.agent_tokens.len().min(8);
-    let bar_rows = if agent_count > 0 { agent_count as u16 + 1 } else { 0 }; // +1 for header
+    let bar_rows = if agent_count > 0 {
+        agent_count as u16 + 1
+    } else {
+        0
+    }; // +1 for header
     let has_bar = bar_rows > 0 && area.height >= 6 + bar_rows + 4;
 
     let chunks = if has_bar {
@@ -488,11 +492,7 @@ pub fn render_dashboard(
             .unwrap_or(6) as u16;
 
         // Header row.
-        let header = format!(
-            " {:label_w$}  tokens",
-            "Agent",
-            label_w = label_w as usize
-        );
+        let header = format!(" {:label_w$}  tokens", "Agent", label_w = label_w as usize);
         let header_line = ftui::text::Line::from_spans(vec![ftui::text::Span::styled(
             header,
             ftui::Style::new().fg(cc.muted),
@@ -554,10 +554,8 @@ pub fn render_dashboard(
             }
 
             // Render value at right edge.
-            let val_span = ftui::text::Span::styled(
-                format!(" {val_str}"),
-                ftui::Style::new().fg(cc.muted),
-            );
+            let val_span =
+                ftui::text::Span::styled(format!(" {val_str}"), ftui::Style::new().fg(cc.muted));
             let val_x = bar_end;
             Paragraph::new(ftui::text::Line::from_spans(vec![val_span])).render(
                 Rect {
@@ -575,10 +573,7 @@ pub fn render_dashboard(
     let sparkline_chunk = if has_bar { chunks[2] } else { chunks[1] };
     if !data.daily_tokens.is_empty() && sparkline_chunk.height >= 2 {
         // Render label on first row.
-        let label = format!(
-            " Daily Tokens ({} days)",
-            data.daily_tokens.len()
-        );
+        let label = format!(" Daily Tokens ({} days)", data.daily_tokens.len());
         Paragraph::new(label)
             .style(ftui::Style::new().fg(cc.muted))
             .render(
