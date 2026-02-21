@@ -5859,6 +5859,10 @@ impl CassApp {
     }
 
     fn schedule_analytics_reload(&mut self) -> ftui::Cmd<CassMsg> {
+        if self.db_reader.is_none() {
+            self.clear_loading_context(LoadingContext::Analytics);
+            return ftui::Cmd::none();
+        }
         self.set_loading_context(LoadingContext::Analytics);
         ftui::Cmd::msg(CassMsg::AnalyticsLoadRequested)
     }
@@ -25020,7 +25024,12 @@ mod tests {
             source_filter: None,
             model: None,
         }));
-        assert!(matches!(extract_msg(cmd), Some(CassMsg::SearchRequested)));
+        assert!(
+            extract_msgs(cmd)
+                .iter()
+                .any(|m| matches!(m, CassMsg::SearchRequested)),
+            "drilldown should emit SearchRequested"
+        );
         assert_eq!(app.surface, AppSurface::Search);
         assert_eq!(app.view_stack.last(), Some(&AppSurface::Analytics));
 
