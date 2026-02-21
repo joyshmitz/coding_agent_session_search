@@ -893,7 +893,7 @@ impl ModelDownloader {
                 let file_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
                 let progress_pct = if grand_total > 0 {
-                    ((total_downloaded as f64 / grand_total as f64) * 100.0) as u8
+                    ((total_downloaded as f64 / grand_total as f64) * 100.0).min(100.0) as u8
                 } else {
                     0
                 };

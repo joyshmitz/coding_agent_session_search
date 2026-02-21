@@ -9834,15 +9834,26 @@ impl CassApp {
         // Pinned indicator
         if self.help_pinned {
             lines.push(ftui::text::Line::from_spans(vec![
-                ftui::text::Span::styled("  [PINNED] ".to_string(), key_style),
-                ftui::text::Span::styled("Press P to unpin, Esc to close".to_string(), muted_style),
+                ftui::text::Span::styled("  [PINNED] ", key_style),
+                ftui::text::Span::styled("P", key_style.bold()),
+                ftui::text::Span::styled("=unpin  ", muted_style),
+                ftui::text::Span::styled("\u{2191}/\u{2193}", key_style),
+                ftui::text::Span::styled("=scroll  ", muted_style),
+                ftui::text::Span::styled("Esc", key_style),
+                ftui::text::Span::styled("=close", muted_style),
             ]));
         } else {
             lines.push(ftui::text::Line::from_spans(vec![
-                ftui::text::Span::styled(
-                    "  P=pin  \u{2191}/\u{2193}=scroll  PgUp/PgDn  Esc=close".to_string(),
-                    muted_style,
-                ),
+                ftui::text::Span::styled("  P", key_style),
+                ftui::text::Span::styled("=pin  ", muted_style),
+                ftui::text::Span::styled("\u{2191}/\u{2193}", key_style),
+                ftui::text::Span::styled("=scroll  ", muted_style),
+                ftui::text::Span::styled("PgUp/PgDn", key_style),
+                ftui::text::Span::styled("=page  ", muted_style),
+                ftui::text::Span::styled("Home/End", key_style),
+                ftui::text::Span::styled("=jump  ", muted_style),
+                ftui::text::Span::styled("Esc", key_style),
+                ftui::text::Span::styled("=close", muted_style),
             ]));
         }
 
