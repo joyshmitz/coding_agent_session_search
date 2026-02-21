@@ -1,20 +1,20 @@
 ╭Detail [Messages] ↩───────────────────────────────────────────────────────────────────────────╮
 │  ● Messages  │  Snippets  │  Raw  │  Json  │  Analytics                                      │
 │ [agent:✓ aider] [ws:/workspace/cass] [src:⇄ ci-linux@ci-linux] [score:0.640 (6.4/10)]        │
-│ [at:1970-01-20 16:13] [dur:0s] [msgs:0 msgs] [mix:u:0 a:0 t:0 s:0]                           │
+│ [at:2023-11-14 22:13] [dur:2m 0s] [msgs:2 msgs] [mix:u:1 a:1 t:0 s:0]                        │
+│ activity █                                                          █  2 msgs                │
 │────────────────────────────────────────────────────────────────────────────────────────────  │
 │Large-snippet rendering edge case                                                             │
 │agent=aider │ ws=/workspace/cass │ source=ci-linux (remote) │ score=0.640 (6.4/10) │          │
 │ws_orig=/mnt/build/cass                                                                       │
 │────────────────────────────────────────────────────────────────────────────────────────────  │
+│▌  User 22:13:20 [1/2]                                                                       │
+│▌ Find the needle in the haystack.                                                            │
 │                                                                                              │
-│                                                                                              │
-│                                                                                              │
-│                                                                                              │
-│                                                                                              │
-│                                                                                              │
-│                                                                                              │
+│  ────────────────────────────────────────────────────────────                                │
+│▌ ✓ Agent 22:13:30 [2/2]                                                                      │
+│▌ Found the needle here and another needle there.                                             │
 │                                                                                              │
 │─ Find / ─────────────────────────────────────────────────────────────────────────────────────│
-│ /needle (2/3) · Enter next · n/N prev · Esc close                                            │
+│ /needle (2/2) · Enter next · n/N prev · Esc close                                            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
