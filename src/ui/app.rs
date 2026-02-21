@@ -5940,10 +5940,14 @@ impl CassApp {
         }
     }
 
-    fn start_surface_transition(&mut self, from: AppSurface, to: AppSurface) {
+    fn start_surface_transition(
+        &mut self,
+        from: AppSurface,
+        to: AppSurface,
+    ) -> ftui::Cmd<CassMsg> {
         if from == to || !self.anim.enabled {
             self.view_transition = None;
-            return;
+            return ftui::Cmd::none();
         }
         let slide_direction = if to.nav_order() >= from.nav_order() {
             -1
@@ -5957,11 +5961,17 @@ impl CassApp {
             self.latest_surface_snapshot(from),
             slide_direction,
         ));
+        // Schedule a tick to clear the transition after it completes.
+        ftui::Cmd::tick(SURFACE_TRANSITION_DURATION + Duration::from_millis(20))
     }
 
-    fn start_analytics_view_transition(&mut self, from: AnalyticsView, to: AnalyticsView) {
+    fn start_analytics_view_transition(
+        &mut self,
+        from: AnalyticsView,
+        to: AnalyticsView,
+    ) -> ftui::Cmd<CassMsg> {
         if from == to || !self.anim.enabled {
-            return;
+            return ftui::Cmd::none();
         }
         let slide_direction = if to.nav_order() >= from.nav_order() {
             -1
@@ -5975,6 +5985,8 @@ impl CassApp {
             self.latest_analytics_snapshot(from),
             slide_direction,
         ));
+        // Schedule a tick to clear the transition after it completes.
+        ftui::Cmd::tick(ANALYTICS_VIEW_TRANSITION_DURATION + Duration::from_millis(20))
     }
 
     fn render_view_transition_overlay(
@@ -15752,16 +15764,19 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::AnalyticsEntered => {
                 self.pane_split_drag = None;
                 let previous_surface = self.surface;
-                if self.surface != AppSurface::Analytics {
+                let transition_cmd = if self.surface != AppSurface::Analytics {
                     self.view_stack.push(self.surface);
                     self.surface = AppSurface::Analytics;
-                    self.start_surface_transition(previous_surface, self.surface);
-                }
+                    self.start_surface_transition(previous_surface, self.surface)
+                } else {
+                    ftui::Cmd::none()
+                };
                 // Deferred load on entry so the UI can render a loading frame first.
                 if self.analytics_cache.is_none() {
-                    return self.schedule_analytics_reload();
+                    let reload = self.schedule_analytics_reload();
+                    return ftui::Cmd::batch(vec![transition_cmd, reload]);
                 }
-                ftui::Cmd::none()
+                transition_cmd
             }
             CassMsg::AnalyticsLoadRequested => {
                 let db_path = self.db_path.clone();
@@ -15853,15 +15868,18 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::AnalyticsViewChanged(view) => {
                 let view = view.canonical();
                 let previous_view = self.analytics_view;
-                if previous_view != view {
+                let transition_cmd = if previous_view != view {
                     self.analytics_view = view;
                     self.analytics_selection = 0; // reset selection on view change
-                    self.start_analytics_view_transition(previous_view, view);
-                }
+                    self.start_analytics_view_transition(previous_view, view)
+                } else {
+                    ftui::Cmd::none()
+                };
                 if self.surface == AppSurface::Analytics && self.analytics_cache.is_none() {
-                    return self.schedule_analytics_reload();
+                    let reload = self.schedule_analytics_reload();
+                    return ftui::Cmd::batch(vec![transition_cmd, reload]);
                 }
-                ftui::Cmd::none()
+                transition_cmd
             }
             CassMsg::ViewStackPopped => {
                 self.pane_split_drag = None;
@@ -15871,11 +15889,11 @@ impl super::ftui_adapter::Model for CassApp {
                 } else {
                     self.surface = AppSurface::Search;
                 }
-                self.start_surface_transition(previous_surface, self.surface);
+                let transition_cmd = self.start_surface_transition(previous_surface, self.surface);
                 if self.surface != AppSurface::Analytics {
                     self.clear_loading_context(LoadingContext::Analytics);
                 }
-                ftui::Cmd::none()
+                transition_cmd
             }
             CassMsg::AnalyticsTimeRangeSet { since_ms, until_ms } => {
                 self.analytics_filters.since_ms = since_ms;
@@ -15955,7 +15973,7 @@ impl super::ftui_adapter::Model for CassApp {
                 let previous_surface = self.surface;
                 self.view_stack.push(AppSurface::Analytics);
                 self.surface = AppSurface::Search;
-                self.start_surface_transition(previous_surface, self.surface);
+                let transition_cmd = self.start_surface_transition(previous_surface, self.surface);
 
                 // Convert drilldown context into search filters.
                 self.filters.created_from = since_ms;
@@ -16014,7 +16032,7 @@ impl super::ftui_adapter::Model for CassApp {
                 };
                 self.status = format!("Drilldown from analytics{suffix} — type a query or browse");
                 self.clear_loading_context(LoadingContext::Analytics);
-                ftui::Cmd::msg(CassMsg::SearchRequested)
+                ftui::Cmd::batch(vec![transition_cmd, ftui::Cmd::msg(CassMsg::SearchRequested)])
             }
             CassMsg::ExplorerMetricCycled { forward } => {
                 self.explorer_metric = if forward {
@@ -16102,15 +16120,17 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::SourcesEntered => {
                 self.pane_split_drag = None;
                 let previous_surface = self.surface;
-                if self.surface != AppSurface::Sources {
+                let transition_cmd = if self.surface != AppSurface::Sources {
                     self.view_stack.push(self.surface);
                     self.surface = AppSurface::Sources;
-                    self.start_surface_transition(previous_surface, self.surface);
-                }
+                    self.start_surface_transition(previous_surface, self.surface)
+                } else {
+                    ftui::Cmd::none()
+                };
                 self.clear_loading_context(LoadingContext::Analytics);
                 #[cfg(not(test))]
                 self.load_sources_view();
-                ftui::Cmd::none()
+                transition_cmd
             }
             CassMsg::SourcesRefreshed => {
                 #[cfg(not(test))]

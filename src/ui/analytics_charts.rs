@@ -444,21 +444,23 @@ pub fn render_dashboard(
     // Compute exact height needed for agent bar chart (1 row per agent).
     let agent_count = data.agent_tokens.len().min(8);
     let bar_rows = if agent_count > 0 { agent_count as u16 + 1 } else { 0 }; // +1 for header
-    let has_bar = bar_rows > 0 && area.height >= 6 + bar_rows + 2;
+    let has_bar = bar_rows > 0 && area.height >= 6 + bar_rows + 4;
 
     let chunks = if has_bar {
         Flex::vertical()
             .constraints([
                 Constraint::Fixed(6),        // KPI tile grid
                 Constraint::Fixed(bar_rows), // Top agents bar chart (exact fit)
-                Constraint::Min(2),          // Aggregate sparkline (fills rest)
+                Constraint::Fixed(2),        // Aggregate sparkline (label + bars)
+                Constraint::Min(0),          // Remaining space
             ])
             .split(area)
     } else {
         Flex::vertical()
             .constraints([
                 Constraint::Fixed(6), // KPI tile grid
-                Constraint::Min(1),   // Aggregate sparkline
+                Constraint::Fixed(2), // Aggregate sparkline (label + bars)
+                Constraint::Min(0),   // Remaining space
             ])
             .split(area)
     };
@@ -467,21 +469,6 @@ pub fn render_dashboard(
     render_kpi_tiles(data, chunks[0], frame, dark_mode);
 
     // ── Top Agents Bar Chart (manual rendering with full labels) ──
-    // Debug: render a marker to prove this code path runs.
-    if area.width > 10 {
-        let dbg_text = format!("agents={} bar_rows={} has_bar={}", agent_count, bar_rows, has_bar);
-        Paragraph::new(dbg_text.clone())
-            .style(ftui::Style::new().fg(PackedRgba::rgb(255, 0, 0)))
-            .render(
-                Rect {
-                    x: area.x + 1,
-                    y: area.y + 6,
-                    width: (dbg_text.len() as u16 + 2).min(area.width),
-                    height: 1,
-                },
-                frame,
-            );
-    }
     if has_bar {
         let bar_area = chunks[1];
         let max_val = data
@@ -551,9 +538,9 @@ pub fn render_dashboard(
                 frame,
             );
 
-            // Render bar.
-            let bar_len = if max_val > 0.0 {
-                ((val / max_val) * bar_max_w).round() as u16
+            // Render bar (minimum 1 char for non-zero values so every agent is visible).
+            let bar_len = if max_val > 0.0 && *val > 0.0 {
+                ((val / max_val) * bar_max_w).round().max(1.0) as u16
             } else {
                 0
             };
@@ -586,7 +573,35 @@ pub fn render_dashboard(
 
     // ── Aggregate Token Sparkline ────────────────────────────────
     let sparkline_chunk = if has_bar { chunks[2] } else { chunks[1] };
-    if !data.daily_tokens.is_empty() {
+    if !data.daily_tokens.is_empty() && sparkline_chunk.height >= 2 {
+        // Render label on first row.
+        let label = format!(
+            " Daily Tokens ({} days)",
+            data.daily_tokens.len()
+        );
+        Paragraph::new(label)
+            .style(ftui::Style::new().fg(cc.muted))
+            .render(
+                Rect {
+                    x: sparkline_chunk.x,
+                    y: sparkline_chunk.y,
+                    width: sparkline_chunk.width,
+                    height: 1,
+                },
+                frame,
+            );
+        // Sparkline fills remaining rows.
+        let spark_area = Rect {
+            x: sparkline_chunk.x,
+            y: sparkline_chunk.y + 1,
+            width: sparkline_chunk.width,
+            height: sparkline_chunk.height - 1,
+        };
+        let values: Vec<f64> = data.daily_tokens.iter().map(|(_, v)| *v).collect();
+        let sparkline = Sparkline::new(&values)
+            .gradient(PackedRgba::rgb(40, 80, 200), PackedRgba::rgb(255, 80, 40));
+        sparkline.render(spark_area, frame);
+    } else if !data.daily_tokens.is_empty() {
         let values: Vec<f64> = data.daily_tokens.iter().map(|(_, v)| *v).collect();
         let sparkline = Sparkline::new(&values)
             .gradient(PackedRgba::rgb(40, 80, 200), PackedRgba::rgb(255, 80, 40));
@@ -1919,7 +1934,13 @@ pub fn render_breakdowns(
     render_breakdown_tabs(tab, layout[0], frame, cc);
 
     // ── Content: side-by-side bar charts (tokens | messages) ─
-    let content = layout[1];
+    // Inset by 1 column to leave a gutter for the selection indicator (▶).
+    let content = Rect {
+        x: layout[1].x + 1,
+        y: layout[1].y,
+        width: layout[1].width.saturating_sub(1),
+        height: layout[1].height,
+    };
 
     // For Model tab, show a single tokens-only chart (no message counts).
     if matches!(tab, BreakdownTab::Model) {
