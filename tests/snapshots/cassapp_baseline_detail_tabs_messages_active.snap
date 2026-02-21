@@ -4,9 +4,9 @@
 │ [at:1970-01-20 16:13] [dur:0s] [msgs:0 msgs] [mix:u:0 a:0 t:0 s:0]                   │
 │────────────────────────────────────────────────────────────────────────────────────  │
 │Large-snippet rendering edge case                                                     │
-│agent=aider │ ws=/workspace/cass │ source=ci-linux (remote) │ score=0.640 (6.4/10) │ w│
+│agent=aider │ ws=/workspace/cass │ source=ci-linux (remote) │ score=0.640 (6.4/10) │  │
+│ws_orig=/mnt/build/cass                                                               │
 │────────────────────────────────────────────────────────────────────────────────────  │
-│                                                                                      │
 │                                                                                      │
 │                                                                                      │
 │                                                                                      │

@@ -10,15 +10,15 @@
 │      M█▇ 6.4 [ci-linux] mt suffix │ ws /workspace/cass │ ● 1 msg                 ││────────────────────────────────  │
 │      /workspace/cass/tests/regression/long_snippet.md:9                          ││Large-snippet rendering edge case │
 │    ╰─ ⇄ remote · score 0.640 (6.4/10) · idx 1 · ● 1 msg                          ││agent=aider │ ws=/workspace/cass ││
-│    │ The following snippet intentionally exceeds normal row budgets to exe...    ││────────────────────────────────  │
-│                                                                                  ││  This is a deliberately long snip│
-│                                                                                  ││                                  │
-│                                                                                  ││                                  │
-│                                                                                  ││                                  │
-│                                                                                  ││                                  │
-│                                                                                  ││                                  │
-│                                                                                  ││                                  │
-│1 sessions │ 1 msgs                                                               ││                                  │
+│    │ The following snippet intentionally exceeds normal row budgets to exe...    ││source=ci-linux (remote) │ score= │
+│                                                                                  ││0.640 (6.4/10) │                  │
+│                                                                                  ││ws_orig=/mnt/build/cass           │
+│                                                                                  ││────────────────────────────────  │
+│                                                                                  ││  This is a deliberately long     │
+│                                                                                  ││snippet line that includes        │
+│                                                                                  ││repeated context windows, remote  │
+│                                                                                  ││provenance markers, and unicode   │
+│1 sessions │ 1 msgs                                                               ││glyphs → λ Δ ✓ to stress wrapping │
 ╰──────────────────────────────────────────────────────────────────────────────────│╰──────────────────────────────────╯
  [hits:1] [view:med/cozy] [query:HYB / PFX] [perf:lat:— cache:cold] [runtime:stable] [scope:rank:balanced ctx:M src:all]
   | Enter=open Ctrl+X=select Alt+S=mode Tab=focus                                                                       
