@@ -177,6 +177,16 @@ pub struct AnalyticsChartData {
     pub auto_rebuild_error: Option<String>,
 }
 
+impl AnalyticsChartData {
+    /// Returns true when the dataset contains no meaningful analytics data.
+    pub fn is_empty(&self) -> bool {
+        self.total_api_tokens == 0
+            && self.total_messages == 0
+            && self.total_tool_calls == 0
+            && self.agent_tokens.is_empty()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Data loading
 // ---------------------------------------------------------------------------
@@ -437,6 +447,73 @@ pub fn render_dashboard(
 ) {
     if area.height < 4 || area.width < 20 {
         return; // too small to render
+    }
+
+    // Show a helpful empty state when no analytics data has been loaded.
+    if data.is_empty() {
+        let muted = if dark_mode {
+            PackedRgba::rgb(120, 125, 140)
+        } else {
+            PackedRgba::rgb(100, 105, 115)
+        };
+        let accent = if dark_mode {
+            PackedRgba::rgb(90, 180, 255)
+        } else {
+            PackedRgba::rgb(20, 100, 200)
+        };
+        let mut lines: Vec<ftui::text::Line<'static>> = Vec::new();
+        lines.push(ftui::text::Line::from(""));
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled(
+                "No analytics data yet",
+                ftui::Style::new().fg(accent).bold(),
+            ),
+        ]));
+        lines.push(ftui::text::Line::from(""));
+        if area.height >= 10 {
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(
+                    "Analytics are computed from indexed sessions.",
+                    ftui::Style::new().fg(muted),
+                ),
+            ]));
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("  1. ", ftui::Style::new().fg(accent)),
+                ftui::text::Span::styled(
+                    "Run a search to load session data",
+                    ftui::Style::new().fg(muted),
+                ),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("  2. ", ftui::Style::new().fg(accent)),
+                ftui::text::Span::styled(
+                    "Press Ctrl+R to refresh the index",
+                    ftui::Style::new().fg(muted),
+                ),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("  3. ", ftui::Style::new().fg(accent)),
+                ftui::text::Span::styled(
+                    "Switch between views using the tab bar above",
+                    ftui::Style::new().fg(muted),
+                ),
+            ]));
+        }
+        let y_offset = area.height.saturating_sub(lines.len() as u16) / 3;
+        let avail = area.height.saturating_sub(y_offset);
+        if avail > 0 {
+            let block_area = Rect::new(
+                area.x,
+                area.y + y_offset,
+                area.width,
+                avail.min(lines.len() as u16),
+            );
+            Paragraph::new(ftui::text::Text::from_lines(lines))
+                .alignment(ftui::widgets::block::Alignment::Center)
+                .render(block_area, frame);
+        }
+        return;
     }
 
     let cc = ChartColors::for_theme(dark_mode);
@@ -701,6 +778,7 @@ fn render_kpi_tiles(
 }
 
 /// Render a single KPI tile: label (dim) + value (bright) + mini sparkline.
+#[allow(clippy::too_many_arguments)]
 fn render_kpi_tile(
     label: &str,
     value: &str,

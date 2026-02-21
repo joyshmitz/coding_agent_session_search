@@ -292,12 +292,12 @@ impl LoadingContext {
 
 /// Snapshot of indexer progress atomics, polled each tick.
 #[derive(Clone, Debug, Default)]
-struct IndexProgressSnapshot {
+pub(crate) struct IndexProgressSnapshot {
     /// 0=Idle, 1=Scanning, 2=Indexing
     phase: usize,
     current: usize,
     total: usize,
-    is_rebuilding: bool,
+    _is_rebuilding: bool,
     agents_discovered: usize,
 }
 
@@ -2459,6 +2459,49 @@ fn move_cursor_by_chars(text: &str, cursor: usize, delta: i32) -> usize {
     idx
 }
 
+/// Move cursor to the next or previous word boundary.
+fn move_cursor_to_word_boundary(text: &str, cursor: usize, forward: bool) -> usize {
+    let idx = clamp_cursor_boundary(text, cursor);
+    if forward {
+        // Skip current word chars, then skip whitespace.
+        let rest = &text[idx..];
+        let mut chars = rest.char_indices();
+        // Skip non-whitespace (current word).
+        let after_word = loop {
+            match chars.next() {
+                Some((_, c)) if !c.is_whitespace() => continue,
+                Some((i, _)) => break idx + i,
+                None => break text.len(),
+            }
+        };
+        // Skip whitespace to reach start of next word.
+        let rest2 = &text[after_word..];
+        let mut chars2 = rest2.char_indices();
+        loop {
+            match chars2.next() {
+                Some((_, c)) if c.is_whitespace() => continue,
+                Some((i, _)) => break after_word + i,
+                None => break text.len(),
+            }
+        }
+    } else {
+        // Move backward: skip whitespace, then skip word chars.
+        let before = &text[..idx];
+        let trimmed = before.trim_end();
+        if trimmed.is_empty() {
+            return 0;
+        }
+        // Find the last whitespace before the word.
+        trimmed
+            .rfind(|c: char| c.is_whitespace())
+            .map(|i| {
+                // Move past the whitespace char.
+                i + trimmed[i..].chars().next().map_or(1, |ch| ch.len_utf8())
+            })
+            .unwrap_or(0)
+    }
+}
+
 /// Elide long paths while preserving their tail for faster row-level scanning.
 fn elide_path_for_metadata(path: &str, max_cols: usize) -> String {
     if max_cols == 0 {
@@ -2776,7 +2819,10 @@ impl RenderItem for ResultItem {
         } else {
             self.text_primary_style
         };
-        let elided_title = elide_text(title, content_width.saturating_sub(agent_name.len() + 10));
+        let elided_title = elide_text(
+            title,
+            content_width.saturating_sub(display_width(&agent_name) + 10),
+        );
         let hl_spans = highlight_query_spans(
             &elided_title,
             &self.query_terms,
@@ -2889,7 +2935,7 @@ impl RenderItem for ResultItem {
             let score_text = format!("score {}", score_display_label(hit.score));
             let idx_text = format!("idx {}", self.index);
             // Core: "    ╰─ ⌂ local · score 10.0/10"
-            let core_w = 7 + source_text.len() + 3 + score_text.len();
+            let core_w = 7 + display_width(&source_text) + 3 + score_text.len();
             let mut signal_spans = vec![
                 ftui::text::Span::styled("    \u{2570}\u{2500} ", self.text_subtle_style),
                 ftui::text::Span::styled(
@@ -2915,7 +2961,7 @@ impl RenderItem for ResultItem {
             if !analytics_spans.is_empty() {
                 let analytics_w: usize = 3 + analytics_spans
                     .iter()
-                    .map(|s| s.content.len())
+                    .map(|s| display_width(&s.content))
                     .sum::<usize>();
                 if used_w + analytics_w <= content_width {
                     signal_spans.push(ftui::text::Span::styled(" · ", self.text_subtle_style));
@@ -3229,7 +3275,7 @@ fn build_footer_hud_line(
     width: u16,
     key_style: ftui::Style,
     sep_style: ftui::Style,
-) -> ftui::text::Line {
+) -> ftui::text::Line<'_> {
     if width == 0 {
         return ftui::text::Line::raw(String::new());
     }
@@ -3240,11 +3286,11 @@ fn build_footer_hud_line(
     let mut spans = Vec::new();
 
     for lane in lanes {
-        let lane_chars = display_width(&lane.key) + 3 + display_width(&lane.value);
+        let lane_chars = display_width(lane.key) + 3 + display_width(&lane.value);
         let prefix = 1;
 
         if rendered == 0 && used + prefix + lane_chars > max_chars {
-            let max_value = max_chars.saturating_sub(prefix + display_width(&lane.key) + 3);
+            let max_value = max_chars.saturating_sub(prefix + display_width(lane.key) + 3);
             if max_value == 0 {
                 continue;
             }
@@ -3291,7 +3337,7 @@ fn build_detail_find_bar_line(
     query_style: ftui::Style,
     match_active_style: ftui::Style,
     match_inactive_style: ftui::Style,
-) -> ftui::text::Line {
+) -> ftui::text::Line<'_> {
     let max_width = width as usize;
     if max_width == 0 {
         return ftui::text::Line::raw(String::new());
@@ -4072,7 +4118,7 @@ pub struct CassApp {
     /// Shared progress handle for the background indexer (set during refresh).
     pub indexing_progress: Option<Arc<crate::indexer::IndexingProgress>>,
     /// Tick-polled snapshot of indexer progress atomics.
-    pub index_progress_snapshot: IndexProgressSnapshot,
+    pub(crate) index_progress_snapshot: IndexProgressSnapshot,
     /// Phase accumulator for indeterminate (ping-pong) progress bars.
     pub indeterminate_progress_phase: f64,
 }
@@ -5022,7 +5068,7 @@ impl CassApp {
         width: u16,
         styles: &StyleContext,
         apply_style: bool,
-    ) -> ftui::text::Line {
+    ) -> ftui::text::Line<'_> {
         if width == 0 {
             return ftui::text::Line::raw(String::new());
         }
@@ -5675,7 +5721,7 @@ impl CassApp {
         inactive_style: ftui::Style,
         label_style: ftui::Style,
         separator_style: ftui::Style,
-    ) -> (ftui::text::Line, Vec<(Rect, Pill)>) {
+    ) -> (ftui::text::Line<'_>, Vec<(Rect, Pill)>) {
         if area.is_empty() {
             return (ftui::text::Line::from_spans(vec![]), Vec::new());
         }
@@ -5783,7 +5829,7 @@ impl CassApp {
         active_style: ftui::Style,
         inactive_style: ftui::Style,
         separator_style: ftui::Style,
-    ) -> ftui::text::Line {
+    ) -> ftui::text::Line<'_> {
         let agent_text = summarize_filter_values(&self.filters.agents, "All agents");
         let agent_active = !self.filters.agents.is_empty();
 
@@ -6248,7 +6294,7 @@ impl CassApp {
     }
 
     /// Build the aggregate stats line for the results pane bottom bar.
-    fn build_results_stats_line(&self, width: u16, styles: &StyleContext) -> ftui::text::Line {
+    fn build_results_stats_line(&self, width: u16, styles: &StyleContext) -> ftui::text::Line<'_> {
         let label_s = styles.style(style_system::STYLE_TEXT_SUBTLE);
         let value_s = styles.style(style_system::STYLE_TEXT_PRIMARY);
         let sep = ftui::text::Span::styled(" \u{2502} ", label_s);
@@ -6327,7 +6373,7 @@ impl CassApp {
         total_hits: usize,
         pane_count: usize,
         styles: &StyleContext,
-    ) -> ftui::text::Line {
+    ) -> ftui::text::Line<'_> {
         if width == 0 {
             return ftui::text::Line::raw(String::new());
         }
@@ -6399,10 +6445,28 @@ impl CassApp {
             self.filters.source_filter.to_string()
         };
 
+        // Current row position within the active pane (1-based display).
+        let row_position = self
+            .panes
+            .get(self.active_pane)
+            .map(|pane| {
+                if pane.hits.is_empty() {
+                    "0/0".to_string()
+                } else {
+                    format!(
+                        "{}/{}",
+                        pane.selected.saturating_add(1).min(pane.hits.len()),
+                        pane.hits.len()
+                    )
+                }
+            })
+            .unwrap_or_else(|| "0/0".to_string());
+
         let lanes = vec![
             ("pane", active_pane_label, value_s),
             ("idx", active_pane_idx, info_s),
             ("hits", total_hits.to_string(), value_s),
+            ("row", row_position, info_s),
             ("sel", self.selected.len().to_string(), info_s),
             ("exact", exact.to_string(), success_s),
             ("prefix", prefix.to_string(), info_s),
@@ -6463,20 +6527,27 @@ impl CassApp {
         let total_hits: usize = self.panes.iter().map(|pane| pane.total_count).sum();
         let pane_count = self.panes.len();
         let single_pane = pane_count <= 1;
+        let in_flight_suffix = if self.search_in_flight {
+            format!(" {} ", self.loading_spinner_glyph())
+        } else {
+            String::new()
+        };
         let results_title = if single_pane {
             if self.selected.is_empty() {
-                format!("Results ({total_hits}){grouping_suffix}")
+                format!("Results ({total_hits}){grouping_suffix}{in_flight_suffix}")
             } else {
                 format!(
-                    "Results ({total_hits}) \u{2022} {} selected{grouping_suffix}",
+                    "Results ({total_hits}) \u{2022} {} selected{grouping_suffix}{in_flight_suffix}",
                     self.selected.len()
                 )
             }
         } else if self.selected.is_empty() {
-            format!("Results ({total_hits} hits · {pane_count} panes){grouping_suffix}")
+            format!(
+                "Results ({total_hits} hits · {pane_count} panes){grouping_suffix}{in_flight_suffix}"
+            )
         } else {
             format!(
-                "Results ({total_hits} hits · {pane_count} panes) \u{2022} {} selected{grouping_suffix}",
+                "Results ({total_hits} hits · {pane_count} panes) \u{2022} {} selected{grouping_suffix}{in_flight_suffix}",
                 self.selected.len()
             )
         };
@@ -6582,19 +6653,99 @@ impl CassApp {
         };
 
         if self.panes.is_empty() {
-            // Centered empty-state message with magnifying glass icon.
-            let msg = "\u{1f50d} No results yet \u{2014} type a query and press Enter";
-            let msg_line = ftui::text::Line::from_spans(vec![ftui::text::Span::styled(
-                msg.to_string(),
-                text_muted_style,
-            )]);
-            let y_offset = inner.height / 3;
-            if y_offset < inner.height {
-                let row = Rect::new(inner.x, inner.y + y_offset, inner.width, 1);
-                Paragraph::new(ftui::text::Text::from_lines(vec![msg_line]))
+            // Show a loading spinner when a search is in flight.
+            if self.search_in_flight {
+                let accent_s = styles.style(style_system::STYLE_STATUS_INFO);
+                let subtle_s = styles.style(style_system::STYLE_TEXT_SUBTLE);
+                let spinner = self.loading_spinner_glyph();
+                let mut lines: Vec<ftui::text::Line<'static>> = Vec::new();
+                lines.push(ftui::text::Line::from(""));
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled(
+                        format!("{spinner} Searching\u{2026}"),
+                        accent_s.bold(),
+                    ),
+                ]));
+                if inner.height >= 6 {
+                    lines.push(ftui::text::Line::from(""));
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(format!("query: {}", self.query), subtle_s),
+                    ]));
+                }
+                let y_offset = inner.height.saturating_sub(lines.len() as u16) / 3;
+                let avail = inner.height.saturating_sub(y_offset);
+                if avail > 0 {
+                    let block_area = Rect::new(
+                        inner.x,
+                        inner.y + y_offset,
+                        inner.width,
+                        avail.min(lines.len() as u16),
+                    );
+                    Paragraph::new(ftui::text::Text::from_lines(lines))
+                        .style(text_muted_style)
+                        .alignment(Alignment::Center)
+                        .render(block_area, frame);
+                }
+                return;
+            }
+
+            let subtle_s = styles.style(style_system::STYLE_TEXT_SUBTLE);
+            let info_s = styles.style(style_system::STYLE_STATUS_INFO);
+            let pill_s = styles.style(style_system::STYLE_PILL_ACTIVE);
+
+            let mut lines: Vec<ftui::text::Line<'static>> = Vec::new();
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(
+                    "\u{1f50d} Type a query and press Enter to search",
+                    text_muted_style,
+                ),
+            ]));
+            lines.push(ftui::text::Line::from(""));
+            // Show tips only if we have enough height
+            if inner.height >= 14 {
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("  Try: ", subtle_s),
+                    ftui::text::Span::styled("authentication", info_s),
+                    ftui::text::Span::styled("  ", subtle_s),
+                    ftui::text::Span::styled("\"error handling\"", info_s),
+                    ftui::text::Span::styled("  ", subtle_s),
+                    ftui::text::Span::styled("deploy AND staging", info_s),
+                ]));
+                lines.push(ftui::text::Line::from(""));
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("  Ctrl+P", pill_s),
+                    ftui::text::Span::styled(" command palette   ", subtle_s),
+                    ftui::text::Span::styled("Tab", pill_s),
+                    ftui::text::Span::styled(" focus panels", subtle_s),
+                ]));
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("  F1    ", pill_s),
+                    ftui::text::Span::styled(" help & shortcuts  ", subtle_s),
+                    ftui::text::Span::styled("F2 ", pill_s),
+                    ftui::text::Span::styled(" cycle themes", subtle_s),
+                ]));
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("  Alt+S ", pill_s),
+                    ftui::text::Span::styled(" match mode        ", subtle_s),
+                    ftui::text::Span::styled("F3 ", pill_s),
+                    ftui::text::Span::styled(" filter by agent", subtle_s),
+                ]));
+            }
+
+            let y_offset = inner.height.saturating_sub(lines.len() as u16) / 3;
+            let avail = inner.height.saturating_sub(y_offset);
+            if avail > 0 {
+                let block_area = Rect::new(
+                    inner.x,
+                    inner.y + y_offset,
+                    inner.width,
+                    avail.min(lines.len() as u16),
+                );
+                Paragraph::new(ftui::text::Text::from_lines(lines))
                     .style(text_muted_style)
                     .alignment(Alignment::Center)
-                    .render(row, frame);
+                    .render(block_area, frame);
             }
             return;
         }
@@ -6608,11 +6759,56 @@ impl CassApp {
             *self.last_results_inner.borrow_mut() = Some(inner);
 
             if pane.hits.is_empty() {
-                let msg = "\u{2205} No results match the current filters";
-                Paragraph::new(msg)
+                let subtle_s = styles.style(style_system::STYLE_TEXT_SUBTLE);
+                let pill_s = styles.style(style_system::STYLE_PILL_ACTIVE);
+                let mut zero_lines: Vec<ftui::text::Line<'static>> = Vec::new();
+                zero_lines.push(ftui::text::Line::from(""));
+                zero_lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled(
+                        "\u{2205} No results match your query",
+                        text_muted_style,
+                    ),
+                ]));
+                if inner.height >= 8 {
+                    zero_lines.push(ftui::text::Line::from(""));
+                    zero_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  Suggestions:", subtle_s),
+                    ]));
+                    zero_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            "  \u{2022} Use fewer or broader keywords",
+                            subtle_s,
+                        ),
+                    ]));
+                    zero_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  \u{2022} Check active filters ", subtle_s),
+                        ftui::text::Span::styled("F3", pill_s),
+                        ftui::text::Span::styled("-", subtle_s),
+                        ftui::text::Span::styled("F6", pill_s),
+                    ]));
+                    zero_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  \u{2022} Try ", subtle_s),
+                        ftui::text::Span::styled("Alt+S", pill_s),
+                        ftui::text::Span::styled(
+                            " to switch match mode (fuzzy/semantic)",
+                            subtle_s,
+                        ),
+                    ]));
+                }
+                let y_off = inner.height.saturating_sub(zero_lines.len() as u16) / 3;
+                let block_area = Rect::new(
+                    inner.x,
+                    inner.y + y_off,
+                    inner.width,
+                    inner
+                        .height
+                        .saturating_sub(y_off)
+                        .min(zero_lines.len() as u16),
+                );
+                Paragraph::new(ftui::text::Text::from_lines(zero_lines))
                     .style(text_muted_style)
                     .alignment(Alignment::Center)
-                    .render(inner, frame);
+                    .render(block_area, frame);
                 return;
             }
 
@@ -6993,7 +7189,7 @@ impl CassApp {
         let mut line2_width: usize = 1; // leading space
         let max_chip_width = inner_width as usize;
         let mut push_chip = |key: &str, value: String, value_style_chip: ftui::Style| {
-            let chip_w = key.len() + value.len() + 4; // "[" + key + ":" + value + "] "
+            let chip_w = display_width(key) + display_width(&value) + 4; // "[" + key + ":" + value + "] "
             if line2_width + chip_w > max_chip_width {
                 return;
             }
@@ -7133,7 +7329,7 @@ impl CassApp {
         hit: &SearchHit,
         inner_width: u16,
         styles: &StyleContext,
-    ) -> Vec<ftui::text::Line> {
+    ) -> Vec<ftui::text::Line<'_>> {
         let mut lines: Vec<ftui::text::Line> = Vec::new();
         let session_hit_lines = &self.detail_session_hit_lines;
         let session_hit_total = session_hit_lines.len();
@@ -7382,15 +7578,31 @@ impl CassApp {
                             for text_line in content.lines() {
                                 if self.detail_wrap && !text_line.is_empty() {
                                     let w = inner_width.saturating_sub(4) as usize;
-                                    for chunk in text_line
-                                        .as_bytes()
-                                        .chunks(w.max(20))
-                                        .map(|c| std::str::from_utf8(c).unwrap_or(""))
-                                    {
+                                    // Char-boundary-aware chunking to avoid splitting
+                                    // multi-byte UTF-8 characters.
+                                    let max_w = w.max(20);
+                                    let mut cstart = 0usize;
+                                    while cstart < text_line.len() {
+                                        let mut cend = (cstart + max_w).min(text_line.len());
+                                        while cend > cstart && !text_line.is_char_boundary(cend) {
+                                            cend -= 1;
+                                        }
+                                        if cend == cstart {
+                                            // Single char wider than max_w; take it whole.
+                                            cend = cstart + 1;
+                                            while cend < text_line.len()
+                                                && !text_line.is_char_boundary(cend)
+                                            {
+                                                cend += 1;
+                                            }
+                                        }
                                         lines.push(ftui::text::Line::from_spans(vec![
                                             ftui::text::Span::styled("\u{258c} ", gutter_s),
-                                            ftui::text::Span::raw(chunk.to_string()),
+                                            ftui::text::Span::raw(
+                                                text_line[cstart..cend].to_string(),
+                                            ),
                                         ]));
+                                        cstart = cend;
                                     }
                                 } else {
                                     lines.push(ftui::text::Line::from_spans(vec![
@@ -7455,7 +7667,7 @@ impl CassApp {
         &self,
         hit: &SearchHit,
         styles: &StyleContext,
-    ) -> Vec<ftui::text::Line> {
+    ) -> Vec<ftui::text::Line<'_>> {
         let mut lines: Vec<ftui::text::Line> = Vec::new();
         let header_style = styles.style(style_system::STYLE_TEXT_PRIMARY).bold();
         let meta_style = styles.style(style_system::STYLE_TEXT_MUTED);
@@ -7517,7 +7729,7 @@ impl CassApp {
     }
 
     /// Build rendered lines for Raw tab.
-    fn build_raw_lines(&self, hit: &SearchHit, styles: &StyleContext) -> Vec<ftui::text::Line> {
+    fn build_raw_lines(&self, hit: &SearchHit, styles: &StyleContext) -> Vec<ftui::text::Line<'_>> {
         let mut lines: Vec<ftui::text::Line> = Vec::new();
         let header_style = styles.style(style_system::STYLE_TEXT_PRIMARY).bold();
         let code_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
@@ -7607,7 +7819,11 @@ impl CassApp {
     }
 
     /// Build syntax-highlighted JSON lines for the Json tab using ftui JsonView.
-    fn build_json_lines(&self, hit: &SearchHit, styles: &StyleContext) -> Vec<ftui::text::Line> {
+    fn build_json_lines(
+        &self,
+        hit: &SearchHit,
+        styles: &StyleContext,
+    ) -> Vec<ftui::text::Line<'_>> {
         let mut lines: Vec<ftui::text::Line> = Vec::new();
         let header_style = styles.style(style_system::STYLE_TEXT_PRIMARY).bold();
 
@@ -7866,7 +8082,13 @@ impl CassApp {
                             rebuilt.push(ftui::text::Span::raw(chunk));
                         }
                     }
-                    pos = cursor.max(start + 1).min(text.len());
+                    // Ensure forward progress on char boundaries.
+                    pos = if cursor > start {
+                        cursor
+                    } else {
+                        start + text[start..].chars().next().map_or(1, |ch| ch.len_utf8())
+                    };
+                    pos = pos.min(text.len());
                 }
             }
 
@@ -7885,7 +8107,7 @@ impl CassApp {
         hit: &SearchHit,
         inner_width: u16,
         styles: &StyleContext,
-    ) -> Vec<ftui::text::Line> {
+    ) -> Vec<ftui::text::Line<'_>> {
         let mut lines: Vec<ftui::text::Line> = Vec::new();
         let header_style = styles.style(style_system::STYLE_TEXT_PRIMARY).bold();
         let label_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
@@ -8562,7 +8784,28 @@ impl CassApp {
                     .render(ind_area, frame);
             }
         } else {
-            Paragraph::new("Select a result to preview context and metadata.")
+            let subtle_s = styles.style(style_system::STYLE_TEXT_SUBTLE);
+            let pill_s = styles.style(style_system::STYLE_PILL_ACTIVE);
+            let mut hint_lines: Vec<ftui::text::Line<'static>> = Vec::new();
+            hint_lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("Select a result to preview", text_muted_style),
+            ]));
+            if content_area.height >= 6 {
+                hint_lines.push(ftui::text::Line::from(""));
+                hint_lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("\u{2191}\u{2193}", pill_s),
+                    ftui::text::Span::styled(" navigate results  ", subtle_s),
+                ]));
+                hint_lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("Enter", pill_s),
+                    ftui::text::Span::styled(" expand detail      ", subtle_s),
+                ]));
+                hint_lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("Tab", pill_s),
+                    ftui::text::Span::styled(" switch panel focus ", subtle_s),
+                ]));
+            }
+            Paragraph::new(ftui::text::Text::from_lines(hint_lines))
                 .style(text_muted_style)
                 .render(content_area, frame);
         }
@@ -9289,7 +9532,7 @@ impl CassApp {
     // -- Help overlay rendering -----------------------------------------------
 
     /// Build the help content lines using ftui text types.
-    fn build_help_lines(&self, styles: &StyleContext) -> Vec<ftui::text::Line> {
+    fn build_help_lines(&self, styles: &StyleContext) -> Vec<ftui::text::Line<'_>> {
         let title_style = styles.style(style_system::STYLE_STATUS_INFO).bold();
         let key_style = styles.style(style_system::STYLE_KBD_KEY);
         let desc_style = styles.style(style_system::STYLE_KBD_DESC);
@@ -9518,6 +9761,9 @@ impl CassApp {
                 ("Alt+h/j/k/l", "Directional navigation"),
                 ("\u{2191}/\u{2193}", "Move selection"),
                 ("Home/End", "Move query caret to start/end"),
+                ("Ctrl+\u{2190}/\u{2192}", "Jump by word in query"),
+                ("Del", "Delete forward in query"),
+                ("Ctrl+W", "Delete word backward in query"),
                 ("Alt+1..9", "Jump to pane index"),
                 (
                     "Enter",
@@ -10267,7 +10513,7 @@ impl CassApp {
         active_style: ftui::Style,
         inactive_style: ftui::Style,
         meta_style: ftui::Style,
-    ) -> ftui::text::Line {
+    ) -> ftui::text::Line<'_> {
         let mut spans: Vec<ftui::text::Span> = Vec::new();
         if show_tab_bar {
             for (idx, view) in AnalyticsView::all().iter().enumerate() {
@@ -10306,7 +10552,7 @@ impl CassApp {
         width: u16,
         value_style: ftui::Style,
         meta_style: ftui::Style,
-    ) -> ftui::text::Line {
+    ) -> ftui::text::Line<'_> {
         let mut spans: Vec<ftui::text::Span> = Vec::new();
         let push_metric = |spans: &mut Vec<ftui::text::Span>,
                            label: &str,
@@ -10717,6 +10963,10 @@ pub enum CassMsg {
     SearchFailed { generation: u64, error: String },
     /// Move cursor within the query string (Left/Right arrow keys).
     CursorMoved { delta: i32 },
+    /// Move cursor by word boundary (Ctrl+Left/Right).
+    CursorWordMoved { forward: bool },
+    /// Delete the character after the cursor (Del key).
+    DeleteForward,
     /// Jump cursor to start or end of query (Home/End keys).
     CursorJumped { to_end: bool },
     /// Toggle the wildcard fallback indicator (Ctrl+F).
@@ -12025,8 +12275,11 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                         direction: FocusDirection::Right,
                     },
                     // -- Cursor movement (query editing) --------------------------
+                    KeyCode::Left if ctrl => CassMsg::CursorWordMoved { forward: false },
+                    KeyCode::Right if ctrl => CassMsg::CursorWordMoved { forward: true },
                     KeyCode::Left => CassMsg::CursorMoved { delta: -1 },
                     KeyCode::Right => CassMsg::CursorMoved { delta: 1 },
+                    KeyCode::Delete => CassMsg::DeleteForward,
 
                     KeyCode::Up => CassMsg::SelectionMoved { delta: -1 },
                     KeyCode::Down => CassMsg::SelectionMoved { delta: 1 },
@@ -12146,6 +12399,34 @@ impl super::ftui_adapter::Model for CassApp {
             }
             // Ignore other query input while consent dialog is open
             return ftui::Cmd::none();
+        }
+
+        // Help overlay intercepts navigation keys for scrolling.
+        if self.show_help {
+            let help_msg = match &msg {
+                CassMsg::SelectionMoved { delta } => Some(CassMsg::HelpScrolled { delta: *delta }),
+                CassMsg::PageScrolled { delta } => {
+                    let page = self.help_visible_height.get().max(1) as i32;
+                    Some(CassMsg::HelpScrolled {
+                        delta: delta * (page.saturating_sub(2).max(1)),
+                    })
+                }
+                CassMsg::CursorJumped { to_end } => {
+                    if *to_end {
+                        Some(CassMsg::HelpScrolled { delta: i32::MAX / 2 })
+                    } else {
+                        Some(CassMsg::HelpScrolled {
+                            delta: -(i32::MAX / 2),
+                        })
+                    }
+                }
+                // Let HelpToggled, QuitRequested, HelpPinToggled, ThemeToggled,
+                // ForceQuit etc. pass through normally.
+                _ => None,
+            };
+            if let Some(redirected) = help_msg {
+                return self.update(redirected);
+            }
         }
 
         // Export modal intercepts keyboard input for form navigation and text editing.
@@ -13248,6 +13529,23 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::CursorMoved { delta } => {
                 self.cursor_pos = move_cursor_by_chars(&self.query, self.cursor_pos, delta);
+                ftui::Cmd::none()
+            }
+            CassMsg::CursorWordMoved { forward } => {
+                self.cursor_pos =
+                    move_cursor_to_word_boundary(&self.query, self.cursor_pos, forward);
+                ftui::Cmd::none()
+            }
+            CassMsg::DeleteForward => {
+                let pos = clamp_cursor_boundary(&self.query, self.cursor_pos);
+                if pos < self.query.len() {
+                    let next = next_cursor_boundary(&self.query, pos);
+                    self.push_undo("Delete forward");
+                    self.query.drain(pos..next);
+                    self.cursor_pos = pos;
+                    self.search_dirty_since = Some(std::time::Instant::now());
+                    return ftui::Cmd::tick(SEARCH_DEBOUNCE);
+                }
                 ftui::Cmd::none()
             }
             CassMsg::CursorJumped { to_end } => {
@@ -15450,7 +15748,7 @@ impl super::ftui_adapter::Model for CassApp {
                         phase: progress.phase.load(Relaxed),
                         current: progress.current.load(Relaxed),
                         total: progress.total.load(Relaxed),
-                        is_rebuilding: progress.is_rebuilding.load(Relaxed),
+                        _is_rebuilding: progress.is_rebuilding.load(Relaxed),
                         agents_discovered: progress.discovered_agents.load(Relaxed),
                     };
                     let snap = &self.index_progress_snapshot;
@@ -16625,6 +16923,15 @@ impl super::ftui_adapter::Model for CassApp {
                     self.input_buffer.clear();
                     return ftui::Cmd::none();
                 }
+                // Clear non-empty query before quitting — matches fzf/omnibox UX.
+                if !self.query.is_empty() {
+                    self.query.clear();
+                    self.cursor_pos = 0;
+                    self.panes.clear();
+                    self.cached_detail = None;
+                    self.status = "Query cleared".to_string();
+                    return ftui::Cmd::none();
+                }
                 if self.dirty_since.is_some() {
                     let state_path = self.state_file_path();
                     let snapshot = self.capture_persisted_state();
@@ -17327,6 +17634,7 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                 );
                 let perf_lane_style = match self.last_search_ms {
+                    Some(ms) if ms >= 1000 => status_error_s,
                     Some(ms) if ms >= 350 => status_warning_s,
                     Some(_) => status_success_s,
                     None => status_info_s,
@@ -17398,16 +17706,24 @@ impl super::ftui_adapter::Model for CassApp {
                     value: perf_lane,
                     value_style: perf_lane_style,
                 });
-                hud_lanes.push(FooterHudLane {
-                    key: "runtime",
-                    value: runtime_lane,
-                    value_style: runtime_lane_style,
-                });
-                hud_lanes.push(FooterHudLane {
-                    key: "scope",
-                    value: scope_lane,
-                    value_style: status_info_s,
-                });
+                // Only show runtime lane when degraded (non-default).
+                if !matches!(degradation, ftui::render::budget::DegradationLevel::Full)
+                    || !runtime_parts.is_empty()
+                {
+                    hud_lanes.push(FooterHudLane {
+                        key: "runtime",
+                        value: runtime_lane,
+                        value_style: runtime_lane_style,
+                    });
+                }
+                // Only show scope lane when filters/ranking are non-default.
+                if self.ranking_mode != Default::default() || !self.filters.source_filter.is_all() {
+                    hud_lanes.push(FooterHudLane {
+                        key: "scope",
+                        value: scope_lane,
+                        value_style: status_info_s,
+                    });
+                }
                 if !self.terminal_focused {
                     hud_lanes.push(FooterHudLane {
                         key: "focus",
@@ -21483,6 +21799,67 @@ mod tests {
     }
 
     #[test]
+    fn cursor_word_moved_jumps_word_boundaries() {
+        let mut app = CassApp::default();
+        app.query = "hello world foo".to_string();
+        app.cursor_pos = 0;
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        // Forward: skip "hello" → land on "world"
+        let _ = app.update(CassMsg::CursorWordMoved { forward: true });
+        assert_eq!(app.cursor_pos, 6, "should jump to start of 'world'");
+
+        // Forward: skip "world" → land on "foo"
+        let _ = app.update(CassMsg::CursorWordMoved { forward: true });
+        assert_eq!(app.cursor_pos, 12, "should jump to start of 'foo'");
+
+        // Forward at end: should stay at end
+        let _ = app.update(CassMsg::CursorWordMoved { forward: true });
+        assert_eq!(app.cursor_pos, app.query.len());
+
+        // Backward: from end → start of "foo"
+        let _ = app.update(CassMsg::CursorWordMoved { forward: false });
+        assert_eq!(app.cursor_pos, 12, "should jump back to 'foo'");
+
+        // Backward: → start of "world"
+        let _ = app.update(CassMsg::CursorWordMoved { forward: false });
+        assert_eq!(app.cursor_pos, 6, "should jump back to 'world'");
+
+        // Backward: → start of "hello"
+        let _ = app.update(CassMsg::CursorWordMoved { forward: false });
+        assert_eq!(app.cursor_pos, 0, "should jump to start");
+    }
+
+    #[test]
+    fn delete_forward_removes_char_after_cursor() {
+        let mut app = CassApp::default();
+        app.query = "abc".to_string();
+        app.cursor_pos = 1;
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        let _ = app.update(CassMsg::DeleteForward);
+        assert_eq!(app.query, "ac");
+        assert_eq!(app.cursor_pos, 1);
+
+        // Delete at end: no-op
+        app.cursor_pos = app.query.len();
+        let _ = app.update(CassMsg::DeleteForward);
+        assert_eq!(app.query, "ac", "delete at end should be no-op");
+    }
+
+    #[test]
+    fn delete_forward_handles_unicode() {
+        let mut app = CassApp::default();
+        app.query = "a🙂b".to_string();
+        app.cursor_pos = 1; // after 'a', before emoji
+        app.focus_manager.focus(focus_ids::SEARCH_BAR);
+
+        let _ = app.update(CassMsg::DeleteForward);
+        assert_eq!(app.query, "ab");
+        assert_eq!(app.cursor_pos, 1);
+    }
+
+    #[test]
     fn cursor_moved_in_results_focus_switches_active_pane() {
         let mut app = CassApp::default();
         app.panes = vec![
@@ -23478,7 +23855,6 @@ mod tests {
 
     /// Helper: populate cached_detail with messages containing a keyword for find tests.
     fn set_detail_with_keyword(app: &mut CassApp, keyword: &str) {
-        use std::path::PathBuf;
         let mut cv = make_test_conversation_view();
         cv.messages = vec![
             crate::model::types::Message {
@@ -35859,6 +36235,43 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         assert!(
             !matches!(cmd, ftui::Cmd::Quit),
             "test_id=8.6.interaction.escape_selection expected=no_quit_yet"
+        );
+    }
+
+    #[test]
+    fn esc_clears_nonempty_query_before_quitting() {
+        let mut app = app_with_hits(3);
+        app.query = "authentication".to_string();
+        app.cursor_pos = 14;
+
+        // First Esc should clear the query, not quit.
+        let cmd = app.update(CassMsg::QuitRequested);
+        assert!(
+            app.query.is_empty(),
+            "test_id=8.7.interaction.escape_clear_query component=query expected=cleared"
+        );
+        assert_eq!(
+            app.cursor_pos, 0,
+            "test_id=8.7.interaction.escape_clear_query component=cursor expected=0"
+        );
+        assert!(
+            app.panes.is_empty(),
+            "test_id=8.7.interaction.escape_clear_query component=panes expected=empty"
+        );
+        assert!(
+            app.status.contains("Query cleared"),
+            "test_id=8.7.interaction.escape_clear_query component=status expected=query_cleared"
+        );
+        assert!(
+            !matches!(cmd, ftui::Cmd::Quit),
+            "test_id=8.7.interaction.escape_clear_query expected=no_quit_yet"
+        );
+
+        // Second Esc should proceed toward quit (no more obstacles).
+        let cmd2 = app.update(CassMsg::QuitRequested);
+        assert!(
+            !matches!(cmd2, ftui::Cmd::None),
+            "test_id=8.7.interaction.escape_clear_query expected=quit_or_save_state"
         );
     }
 

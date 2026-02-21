@@ -11446,8 +11446,7 @@ async fn maybe_prompt_for_update(once: bool) -> Result<()> {
 
     // Use spawn_blocking so the network I/O doesn't block the async worker.
     // reqwest's async client requires a tokio reactor we no longer have.
-    let update_result =
-        asupersync::runtime::spawn_blocking(|| latest_release_version_blocking()).await;
+    let update_result = asupersync::runtime::spawn_blocking(latest_release_version_blocking).await;
 
     let Some((latest_tag, latest_ver)) = update_result else {
         return Ok(());
