@@ -467,6 +467,21 @@ pub fn render_dashboard(
     render_kpi_tiles(data, chunks[0], frame, dark_mode);
 
     // ── Top Agents Bar Chart (manual rendering with full labels) ──
+    // Debug: render a marker to prove this code path runs.
+    if area.width > 10 {
+        let dbg_text = format!("agents={} bar_rows={} has_bar={}", agent_count, bar_rows, has_bar);
+        Paragraph::new(dbg_text.clone())
+            .style(ftui::Style::new().fg(PackedRgba::rgb(255, 0, 0)))
+            .render(
+                Rect {
+                    x: area.x + 1,
+                    y: area.y + 6,
+                    width: (dbg_text.len() as u16 + 2).min(area.width),
+                    height: 1,
+                },
+                frame,
+            );
+    }
     if has_bar {
         let bar_area = chunks[1];
         let max_val = data
