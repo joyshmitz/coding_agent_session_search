@@ -10817,30 +10817,84 @@ fn build_response_schemas() -> std::collections::HashMap<String, serde_json::Val
     schemas
 }
 
+fn role_to_export_string(role: &crate::model::types::MessageRole) -> String {
+    match role {
+        crate::model::types::MessageRole::User => "user".to_string(),
+        crate::model::types::MessageRole::Agent => "assistant".to_string(),
+        crate::model::types::MessageRole::Tool => "tool".to_string(),
+        crate::model::types::MessageRole::System => "system".to_string(),
+        crate::model::types::MessageRole::Other(s) => s.clone(),
+    }
+}
+
+fn conversation_view_to_raw_messages(
+    view: &crate::ui::data::ConversationView,
+) -> Vec<serde_json::Value> {
+    view.messages
+        .iter()
+        .map(|msg| {
+            let mut json_msg = serde_json::json!({
+                "role": role_to_export_string(&msg.role),
+                "content": msg.content,
+            });
+            if let Some(ts) = msg.created_at {
+                json_msg["timestamp"] = serde_json::json!(ts);
+            }
+            if let Some(author) = &msg.author {
+                json_msg["author"] = serde_json::json!(author);
+            }
+            json_msg
+        })
+        .collect()
+}
+
+fn try_load_indexed_conversation_from_db(
+    source_path: &Path,
+    db_path: &Path,
+) -> Option<crate::ui::data::ConversationView> {
+    if !db_path.exists() {
+        return None;
+    }
+    let storage = crate::storage::sqlite::SqliteStorage::open(db_path).ok()?;
+    crate::ui::data::load_conversation(&storage, &source_path.to_string_lossy()).ok()?
+}
+
+fn try_load_indexed_conversation(source_path: &Path) -> Option<crate::ui::data::ConversationView> {
+    let db_path = default_db_path();
+    try_load_indexed_conversation_from_db(source_path, &db_path)
+}
+
 fn run_view(path: &PathBuf, line: Option<usize>, context: usize, json: bool) -> CliResult<()> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
-    if !path.exists() {
+    let lines: Vec<String> = if path.exists() {
+        let file = File::open(path).map_err(|e| CliError {
+            code: 9,
+            kind: "file-open",
+            message: format!("Failed to open file: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+        let reader = BufReader::new(file);
+        reader.lines().map_while(Result::ok).collect()
+    } else if let Some(view) = try_load_indexed_conversation(path) {
+        conversation_view_to_raw_messages(&view)
+            .into_iter()
+            .filter_map(|msg| serde_json::to_string(&msg).ok())
+            .collect()
+    } else {
         return Err(CliError {
             code: 3,
             kind: "file-not-found",
             message: format!("File not found: {}", path.display()),
-            hint: None,
+            hint: Some(
+                "Path may be virtual (e.g. Cursor composer). Re-run index, then use the exact source_path from search output."
+                    .to_string(),
+            ),
             retryable: false,
         });
-    }
-
-    let file = File::open(path).map_err(|e| CliError {
-        code: 9,
-        kind: "file-open",
-        message: format!("Failed to open file: {e}"),
-        hint: None,
-        retryable: false,
-    })?;
-
-    let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
+    };
 
     if lines.is_empty() {
         return Err(CliError {
@@ -11793,7 +11847,13 @@ fn run_export(
     use std::fs::File;
     use std::io::{BufRead, BufReader, Write};
 
-    if !path.exists() {
+    let indexed_view = if path.exists() {
+        None
+    } else {
+        try_load_indexed_conversation(path)
+    };
+
+    if !path.exists() && indexed_view.is_none() {
         return Err(CliError {
             code: 3,
             kind: "file-not-found",
@@ -11808,13 +11868,12 @@ fn run_export(
     let mut session_start: Option<i64> = None;
     let mut _session_end: Option<i64> = None;
 
-    // Check if this is an OpenCode storage session file
-    // OpenCode stores sessions in: storage/session/{projectID}/{sessionID}.json
-    // with messages in: storage/message/{sessionID}/*.json
-    // and parts in: storage/part/{messageID}/*.json
-    let is_opencode = detect_opencode_session(path);
-
-    if is_opencode {
+    if let Some(view) = indexed_view {
+        session_title = view.convo.title.clone();
+        session_start = view.convo.started_at;
+        _session_end = view.convo.ended_at;
+        messages = conversation_view_to_raw_messages(&view);
+    } else if detect_opencode_session(path) {
         // Load OpenCode session using split storage format
         match load_opencode_session_for_export(path) {
             Ok((title, start, end, msgs)) => {
@@ -11871,7 +11930,7 @@ fn run_export(
             code: 9,
             kind: "empty-session",
             message: format!("No messages found in: {}", path.display()),
-            hint: if is_opencode {
+            hint: if detect_opencode_session(path) {
                 Some("Check that storage/message/{sessionID}/ contains message files".into())
             } else {
                 None
@@ -11957,8 +12016,14 @@ fn run_export_html(
     use std::fs::File;
     use std::io::{self, BufRead, BufReader, Write};
 
+    let indexed_view = if session_path.exists() {
+        None
+    } else {
+        try_load_indexed_conversation(session_path)
+    };
+
     // --- Validate session exists ---
-    if !session_path.exists() {
+    if !session_path.exists() && indexed_view.is_none() {
         let err = CliError {
             code: 3,
             kind: "session_not_found",
@@ -12036,71 +12101,82 @@ fn run_export_html(
     let mut agent_name: Option<String> = None;
     let mut workspace: Option<String> = None;
 
-    // Detect agent from path
-    let path_str = session_path.to_string_lossy();
-    let path_lower = path_str.to_ascii_lowercase();
-    if path_lower.contains(".claude") {
-        agent_name = Some("claude_code".to_string());
-    } else if path_lower.contains(".codex") {
-        agent_name = Some("codex".to_string());
-    } else if path_lower.contains("cursor") {
-        agent_name = Some("cursor".to_string());
-    } else if path_lower.contains(".gemini") {
-        agent_name = Some("gemini".to_string());
-    } else if path_lower.contains(".vibe") {
-        agent_name = Some("vibe".to_string());
-    }
-
-    // Extract workspace from path
-    if let Some(parent) = session_path.parent() {
-        workspace = Some(parent.display().to_string());
-    }
-
-    let is_opencode = detect_opencode_session(session_path);
-
-    if is_opencode {
-        match load_opencode_session_for_export(session_path) {
-            Ok((title, start, end, msgs)) => {
-                session_title = title;
-                session_start = start;
-                session_end = end;
-                raw_messages = msgs;
-                agent_name = Some("opencode".to_string());
-            }
-            Err(e) => {
-                return Err(CliError {
-                    code: 9,
-                    kind: "opencode_parse",
-                    message: format!("Failed to parse OpenCode session: {e}"),
-                    hint: Some("Ensure the session file is valid".into()),
-                    retryable: false,
-                });
-            }
-        }
+    if let Some(view) = indexed_view {
+        session_title = view.convo.title.clone();
+        session_start = view.convo.started_at;
+        session_end = view.convo.ended_at;
+        agent_name = Some(view.convo.agent_slug.clone());
+        workspace = view
+            .convo
+            .workspace
+            .as_ref()
+            .map(|p| p.display().to_string());
+        raw_messages = conversation_view_to_raw_messages(&view);
     } else {
-        let file = File::open(session_path).map_err(|e| CliError {
-            code: 9,
-            kind: "file_open",
-            message: format!("Failed to open file: {e}"),
-            hint: None,
-            retryable: false,
-        })?;
+        // Detect agent from path
+        let path_str = session_path.to_string_lossy();
+        let path_lower = path_str.to_ascii_lowercase();
+        if path_lower.contains(".claude") {
+            agent_name = Some("claude_code".to_string());
+        } else if path_lower.contains(".codex") {
+            agent_name = Some("codex".to_string());
+        } else if path_lower.contains("cursor") {
+            agent_name = Some("cursor".to_string());
+        } else if path_lower.contains(".gemini") {
+            agent_name = Some("gemini".to_string());
+        } else if path_lower.contains(".vibe") {
+            agent_name = Some("vibe".to_string());
+        }
 
-        let reader = BufReader::new(file);
-        for line in reader.lines().map_while(Result::ok) {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-                if let Some(ts) = extract_message_timestamp(&msg) {
-                    if session_start.is_none_or(|start| ts < start) {
-                        session_start = Some(ts);
-                    }
-                    if session_end.is_none_or(|end| ts > end) {
-                        session_end = Some(ts);
-                    }
+        // Extract workspace from path
+        if let Some(parent) = session_path.parent() {
+            workspace = Some(parent.display().to_string());
+        }
+
+        if detect_opencode_session(session_path) {
+            match load_opencode_session_for_export(session_path) {
+                Ok((title, start, end, msgs)) => {
+                    session_title = title;
+                    session_start = start;
+                    session_end = end;
+                    raw_messages = msgs;
+                    agent_name = Some("opencode".to_string());
                 }
-                raw_messages.push(msg);
+                Err(e) => {
+                    return Err(CliError {
+                        code: 9,
+                        kind: "opencode_parse",
+                        message: format!("Failed to parse OpenCode session: {e}"),
+                        hint: Some("Ensure the session file is valid".into()),
+                        retryable: false,
+                    });
+                }
+            }
+        } else {
+            let file = File::open(session_path).map_err(|e| CliError {
+                code: 9,
+                kind: "file_open",
+                message: format!("Failed to open file: {e}"),
+                hint: None,
+                retryable: false,
+            })?;
+
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(ts) = extract_message_timestamp(&msg) {
+                        if session_start.is_none_or(|start| ts < start) {
+                            session_start = Some(ts);
+                        }
+                        if session_end.is_none_or(|end| ts > end) {
+                            session_end = Some(ts);
+                        }
+                    }
+                    raw_messages.push(msg);
+                }
             }
         }
     }
@@ -12984,6 +13060,76 @@ mod export_timestamp_tests {
         assert_eq!(
             extract_message_timestamp(&nested_payload),
             Some(1_733_000_123_000)
+        );
+    }
+}
+
+#[cfg(test)]
+mod indexed_conversation_fallback_tests {
+    use super::*;
+    use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+    use crate::storage::sqlite::SqliteStorage;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    #[test]
+    fn db_fallback_loads_virtual_source_path_and_converts_messages() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let mut storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "cursor".to_string(),
+            name: "Cursor".to_string(),
+            version: None,
+            kind: AgentKind::VsCode,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let synthetic_path = tmp
+            .path()
+            .join("Cursor/globalStorage/state.vscdb/composer-123");
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "cursor".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("composer-123".to_string()),
+            title: Some("Cursor synthetic path".to_string()),
+            source_path: synthetic_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "hello from cursor".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        let loaded = try_load_indexed_conversation_from_db(&synthetic_path, &db_path)
+            .expect("conversation should load via db fallback");
+        assert_eq!(loaded.convo.external_id.as_deref(), Some("composer-123"));
+        assert_eq!(loaded.messages.len(), 1);
+
+        let raw_messages = conversation_view_to_raw_messages(&loaded);
+        assert_eq!(raw_messages.len(), 1);
+        assert_eq!(extract_role(&raw_messages[0]), "user");
+        assert_eq!(extract_text_content(&raw_messages[0]), "hello from cursor");
+        assert_eq!(
+            extract_message_timestamp(&raw_messages[0]),
+            Some(1_733_000_000_000)
         );
     }
 }

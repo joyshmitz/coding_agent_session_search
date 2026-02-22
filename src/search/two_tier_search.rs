@@ -1304,10 +1304,7 @@ mod tests {
                 doc_id: DocumentId::Session(format!("s{i}")),
                 message_id: i as u64 + 1,
                 fast_embedding: vec![f16::from_f32(20.0 + i as f32); config.fast_dimension],
-                quality_embedding: vec![
-                    f16::from_f32(10.0 + i as f32);
-                    config.quality_dimension
-                ],
+                quality_embedding: vec![f16::from_f32(10.0 + i as f32); config.quality_dimension],
             })
             .collect();
         let index = TwoTierIndex::build("fast-8", "quality-8", &config, entries).unwrap();
