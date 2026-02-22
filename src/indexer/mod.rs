@@ -1487,6 +1487,13 @@ fn reset_storage(storage: &mut SqliteStorage) -> Result<()> {
     // all changes are rolled back to prevent inconsistent state
     storage.raw().execute_batch(
         "BEGIN TRANSACTION;
+         DELETE FROM usage_models_daily;
+         DELETE FROM usage_daily;
+         DELETE FROM usage_hourly;
+         DELETE FROM token_daily_stats;
+         DELETE FROM daily_stats;
+         DELETE FROM message_metrics;
+         DELETE FROM token_usage;
          DELETE FROM fts_messages;
          DELETE FROM snippets;
          DELETE FROM messages;
@@ -2485,6 +2492,23 @@ mod tests {
             .unwrap();
         assert_eq!(msg_count, 1);
 
+        storage
+            .raw()
+            .execute(
+                "INSERT INTO daily_stats(day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+                 VALUES(?1, ?2, ?3, 1, 1, 10, ?4)",
+                rusqlite::params![1_i64, "tester", "local", 123_i64],
+            )
+            .unwrap();
+        storage
+            .raw()
+            .execute(
+                "INSERT INTO usage_daily(day_id, agent_slug, workspace_id, source_id, message_count, last_updated)
+                 VALUES(?1, ?2, ?3, ?4, 1, ?5)",
+                rusqlite::params![1_i64, "tester", 0_i64, "local", 123_i64],
+            )
+            .unwrap();
+
         reset_storage(&mut storage).unwrap();
 
         let msg_count: i64 = storage
@@ -2492,6 +2516,16 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(msg_count, 0);
+        let daily_count: i64 = storage
+            .raw()
+            .query_row("SELECT COUNT(*) FROM daily_stats", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(daily_count, 0);
+        let usage_daily_count: i64 = storage
+            .raw()
+            .query_row("SELECT COUNT(*) FROM usage_daily", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(usage_daily_count, 0);
         assert_eq!(
             storage.schema_version().unwrap(),
             crate::storage::sqlite::CURRENT_SCHEMA_VERSION
