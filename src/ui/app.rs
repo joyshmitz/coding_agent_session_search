@@ -129,7 +129,9 @@ use crate::update_check::{UpdateInfo, open_in_browser, skip_version};
 #[cfg(not(test))]
 use crate::update_check::{run_self_update, spawn_update_check};
 use crate::{
-    html_export::{FilenameMetadata, FilenameOptions, generate_filename, get_downloads_dir},
+    html_export::{
+        FilenameMetadata, FilenameOptions, generate_filename, get_downloads_dir, unique_filename,
+    },
     smart_truncate,
 };
 use ftui::render::drawing::Draw;
@@ -8517,7 +8519,12 @@ impl CassApp {
             include_topic: true,
             ..Default::default()
         };
-        let filename_preview = format!("{}.html", generate_filename(&metadata, &options));
+        let base_filename = format!("{}.html", generate_filename(&metadata, &options));
+        let filename_preview = unique_filename(&downloads, &base_filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .unwrap_or(base_filename);
 
         ExportModalState {
             output_dir_buffer: downloads.display().to_string(),
@@ -15428,18 +15435,11 @@ impl super::ftui_adapter::Model for CassApp {
                 let output_dir = export_state.output_dir.clone();
                 let output_filename =
                     Self::markdown_filename_from_html(&export_state.filename_preview);
+                let output_path = unique_filename(&output_dir, &output_filename);
                 let include_tools = export_state.include_tools;
-                self.status = format!(
-                    "Exporting markdown to {}",
-                    output_dir.join(&output_filename).display()
-                );
+                self.status = format!("Exporting markdown to {}", output_path.display());
                 ftui::Cmd::task(move || {
-                    export_session_markdown_task(
-                        &source_path,
-                        &output_dir,
-                        &output_filename,
-                        include_tools,
-                    )
+                    export_session_markdown_task(&source_path, &output_path, include_tools)
                 })
             }
             CassMsg::ExportExecuted => {
@@ -15455,6 +15455,7 @@ impl super::ftui_adapter::Model for CassApp {
                     state.progress = ExportProgress::Preparing;
                     let output_dir = state.output_dir.clone();
                     let output_filename = state.filename_preview.clone();
+                    let output_path = unique_filename(&output_dir, &output_filename);
                     let encrypt = state.encrypt;
                     let password = if encrypt {
                         Some(state.password.clone())
@@ -15465,13 +15466,13 @@ impl super::ftui_adapter::Model for CassApp {
                     let include_tools = state.include_tools;
                     let title = state.title_preview.clone();
                     let agent_name = state.agent_name.clone();
+                    self.status = format!("Exporting HTML to {}", output_path.display());
 
                     // Dispatch the export as a background task.
                     return ftui::Cmd::task(move || {
                         export_session_task(
                             &source_path,
-                            &output_dir,
-                            &output_filename,
+                            &output_path,
                             encrypt,
                             password.as_deref(),
                             show_timestamps,
@@ -18989,14 +18990,62 @@ fn write_screenshot_file_sync(format: ScreenshotFormat, content: String) -> Cass
     }
 }
 
+fn write_export_bytes_no_overwrite(
+    output_path: &std::path::Path,
+    payload: &[u8],
+) -> Result<std::path::PathBuf, String> {
+    use std::fs::OpenOptions;
+    use std::io::{ErrorKind, Write};
+
+    let parent = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    if !parent.exists()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        return Err(format!("Cannot create output directory: {err}"));
+    }
+
+    let base_filename = output_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Invalid output filename: {}", output_path.display()))?
+        .to_string();
+    let mut candidate = output_path.to_path_buf();
+
+    for _ in 0..32 {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(err) = file.write_all(payload) {
+                    return Err(format!("Failed to write export: {err}"));
+                }
+                return Ok(candidate);
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                candidate = unique_filename(parent, &base_filename);
+            }
+            Err(err) => return Err(format!("Failed to write export: {err}")),
+        }
+    }
+
+    Err(format!(
+        "Failed to reserve unique output filename after multiple attempts: {}",
+        output_path.display()
+    ))
+}
+
 /// Background task: export a session to HTML.
 ///
 /// Runs on a background thread via `Cmd::task` so the UI stays responsive.
 #[allow(clippy::too_many_arguments)]
 fn export_session_task(
     source_path: &str,
-    output_dir: &std::path::Path,
-    output_filename: &str,
+    output_path: &std::path::Path,
     encrypt: bool,
     password: Option<&str>,
     show_timestamps: bool,
@@ -19008,7 +19057,7 @@ fn export_session_task(
         ExportOptions as HtmlExportOptions, HtmlExporter, Message as HtmlMessage, TemplateMetadata,
     };
     use std::fs::File;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader};
 
     let session = std::path::Path::new(source_path);
     if !session.exists() {
@@ -19119,21 +19168,14 @@ fn export_session_task(
         Err(e) => return CassMsg::ExportFailed(format!("HTML generation failed: {e}")),
     };
 
-    // Write output file.
-    let output_path = output_dir.join(output_filename);
-    if let Some(parent) = output_path.parent()
-        && !parent.exists()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        return CassMsg::ExportFailed(format!("Cannot create output directory: {e}"));
-    }
-    match File::create(&output_path).and_then(|mut f| f.write_all(html.as_bytes())) {
-        Ok(()) => CassMsg::ExportCompleted {
-            output_path: output_path.clone(),
+    // Write output file without clobbering an existing export.
+    match write_export_bytes_no_overwrite(output_path, html.as_bytes()) {
+        Ok(final_path) => CassMsg::ExportCompleted {
+            output_path: final_path,
             file_size: html.len(),
             encrypted: encrypt,
         },
-        Err(e) => CassMsg::ExportFailed(format!("Failed to write export: {e}")),
+        Err(err) => CassMsg::ExportFailed(err),
     }
 }
 
@@ -19143,12 +19185,11 @@ fn export_session_task(
 /// stays consistent with `cass export --format markdown`.
 fn export_session_markdown_task(
     source_path: &str,
-    output_dir: &std::path::Path,
-    output_filename: &str,
+    output_path: &std::path::Path,
     include_tools: bool,
 ) -> CassMsg {
     use std::fs::File;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader};
 
     let session_path = std::path::Path::new(source_path);
     if !session_path.exists() {
@@ -19212,20 +19253,13 @@ fn export_session_markdown_task(
 
     let markdown =
         crate::format_as_markdown(&messages, &session_title, session_start, include_tools);
-    let output_path = output_dir.join(output_filename);
-    if let Some(parent) = output_path.parent()
-        && !parent.exists()
-        && let Err(err) = std::fs::create_dir_all(parent)
-    {
-        return CassMsg::ExportFailed(format!("Cannot create output directory: {err}"));
-    }
-    match File::create(&output_path).and_then(|mut file| file.write_all(markdown.as_bytes())) {
-        Ok(()) => CassMsg::ExportCompleted {
-            output_path,
+    match write_export_bytes_no_overwrite(output_path, markdown.as_bytes()) {
+        Ok(final_path) => CassMsg::ExportCompleted {
+            output_path: final_path,
             file_size: markdown.len(),
             encrypted: false,
         },
-        Err(err) => CassMsg::ExportFailed(format!("Failed to write export: {err}")),
+        Err(err) => CassMsg::ExportFailed(err),
     }
 }
 
@@ -24901,6 +24935,122 @@ mod tests {
             app.status.starts_with("Exporting markdown to "),
             "status should reflect quick markdown export, got: {}",
             app.status
+        );
+    }
+
+    #[test]
+    fn detail_modal_quick_markdown_export_status_uses_unique_filename() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let mut app = app_with_hits(1);
+        app.show_detail_modal = true;
+        app.detail_tab = DetailTab::Export;
+        app.export_modal_state = Some(ExportModalState {
+            output_dir: tmp.path().to_path_buf(),
+            output_dir_buffer: tmp.path().display().to_string(),
+            filename_preview: "collision.html".to_string(),
+            ..Default::default()
+        });
+        std::fs::write(tmp.path().join("collision.md"), "existing")
+            .expect("seed existing markdown");
+
+        let cmd = app.update(CassMsg::ExportMarkdownExecuted);
+        assert!(
+            matches!(cmd, ftui::Cmd::Task(..)),
+            "quick markdown export should dispatch a task"
+        );
+        assert!(
+            app.status.contains("collision_1.md"),
+            "status should reference deduped markdown filename, got: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn export_session_markdown_task_preserves_existing_file_on_collision() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let session_path = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_path,
+            r#"{"role":"user","content":"hello"}
+{"role":"assistant","content":"hi"}"#,
+        )
+        .expect("write session fixture");
+        let existing_path = tmp.path().join("session.md");
+        std::fs::write(&existing_path, "existing").expect("seed existing export");
+
+        let msg = export_session_markdown_task(
+            &session_path.display().to_string(),
+            &existing_path,
+            false,
+        );
+        let exported_path = match msg {
+            CassMsg::ExportCompleted { output_path, .. } => output_path,
+            other => panic!("expected ExportCompleted, got: {other:?}"),
+        };
+
+        assert_ne!(
+            exported_path, existing_path,
+            "markdown export should avoid clobbering an existing file"
+        );
+        assert!(
+            exported_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("session_1.md")),
+            "expected numeric suffix in deduped markdown filename, got: {}",
+            exported_path.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&existing_path).expect("read original markdown"),
+            "existing",
+            "original markdown export should remain untouched"
+        );
+    }
+
+    #[test]
+    fn export_session_html_task_preserves_existing_file_on_collision() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let session_path = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_path,
+            r#"{"role":"user","content":"hello"}
+{"role":"assistant","content":"hi"}"#,
+        )
+        .expect("write session fixture");
+        let existing_path = tmp.path().join("session.html");
+        std::fs::write(&existing_path, "existing").expect("seed existing html export");
+
+        let msg = export_session_task(
+            &session_path.display().to_string(),
+            &existing_path,
+            false,
+            None,
+            true,
+            false,
+            "Session",
+            "claude_code",
+        );
+        let exported_path = match msg {
+            CassMsg::ExportCompleted { output_path, .. } => output_path,
+            other => panic!("expected ExportCompleted, got: {other:?}"),
+        };
+
+        assert_ne!(
+            exported_path, existing_path,
+            "html export should avoid clobbering an existing file"
+        );
+        assert!(
+            exported_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("session_1.html")),
+            "expected numeric suffix in deduped html filename, got: {}",
+            exported_path.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&existing_path).expect("read original html"),
+            "existing",
+            "original html export should remain untouched"
         );
     }
 
