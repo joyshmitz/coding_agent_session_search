@@ -2944,7 +2944,7 @@ impl SearchClient {
                 let title: String = row.get(0)?;
                 let content: String = row.get(1)?;
                 let agent: String = row.get(2)?;
-                let workspace: String = row.get(3)?;
+                let workspace: Option<String> = row.get(3)?;
                 let source_path: String = row.get(4)?;
                 let created_at: Option<i64> = row.get(5).ok();
                 let score: f32 = row.get::<_, f64>(6)? as f32;
@@ -2962,7 +2962,7 @@ impl SearchClient {
                     score,
                     source_path,
                     agent,
-                    workspace,
+                    workspace: workspace.unwrap_or_default(),
                     workspace_original: None,
                     created_at,
                     line_number,
@@ -4831,6 +4831,51 @@ mod tests {
             "wildcard should skip sqlite fallback, not error"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_backend_handles_null_workspace() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, idx INTEGER);
+             CREATE VIRTUAL TABLE fts_messages USING fts5(
+                content,
+                title,
+                agent,
+                workspace,
+                source_path,
+                created_at UNINDEXED,
+                message_id UNINDEXED
+             );",
+        )?;
+        conn.execute("INSERT INTO messages(id, idx) VALUES(1, 0)", [])?;
+        conn.execute(
+            "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+             VALUES(?1, ?2, ?3, NULL, ?4, ?5, ?6)",
+            rusqlite::params!["auth token failure", "t", "codex", "/tmp/session.jsonl", 42_i64, 1_i64],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(conn)),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+        };
+
+        let hits = client.search("auth", SearchFilters::default(), 5, 0, FieldMask::FULL)?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].workspace, "");
         Ok(())
     }
 
