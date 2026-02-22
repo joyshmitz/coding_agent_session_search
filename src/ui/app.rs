@@ -200,11 +200,6 @@ fn take_raw_event() -> Option<super::ftui_adapter::Event> {
     RAW_EVENT_STASH.with(|buf| buf.borrow_mut().take())
 }
 
-/// Peek at the stashed raw event without removing it.
-fn peek_raw_event() -> Option<super::ftui_adapter::Event> {
-    RAW_EVENT_STASH.with(|buf| buf.borrow().clone())
-}
-
 // =========================================================================
 // Constants
 // =========================================================================
@@ -5500,23 +5495,24 @@ impl CassApp {
             return None;
         }
         let current_idx = pane.selected;
-        let current_day = pane.hits.get(current_idx)?.created_at.unwrap_or(0) / 86400;
+        let day_bucket = |ts: Option<i64>| ts_to_secs(ts.unwrap_or(0)) / 86400;
+        let current_day = day_bucket(pane.hits.get(current_idx)?.created_at);
 
         if forward {
             for i in (current_idx + 1)..pane.hits.len() {
-                let day = pane.hits[i].created_at.unwrap_or(0) / 86400;
+                let day = day_bucket(pane.hits[i].created_at);
                 if day != current_day {
                     return Some(i);
                 }
             }
         } else {
             for i in (0..current_idx).rev() {
-                let day = pane.hits[i].created_at.unwrap_or(0) / 86400;
+                let day = day_bucket(pane.hits[i].created_at);
                 if day != current_day {
                     // Jump to the first hit of that previous day.
                     let first = (0..=i)
                         .rev()
-                        .take_while(|&j| pane.hits[j].created_at.unwrap_or(0) / 86400 == day)
+                        .take_while(|&j| day_bucket(pane.hits[j].created_at) == day)
                         .last()
                         .unwrap_or(i);
                     return Some(first);
@@ -12815,11 +12811,13 @@ impl super::ftui_adapter::Model for CassApp {
     }
 
     fn update(&mut self, msg: CassMsg) -> ftui::Cmd<CassMsg> {
+        let raw_event = take_raw_event();
+
         // Record raw event for model-level macro recording.
         if let Some(ref mut recorder) = self.macro_recorder
-            && let Some(raw_event) = take_raw_event()
+            && let Some(ref raw_event) = raw_event
         {
-            recorder.record_event(raw_event);
+            recorder.record_event(raw_event.clone());
         }
 
         // Consent dialog intercepts D/H keys and blocks other query input
@@ -13384,7 +13382,7 @@ impl super::ftui_adapter::Model for CassApp {
                 // Let critical / non-keyboard messages through to normal handling.
                 CassMsg::Tick | CassMsg::ForceQuit | CassMsg::MouseEvent { .. } => {}
                 _ => {
-                    if let Some(ref raw_event) = peek_raw_event()
+                    if let Some(ref raw_event) = raw_event
                         && let super::ftui_adapter::Event::Key(ke) = raw_event
                     {
                         // Alt+E toggles the evidence ledger panel.
@@ -13453,7 +13451,7 @@ impl super::ftui_adapter::Model for CassApp {
                             .record(_t0.elapsed().as_micros() as u64);
                         return ftui::Cmd::none();
                     }
-                    // No raw key event available — fall through to main handler.
+                    // No raw key event available for this update cycle — fall through.
                 }
             }
         }
@@ -21471,6 +21469,25 @@ mod tests {
         let old_sel = app.selected.clone();
         let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
         assert_eq!(app.selected, old_sel);
+    }
+
+    #[test]
+    fn palette_interceptor_does_not_replay_stale_raw_event() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::PaletteOpened);
+
+        // First update consumes one real key event.
+        stash_raw_event(&Event::Key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: Modifiers::NONE,
+            kind: ftui::KeyEventKind::Press,
+        }));
+        let _ = app.update(CassMsg::SelectionMoved { delta: 1 });
+
+        // Then process a non-key message with no new raw event.
+        let _ = app.update(CassMsg::PaletteMatchModeCycled);
+        assert_eq!(app.palette_match_mode, PaletteMatchMode::Exact);
     }
 
     #[test]
@@ -31178,6 +31195,32 @@ mod tests {
             selected: 0,
         });
         // Jump forward from day1 → should land on index 3 (first of day2)
+        let idx = app.timeline_jump_index(true);
+        assert_eq!(idx, Some(3));
+    }
+
+    #[test]
+    fn timeline_jump_finds_next_day_with_millisecond_timestamps() {
+        let mut app = CassApp::default();
+        let day1_ms = 1_700_000_000_i64 * 1000;
+        let day2_ms = day1_ms + 86_400_000;
+        let mut hits: Vec<SearchHit> = Vec::new();
+        for i in 0..3 {
+            let mut h = make_hit(i, &format!("/p/ms/{i}"));
+            h.created_at = Some(day1_ms + i as i64 * 1000);
+            hits.push(h);
+        }
+        for i in 3..6 {
+            let mut h = make_hit(i, &format!("/p/ms/{i}"));
+            h.created_at = Some(day2_ms + i as i64 * 1000);
+            hits.push(h);
+        }
+        app.panes.push(AgentPane {
+            agent: "test".into(),
+            total_count: hits.len(),
+            hits,
+            selected: 0,
+        });
         let idx = app.timeline_jump_index(true);
         assert_eq!(idx, Some(3));
     }
