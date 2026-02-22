@@ -706,16 +706,23 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                                     .index
                                     .quality_scores_for_indices(&query_vec, &candidates);
 
-                                // Blend scores
+                                // Blend normalized scores to avoid scale mismatch between
+                                // fast and quality embedding spaces.
                                 let weight = self.searcher.config.quality_weight;
+                                let fast_scores: Vec<f32> =
+                                    fast_results.iter().map(|sr| sr.score).collect();
+                                let fast_norm = normalize_scores(&fast_scores);
+                                let quality_norm = normalize_scores(&quality_scores);
+
                                 let mut blended: Vec<ScoredResult> =
                                     Vec::with_capacity(fast_results.len());
                                 for (idx, fast) in fast_results.iter().enumerate() {
-                                    let score = if idx < quality_scores.len() {
-                                        let quality = quality_scores[idx];
-                                        (1.0 - weight) * fast.score + weight * quality
+                                    let score = if idx < quality_norm.len() {
+                                        let fast_s = fast_norm.get(idx).copied().unwrap_or(0.0);
+                                        let quality_s = quality_norm[idx];
+                                        (1.0 - weight) * fast_s + weight * quality_s
                                     } else {
-                                        fast.score
+                                        fast_norm.get(idx).copied().unwrap_or(fast.score)
                                     };
                                     blended.push(ScoredResult {
                                         idx: fast.idx,
@@ -869,6 +876,11 @@ mod tests {
         dim: usize,
     }
 
+    struct ConstantEmbedder {
+        dim: usize,
+        value: f32,
+    }
+
     impl Embedder for FailingEmbedder {
         fn embed_sync(&self, _text: &str) -> Result<Vec<f32>, EmbedderError> {
             Err(EmbedderError::EmbeddingFailed {
@@ -883,6 +895,28 @@ mod tests {
 
         fn id(&self) -> &str {
             "failing-embedder"
+        }
+
+        fn is_semantic(&self) -> bool {
+            false
+        }
+
+        fn category(&self) -> ModelCategory {
+            ModelCategory::HashEmbedder
+        }
+    }
+
+    impl Embedder for ConstantEmbedder {
+        fn embed_sync(&self, _text: &str) -> Result<Vec<f32>, EmbedderError> {
+            Ok(vec![self.value; self.dim])
+        }
+
+        fn dimension(&self) -> usize {
+            self.dim
+        }
+
+        fn id(&self) -> &str {
+            "constant-embedder"
         }
 
         fn is_semantic(&self) -> bool {
@@ -1254,5 +1288,49 @@ mod tests {
 
         assert_eq!(phases.len(), 1);
         assert!(matches!(phases[0], SearchPhase::RefinementFailed { .. }));
+    }
+
+    #[test]
+    fn test_refinement_scores_are_normalized() {
+        let config = TwoTierConfig {
+            fast_dimension: 8,
+            quality_dimension: 8,
+            quality_weight: 0.6,
+            max_refinement_docs: 3,
+            ..Default::default()
+        };
+        let entries: Vec<TwoTierEntry> = (0..5)
+            .map(|i| TwoTierEntry {
+                doc_id: DocumentId::Session(format!("s{i}")),
+                message_id: i as u64 + 1,
+                fast_embedding: vec![f16::from_f32(20.0 + i as f32); config.fast_dimension],
+                quality_embedding: vec![
+                    f16::from_f32(10.0 + i as f32);
+                    config.quality_dimension
+                ],
+            })
+            .collect();
+        let index = TwoTierIndex::build("fast-8", "quality-8", &config, entries).unwrap();
+
+        let fast_embedder: Arc<dyn Embedder> = Arc::new(ConstantEmbedder {
+            dim: config.fast_dimension,
+            value: 10.0,
+        });
+        let daemon = Arc::new(TestDaemon {
+            dim: config.quality_dimension,
+            available: true,
+        });
+        let searcher = TwoTierSearcher::new(&index, fast_embedder, Some(daemon), config);
+        let phases: Vec<SearchPhase> = searcher.search("query", 5).collect();
+
+        assert_eq!(phases.len(), 2);
+        let SearchPhase::Refined { results, .. } = &phases[1] else {
+            panic!("expected refined phase");
+        };
+        assert!(
+            results.iter().all(|r| (0.0..=1.0).contains(&r.score)),
+            "expected normalized refined scores, got {:?}",
+            results.iter().map(|r| r.score).collect::<Vec<_>>()
+        );
     }
 }
