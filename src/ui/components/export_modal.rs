@@ -152,12 +152,24 @@ impl Default for ExportModalState {
     }
 }
 
+fn timestamp_to_utc(ts: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+    if ts.abs() >= 10_000_000_000 {
+        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ts)
+    } else {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+    }
+}
+
 impl ExportModalState {
     /// Create new export modal state from a search hit and conversation view.
     pub fn from_hit(hit: &SearchHit, view: &ConversationView) -> Self {
         let agent = &hit.agent;
         let workspace = &hit.workspace;
-        let started_at = view.convo.started_at.unwrap_or(0);
+        let started_at = view
+            .convo
+            .started_at
+            .or_else(|| view.messages.iter().filter_map(|m| m.created_at).min())
+            .or(hit.created_at);
         let message_count = view.messages.len();
 
         // Extract title from first message or use fallback
@@ -181,8 +193,8 @@ impl ExportModalState {
             .unwrap_or_else(|| "Untitled Session".to_string());
 
         // Format date for filename
-        let date_str = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(started_at)
-            .map(|dt| dt.format("%Y-%m-%d").to_string());
+        let started_dt = started_at.and_then(timestamp_to_utc);
+        let date_str = started_dt.map(|dt| dt.format("%Y-%m-%d").to_string());
 
         // Generate filename preview
         let metadata = FilenameMetadata {
@@ -207,7 +219,8 @@ impl ExportModalState {
             .unwrap_or_else(|| "session.html".to_string());
 
         // Format timestamp for display
-        let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(started_at)
+        let timestamp = started_at
+            .and_then(timestamp_to_utc)
             .map(|dt| dt.format("%b %d, %Y at %I:%M %p").to_string())
             .unwrap_or_else(|| "Unknown date".to_string());
 
@@ -344,6 +357,61 @@ impl ExportModalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::types::{Conversation, Message, MessageRole};
+    use crate::search::query::MatchType;
+    use crate::ui::data::ConversationView;
+    use std::path::PathBuf;
+
+    fn make_hit(created_at: Option<i64>) -> SearchHit {
+        SearchHit {
+            title: "t".to_string(),
+            snippet: "s".to_string(),
+            content: "content".to_string(),
+            content_hash: 1,
+            score: 1.0,
+            source_path: "/tmp/session.jsonl".to_string(),
+            agent: "codex".to_string(),
+            workspace: "/tmp/ws".to_string(),
+            workspace_original: None,
+            created_at,
+            line_number: Some(1),
+            match_type: MatchType::Exact,
+            source_id: "local".to_string(),
+            origin_kind: "local".to_string(),
+            origin_host: None,
+        }
+    }
+
+    fn make_view(started_at: Option<i64>, message_ts: Option<i64>) -> ConversationView {
+        ConversationView {
+            convo: Conversation {
+                id: Some(1),
+                agent_slug: "codex".to_string(),
+                workspace: Some(PathBuf::from("/tmp/ws")),
+                external_id: Some("ext-1".to_string()),
+                title: Some("session".to_string()),
+                source_path: PathBuf::from("/tmp/session.jsonl"),
+                started_at,
+                ended_at: started_at,
+                approx_tokens: None,
+                metadata_json: serde_json::json!({}),
+                messages: Vec::new(),
+                source_id: "local".to_string(),
+                origin_host: None,
+            },
+            messages: vec![Message {
+                id: Some(1),
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("user".to_string()),
+                created_at: message_ts,
+                content: "hello export".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            workspace: None,
+        }
+    }
 
     #[test]
     fn test_export_field_navigation() {
@@ -411,5 +479,26 @@ mod tests {
         state.toggle_current();
         assert!(!state.encrypt);
         assert!(state.password.is_empty());
+    }
+
+    #[test]
+    fn from_hit_uses_message_timestamp_when_conversation_start_missing() {
+        let hit = make_hit(None);
+        let view = make_view(None, Some(1_700_000_000));
+        let state = ExportModalState::from_hit(&hit, &view);
+
+        assert_ne!(state.timestamp, "Unknown date");
+        assert!(!state.filename_preview.contains("1970"));
+    }
+
+    #[test]
+    fn from_hit_with_no_timestamps_does_not_fabricate_epoch_date() {
+        let hit = make_hit(None);
+        let mut view = make_view(None, None);
+        view.messages.clear();
+        let state = ExportModalState::from_hit(&hit, &view);
+
+        assert_eq!(state.timestamp, "Unknown date");
+        assert!(!state.filename_preview.contains("1970"));
     }
 }
