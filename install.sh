@@ -28,15 +28,21 @@ err() { log "\033[0;31m✗\033[0m $*"; }
 
 resolve_version() {
   if [ -n "$VERSION" ]; then return 0; fi
-  # Fetch latest release tag from GitHub API
   local latest=""
   if command -v curl >/dev/null 2>&1; then
+    # Try 1: Fetch latest release tag from GitHub API
     latest=$(curl -fsSL "https://api.github.com/repos/$OWNER/$REPO/releases/latest" 2>/dev/null \
       | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    # Try 2: If no releases exist, fall back to latest git tag (sorted by version)
+    if [ -z "$latest" ]; then
+      warn "No GitHub releases found; falling back to latest git tag"
+      latest=$(curl -fsSL "https://api.github.com/repos/$OWNER/$REPO/tags?per_page=1" 2>/dev/null \
+        | grep '"name"' | head -1 | sed 's/.*"name": *"\([^"]*\)".*/\1/')
+    fi
   fi
   if [ -n "$latest" ]; then
     VERSION="$latest"
-    info "Using latest release: $VERSION"
+    info "Using latest version: $VERSION"
   elif [ -n "$FALLBACK_VERSION" ]; then
     VERSION="$FALLBACK_VERSION"
     info "Using fallback version: $VERSION"

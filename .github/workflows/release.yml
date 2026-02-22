@@ -148,6 +148,7 @@ jobs:
           fi
           VERSION="${RAW_TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Validate tag matches Cargo.toml version
         shell: bash
@@ -208,38 +209,69 @@ jobs:
           done
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
-        with:
-          name: v${{ steps.version.outputs.version }}
-          files: artifacts/*
-          generate_release_notes: true
-          body: |
-            ## Installation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          echo "Creating release for tag: ${TAG}"
 
-            ### Quick Install (recommended)
-            ```bash
-            # Linux/macOS
-            curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh" | bash -s -- --easy-mode --verify
+          # Delete any leftover draft/broken release for this tag (from prior failed runs)
+          EXISTING_ID=$(gh api "repos/${{ github.repository }}/releases" \
+            --paginate --jq ".[] | select(.tag_name == \"${TAG}\") | .id" 2>/dev/null || true)
+          if [[ -n "$EXISTING_ID" ]]; then
+            echo "Deleting existing release id=${EXISTING_ID} for tag ${TAG}"
+            gh api -X DELETE "repos/${{ github.repository }}/releases/${EXISTING_ID}" || true
+          fi
 
-            # Windows (PowerShell)
-            irm https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.ps1 | iex
-            ```
+          # Build release body
+          cat > "$RUNNER_TEMP/release-body.md" <<'EOF'
+          ## Installation
 
-            ### Package Managers
-            ```bash
-            # Homebrew
-            brew install dicklesworthstone/tap/cass
+          ### Quick Install (recommended)
+          ```bash
+          # Linux/macOS
+          curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh" | bash -s -- --easy-mode --verify
 
-            # Scoop
-            scoop bucket add dicklesworthstone https://github.com/Dicklesworthstone/scoop-bucket
-            scoop install dicklesworthstone/cass
-            ```
+          # Windows (PowerShell)
+          irm https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.ps1 | iex
+          ```
 
-            ### Verify Downloads
-            All binaries include SHA256 checksums. Download `SHA256SUMS.txt` and verify:
-            ```bash
-            sha256sum -c SHA256SUMS.txt
-            ```
+          ### Package Managers
+          ```bash
+          # Homebrew
+          brew install dicklesworthstone/tap/cass
+
+          # Scoop
+          scoop bucket add dicklesworthstone https://github.com/Dicklesworthstone/scoop-bucket
+          scoop install dicklesworthstone/cass
+          ```
+
+          ### Verify Downloads
+          All binaries include SHA256 checksums. Download `SHA256SUMS.txt` and verify:
+          ```bash
+          sha256sum -c SHA256SUMS.txt
+          ```
+          EOF
+          sed -i 's/^          //' "$RUNNER_TEMP/release-body.md"
+
+          # Create the release with all artifacts attached atomically
+          # Using gh CLI directly avoids softprops/action-gh-release v2.5.0 draft
+          # finalization bugs (see: https://github.com/softprops/action-gh-release/issues/709)
+          gh release create "${TAG}" artifacts/* \
+            --repo "${{ github.repository }}" \
+            --title "v${VERSION}" \
+            --notes-file "$RUNNER_TEMP/release-body.md" \
+            --generate-notes \
+            --latest \
+            --verify-tag
+
+          echo "Release created successfully for ${TAG}."
+
+          # Verify the release is publicly accessible
+          gh release view "${TAG}" --repo "${{ github.repository }}" --json tagName,isDraft,assets \
+            --jq '{tag: .tagName, draft: .isDraft, asset_count: (.assets | length)}'
 
     outputs:
       version: ${{ steps.version.outputs.version }}
