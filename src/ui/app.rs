@@ -5414,13 +5414,37 @@ impl CassApp {
             };
             pane_map.entry(key).or_default().push(hit.clone());
         }
+
+        // Fix #79: Apply per-agent-type result quota so one agent type cannot
+        // monopolize all result slots. When `per_pane_limit` is set the user
+        // has an explicit cap; otherwise we apply a fair-share cap derived
+        // from the total result count divided across the number of groups.
+        let num_groups = pane_map.len().max(1);
+        let effective_limit = if self.per_pane_limit > 0 {
+            self.per_pane_limit
+        } else if num_groups > 1 {
+            // Fair share: total results / groups, with minimum floor to avoid
+            // showing too few results per pane.
+            let total: usize = pane_map.values().map(|v| v.len()).sum();
+            let fair = total / num_groups;
+            // At least 20 results per pane, or all of them if the total is small.
+            fair.max(20).max(total.min(50))
+        } else {
+            0 // single group: no cap
+        };
+
         self.panes = pane_map
             .into_iter()
             .map(|(key, hits)| {
                 let total = hits.len();
+                let capped = if effective_limit > 0 && hits.len() > effective_limit {
+                    hits.into_iter().take(effective_limit).collect()
+                } else {
+                    hits
+                };
                 AgentPane {
                     agent: key,
-                    hits,
+                    hits: capped,
                     selected: 0,
                     total_count: total,
                 }
@@ -12442,6 +12466,24 @@ impl SearchService for TantivySearchService {
         let started = Instant::now();
         let limit = params.limit;
         let offset = params.offset;
+
+        // Fix #79: Empty queries bypass BM25 and use date-sorted browsing.
+        // BM25 relevance scoring is meaningless without search terms, so we
+        // query SQLite directly with ORDER BY created_at instead.
+        if params.query.trim().is_empty() {
+            let newest_first = !matches!(params.ranking, RankingMode::DateOldest);
+            let hits = self
+                .client
+                .browse_by_date(params.filters.clone(), limit, offset, newest_first)
+                .map_err(|e| e.to_string())?;
+            return Ok(SearchResult {
+                hits,
+                elapsed_ms: started.elapsed().as_millis(),
+                suggestions: Vec::new(),
+                wildcard_fallback: false,
+            });
+        }
+
         let sparse_threshold = 3;
         let field_mask = FieldMask::new(true, true, true, true);
 
@@ -13813,12 +13855,9 @@ impl super::ftui_adapter::Model for CassApp {
                     limit: self.search_page_size.max(1),
                     offset: 0,
                 };
-                // Skip empty queries.
-                if params.query.trim().is_empty() {
-                    self.clear_loading_context(LoadingContext::Search);
-                    return ftui::Cmd::none();
-                }
                 // Dispatch async search if a service is available.
+                // Note: empty queries are allowed — the backend handles them
+                // by browsing recent sessions sorted by date (fix #79).
                 if let Some(svc) = self.search_service.clone() {
                     self.search_generation = generation;
                     self.search_backend_offset = 0;
@@ -13861,9 +13900,6 @@ impl super::ftui_adapter::Model for CassApp {
                     limit: self.search_page_size.max(1),
                     offset: self.search_backend_offset,
                 };
-                if params.query.trim().is_empty() {
-                    return ftui::Cmd::none();
-                }
                 if let Some(svc) = self.search_service.clone() {
                     self.search_in_flight = true;
                     self.status = format!("Loading more\u{2026} ({} loaded)", self.results.len());
@@ -14141,7 +14177,10 @@ impl super::ftui_adapter::Model for CassApp {
                     RankingMode::DateOldest => RankingMode::RecentHeavy,
                 };
                 self.dirty_since = Some(Instant::now());
-                ftui::Cmd::none()
+                // Fix #79: re-fetch results from backend so ranking mode
+                // changes are reflected (especially for empty-query date
+                // browsing where sort order matters).
+                ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::ContextWindowCycled => {
                 self.context_window = match self.context_window {
@@ -15437,7 +15476,7 @@ impl super::ftui_adapter::Model for CassApp {
                     Self::markdown_filename_from_html(&export_state.filename_preview);
                 let output_path = unique_filename(&output_dir, &output_filename);
                 let include_tools = export_state.include_tools;
-                self.status = format!("Exporting markdown to {}", output_path.display());
+                self.status = "Exporting markdown...".to_string();
                 ftui::Cmd::task(move || {
                     export_session_markdown_task(&source_path, &output_path, include_tools)
                 })
@@ -15466,7 +15505,7 @@ impl super::ftui_adapter::Model for CassApp {
                     let include_tools = state.include_tools;
                     let title = state.title_preview.clone();
                     let agent_name = state.agent_name.clone();
-                    self.status = format!("Exporting HTML to {}", output_path.display());
+                    self.status = "Exporting HTML...".to_string();
 
                     // Dispatch the export as a background task.
                     return ftui::Cmd::task(move || {
@@ -16227,7 +16266,10 @@ impl super::ftui_adapter::Model for CassApp {
                     self.focus_manager.focus(focus_ids::HELP_OVERLAY);
                 }
                 self.dirty_since = None;
-                ftui::Cmd::none()
+                // Fix #79: Trigger an initial search/browse on startup so the
+                // TUI is populated with recent sessions immediately, even when
+                // the query is empty.
+                ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::StateLoadFailed(err) => {
                 self.clear_loading_context(LoadingContext::StateLoad);
@@ -22884,7 +22926,8 @@ mod tests {
         app.search_dirty_since = Some(Instant::now());
         let _ = app.update(CassMsg::SearchRequested);
         assert!(app.search_dirty_since.is_none(), "dirty state should clear");
-        // No search dispatched (no service, query is empty whitespace)
+        // No service attached — no search dispatched. Empty queries are
+        // allowed by the handler (fix #79) but still require a service.
         assert!(app.status.is_empty());
         assert!(app.loading_context.is_none());
     }
@@ -24934,14 +24977,14 @@ mod tests {
         assert!(app.show_detail_modal, "detail modal should remain open");
         assert_eq!(app.detail_tab, DetailTab::Export);
         assert!(
-            app.status.starts_with("Exporting markdown to "),
-            "status should reflect quick markdown export, got: {}",
+            app.status == "Exporting markdown...",
+            "status should use generic in-flight text, got: {}",
             app.status
         );
     }
 
     #[test]
-    fn detail_modal_quick_markdown_export_status_uses_unique_filename() {
+    fn detail_modal_quick_markdown_export_status_stays_path_agnostic() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let mut app = app_with_hits(1);
         app.show_detail_modal = true;
@@ -24961,8 +25004,8 @@ mod tests {
             "quick markdown export should dispatch a task"
         );
         assert!(
-            app.status.contains("collision_1.md"),
-            "status should reference deduped markdown filename, got: {}",
+            app.status == "Exporting markdown...",
+            "status should avoid precomputed output path, got: {}",
             app.status
         );
     }

@@ -2980,6 +2980,118 @@ impl SearchClient {
         }
         Ok(hits)
     }
+
+    /// Browse messages ordered by date, without any text query.
+    ///
+    /// Used when the TUI query is empty and the user wants to see recent (or
+    /// oldest) sessions. Bypasses BM25 scoring entirely and returns results
+    /// ordered by `created_at`. Applies agent, workspace, time-range, and
+    /// source filters identically to the normal search path.
+    pub fn browse_by_date(
+        &self,
+        filters: SearchFilters,
+        limit: usize,
+        offset: usize,
+        newest_first: bool,
+    ) -> Result<Vec<SearchHit>> {
+        let sqlite_guard = self.sqlite_guard()?;
+        if let Some(conn) = sqlite_guard.as_ref() {
+            self.browse_by_date_sqlite(conn, filters, limit, offset, newest_first)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn browse_by_date_sqlite(
+        &self,
+        conn: &Connection,
+        filters: SearchFilters,
+        limit: usize,
+        offset: usize,
+        newest_first: bool,
+    ) -> Result<Vec<SearchHit>> {
+        let order = if newest_first { "DESC" } else { "ASC" };
+        let mut sql = format!(
+            "SELECT c.title, m.content, a.slug, w.path, c.source_path, m.created_at, m.idx
+             FROM messages m
+             JOIN conversations c ON m.conversation_id = c.id
+             JOIN agents a ON c.agent_id = a.id
+             LEFT JOIN workspaces w ON c.workspace_id = w.id
+             WHERE 1=1"
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if !filters.agents.is_empty() {
+            let placeholders = sql_placeholders(filters.agents.len());
+            sql.push_str(&format!(" AND a.slug IN ({placeholders})"));
+            for a in &filters.agents {
+                params.push(Box::new(a.clone()));
+            }
+        }
+
+        if !filters.workspaces.is_empty() {
+            let placeholders = sql_placeholders(filters.workspaces.len());
+            sql.push_str(&format!(" AND w.path IN ({placeholders})"));
+            for w in &filters.workspaces {
+                params.push(Box::new(w.clone()));
+            }
+        }
+
+        if let Some(created_from) = filters.created_from {
+            sql.push_str(" AND m.created_at >= ?");
+            params.push(Box::new(created_from));
+        }
+        if let Some(created_to) = filters.created_to {
+            sql.push_str(" AND m.created_at <= ?");
+            params.push(Box::new(created_to));
+        }
+
+        sql.push_str(&format!(
+            " ORDER BY m.created_at IS NULL, m.created_at {order}, m.id {order} LIMIT ? OFFSET ?"
+        ));
+        params.push(Box::new(limit as i64));
+        params.push(Box::new(offset as i64));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|b| &**b)),
+            |row| {
+                let title: String = row.get::<_, Option<String>>(0)?.unwrap_or_default();
+                let content: String = row.get(1)?;
+                let agent: String = row.get(2)?;
+                let workspace: Option<String> = row.get(3)?;
+                let source_path: String = row.get(4)?;
+                let created_at: Option<i64> = row.get(5).ok();
+                let idx: Option<i64> = row.get(6).ok();
+                let line_number = idx.map(|i| (i + 1) as usize);
+                let content_hash =
+                    stable_hit_hash(&content, &source_path, line_number, created_at);
+                Ok(SearchHit {
+                    title,
+                    snippet: String::new(),
+                    content,
+                    content_hash,
+                    score: 0.0,
+                    source_path,
+                    agent,
+                    workspace: workspace.unwrap_or_default(),
+                    workspace_original: None,
+                    created_at,
+                    line_number,
+                    match_type: MatchType::Exact,
+                    source_id: default_source_id(),
+                    origin_kind: default_origin_kind(),
+                    origin_host: None,
+                })
+            },
+        )?;
+
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row?);
+        }
+        Ok(hits)
+    }
 }
 
 /// Transpile a raw query string into an FTS5-compatible query string.
