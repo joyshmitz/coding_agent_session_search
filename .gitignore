@@ -110,6 +110,12 @@ user_requests_output.txt
 .beads/.migration-hint-ts
 .beads/*.bak_*
 
+# Test log output
+test-logs/
+
+# Beads migration baseline artifacts
+.beads/migration_baseline/
+
 # Ephemeral files (agent-generated, build artifacts, test detritus)
 ci-artifacts/
 proptest-regressions/

@@ -41,6 +41,8 @@ pub const BULK_MENU: &str = "Alt+B";
 pub const JSON_VIEW: &str = "Alt+Shift+J";
 pub const TOGGLE_SELECT: &str = "Ctrl+X";
 pub const PANE_FILTER: &str = "Alt+/";
+pub const EXPORT_HTML: &str = "Ctrl+E";
+pub const EXPORT_MARKDOWN: &str = "Ctrl+Shift+E";
 
 // Find in detail
 pub const DETAIL_FIND: &str = "/";
@@ -168,6 +170,8 @@ mod tests {
         assert!(!COPY.is_empty());
         assert!(!BULK_MENU.is_empty());
         assert!(!PANE_FILTER.is_empty());
+        assert!(!EXPORT_HTML.is_empty());
+        assert!(!EXPORT_MARKDOWN.is_empty());
     }
 
     #[test]
@@ -175,6 +179,8 @@ mod tests {
         assert_eq!(COPY, "Alt+Y");
         assert_eq!(BULK_MENU, "Alt+B");
         assert_eq!(PANE_FILTER, "Alt+/");
+        assert_eq!(EXPORT_HTML, "Ctrl+E");
+        assert_eq!(EXPORT_MARKDOWN, "Ctrl+Shift+E");
     }
 
     // =========================================================================

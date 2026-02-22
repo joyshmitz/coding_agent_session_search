@@ -128,6 +128,10 @@ use crate::ui::time_parser::parse_time_input;
 use crate::update_check::{UpdateInfo, open_in_browser, skip_version};
 #[cfg(not(test))]
 use crate::update_check::{run_self_update, spawn_update_check};
+use crate::{
+    html_export::{FilenameMetadata, FilenameOptions, generate_filename, get_downloads_dir},
+    smart_truncate,
+};
 use ftui::render::drawing::Draw;
 use ftui::widgets::Widget;
 use ftui::widgets::block::{Alignment, Block};
@@ -947,6 +951,8 @@ pub enum DetailTab {
     Json,
     /// Per-session analytics: token timeline, tool calls, message stats.
     Analytics,
+    /// Export actions and filename previews (HTML/Markdown).
+    Export,
 }
 
 /// Text matching strategy for search queries.
@@ -8472,6 +8478,181 @@ impl CassApp {
         lines
     }
 
+    /// Build export defaults for the current hit, reusing the same naming
+    /// strategy as the HTML export modal.
+    fn detail_export_state_for_hit(&self, hit: &SearchHit) -> ExportModalState {
+        if let Some((cached_path, cv)) = self.cached_detail.as_ref()
+            && *cached_path == hit.source_path
+        {
+            return ExportModalState::from_hit(hit, cv);
+        }
+
+        let downloads = get_downloads_dir();
+        let fallback_title = if hit.title.trim().is_empty() {
+            if hit.snippet.trim().is_empty() {
+                "Untitled Session".to_string()
+            } else {
+                smart_truncate(&hit.snippet, 60)
+            }
+        } else {
+            smart_truncate(&hit.title, 60)
+        };
+        let created_date = hit
+            .created_at
+            .and_then(smart_timestamp)
+            .map(|dt| dt.format("%Y-%m-%d").to_string());
+        let timestamp = hit
+            .created_at
+            .and_then(smart_timestamp)
+            .map(|dt| dt.format("%b %d, %Y at %I:%M %p").to_string())
+            .unwrap_or_else(|| "Unknown date".to_string());
+
+        let metadata = FilenameMetadata {
+            agent: Some(hit.agent.clone()),
+            date: created_date,
+            project: Some(hit.workspace.clone()),
+            topic: Some(fallback_title.clone()),
+            title: None,
+        };
+        let options = FilenameOptions {
+            include_date: true,
+            include_agent: true,
+            include_project: true,
+            include_topic: true,
+            ..Default::default()
+        };
+        let filename_preview = format!("{}.html", generate_filename(&metadata, &options));
+
+        ExportModalState {
+            output_dir_buffer: downloads.display().to_string(),
+            output_dir: downloads,
+            filename_preview,
+            agent_name: hit.agent.clone(),
+            workspace: hit.workspace.clone(),
+            timestamp,
+            message_count: 0,
+            title_preview: fallback_title,
+            ..Default::default()
+        }
+    }
+
+    /// Derive the markdown filename from the HTML filename suggestion.
+    fn markdown_filename_from_html(html_filename: &str) -> String {
+        if let Some(base) = html_filename.strip_suffix(".html") {
+            format!("{base}.md")
+        } else {
+            format!("{html_filename}.md")
+        }
+    }
+
+    /// Build rendered lines for the Export tab in the detail modal.
+    fn build_export_lines(
+        &self,
+        hit: &SearchHit,
+        inner_width: u16,
+        styles: &StyleContext,
+    ) -> Vec<ftui::text::Line<'_>> {
+        let mut lines: Vec<ftui::text::Line> = Vec::new();
+        let header_style = styles.style(style_system::STYLE_TEXT_PRIMARY).bold();
+        let label_style = styles.style(style_system::STYLE_TEXT_SUBTLE);
+        let value_style = styles.style(style_system::STYLE_TEXT_PRIMARY);
+        let muted_style = styles.style(style_system::STYLE_TEXT_MUTED);
+        let html_style = styles.style(style_system::STYLE_STATUS_INFO).bold();
+        let markdown_style = styles.style(style_system::STYLE_STATUS_SUCCESS).bold();
+
+        let export_state = self.detail_export_state_for_hit(hit);
+        let html_path = export_state.output_path();
+        let markdown_filename = Self::markdown_filename_from_html(&export_state.filename_preview);
+        let markdown_path = export_state.output_dir.join(&markdown_filename);
+        let max_path_chars = inner_width.saturating_sub(14).clamp(24, 160) as usize;
+        let truncate_path = |path: &Path| {
+            let rendered = path.display().to_string();
+            if rendered.chars().count() <= max_path_chars {
+                rendered
+            } else {
+                let keep = max_path_chars.saturating_sub(3);
+                let start = rendered
+                    .char_indices()
+                    .nth(rendered.chars().count().saturating_sub(keep))
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
+                format!("...{}", &rendered[start..])
+            }
+        };
+
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("Session Export", header_style),
+        ]));
+        lines.push(ftui::text::Line::from(""));
+
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("\u{2501} Suggested Output", label_style.bold()),
+        ]));
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("  HTML: ", label_style),
+            ftui::text::Span::styled(truncate_path(&html_path), value_style),
+        ]));
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("  MD:   ", label_style),
+            ftui::text::Span::styled(truncate_path(&markdown_path), value_style),
+        ]));
+        lines.push(ftui::text::Line::from(""));
+
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("\u{2501} Quick Actions", label_style.bold()),
+        ]));
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("  Enter / h / Ctrl+E ", html_style),
+            ftui::text::Span::styled("open HTML export modal (encryption + options)", value_style),
+        ]));
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("  m / Ctrl+Shift+E ", markdown_style),
+            ftui::text::Span::styled("export Markdown immediately", value_style),
+        ]));
+        lines.push(ftui::text::Line::from(""));
+
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("\u{2501} Export Profile", label_style.bold()),
+        ]));
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("  Agent: ", label_style),
+            ftui::text::Span::styled(export_state.agent_name.clone(), value_style),
+            ftui::text::Span::styled("  \u{2502}  ", muted_style),
+            ftui::text::Span::styled("Workspace: ", label_style),
+            ftui::text::Span::styled(export_state.workspace.clone(), value_style),
+        ]));
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("  Session: ", label_style),
+            ftui::text::Span::styled(export_state.title_preview.clone(), value_style),
+        ]));
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled("  Timestamp: ", label_style),
+            ftui::text::Span::styled(export_state.timestamp.clone(), value_style),
+            ftui::text::Span::styled("  \u{2502}  ", muted_style),
+            ftui::text::Span::styled("Messages: ", label_style),
+            ftui::text::Span::styled(format!("{}", export_state.message_count), value_style),
+        ]));
+        lines.push(ftui::text::Line::from(""));
+        lines.push(ftui::text::Line::from_spans(vec![
+            ftui::text::Span::styled(
+                "Tip: Tab cycles sections. Esc closes detail. Markdown export uses the same filename base as HTML.",
+                muted_style,
+            ),
+        ]));
+
+        if export_state.message_count == 0 {
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(
+                    "Conversation details are still loading; file names are derived from indexed metadata for now.",
+                    muted_style,
+                ),
+            ]));
+        }
+
+        lines
+    }
+
     /// Render the detail/preview pane with rich content (Messages/Snippets/Raw).
     #[allow(clippy::too_many_arguments)]
     fn render_detail_pane(
@@ -8495,6 +8676,7 @@ impl CassApp {
             DetailTab::Raw => "Raw",
             DetailTab::Json => "Json",
             DetailTab::Analytics => "Analytics",
+            DetailTab::Export => "Export",
         };
         let title = format!("Detail [{tab_label}]{wrap_indicator}");
 
@@ -8552,6 +8734,16 @@ impl CassApp {
                 } else {
                     ftui::PackedRgba::rgb(30, 130, 130)
                 }),
+            DetailTab::Export => {
+                styles
+                    .style(style_system::STYLE_STATUS_INFO)
+                    .fg
+                    .unwrap_or(if dark {
+                        ftui::PackedRgba::rgb(130, 200, 255)
+                    } else {
+                        ftui::PackedRgba::rgb(30, 100, 190)
+                    })
+            }
         };
         let detail_accent = if let Some(hit) = self.selected_hit() {
             let agent_accent = legacy_agent_color(&hit.agent);
@@ -8671,6 +8863,7 @@ impl CassApp {
                 ("Raw", DetailTab::Raw),
                 ("Json", DetailTab::Json),
                 ("Analytics", DetailTab::Analytics),
+                ("Export", DetailTab::Export),
             ];
             let mut tab_spans: Vec<ftui::text::Span> =
                 vec![ftui::text::Span::styled(" ", block_style)];
@@ -8783,6 +8976,7 @@ impl CassApp {
                 DetailTab::Raw => self.build_raw_lines(hit, styles),
                 DetailTab::Json => self.build_json_lines(hit, styles),
                 DetailTab::Analytics => self.build_analytics_lines(hit, content_area.width, styles),
+                DetailTab::Export => self.build_export_lines(hit, content_area.width, styles),
             };
 
             // Apply find-in-detail highlighting and cache match positions.
@@ -9973,7 +10167,10 @@ impl CassApp {
                     "Open detail (Messages tab default; if no selected hit, submit query)",
                 ),
                 ("Esc", "Close/back"),
-                ("Tab (in detail)", "Cycle detail tabs"),
+                (
+                    "Tab (in detail)",
+                    "Cycle detail tabs (Messages/Snippets/Raw/Json/Analytics/Export)",
+                ),
                 ("{ / }", "Jump messages"),
                 ("[ / ]", "Jump user messages"),
                 ("Ctrl+Enter", "Queue item; Ctrl+O open all queued"),
@@ -10002,6 +10199,11 @@ impl CassApp {
                 format!(
                     "{} detail-find within messages; n/N cycle session hits",
                     shortcuts::PANE_FILTER
+                ),
+                format!(
+                    "{} HTML export modal | {} quick Markdown export",
+                    shortcuts::EXPORT_HTML,
+                    shortcuts::EXPORT_MARKDOWN
                 ),
                 format!(
                     "{}/Alt+H toggle this help; {} quit (or back from detail)",
@@ -11399,6 +11601,8 @@ pub enum CassMsg {
     ExportFocusMoved { forward: bool },
     /// Execute the export.
     ExportExecuted,
+    /// Quick-export the current session as Markdown.
+    ExportMarkdownExecuted,
     /// Export progress update from background task.
     ExportProgressUpdated(ExportProgress),
     /// Export completed successfully.
@@ -12471,6 +12675,8 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::Char('o') if ctrl => CassMsg::OpenAllQueued,
 
                     // -- Quick export ---------------------------------------------
+                    KeyCode::Char('e') if ctrl && shift => CassMsg::ExportMarkdownExecuted,
+                    KeyCode::Char('E') if ctrl && shift => CassMsg::ExportMarkdownExecuted,
                     KeyCode::Char('e') if ctrl => CassMsg::ExportModalOpened,
 
                     // -- Clipboard ------------------------------------------------
@@ -12976,6 +13182,8 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::DetailClosed
                     | CassMsg::DetailLoadRequested { .. }
                     | CassMsg::DetailTabChanged(_)
+                    | CassMsg::ExportModalOpened
+                    | CassMsg::ExportMarkdownExecuted
                     | CassMsg::DetailScrolled { .. }
                     | CassMsg::DetailWrapToggled
                     | CassMsg::DetailPaneToggled
@@ -13008,6 +13216,9 @@ impl super::ftui_adapter::Model for CassApp {
                             return self
                                 .update(CassMsg::DetailSessionHitNavigated { forward: true });
                         }
+                        if self.detail_tab == DetailTab::Export {
+                            return self.update(CassMsg::ExportModalOpened);
+                        }
                         return ftui::Cmd::none();
                     }
                     // j/k scroll the detail view
@@ -13030,7 +13241,20 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     // e expands all tool/system messages
                     CassMsg::QueryChanged(text) if text == "e" => {
+                        if self.detail_tab == DetailTab::Export {
+                            return self.update(CassMsg::ExportModalOpened);
+                        }
                         return self.update(CassMsg::ToolExpandAll);
+                    }
+                    CassMsg::QueryChanged(text)
+                        if self.detail_tab == DetailTab::Export && (text == "h" || text == "H") =>
+                    {
+                        return self.update(CassMsg::ExportModalOpened);
+                    }
+                    CassMsg::QueryChanged(text)
+                        if self.detail_tab == DetailTab::Export && (text == "m" || text == "M") =>
+                    {
+                        return self.update(CassMsg::ExportMarkdownExecuted);
                     }
                     // c collapses all tool/system messages
                     CassMsg::QueryChanged(text) if text == "c" => {
@@ -13100,7 +13324,8 @@ impl super::ftui_adapter::Model for CassApp {
                             DetailTab::Snippets => DetailTab::Raw,
                             DetailTab::Raw => DetailTab::Json,
                             DetailTab::Json => DetailTab::Analytics,
-                            DetailTab::Analytics => DetailTab::Messages,
+                            DetailTab::Analytics => DetailTab::Export,
+                            DetailTab::Export => DetailTab::Messages,
                         };
                         return self.update(CassMsg::DetailTabChanged(next));
                     }
@@ -13108,6 +13333,8 @@ impl super::ftui_adapter::Model for CassApp {
                     CassMsg::DetailClosed
                     | CassMsg::DetailLoadRequested { .. }
                     | CassMsg::DetailTabChanged(_)
+                    | CassMsg::ExportModalOpened
+                    | CassMsg::ExportMarkdownExecuted
                     | CassMsg::DetailScrolled { .. }
                     | CassMsg::DetailWrapToggled
                     | CassMsg::DetailPaneToggled
@@ -15140,16 +15367,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::ExportModalOpened => {
                 // Initialize modal state from the currently selected hit + conversation.
                 if let Some(hit) = self.selected_hit().cloned() {
-                    let state = if let Some((_, ref cv)) = self.cached_detail {
-                        ExportModalState::from_hit(&hit, cv)
-                    } else {
-                        // Fallback: build minimal state from hit alone.
-                        ExportModalState {
-                            agent_name: hit.agent.clone(),
-                            workspace: hit.workspace.clone(),
-                            ..Default::default()
-                        }
-                    };
+                    let state = self.detail_export_state_for_hit(&hit);
                     self.export_modal_state = Some(state);
                     self.show_export_modal = true;
                     self.focus_manager.push_trap(focus_ids::GROUP_EXPORT);
@@ -15158,9 +15376,12 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::ExportModalClosed => {
+                let was_open = self.show_export_modal;
                 self.show_export_modal = false;
                 self.export_modal_state = None;
-                self.focus_manager.pop_trap();
+                if was_open {
+                    self.focus_manager.pop_trap();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::ExportFieldChanged { field, value } => {
@@ -15195,6 +15416,33 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                 }
                 ftui::Cmd::none()
+            }
+            CassMsg::ExportMarkdownExecuted => {
+                let Some(hit) = self.selected_hit().cloned() else {
+                    self.status = "No active result to export.".to_string();
+                    return ftui::Cmd::none();
+                };
+                let export_state = self
+                    .export_modal_state
+                    .clone()
+                    .unwrap_or_else(|| self.detail_export_state_for_hit(&hit));
+                let source_path = hit.source_path.clone();
+                let output_dir = export_state.output_dir.clone();
+                let output_filename =
+                    Self::markdown_filename_from_html(&export_state.filename_preview);
+                let include_tools = export_state.include_tools;
+                self.status = format!(
+                    "Exporting markdown to {}",
+                    output_dir.join(&output_filename).display()
+                );
+                ftui::Cmd::task(move || {
+                    export_session_markdown_task(
+                        &source_path,
+                        &output_dir,
+                        &output_filename,
+                        include_tools,
+                    )
+                })
             }
             CassMsg::ExportExecuted => {
                 // Extract source_path before mutable borrow of export_modal_state.
@@ -15248,9 +15496,12 @@ impl super::ftui_adapter::Model for CassApp {
                 file_size: _,
                 encrypted: _,
             } => {
+                let was_open = self.show_export_modal;
                 self.show_export_modal = false;
                 self.export_modal_state = None;
-                self.focus_manager.pop_trap();
+                if was_open {
+                    self.focus_manager.pop_trap();
+                }
                 self.status = format!("Exported to {}", output_path.display());
                 self.toast_manager
                     .push(crate::ui::components::toast::Toast::success(format!(
@@ -18582,10 +18833,11 @@ impl super::ftui_adapter::Model for CassApp {
 
         // ── Detail modal overlay ─────────────────────────────────────
         if self.show_detail_modal {
-            // Cap the modal at a readable width (120 cols) and center it.
-            let max_modal_w: u16 = 120;
+            // Wider cap improves readability for markdown/code and reduces
+            // wasted horizontal space on modern terminals.
+            let max_modal_w: u16 = 140;
             let margin_y = if area.height > 6 { 1 } else { 0 };
-            let inner_w = area.width.saturating_sub(4).min(max_modal_w).max(1);
+            let inner_w = area.width.saturating_sub(2).min(max_modal_w).max(1);
             let margin_x = (area.width.saturating_sub(inner_w)) / 2;
             let modal_w = inner_w;
             let modal_h = area.height.saturating_sub(margin_y * 2).max(1);
@@ -18884,6 +19136,98 @@ fn export_session_task(
             encrypted: encrypt,
         },
         Err(e) => CassMsg::ExportFailed(format!("Failed to write export: {e}")),
+    }
+}
+
+/// Background task: export a session to Markdown.
+///
+/// Reuses the existing CLI markdown formatter and parser helpers so TUI export
+/// stays consistent with `cass export --format markdown`.
+fn export_session_markdown_task(
+    source_path: &str,
+    output_dir: &std::path::Path,
+    output_filename: &str,
+    include_tools: bool,
+) -> CassMsg {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Write};
+
+    let session_path = std::path::Path::new(source_path);
+    if !session_path.exists() {
+        return CassMsg::ExportFailed(format!("Session not found: {source_path}"));
+    }
+
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    let mut session_title: Option<String> = None;
+    let mut session_start: Option<i64> = None;
+
+    let is_opencode = crate::detect_opencode_session(session_path);
+    if is_opencode {
+        match crate::load_opencode_session_for_export(session_path) {
+            Ok((title, start, end, msgs)) => {
+                session_title = title;
+                session_start = start;
+                let _ = end;
+                messages = msgs;
+            }
+            Err(err) => {
+                return CassMsg::ExportFailed(format!("Failed to parse OpenCode session: {err}"));
+            }
+        }
+    } else {
+        let file = match File::open(session_path) {
+            Ok(file) => file,
+            Err(err) => return CassMsg::ExportFailed(format!("Cannot open session: {err}")),
+        };
+        let reader = BufReader::new(file);
+        for line in reader.lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) {
+                if let Some(ts) = crate::extract_message_timestamp(&message)
+                    && session_start.is_none_or(|start| ts < start)
+                {
+                    session_start = Some(ts);
+                }
+                messages.push(message);
+            }
+        }
+    }
+
+    if messages.is_empty() {
+        return CassMsg::ExportFailed("No messages found in session".to_string());
+    }
+
+    if session_title.is_none() {
+        for message in &messages {
+            if crate::extract_role(message) == "user" {
+                let content = crate::extract_text_content(message);
+                if !content.trim().is_empty() {
+                    let first_line = content.lines().next().unwrap_or("Untitled Session");
+                    session_title = Some(crate::smart_truncate(first_line, 80));
+                    break;
+                }
+            }
+        }
+    }
+
+    let markdown =
+        crate::format_as_markdown(&messages, &session_title, session_start, include_tools);
+    let output_path = output_dir.join(output_filename);
+    if let Some(parent) = output_path.parent()
+        && !parent.exists()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        return CassMsg::ExportFailed(format!("Cannot create output directory: {err}"));
+    }
+    match File::create(&output_path).and_then(|mut file| file.write_all(markdown.as_bytes())) {
+        Ok(()) => CassMsg::ExportCompleted {
+            output_path,
+            file_size: markdown.len(),
+            encrypted: false,
+        },
+        Err(err) => CassMsg::ExportFailed(format!("Failed to write export: {err}")),
     }
 }
 
@@ -19975,6 +20319,7 @@ mod tests {
         let _raw = DetailTab::Raw;
         let _json = DetailTab::Json;
         let _analytics = DetailTab::Analytics;
+        let _export = DetailTab::Export;
     }
 
     #[test]
@@ -24508,7 +24853,38 @@ mod tests {
         let _ = app.update(CassMsg::FocusToggled);
         assert_eq!(app.detail_tab, DetailTab::Analytics);
         let _ = app.update(CassMsg::FocusToggled);
+        assert_eq!(app.detail_tab, DetailTab::Export);
+        let _ = app.update(CassMsg::FocusToggled);
         assert_eq!(app.detail_tab, DetailTab::Messages);
+    }
+
+    #[test]
+    fn detail_modal_ctrl_shift_e_routes_to_quick_markdown_export() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let mut app = app_with_hits(1);
+        app.show_detail_modal = true;
+        app.detail_tab = DetailTab::Export;
+
+        let msg = CassMsg::from(Event::Key(KeyEvent {
+            code: KeyCode::Char('e'),
+            modifiers: Modifiers::CTRL | Modifiers::SHIFT,
+            kind: ftui::KeyEventKind::Press,
+        }));
+        assert!(matches!(msg, CassMsg::ExportMarkdownExecuted));
+
+        let cmd = app.update(msg);
+        assert!(
+            matches!(cmd, ftui::Cmd::Task(..)),
+            "Ctrl+Shift+E should dispatch quick markdown export task"
+        );
+        assert!(app.show_detail_modal, "detail modal should remain open");
+        assert_eq!(app.detail_tab, DetailTab::Export);
+        assert!(
+            app.status.starts_with("Exporting markdown to "),
+            "status should reflect quick markdown export, got: {}",
+            app.status
+        );
     }
 
     #[test]
@@ -27519,7 +27895,8 @@ mod tests {
                 preset
             );
             assert!(
-                medium_text.contains("Search sessions, messages, code...") && medium_text.contains("│"),
+                medium_text.contains("Search sessions, messages, code...")
+                    && medium_text.contains("│"),
                 "query row should include placeholder and caret for {:?}",
                 preset
             );
@@ -29579,7 +29956,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycling_includes_analytics() {
+    fn tab_cycling_includes_analytics_and_export() {
         let mut app = app_with_hits(3);
         let _ = app.update(CassMsg::DetailOpened);
         assert_eq!(app.detail_tab, DetailTab::Messages);
@@ -29590,6 +29967,8 @@ mod tests {
         // Json -> Analytics (via tab cycle logic, but we test direct tab change)
         let _ = app.update(CassMsg::DetailTabChanged(DetailTab::Analytics));
         assert_eq!(app.detail_tab, DetailTab::Analytics);
+        let _ = app.update(CassMsg::DetailTabChanged(DetailTab::Export));
+        assert_eq!(app.detail_tab, DetailTab::Export);
     }
 
     // -- End analytics tab tests ----------------------------------------------
@@ -30234,6 +30613,7 @@ mod tests {
             DetailTab::Raw,
             DetailTab::Json,
             DetailTab::Analytics,
+            DetailTab::Export,
             DetailTab::Messages, // back to start
         ];
         for expected in &tabs {
