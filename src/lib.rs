@@ -12038,15 +12038,16 @@ fn run_export_html(
 
     // Detect agent from path
     let path_str = session_path.to_string_lossy();
-    if path_str.contains(".claude") {
+    let path_lower = path_str.to_ascii_lowercase();
+    if path_lower.contains(".claude") {
         agent_name = Some("claude_code".to_string());
-    } else if path_str.contains(".codex") {
+    } else if path_lower.contains(".codex") {
         agent_name = Some("codex".to_string());
-    } else if path_str.contains("cursor") {
+    } else if path_lower.contains("cursor") {
         agent_name = Some("cursor".to_string());
-    } else if path_str.contains(".gemini") {
+    } else if path_lower.contains(".gemini") {
         agent_name = Some("gemini".to_string());
-    } else if path_str.contains(".vibe") {
+    } else if path_lower.contains(".vibe") {
         agent_name = Some("vibe".to_string());
     }
 
