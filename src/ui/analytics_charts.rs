@@ -215,11 +215,7 @@ pub fn load_chart_data(
             SourceFilter::Remote => analytics::SourceFilter::Remote,
             SourceFilter::SourceId(s) => analytics::SourceFilter::Specific(s.clone()),
         },
-        workspace_ids: filters
-            .workspaces
-            .iter()
-            .filter_map(|w| w.parse().ok())
-            .collect(),
+        workspace_ids: resolve_workspace_filter_ids(conn, &filters.workspaces),
     };
 
     let mut data = AnalyticsChartData::default();
@@ -432,6 +428,37 @@ pub fn load_chart_data(
     }
 
     data
+}
+
+fn resolve_workspace_filter_ids(
+    conn: &rusqlite::Connection,
+    workspaces: &std::collections::HashSet<String>,
+) -> Vec<i64> {
+    if workspaces.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ids = Vec::new();
+    let mut stmt = conn
+        .prepare("SELECT id FROM workspaces WHERE path = ?1")
+        .ok();
+
+    for workspace in workspaces {
+        if let Ok(id) = workspace.parse::<i64>()
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+
+        if let Some(stmt) = stmt.as_mut()
+            && let Ok(id) = stmt.query_row([workspace.as_str()], |row| row.get::<_, i64>(0))
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+    }
+
+    ids
 }
 
 // ---------------------------------------------------------------------------
@@ -2835,6 +2862,86 @@ fn format_number(n: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_workspace_filter_ids_supports_paths_and_numeric_ids() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workspaces (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (id, path) VALUES (?1, ?2)",
+            rusqlite::params![1_i64, "/workspace/one"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (id, path) VALUES (?1, ?2)",
+            rusqlite::params![2_i64, "/workspace/two"],
+        )
+        .unwrap();
+
+        let mut filters = std::collections::HashSet::new();
+        filters.insert("/workspace/one".to_string());
+        filters.insert("2".to_string());
+        filters.insert("/workspace/missing".to_string());
+
+        let ids = resolve_workspace_filter_ids(&conn, &filters);
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+        assert_eq!(ids.iter().filter(|id| **id == 2).count(), 1);
+    }
+
+    #[test]
+    fn load_chart_data_applies_workspace_path_filter() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("analytics_filters.db");
+        let storage = crate::storage::sqlite::SqliteStorage::open(&db_path).unwrap();
+
+        let ws_a = storage
+            .ensure_workspace(std::path::Path::new("/workspace/a"), None)
+            .unwrap();
+        let ws_b = storage
+            .ensure_workspace(std::path::Path::new("/workspace/b"), None)
+            .unwrap();
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let conn = storage.raw();
+        conn.execute(
+            "INSERT INTO usage_daily (
+                day_id, agent_slug, workspace_id, source_id,
+                message_count, tool_call_count, api_tokens_total, last_updated
+             ) VALUES (?1, 'codex', ?2, 'local', 10, 2, 1000, ?3)",
+            rusqlite::params![20260220_i64, ws_a, now_ms],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_daily (
+                day_id, agent_slug, workspace_id, source_id,
+                message_count, tool_call_count, api_tokens_total, last_updated
+             ) VALUES (?1, 'codex', ?2, 'local', 20, 4, 2000, ?3)",
+            rusqlite::params![20260220_i64, ws_b, now_ms],
+        )
+        .unwrap();
+
+        let mut filters = crate::ui::app::AnalyticsFilterState::default();
+        filters.workspaces.insert("/workspace/a".to_string());
+
+        let data = load_chart_data(&storage, &filters, crate::analytics::GroupBy::Day);
+        assert_eq!(data.total_api_tokens, 1000);
+        assert_eq!(data.total_messages, 10);
+        assert_eq!(data.total_tool_calls, 2);
+        assert_eq!(
+            data.agent_tokens.first().map(|(_, v)| *v as i64),
+            Some(1000)
+        );
+    }
 
     #[test]
     fn format_number_basic() {

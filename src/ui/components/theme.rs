@@ -944,14 +944,14 @@ impl ThemePalette {
             accent: PackedRgba::rgb(38, 139, 210),      // #268bd2 blue
             accent_alt: PackedRgba::rgb(108, 113, 196), // #6c71c4 violet
             bg: PackedRgba::rgb(0, 43, 54),             // #002b36 base03
-            fg: PackedRgba::rgb(131, 148, 150),         // #839496 base0
+            fg: PackedRgba::rgb(147, 161, 161),         // #93a1a1 base1 (WCAG AA on surface)
             surface: PackedRgba::rgb(7, 54, 66),        // #073642 base02
-            hint: PackedRgba::rgb(101, 123, 131),       // #657b83 base00
-            border: PackedRgba::rgb(88, 110, 117),      // #586e75 base01
-            user: PackedRgba::rgb(133, 153, 0),         // #859900 green
-            agent: PackedRgba::rgb(38, 139, 210),       // #268bd2 blue
-            tool: PackedRgba::rgb(203, 75, 22),         // #cb4b16 orange
-            system: PackedRgba::rgb(181, 137, 0),       // #b58900 yellow
+            hint: PackedRgba::rgb(105, 127, 134), // lightened base00 (WCAG AA-large on surface)
+            border: PackedRgba::rgb(88, 110, 117), // #586e75 base01
+            user: PackedRgba::rgb(133, 153, 0),   // #859900 green
+            agent: PackedRgba::rgb(38, 139, 210), // #268bd2 blue
+            tool: PackedRgba::rgb(203, 75, 22),   // #cb4b16 orange
+            system: PackedRgba::rgb(181, 137, 0), // #b58900 yellow
             stripe_even: PackedRgba::rgb(0, 43, 54),
             stripe_odd: PackedRgba::rgb(7, 54, 66),
         }
@@ -962,14 +962,14 @@ impl ThemePalette {
             accent: PackedRgba::rgb(38, 139, 210),
             accent_alt: PackedRgba::rgb(108, 113, 196),
             bg: PackedRgba::rgb(253, 246, 227), // #fdf6e3 base3
-            fg: PackedRgba::rgb(101, 123, 131), // #657b83 base00
+            fg: PackedRgba::rgb(86, 108, 116),  // darkened base01 (WCAG AA on surface+bg)
             surface: PackedRgba::rgb(238, 232, 213), // #eee8d5 base2
-            hint: PackedRgba::rgb(131, 148, 150), // #839496 base0
+            hint: PackedRgba::rgb(115, 132, 134), // darkened base0 (WCAG AA-large on surface+bg)
             border: PackedRgba::rgb(147, 161, 161), // #93a1a1 base1
-            user: PackedRgba::rgb(133, 153, 0),
+            user: PackedRgba::rgb(128, 148, 0), // darkened green (WCAG AA-large on bg)
             agent: PackedRgba::rgb(38, 139, 210),
             tool: PackedRgba::rgb(203, 75, 22),
-            system: PackedRgba::rgb(181, 137, 0),
+            system: PackedRgba::rgb(177, 133, 0), // darkened yellow (WCAG AA-large on bg)
             stripe_even: PackedRgba::rgb(253, 246, 227),
             stripe_odd: PackedRgba::rgb(238, 232, 213),
         }
@@ -1018,12 +1018,12 @@ impl ThemePalette {
             bg: PackedRgba::rgb(40, 44, 52),            // #282c34
             fg: PackedRgba::rgb(171, 178, 191),         // #abb2bf
             surface: PackedRgba::rgb(49, 53, 63),       // #31353f
-            hint: PackedRgba::rgb(99, 109, 131),        // #636d83
-            border: PackedRgba::rgb(62, 68, 81),        // #3e4451
-            user: PackedRgba::rgb(152, 195, 121),       // #98c379 green
-            agent: PackedRgba::rgb(97, 175, 239),       // #61afef blue
-            tool: PackedRgba::rgb(229, 192, 123),       // #e5c07b yellow
-            system: PackedRgba::rgb(224, 108, 117),     // #e06c75 red
+            hint: PackedRgba::rgb(118, 128, 150), // lightened #636d83 (WCAG AA-large on bg+surface)
+            border: PackedRgba::rgb(62, 68, 81),  // #3e4451
+            user: PackedRgba::rgb(152, 195, 121), // #98c379 green
+            agent: PackedRgba::rgb(97, 175, 239), // #61afef blue
+            tool: PackedRgba::rgb(229, 192, 123), // #e5c07b yellow
+            system: PackedRgba::rgb(224, 108, 117), // #e06c75 red
             stripe_even: PackedRgba::rgb(40, 44, 52),
             stripe_odd: PackedRgba::rgb(49, 53, 63),
         }
@@ -1036,12 +1036,12 @@ impl ThemePalette {
             bg: PackedRgba::rgb(25, 23, 36),            // #191724
             fg: PackedRgba::rgb(224, 222, 244),         // #e0def4
             surface: PackedRgba::rgb(38, 35, 53),       // #26233a
-            hint: PackedRgba::rgb(110, 106, 134),       // #6e6a86
-            border: PackedRgba::rgb(57, 53, 82),        // #393552
-            user: PackedRgba::rgb(156, 207, 216),       // #9ccfd8 foam
-            agent: PackedRgba::rgb(196, 167, 231),      // #c4a7e7 iris
-            tool: PackedRgba::rgb(246, 193, 119),       // #f6c177 gold
-            system: PackedRgba::rgb(235, 111, 146),     // #eb6f92 love
+            hint: PackedRgba::rgb(114, 110, 138), // lightened #6e6a86 (WCAG AA-large on surface)
+            border: PackedRgba::rgb(57, 53, 82),  // #393552
+            user: PackedRgba::rgb(156, 207, 216), // #9ccfd8 foam
+            agent: PackedRgba::rgb(196, 167, 231), // #c4a7e7 iris
+            tool: PackedRgba::rgb(246, 193, 119), // #f6c177 gold
+            system: PackedRgba::rgb(235, 111, 146), // #eb6f92 love
             stripe_even: PackedRgba::rgb(25, 23, 36),
             stripe_odd: PackedRgba::rgb(33, 30, 46),
         }
@@ -1054,12 +1054,12 @@ impl ThemePalette {
             bg: PackedRgba::rgb(39, 46, 34),            // #272e22
             fg: PackedRgba::rgb(211, 198, 170),         // #d3c6aa
             surface: PackedRgba::rgb(47, 55, 42),       // #2f372a
-            hint: PackedRgba::rgb(125, 117, 100),       // #7d7564
-            border: PackedRgba::rgb(68, 77, 60),        // #444d3c
-            user: PackedRgba::rgb(131, 192, 146),       // #83c092 aqua
-            agent: PackedRgba::rgb(124, 195, 210),      // #7cc3d2 blue
-            tool: PackedRgba::rgb(219, 188, 127),       // #dbbc7f yellow
-            system: PackedRgba::rgb(230, 126, 128),     // #e67e80 red
+            hint: PackedRgba::rgb(135, 127, 110), // lightened #7d7564 (WCAG AA-large on surface)
+            border: PackedRgba::rgb(68, 77, 60),  // #444d3c
+            user: PackedRgba::rgb(131, 192, 146), // #83c092 aqua
+            agent: PackedRgba::rgb(124, 195, 210), // #7cc3d2 blue
+            tool: PackedRgba::rgb(219, 188, 127), // #dbbc7f yellow
+            system: PackedRgba::rgb(230, 126, 128), // #e67e80 red
             stripe_even: PackedRgba::rgb(39, 46, 34),
             stripe_odd: PackedRgba::rgb(47, 55, 42),
         }
@@ -1072,7 +1072,7 @@ impl ThemePalette {
             bg: PackedRgba::rgb(31, 31, 40),        // #1f1f28
             fg: PackedRgba::rgb(220, 215, 186),     // #dcd7ba
             surface: PackedRgba::rgb(42, 42, 54),   // #2a2a36
-            hint: PackedRgba::rgb(114, 113, 105),   // #727169
+            hint: PackedRgba::rgb(119, 118, 110),   // lightened #727169 (WCAG AA-large on surface)
             border: PackedRgba::rgb(84, 84, 109),   // #54546d
             user: PackedRgba::rgb(152, 187, 108),   // #98bb6c spring green
             agent: PackedRgba::rgb(127, 180, 202),  // #7fb4ca wave blue
@@ -1090,12 +1090,12 @@ impl ThemePalette {
             bg: PackedRgba::rgb(36, 42, 54),            // #242a36
             fg: PackedRgba::rgb(204, 204, 194),         // #cccac2
             surface: PackedRgba::rgb(44, 51, 64),       // #2c3340
-            hint: PackedRgba::rgb(107, 114, 128),       // #6b7280
-            border: PackedRgba::rgb(60, 68, 82),        // #3c4452
-            user: PackedRgba::rgb(135, 213, 134),       // #87d586
-            agent: PackedRgba::rgb(115, 210, 222),      // #73d2de
-            tool: PackedRgba::rgb(255, 213, 109),       // #ffd56d
-            system: PackedRgba::rgb(240, 113, 120),     // #f07178
+            hint: PackedRgba::rgb(119, 126, 140), // lightened #6b7280 (WCAG AA-large on bg+surface)
+            border: PackedRgba::rgb(60, 68, 82),  // #3c4452
+            user: PackedRgba::rgb(135, 213, 134), // #87d586
+            agent: PackedRgba::rgb(115, 210, 222), // #73d2de
+            tool: PackedRgba::rgb(255, 213, 109), // #ffd56d
+            system: PackedRgba::rgb(240, 113, 120), // #f07178
             stripe_even: PackedRgba::rgb(36, 42, 54),
             stripe_odd: PackedRgba::rgb(44, 51, 64),
         }

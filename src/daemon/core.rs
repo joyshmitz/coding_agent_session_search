@@ -159,6 +159,15 @@ impl ModelDaemon {
         *self.last_activity.write() = Instant::now();
     }
 
+    /// Check whether configured memory limit is exceeded.
+    fn memory_limit_exceeded(&self) -> bool {
+        if self.config.memory_limit == 0 {
+            return false;
+        }
+        let memory_bytes = self.resources.memory_usage();
+        memory_bytes > self.config.memory_limit
+    }
+
     /// Initialize the background embedding worker thread.
     fn init_worker(&self) {
         let (worker, handle) = EmbeddingWorker::new();
@@ -183,8 +192,18 @@ impl ModelDaemon {
     /// Start the daemon server.
     pub fn run(&self) -> std::io::Result<()> {
         // Apply resource limits
-        self.resources.apply_nice(self.config.nice_value);
-        self.resources.apply_ionice(self.config.ionice_class);
+        if !self.resources.apply_nice(self.config.nice_value) {
+            warn!(
+                nice = self.config.nice_value,
+                "Failed to apply configured daemon nice value"
+            );
+        }
+        if !self.resources.apply_ionice(self.config.ionice_class) {
+            warn!(
+                ionice_class = self.config.ionice_class,
+                "Failed to apply configured daemon ionice class"
+            );
+        }
 
         // Remove stale socket if exists
         if self.config.socket_path.exists() {
@@ -230,6 +249,17 @@ impl ModelDaemon {
                 info!(
                     idle_secs = self.config.idle_timeout.as_secs(),
                     "Idle timeout reached, shutting down"
+                );
+                break;
+            }
+
+            // Enforce configured memory limit when enabled.
+            if self.memory_limit_exceeded() {
+                let memory_bytes = self.resources.memory_usage();
+                error!(
+                    memory_bytes = memory_bytes,
+                    memory_limit = self.config.memory_limit,
+                    "Daemon memory limit exceeded, shutting down"
                 );
                 break;
             }

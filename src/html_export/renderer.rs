@@ -686,28 +686,28 @@ fn render_message_group(
     };
 
     // Check for content collapse
-    let (content_wrapper_start, content_wrapper_end) = if options.collapse_threshold > 0
-        && group.primary.content.len() > options.collapse_threshold
-    {
-        let preview_len = options.collapse_threshold.min(500);
-        let safe_len = truncate_to_char_boundary(&group.primary.content, preview_len);
-        let preview = &group.primary.content[..safe_len];
-        (
-            format!(
-                r#"<details class="message-collapse">
+    let content_chars = group.primary.content.chars().count();
+    let (content_wrapper_start, content_wrapper_end) =
+        if options.collapse_threshold > 0 && content_chars > options.collapse_threshold {
+            let preview_chars = options.collapse_threshold.min(500);
+            let safe_len = byte_index_for_char_count(&group.primary.content, preview_chars);
+            let preview = &group.primary.content[..safe_len];
+            (
+                format!(
+                    r#"<details class="message-collapse">
                     <summary>
                         <span class="message-preview">{}</span>
                         <span class="message-expand-hint">Click to expand ({} chars)</span>
                     </summary>
                     <div class="message-expanded">"#,
-                super::template::html_escape(preview),
-                group.primary.content.len()
-            ),
-            "</div></details>".to_string(),
-        )
-    } else {
-        (String::new(), String::new())
-    };
+                    super::template::html_escape(preview),
+                    content_chars
+                ),
+                "</div></details>".to_string(),
+            )
+        } else {
+            (String::new(), String::new())
+        };
 
     // Only render content div if there's actual content
     let content_section = if content_html.trim().is_empty() {
@@ -954,19 +954,20 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     let content_html = render_content(&message.content, options);
 
     // Check if message should be collapsed
+    let content_chars = message.content.chars().count();
     let (content_wrapper_start, content_wrapper_end) =
-        if options.collapse_threshold > 0 && message.content.len() > options.collapse_threshold {
+        if options.collapse_threshold > 0 && content_chars > options.collapse_threshold {
             debug!(
                 component = "renderer",
                 operation = "collapse_message",
                 message_index = message.index.unwrap_or(0),
-                content_len = message.content.len(),
+                content_len = content_chars,
                 collapse_threshold = options.collapse_threshold,
                 "Collapsing long message"
             );
-            let preview_len = options.collapse_threshold.min(500);
-            // Safe truncation at char boundary to avoid panic on multi-byte UTF-8
-            let safe_len = truncate_to_char_boundary(&message.content, preview_len);
+            let preview_chars = options.collapse_threshold.min(500);
+            // Safe truncation at char boundary to avoid panic on multi-byte UTF-8.
+            let safe_len = byte_index_for_char_count(&message.content, preview_chars);
             let preview = &message.content[..safe_len];
             (
                 format!(
@@ -977,7 +978,7 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
                     </summary>
                     <div class="message-expanded">"#,
                     html_escape(preview),
-                    message.content.len()
+                    content_chars
                 ),
                 "</div></details>".to_string(),
             )
@@ -1234,6 +1235,17 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> usize {
     end
 }
 
+/// Convert a maximum character count to a safe byte index in `s`.
+fn byte_index_for_char_count(s: &str, max_chars: usize) -> usize {
+    if max_chars == 0 {
+        return 0;
+    }
+    s.char_indices()
+        .nth(max_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or(s.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1471,6 +1483,23 @@ mod tests {
         assert!(html.contains("<details"));
         // The preview should be valid UTF-8 (this would fail if we sliced incorrectly)
         assert!(!html.is_empty());
+    }
+
+    #[test]
+    fn test_collapse_threshold_uses_character_count() {
+        // "é" is 2 bytes in UTF-8, so this string has 60 chars but 120 bytes.
+        let msg = test_message("user", &"é".repeat(60));
+        let opts = RenderOptions {
+            collapse_threshold: 100,
+            ..Default::default()
+        };
+
+        // Should NOT collapse because threshold is in characters, not bytes.
+        let html = render_message(&msg, &opts).unwrap();
+        assert!(
+            !html.contains("<details"),
+            "message should not collapse when char count is below threshold"
+        );
     }
 
     #[test]

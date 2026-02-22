@@ -318,7 +318,14 @@ for dir in ~/.claude/projects ~/.codex/sessions ~/.cursor \
         SIZE=$(du -sm "$expanded_dir" 2>/dev/null | cut -f1)
         # Count JSONL files for session estimate
         if [ -d "$expanded_dir" ]; then
-            COUNT=$(find "$expanded_dir" \( -name "*.jsonl" -o -name "*.json" \) 2>/dev/null | wc -l | tr -d ' ')
+            # Keep probe bounded for very large trees: depth-limit and timeout when available.
+            if command -v timeout &> /dev/null; then
+                COUNT=$(timeout 5s find "$expanded_dir" -maxdepth 8 \( -name "*.jsonl" -o -name "*.json" \) 2>/dev/null | wc -l | tr -d ' ')
+            elif command -v gtimeout &> /dev/null; then
+                COUNT=$(gtimeout 5s find "$expanded_dir" -maxdepth 8 \( -name "*.jsonl" -o -name "*.json" \) 2>/dev/null | wc -l | tr -d ' ')
+            else
+                COUNT=$(find "$expanded_dir" -maxdepth 8 \( -name "*.jsonl" -o -name "*.json" \) 2>/dev/null | wc -l | tr -d ' ')
+            fi
         else
             COUNT=1  # Single file
         fi

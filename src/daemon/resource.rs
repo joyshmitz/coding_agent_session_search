@@ -171,7 +171,7 @@ impl ResourceMonitor {
                     }
                 }
                 Err(e) => {
-                    debug!(error = %e, "ionice command not available");
+                    warn!(error = %e, "ionice command not available");
                     false
                 }
             }

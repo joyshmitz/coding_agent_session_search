@@ -98,7 +98,13 @@ fn query_table_stats(
 /// Returns `(clause_fragments, param_values)` where each fragment is like
 /// `"agent_slug IN (?1, ?2)"` and `param_values` are the corresponding bind
 /// strings.
-pub fn build_where_parts(filter: &AnalyticsFilter) -> (Vec<String>, Vec<String>) {
+///
+/// `workspace_column` should be provided only for tables that contain a
+/// workspace id dimension (for example `usage_daily.workspace_id`).
+pub fn build_where_parts(
+    filter: &AnalyticsFilter,
+    workspace_column: Option<&str>,
+) -> (Vec<String>, Vec<String>) {
     let mut parts = Vec::new();
     let mut params = Vec::new();
 
@@ -130,6 +136,23 @@ pub fn build_where_parts(filter: &AnalyticsFilter) -> (Vec<String>, Vec<String>)
             params.push(s.clone());
             parts.push(format!("source_id = ?{}", params.len()));
         }
+    }
+
+    if let Some(workspace_column) = workspace_column
+        && !filter.workspace_ids.is_empty()
+    {
+        let placeholders: Vec<String> = filter
+            .workspace_ids
+            .iter()
+            .map(|workspace_id| {
+                params.push(workspace_id.to_string());
+                format!("?{}", params.len())
+            })
+            .collect();
+        parts.push(format!(
+            "{workspace_column} IN ({})",
+            placeholders.join(", ")
+        ));
     }
 
     (parts, params)
@@ -364,7 +387,7 @@ pub fn query_tokens_timeseries(
     let (day_min, day_max) = bucketing::resolve_day_range(filter);
     let (hour_min, hour_max) = bucketing::resolve_hour_range(filter);
 
-    let (dim_parts, dim_params) = build_where_parts(filter);
+    let (dim_parts, dim_params) = build_where_parts(filter, Some("workspace_id"));
     let mut where_parts = dim_parts;
     let mut bind_values = dim_params;
 
@@ -574,7 +597,7 @@ pub fn query_cost_timeseries(
 
     // Build WHERE clause — Track B only has day_id (no hourly equivalent).
     let (day_min, day_max) = bucketing::resolve_day_range(filter);
-    let (dim_parts, dim_params) = build_where_parts(filter);
+    let (dim_parts, dim_params) = build_where_parts(filter, None);
     let mut where_parts = dim_parts;
     let mut bind_values = dim_params;
 
@@ -753,7 +776,14 @@ pub fn query_breakdown(
 
     // Build WHERE clause.
     let (day_min, day_max) = bucketing::resolve_day_range(filter);
-    let (dim_parts, dim_params) = build_where_parts(filter);
+    let (dim_parts, dim_params) = build_where_parts(
+        filter,
+        if use_track_b {
+            None
+        } else {
+            Some("workspace_id")
+        },
+    );
     let mut where_parts = dim_parts;
     let mut bind_values = dim_params;
 
@@ -1080,7 +1110,7 @@ pub fn query_tools(
     // Build WHERE clause.
     let (day_min, day_max) = bucketing::resolve_day_range(filter);
     let (hour_min, hour_max) = bucketing::resolve_hour_range(filter);
-    let (dim_parts, dim_params) = build_where_parts(filter);
+    let (dim_parts, dim_params) = build_where_parts(filter, Some("workspace_id"));
     let mut where_parts = dim_parts;
     let mut bind_values = dim_params;
 
@@ -1466,7 +1496,7 @@ mod tests {
     #[test]
     fn build_where_parts_empty_filter() {
         let f = AnalyticsFilter::default();
-        let (parts, params) = build_where_parts(&f);
+        let (parts, params) = build_where_parts(&f, None);
         assert!(parts.is_empty());
         assert!(params.is_empty());
     }
@@ -1477,7 +1507,7 @@ mod tests {
             agents: vec!["claude_code".into()],
             ..Default::default()
         };
-        let (parts, params) = build_where_parts(&f);
+        let (parts, params) = build_where_parts(&f, None);
         assert_eq!(parts.len(), 1);
         assert!(parts[0].contains("agent_slug IN"));
         assert_eq!(params, vec!["claude_code"]);
@@ -1489,7 +1519,7 @@ mod tests {
             agents: vec!["claude_code".into(), "codex".into(), "aider".into()],
             ..Default::default()
         };
-        let (parts, params) = build_where_parts(&f);
+        let (parts, params) = build_where_parts(&f, None);
         assert_eq!(parts.len(), 1);
         assert!(parts[0].contains("?1"));
         assert!(parts[0].contains("?2"));
@@ -1503,7 +1533,7 @@ mod tests {
             source: SourceFilter::Local,
             ..Default::default()
         };
-        let (parts, params) = build_where_parts(&f);
+        let (parts, params) = build_where_parts(&f, None);
         assert_eq!(parts.len(), 1);
         assert!(parts[0].contains("source_id = ?1"));
         assert_eq!(params, vec!["local"]);
@@ -1515,7 +1545,7 @@ mod tests {
             source: SourceFilter::Remote,
             ..Default::default()
         };
-        let (parts, params) = build_where_parts(&f);
+        let (parts, params) = build_where_parts(&f, None);
         assert_eq!(parts.len(), 1);
         assert!(parts[0].contains("source_id != ?1"));
         assert_eq!(params, vec!["local"]);
@@ -1527,7 +1557,7 @@ mod tests {
             source: SourceFilter::Specific("myhost.local".into()),
             ..Default::default()
         };
-        let (parts, params) = build_where_parts(&f);
+        let (parts, params) = build_where_parts(&f, None);
         assert_eq!(parts.len(), 1);
         assert!(parts[0].contains("source_id = ?1"));
         assert_eq!(params, vec!["myhost.local"]);
@@ -1540,11 +1570,34 @@ mod tests {
             source: SourceFilter::Local,
             ..Default::default()
         };
-        let (parts, params) = build_where_parts(&f);
+        let (parts, params) = build_where_parts(&f, None);
         assert_eq!(parts.len(), 2);
         assert_eq!(params.len(), 2);
         assert_eq!(params[0], "codex");
         assert_eq!(params[1], "local");
+    }
+
+    #[test]
+    fn build_where_parts_workspace_filter_enabled() {
+        let f = AnalyticsFilter {
+            workspace_ids: vec![7, 42],
+            ..Default::default()
+        };
+        let (parts, params) = build_where_parts(&f, Some("workspace_id"));
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].contains("workspace_id IN (?1, ?2)"));
+        assert_eq!(params, vec!["7", "42"]);
+    }
+
+    #[test]
+    fn build_where_parts_workspace_filter_disabled() {
+        let f = AnalyticsFilter {
+            workspace_ids: vec![7, 42],
+            ..Default::default()
+        };
+        let (parts, params) = build_where_parts(&f, None);
+        assert!(parts.is_empty());
+        assert!(params.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -2137,6 +2190,19 @@ mod tests {
     }
 
     #[test]
+    fn query_breakdown_workspace_filter_applies_on_track_a() {
+        let conn = setup_usage_daily_db();
+        let filter = AnalyticsFilter {
+            workspace_ids: vec![2],
+            ..Default::default()
+        };
+        let result = query_breakdown(&conn, &filter, Dim::Agent, Metric::MessageCount, 10).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "aider");
+        assert_eq!(result.rows[0].value, 30);
+    }
+
+    #[test]
     fn query_breakdown_by_model_uses_track_b() {
         let conn = setup_token_daily_stats_db();
         let filter = AnalyticsFilter::default();
@@ -2194,6 +2260,19 @@ mod tests {
     }
 
     #[test]
+    fn query_tokens_timeseries_workspace_filter_applies() {
+        let conn = setup_usage_daily_db();
+        let filter = AnalyticsFilter {
+            workspace_ids: vec![2],
+            ..Default::default()
+        };
+        let result = query_tokens_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+        assert_eq!(result.buckets.len(), 1);
+        assert_eq!(result.totals.message_count, 30);
+        assert_eq!(result.totals.tool_call_count, 5);
+    }
+
+    #[test]
     fn query_breakdown_result_to_json_shape() {
         let conn = setup_usage_daily_db();
         let filter = AnalyticsFilter::default();
@@ -2221,6 +2300,19 @@ mod tests {
         // Totals should sum correctly
         let sum: i64 = result.rows.iter().map(|r| r.tool_call_count).sum();
         assert_eq!(result.total_tool_calls, sum);
+    }
+
+    #[test]
+    fn query_tools_workspace_filter_applies() {
+        let conn = setup_usage_daily_db();
+        let filter = AnalyticsFilter {
+            workspace_ids: vec![2],
+            ..Default::default()
+        };
+        let result = query_tools(&conn, &filter, GroupBy::Day, 10).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "aider");
+        assert_eq!(result.rows[0].tool_call_count, 5);
     }
 
     #[test]

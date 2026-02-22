@@ -3907,6 +3907,8 @@ pub struct CassApp {
     pub cached_detail: Option<(String, ConversationView)>,
     /// Whether word-wrap is enabled in the detail pane.
     pub detail_wrap: bool,
+    /// Whether the detail preview pane is hidden (maximise results area).
+    pub detail_pane_hidden: bool,
     /// Indices of tool/system messages that are collapsed in the detail modal.
     /// When a message index is in this set its content is hidden behind a
     /// one-line summary bar; pressing Enter/Space toggles it.
@@ -4187,6 +4189,7 @@ impl Default for CassApp {
             modal_scroll: 0,
             cached_detail: None,
             detail_wrap: true,
+            detail_pane_hidden: false,
             collapsed_tools: HashSet::new(),
             show_stats_bar: true,
             theme_dark: true,
@@ -4444,7 +4447,8 @@ impl CassApp {
     /// that checks `focus_region` for rendering decisions.
     pub fn focused_region(&self) -> FocusRegion {
         match self.focus_manager.current() {
-            Some(id) if id == focus_ids::DETAIL_PANE || id == focus_ids::DETAIL_MODAL => {
+            Some(id) if id == focus_ids::DETAIL_MODAL => FocusRegion::Detail,
+            Some(id) if id == focus_ids::DETAIL_PANE && !self.detail_pane_hidden => {
                 FocusRegion::Detail
             }
             _ => FocusRegion::Results,
@@ -5253,6 +5257,18 @@ impl CassApp {
             .max(1);
         let ratio = rel_x as f64 / area.width as f64;
         Some(ratio.clamp(PANEL_RATIO_MIN, PANEL_RATIO_MAX))
+    }
+
+    fn help_overlay_popup_area(&self) -> Option<Rect> {
+        let area = self.last_content_area.borrow().as_ref().copied()?;
+        let popup_w = ((area.width as u32 * 70) / 100).min(area.width as u32) as u16;
+        let popup_h = ((area.height as u32 * 70) / 100).min(area.height as u32) as u16;
+        if popup_w < 20 || popup_h < 6 {
+            return None;
+        }
+        let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+        let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+        Some(Rect::new(popup_x, popup_y, popup_w, popup_h))
     }
 
     fn apply_panel_ratio_from_mouse_x(&mut self, x: u16) -> bool {
@@ -6693,44 +6709,93 @@ impl CassApp {
             let info_s = styles.style(style_system::STYLE_STATUS_INFO);
             let pill_s = styles.style(style_system::STYLE_PILL_ACTIVE);
 
+            // Distinguish "no query yet" from "query returned zero results".
+            let has_completed_search =
+                !self.query.is_empty() && self.last_search_ms.is_some() && !self.search_in_flight;
+
             let mut lines: Vec<ftui::text::Line<'static>> = Vec::new();
             lines.push(ftui::text::Line::from(""));
-            lines.push(ftui::text::Line::from_spans(vec![
-                ftui::text::Span::styled(
-                    "\u{1f50d} Type a query and press Enter to search",
-                    text_muted_style,
-                ),
-            ]));
-            lines.push(ftui::text::Line::from(""));
-            // Show tips only if we have enough height
-            if inner.height >= 14 {
+            if has_completed_search {
+                // Zero results for a real query.
                 lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("  Try: ", subtle_s),
-                    ftui::text::Span::styled("authentication", info_s),
-                    ftui::text::Span::styled("  ", subtle_s),
-                    ftui::text::Span::styled("\"error handling\"", info_s),
-                    ftui::text::Span::styled("  ", subtle_s),
-                    ftui::text::Span::styled("deploy AND staging", info_s),
+                    ftui::text::Span::styled(
+                        "\u{2205} No results match your query",
+                        text_muted_style,
+                    ),
+                ]));
+                // Show backend did-you-mean suggestions when available.
+                if inner.height >= 8 && !self.suggestions.is_empty() {
+                    lines.push(ftui::text::Line::from(""));
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  Try instead:", info_s),
+                    ]));
+                    for suggestion in self.suggestions.iter().take(3) {
+                        let shortcut_label = suggestion
+                            .shortcut
+                            .map(|n| format!(" {} ", n))
+                            .unwrap_or_else(|| " \u{2022} ".to_string());
+                        lines.push(ftui::text::Line::from_spans(vec![
+                            ftui::text::Span::styled(shortcut_label, pill_s),
+                            ftui::text::Span::styled(format!(" {}", suggestion.message), subtle_s),
+                        ]));
+                    }
+                }
+                if inner.height >= 8 {
+                    lines.push(ftui::text::Line::from(""));
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  \u{2022} Check active filters ", subtle_s),
+                        ftui::text::Span::styled("F3", pill_s),
+                        ftui::text::Span::styled("-", subtle_s),
+                        ftui::text::Span::styled("F6", pill_s),
+                    ]));
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  \u{2022} Try ", subtle_s),
+                        ftui::text::Span::styled("Alt+S", pill_s),
+                        ftui::text::Span::styled(
+                            " to switch match mode (fuzzy/semantic)",
+                            subtle_s,
+                        ),
+                    ]));
+                }
+            } else {
+                // No query submitted yet — show onboarding.
+                lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled(
+                        "\u{1f50d} Type a query and press Enter to search",
+                        text_muted_style,
+                    ),
                 ]));
                 lines.push(ftui::text::Line::from(""));
-                lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("  Ctrl+P", pill_s),
-                    ftui::text::Span::styled(" command palette   ", subtle_s),
-                    ftui::text::Span::styled("Tab", pill_s),
-                    ftui::text::Span::styled(" focus panels", subtle_s),
-                ]));
-                lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("  F1    ", pill_s),
-                    ftui::text::Span::styled(" help & shortcuts  ", subtle_s),
-                    ftui::text::Span::styled("F2 ", pill_s),
-                    ftui::text::Span::styled(" cycle themes", subtle_s),
-                ]));
-                lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("  Alt+S ", pill_s),
-                    ftui::text::Span::styled(" match mode        ", subtle_s),
-                    ftui::text::Span::styled("F3 ", pill_s),
-                    ftui::text::Span::styled(" filter by agent", subtle_s),
-                ]));
+                // Show tips only if we have enough height
+                if inner.height >= 14 {
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  Try: ", subtle_s),
+                        ftui::text::Span::styled("authentication", info_s),
+                        ftui::text::Span::styled("  ", subtle_s),
+                        ftui::text::Span::styled("\"error handling\"", info_s),
+                        ftui::text::Span::styled("  ", subtle_s),
+                        ftui::text::Span::styled("deploy AND staging", info_s),
+                    ]));
+                    lines.push(ftui::text::Line::from(""));
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  Ctrl+P", pill_s),
+                        ftui::text::Span::styled(" command palette   ", subtle_s),
+                        ftui::text::Span::styled("Tab", pill_s),
+                        ftui::text::Span::styled(" focus panels", subtle_s),
+                    ]));
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  F1    ", pill_s),
+                        ftui::text::Span::styled(" help & shortcuts  ", subtle_s),
+                        ftui::text::Span::styled("F2 ", pill_s),
+                        ftui::text::Span::styled(" cycle themes", subtle_s),
+                    ]));
+                    lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("  Alt+S ", pill_s),
+                        ftui::text::Span::styled(" match mode        ", subtle_s),
+                        ftui::text::Span::styled("F3 ", pill_s),
+                        ftui::text::Span::styled(" filter by agent", subtle_s),
+                    ]));
+                }
             }
 
             let y_offset = inner.height.saturating_sub(lines.len() as u16) / 3;
@@ -6770,16 +6835,29 @@ impl CassApp {
                     ),
                 ]));
                 if inner.height >= 8 {
+                    let accent_s = styles.style(style_system::STYLE_STATUS_INFO);
+                    // Show backend did-you-mean suggestions when available.
+                    if !self.suggestions.is_empty() {
+                        zero_lines.push(ftui::text::Line::from(""));
+                        zero_lines.push(ftui::text::Line::from_spans(vec![
+                            ftui::text::Span::styled("  Try instead:", accent_s),
+                        ]));
+                        for suggestion in self.suggestions.iter().take(3) {
+                            let shortcut_label = suggestion
+                                .shortcut
+                                .map(|n| format!(" {} ", n))
+                                .unwrap_or_else(|| " \u{2022} ".to_string());
+                            zero_lines.push(ftui::text::Line::from_spans(vec![
+                                ftui::text::Span::styled(shortcut_label, pill_s),
+                                ftui::text::Span::styled(
+                                    format!(" {}", suggestion.message),
+                                    subtle_s,
+                                ),
+                            ]));
+                        }
+                    }
+                    // Always show static hints below.
                     zero_lines.push(ftui::text::Line::from(""));
-                    zero_lines.push(ftui::text::Line::from_spans(vec![
-                        ftui::text::Span::styled("  Suggestions:", subtle_s),
-                    ]));
-                    zero_lines.push(ftui::text::Line::from_spans(vec![
-                        ftui::text::Span::styled(
-                            "  \u{2022} Use fewer or broader keywords",
-                            subtle_s,
-                        ),
-                    ]));
                     zero_lines.push(ftui::text::Line::from_spans(vec![
                         ftui::text::Span::styled("  \u{2022} Check active filters ", subtle_s),
                         ftui::text::Span::styled("F3", pill_s),
@@ -8784,30 +8862,66 @@ impl CassApp {
                     .render(ind_area, frame);
             }
         } else {
+            // Empty-state guidance when no result is selected.
+            let accent_s = styles.style(style_system::STYLE_STATUS_INFO);
             let subtle_s = styles.style(style_system::STYLE_TEXT_SUBTLE);
             let pill_s = styles.style(style_system::STYLE_PILL_ACTIVE);
             let mut hint_lines: Vec<ftui::text::Line<'static>> = Vec::new();
-            hint_lines.push(ftui::text::Line::from_spans(vec![
-                ftui::text::Span::styled("Select a result to preview", text_muted_style),
-            ]));
+            if self.panes.is_empty() {
+                // No results at all — guide user to search.
+                hint_lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("\u{1f50d} Type a query to search", accent_s.bold()),
+                ]));
+                if content_area.height >= 8 {
+                    hint_lines.push(ftui::text::Line::from(""));
+                    hint_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            "Session messages, tool calls, and code",
+                            subtle_s,
+                        ),
+                    ]));
+                    hint_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled("snippets will appear here.", subtle_s),
+                    ]));
+                }
+            } else {
+                // Results exist but none selected.
+                hint_lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled("Select a result to preview", accent_s),
+                ]));
+            }
             if content_area.height >= 6 {
                 hint_lines.push(ftui::text::Line::from(""));
                 hint_lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("\u{2191}\u{2193}", pill_s),
-                    ftui::text::Span::styled(" navigate results  ", subtle_s),
+                    ftui::text::Span::styled(" \u{2191}\u{2193} ", pill_s),
+                    ftui::text::Span::styled(" navigate results", subtle_s),
                 ]));
                 hint_lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("Enter", pill_s),
-                    ftui::text::Span::styled(" expand detail      ", subtle_s),
+                    ftui::text::Span::styled(" Enter ", pill_s),
+                    ftui::text::Span::styled(" expand detail modal", subtle_s),
                 ]));
                 hint_lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled("Tab", pill_s),
-                    ftui::text::Span::styled(" switch panel focus ", subtle_s),
+                    ftui::text::Span::styled(" Tab ", pill_s),
+                    ftui::text::Span::styled(" switch panel focus", subtle_s),
+                ]));
+                hint_lines.push(ftui::text::Line::from_spans(vec![
+                    ftui::text::Span::styled(" F1 ", pill_s),
+                    ftui::text::Span::styled(" help & shortcuts", subtle_s),
                 ]));
             }
+            // Center vertically.
+            let total = hint_lines.len() as u16;
+            let y_offset = content_area.height.saturating_sub(total) / 2;
+            let centered_area = Rect::new(
+                content_area.x,
+                content_area.y + y_offset,
+                content_area.width,
+                total.min(content_area.height.saturating_sub(y_offset)),
+            );
             Paragraph::new(ftui::text::Text::from_lines(hint_lines))
                 .style(text_muted_style)
-                .render(content_area, frame);
+                .alignment(Alignment::Center)
+                .render(centered_area, frame);
         }
 
         // Render find bar only while actively editing find text.
@@ -9526,6 +9640,88 @@ impl CassApp {
         }
     }
 
+    /// Render toast notifications as small popups in the top-right corner.
+    fn render_toasts(
+        &self,
+        frame: &mut super::ftui_adapter::Frame,
+        area: Rect,
+        styles: &StyleContext,
+    ) {
+        use crate::ui::components::toast::ToastType;
+
+        let toast_area = self.toast_manager.render_area(area);
+        if toast_area.is_empty() {
+            return;
+        }
+
+        // Use theme tokens for toast chrome instead of hardcoded colors.
+        let pane_base = styles.style(style_system::STYLE_PANE_BASE);
+        let base_bg = pane_base.bg.unwrap_or(ftui::PackedRgba::rgb(30, 34, 42));
+        let border_color = styles
+            .style(style_system::STYLE_SPLIT_HANDLE)
+            .fg
+            .unwrap_or(ftui::PackedRgba::rgb(60, 68, 86));
+
+        let mut y = toast_area.y;
+        for toast in self.toast_manager.visible() {
+            if y + 3 > toast_area.y + toast_area.height {
+                break;
+            }
+            let toast_rect = Rect::new(toast_area.x, y, toast_area.width, 3);
+
+            // Clear background.
+            frame.draw_rect_filled(toast_rect, ftui::Cell::from_char(' ').with_bg(base_bg));
+
+            // Type-specific accent color from theme tokens.
+            let accent = match toast.toast_type {
+                ToastType::Success => styles
+                    .style(style_system::STYLE_STATUS_SUCCESS)
+                    .fg
+                    .unwrap_or(ftui::PackedRgba::rgb(120, 220, 160)),
+                ToastType::Error => styles
+                    .style(style_system::STYLE_STATUS_ERROR)
+                    .fg
+                    .unwrap_or(ftui::PackedRgba::rgb(247, 118, 142)),
+                ToastType::Warning => styles
+                    .style(style_system::STYLE_STATUS_WARNING)
+                    .fg
+                    .unwrap_or(ftui::PackedRgba::rgb(255, 195, 110)),
+                ToastType::Info => styles
+                    .style(style_system::STYLE_STATUS_INFO)
+                    .fg
+                    .unwrap_or(ftui::PackedRgba::rgb(90, 180, 255)),
+            };
+
+            // Use accent tint on border when toast is fresh (>50% remaining).
+            let frac = toast.remaining_fraction();
+            let effective_border = if frac > 0.5 { accent } else { border_color };
+            let block = Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(ftui::Style::new().fg(effective_border))
+                .style(ftui::Style::new().bg(base_bg));
+            let inner = block.inner(toast_rect);
+            block.render(toast_rect, frame);
+
+            if !inner.is_empty() {
+                let icon = toast.toast_type.icon();
+                let count_suffix = if toast.count > 1 {
+                    format!(" (x{})", toast.count)
+                } else {
+                    String::new()
+                };
+                let msg = format!(" {} {}{}", icon, toast.message, count_suffix);
+                let line = ftui::text::Line::from_spans(vec![ftui::text::Span::styled(
+                    msg,
+                    ftui::Style::new().fg(accent).bold(),
+                )]);
+                Paragraph::new(ftui::text::Text::from_lines(vec![line])).render(inner, frame);
+            }
+
+            y += 3;
+        }
+    }
+
     // NOTE: render_palette_overlay() removed — rendering now delegated to
     // ftui CommandPalette widget via Widget::render() in the view() method.
 
@@ -9764,6 +9960,13 @@ impl CassApp {
                 ("Ctrl+\u{2190}/\u{2192}", "Jump by word in query"),
                 ("Del", "Delete forward in query"),
                 ("Ctrl+W", "Delete word backward in query"),
+                ("Ctrl+U", "Kill line left of cursor"),
+                ("Ctrl+K", "Kill line right of cursor"),
+                ("Ctrl+L", "Clear entire query"),
+                ("Ctrl+Z", "Undo last query edit"),
+                ("Ctrl+Shift+Z", "Redo"),
+                ("Ctrl+R / Ctrl+N", "History forward (newer)"),
+                ("Ctrl+Shift+N", "History backward (older)"),
                 ("Alt+1..9", "Jump to pane index"),
                 (
                     "Enter",
@@ -9813,6 +10016,7 @@ impl CassApp {
             "Density & Display",
             &[
                 ("Alt+= / Alt+-", "Increase/decrease pane items"),
+                ("Alt+D", "Toggle detail preview pane"),
                 ("Ctrl+D", "Cycle density mode (compact/cozy/spacious)"),
                 ("F2/Shift+F2", "Next/prev theme"),
                 ("Ctrl+B", "Toggle border style"),
@@ -10949,8 +11153,12 @@ pub enum CassMsg {
     // -- Query & search ---------------------------------------------------
     /// User typed or edited the query string.
     QueryChanged(String),
-    /// User cleared the entire query line (Ctrl+U).
+    /// User cleared the entire query line (Ctrl+L).
     QueryCleared,
+    /// User killed text left of cursor (Ctrl+U, Unix line-kill).
+    QueryLineKilled,
+    /// User killed text right of cursor (Ctrl+K, Unix forward-kill).
+    QueryForwardKilled,
     /// User deleted word-backward (Ctrl+W).
     QueryWordDeleted,
     /// User pressed Enter to submit the query (force immediate search, push to history).
@@ -11052,6 +11260,8 @@ pub enum CassMsg {
     DetailTabChanged(DetailTab),
     /// Toggle text wrap in detail view.
     DetailWrapToggled,
+    /// Toggle detail preview pane visibility (Alt+D).
+    DetailPaneToggled,
     /// Enter/exit inline find mode in detail.
     DetailFindToggled,
     /// Update the detail find query.
@@ -12211,9 +12421,11 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     // -- History ---------------------------------------------------
                     KeyCode::Char('r') if ctrl && shift => CassMsg::IndexRefreshRequested,
                     KeyCode::Char('r') if ctrl => CassMsg::HistoryCycled,
+                    KeyCode::Char('n') if ctrl && shift => {
+                        CassMsg::HistoryNavigated { forward: false }
+                    }
+                    KeyCode::Char('N') if ctrl => CassMsg::HistoryNavigated { forward: false },
                     KeyCode::Char('n') if ctrl => CassMsg::HistoryNavigated { forward: true },
-                    // Ctrl+P / Alt+P are used by PaletteOpened; history backward
-                    // is available via HistoryNavigated in tests and programmatically.
 
                     // -- Saved views (Ctrl+1..9 save, Shift+1..9 load) -----------
                     KeyCode::Char(c @ '1'..='9') if ctrl => CassMsg::ViewSaved(c as u8 - b'0'),
@@ -12240,7 +12452,9 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::Char('z') if ctrl => CassMsg::Undo,
 
                     // -- Line editing ---------------------------------------------
-                    KeyCode::Char('u') if ctrl => CassMsg::QueryCleared,
+                    KeyCode::Char('l') if ctrl => CassMsg::QueryCleared,
+                    KeyCode::Char('u') if ctrl => CassMsg::QueryLineKilled,
+                    KeyCode::Char('k') if ctrl => CassMsg::QueryForwardKilled,
                     KeyCode::Char('w') if ctrl => CassMsg::QueryWordDeleted,
                     KeyCode::Char('f') if ctrl => CassMsg::WildcardFallbackToggled,
 
@@ -12304,6 +12518,10 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::Char('-') if alt => CassMsg::PaneShrunk,
                     KeyCode::Char('=') if alt => CassMsg::PaneGrew,
                     KeyCode::Char('+') if alt => CassMsg::PaneGrew,
+
+                    // -- Detail pane toggle (Alt+D) -------------------------------
+                    KeyCode::Char('d') if alt => CassMsg::DetailPaneToggled,
+                    KeyCode::Char('D') if alt => CassMsg::DetailPaneToggled,
 
                     // -- Alt+digit pane switch ------------------------------------
                     KeyCode::Char(c @ '1'..='9') if alt => CassMsg::ActivePaneChanged {
@@ -12424,7 +12642,9 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 CassMsg::CursorJumped { to_end } => {
                     if *to_end {
-                        Some(CassMsg::HelpScrolled { delta: i32::MAX / 2 })
+                        Some(CassMsg::HelpScrolled {
+                            delta: i32::MAX / 2,
+                        })
                     } else {
                         Some(CassMsg::HelpScrolled {
                             delta: -(i32::MAX / 2),
@@ -12758,6 +12978,7 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::DetailTabChanged(_)
                     | CassMsg::DetailScrolled { .. }
                     | CassMsg::DetailWrapToggled
+                    | CassMsg::DetailPaneToggled
                     | CassMsg::CopySnippet
                     | CassMsg::CopyPath
                     | CassMsg::CopyContent
@@ -12889,6 +13110,7 @@ impl super::ftui_adapter::Model for CassApp {
                     | CassMsg::DetailTabChanged(_)
                     | CassMsg::DetailScrolled { .. }
                     | CassMsg::DetailWrapToggled
+                    | CassMsg::DetailPaneToggled
                     | CassMsg::DetailFindToggled
                     | CassMsg::DetailFindQueryChanged(_)
                     | CassMsg::DetailFindNavigated { .. }
@@ -13164,7 +13386,7 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     return ftui::Cmd::none();
                 }
-                CassMsg::QueryCleared => {
+                CassMsg::QueryCleared | CassMsg::QueryLineKilled | CassMsg::QueryForwardKilled => {
                     self.input_buffer.clear();
                     if self.input_mode == InputMode::PaneFilter {
                         self.pane_filter = Some(String::new());
@@ -13275,6 +13497,30 @@ impl super::ftui_adapter::Model for CassApp {
                 self.search_dirty_since = Some(Instant::now());
                 self.history_cursor = None;
                 ftui::Cmd::tick(SEARCH_DEBOUNCE)
+            }
+            CassMsg::QueryLineKilled => {
+                // Kill text from start of line to cursor position (Unix Ctrl+U).
+                let pos = clamp_cursor_boundary(&self.query, self.cursor_pos);
+                if pos > 0 {
+                    self.push_undo("Line kill");
+                    self.query.drain(..pos);
+                    self.cursor_pos = 0;
+                    self.search_dirty_since = Some(Instant::now());
+                    return ftui::Cmd::tick(SEARCH_DEBOUNCE);
+                }
+                ftui::Cmd::none()
+            }
+            CassMsg::QueryForwardKilled => {
+                // Kill text from cursor to end of line (Unix Ctrl+K).
+                let pos = clamp_cursor_boundary(&self.query, self.cursor_pos);
+                if pos < self.query.len() {
+                    self.push_undo("Forward kill");
+                    self.query.truncate(pos);
+                    self.cursor_pos = pos;
+                    self.search_dirty_since = Some(Instant::now());
+                    return ftui::Cmd::tick(SEARCH_DEBOUNCE);
+                }
+                ftui::Cmd::none()
             }
             CassMsg::QueryWordDeleted => {
                 // Delete word backward from cursor (Ctrl+W): trim trailing
@@ -13495,6 +13741,15 @@ impl super::ftui_adapter::Model for CassApp {
                         ""
                     }
                 );
+                // Warn on slow searches so users notice latency issues.
+                if elapsed_ms >= 1000 {
+                    self.toast_manager.push(
+                        crate::ui::components::toast::Toast::warning(format!(
+                            "Slow search: {elapsed_ms}ms"
+                        ))
+                        .with_id("slow_search".to_string()),
+                    );
+                }
                 if self.anim.enabled
                     && (RESULTS_REVEAL_MIN_HITS..=RESULTS_REVEAL_MAX_HITS)
                         .contains(&self.results.len())
@@ -13685,6 +13940,11 @@ impl super::ftui_adapter::Model for CassApp {
                 self.style_options.dark_mode = self.theme_dark;
                 self.style_options.preset = self.theme_preset;
                 self.status = format!("Theme: {}", self.theme_preset.name());
+                self.toast_manager
+                    .push(crate::ui::components::toast::Toast::info(format!(
+                        "Theme: {}",
+                        self.theme_preset.name()
+                    )));
                 if let Err(err) = self.persist_theme_selection() {
                     self.status =
                         format!("Theme: {} (not persisted: {err})", self.theme_preset.name());
@@ -13701,6 +13961,11 @@ impl super::ftui_adapter::Model for CassApp {
                 self.style_options.dark_mode = self.theme_dark;
                 self.style_options.preset = self.theme_preset;
                 self.status = format!("Theme: {}", self.theme_preset.name());
+                self.toast_manager
+                    .push(crate::ui::components::toast::Toast::info(format!(
+                        "Theme: {}",
+                        self.theme_preset.name()
+                    )));
                 if let Err(err) = self.persist_theme_selection() {
                     self.status =
                         format!("Theme: {} (not persisted: {err})", self.theme_preset.name());
@@ -14094,6 +14359,20 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::DetailWrapToggled => {
                 self.detail_wrap = !self.detail_wrap;
+                ftui::Cmd::none()
+            }
+            CassMsg::DetailPaneToggled => {
+                self.detail_pane_hidden = !self.detail_pane_hidden;
+                if self.detail_pane_hidden
+                    && self.focus_manager.current() == Some(focus_ids::DETAIL_PANE)
+                {
+                    self.focus_manager.focus(focus_ids::RESULTS_LIST);
+                }
+                self.status = if self.detail_pane_hidden {
+                    "Detail pane hidden (Alt+D to restore)".to_string()
+                } else {
+                    "Detail pane visible".to_string()
+                };
                 ftui::Cmd::none()
             }
             CassMsg::ToolCollapseToggled(idx) => {
@@ -14973,10 +15252,19 @@ impl super::ftui_adapter::Model for CassApp {
                 self.export_modal_state = None;
                 self.focus_manager.pop_trap();
                 self.status = format!("Exported to {}", output_path.display());
+                self.toast_manager
+                    .push(crate::ui::components::toast::Toast::success(format!(
+                        "Exported to {}",
+                        output_path.display()
+                    )));
                 ftui::Cmd::none()
             }
             CassMsg::ExportFailed(err) => {
                 self.status = format!("Export failed: {err}");
+                self.toast_manager
+                    .push(crate::ui::components::toast::Toast::error(format!(
+                        "Export failed: {err}"
+                    )));
                 ftui::Cmd::none()
             }
 
@@ -15288,11 +15576,25 @@ impl super::ftui_adapter::Model for CassApp {
             // -- Did-you-mean suggestions -------------------------------------
             CassMsg::SuggestionApplied(idx) => {
                 let idx = idx.saturating_sub(1) as usize;
-                if let Some(suggestion) = self.suggestions.get(idx)
-                    && let Some(ref q) = suggestion.suggested_query
-                {
-                    self.query = q.clone();
-                    return ftui::Cmd::msg(CassMsg::SearchRequested);
+                if let Some(suggestion) = self.suggestions.get(idx).cloned() {
+                    let mut changed = false;
+                    if let Some(ref q) = suggestion.suggested_query {
+                        self.query = q.clone();
+                        self.cursor_pos = self.query.len();
+                        changed = true;
+                    }
+                    if let Some(ref f) = suggestion.suggested_filters {
+                        self.filters = f.clone();
+                        changed = true;
+                    }
+                    if changed {
+                        self.toast_manager
+                            .push(crate::ui::components::toast::Toast::info(format!(
+                                "Applied: {}",
+                                suggestion.message
+                            )));
+                        return ftui::Cmd::msg(CassMsg::SearchRequested);
+                    }
                 }
                 ftui::Cmd::none()
             }
@@ -15583,6 +15885,10 @@ impl super::ftui_adapter::Model for CassApp {
                 self.index_progress_snapshot = IndexProgressSnapshot::default();
                 self.clear_loading_context(LoadingContext::IndexRefresh);
                 self.status = "Index refresh complete".to_string();
+                self.toast_manager
+                    .push(crate::ui::components::toast::Toast::success(
+                        "Index refresh complete",
+                    ));
                 ftui::Cmd::none()
             }
             CassMsg::IndexRefreshFailed(err) => {
@@ -15591,6 +15897,10 @@ impl super::ftui_adapter::Model for CassApp {
                 self.index_progress_snapshot = IndexProgressSnapshot::default();
                 self.clear_loading_context(LoadingContext::IndexRefresh);
                 self.status = format!("Index refresh failed: {err}");
+                self.toast_manager
+                    .push(crate::ui::components::toast::Toast::error(format!(
+                        "Index failed: {err}"
+                    )));
                 ftui::Cmd::none()
             }
 
@@ -15923,6 +16233,30 @@ impl super::ftui_adapter::Model for CassApp {
                         self.drag_hover_settled_at = None;
                     }
                     _ => {}
+                }
+
+                // Help overlay intercepts mouse scroll events.
+                if self.show_help {
+                    match kind {
+                        MouseEventKind::ScrollUp => {
+                            return self.update(CassMsg::HelpScrolled { delta: -3 });
+                        }
+                        MouseEventKind::ScrollDown => {
+                            return self.update(CassMsg::HelpScrolled { delta: 3 });
+                        }
+                        MouseEventKind::LeftClick => {
+                            // Click outside help dismisses it (unless pinned).
+                            let clicked_inside_help = self
+                                .help_overlay_popup_area()
+                                .is_some_and(|rect| rect.contains(x, y));
+                            if !self.help_pinned && !clicked_inside_help {
+                                self.show_help = false;
+                                self.focus_manager.pop_trap();
+                            }
+                            return ftui::Cmd::none();
+                        }
+                        _ => return ftui::Cmd::none(),
+                    }
                 }
 
                 let region = self.hit_test(x, y);
@@ -17301,7 +17635,10 @@ impl super::ftui_adapter::Model for CassApp {
                             if self.query.is_empty() {
                                 ftui::text::Line::from_spans(vec![
                                     ftui::text::Span::styled("\u{2502}", caret_style),
-                                    ftui::text::Span::styled("<type to search>", text_muted_style),
+                                    ftui::text::Span::styled(
+                                        "Search sessions, messages, code...",
+                                        text_muted_style.italic(),
+                                    ),
                                 ])
                             } else {
                                 let cpos = clamp_cursor_boundary(&self.query, self.cursor_pos);
@@ -17427,7 +17764,7 @@ impl super::ftui_adapter::Model for CassApp {
                     self.results_focus_flash_intensity(degradation, results_focused);
 
                 let topo = breakpoint.search_topology();
-                if topo.dual_pane {
+                if topo.dual_pane && !self.detail_pane_hidden {
                     // Dual-pane: split content area using topology-defined minimums.
                     let (results_area, detail_area, split_handle) =
                         self.split_content_area(content_area, topo.min_results, topo.min_detail);
@@ -17531,6 +17868,27 @@ impl super::ftui_adapter::Model for CassApp {
                             .style(handle_style)
                             .render(handle, frame);
                     }
+                } else if self.detail_pane_hidden {
+                    // Detail pane hidden: results get full width.
+                    *self.last_split_handle_area.borrow_mut() = None;
+                    self.render_results_pane(
+                        frame,
+                        content_area,
+                        row_h,
+                        border_type,
+                        adaptive_borders,
+                        &styles,
+                        pane_style,
+                        pane_focused_style,
+                        pane_title_focused_style,
+                        pane_title_unfocused_style,
+                        row_style,
+                        row_alt_style,
+                        row_selected_style,
+                        text_muted_style,
+                        reveal_motion_enabled,
+                        focus_flash_intensity,
+                    );
                 } else {
                     // Single-pane: show whichever pane has focus, full-width.
                     match self.focused_region() {
@@ -18330,6 +18688,11 @@ impl super::ftui_adapter::Model for CassApp {
             if self.show_palette_evidence {
                 self.render_palette_evidence(frame, area, &styles);
             }
+        }
+
+        // ── Toast notifications ─────────────────────────────────────
+        if !self.toast_manager.is_empty() {
+            self.render_toasts(frame, area, &styles);
         }
 
         // ── Screenshot capture (runs after all rendering completes) ──
@@ -21774,6 +22137,46 @@ mod tests {
     }
 
     #[test]
+    fn query_line_killed_removes_left_of_cursor() {
+        let mut app = CassApp::default();
+        app.query = "hello world foo".to_string();
+        app.cursor_pos = 11; // after "hello world"
+        let _ = app.update(CassMsg::QueryLineKilled);
+        assert_eq!(app.query, " foo");
+        assert_eq!(app.cursor_pos, 0);
+    }
+
+    #[test]
+    fn query_forward_killed_removes_right_of_cursor() {
+        let mut app = CassApp::default();
+        app.query = "hello world foo".to_string();
+        app.cursor_pos = 5; // after "hello"
+        let _ = app.update(CassMsg::QueryForwardKilled);
+        assert_eq!(app.query, "hello");
+        assert_eq!(app.cursor_pos, 5);
+    }
+
+    #[test]
+    fn query_forward_killed_noop_at_end() {
+        let mut app = CassApp::default();
+        app.query = "hello".to_string();
+        app.cursor_pos = 5;
+        let cmd = app.update(CassMsg::QueryForwardKilled);
+        assert_eq!(app.query, "hello");
+        assert!(matches!(cmd, ftui::Cmd::None));
+    }
+
+    #[test]
+    fn query_line_killed_noop_at_start() {
+        let mut app = CassApp::default();
+        app.query = "hello".to_string();
+        app.cursor_pos = 0;
+        let cmd = app.update(CassMsg::QueryLineKilled);
+        assert_eq!(app.query, "hello");
+        assert!(matches!(cmd, ftui::Cmd::None));
+    }
+
+    #[test]
     fn cursor_moved_bounds_checking() {
         let mut app = CassApp::default();
         app.query = "abc".to_string();
@@ -23057,6 +23460,31 @@ mod tests {
             app.status.contains("Daylight"),
             "status should report Daylight theme, got: {}",
             app.status
+        );
+    }
+
+    #[test]
+    fn theme_toast_message_tracks_current_preset_after_multiple_toggles() {
+        let mut app = CassApp::default();
+
+        let _ = app.update(CassMsg::ThemeToggled);
+        let first_toast = app
+            .toast_manager
+            .visible()
+            .next()
+            .expect("expected toast after first toggle");
+        assert!(first_toast.message.contains(app.theme_preset.name()));
+
+        let _ = app.update(CassMsg::ThemeToggled);
+        let second_toast = app
+            .toast_manager
+            .visible()
+            .next()
+            .expect("expected toast after second toggle");
+        assert!(second_toast.message.contains(app.theme_preset.name()));
+        assert_eq!(
+            second_toast.count, 1,
+            "theme toasts should not coalesce across different presets"
         );
     }
 
@@ -27091,7 +27519,7 @@ mod tests {
                 preset
             );
             assert!(
-                medium_text.contains("<type to search>") && medium_text.contains("│"),
+                medium_text.contains("Search sessions, messages, code...") && medium_text.contains("│"),
                 "query row should include placeholder and caret for {:?}",
                 preset
             );
@@ -32419,6 +32847,48 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     }
 
     #[test]
+    fn help_mouse_click_inside_overlay_keeps_help_open() {
+        use ftui::render::budget::DegradationLevel;
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        render_at_degradation(&app, 120, 40, DegradationLevel::Full);
+
+        let popup = app
+            .help_overlay_popup_area()
+            .expect("help popup area should be available after render");
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: popup.x + 1,
+            y: popup.y + 1,
+        });
+        assert!(app.show_help, "clicking inside help should not dismiss it");
+    }
+
+    #[test]
+    fn help_mouse_click_outside_overlay_dismisses_unpinned_help() {
+        use ftui::render::budget::DegradationLevel;
+        let mut app = test_app();
+        let _ = app.update(CassMsg::HelpToggled);
+        render_at_degradation(&app, 120, 40, DegradationLevel::Full);
+
+        let popup = app
+            .help_overlay_popup_area()
+            .expect("help popup area should be available after render");
+        let outside_x = popup.x.saturating_sub(1);
+        let outside_y = popup.y;
+        assert!(
+            !popup.contains(outside_x, outside_y),
+            "test setup must click outside popup"
+        );
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: outside_x,
+            y: outside_y,
+        });
+        assert!(!app.show_help, "outside click should dismiss unpinned help");
+    }
+
+    #[test]
     fn help_overlay_render_no_panic_80x24() {
         let mut app = test_app();
         let _ = app.update(CassMsg::HelpToggled);
@@ -32724,6 +33194,45 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         let app = CassApp::default();
         assert_eq!(app.focus_manager.current(), Some(focus_ids::RESULTS_LIST));
         assert_eq!(app.focused_region(), FocusRegion::Results);
+    }
+
+    #[test]
+    fn focused_region_treats_hidden_detail_pane_as_results() {
+        let mut app = CassApp::default();
+        app.detail_pane_hidden = true;
+        app.focus_manager.focus(focus_ids::DETAIL_PANE);
+        assert_eq!(app.focused_region(), FocusRegion::Results);
+
+        app.focus_manager.focus(focus_ids::DETAIL_MODAL);
+        assert_eq!(app.focused_region(), FocusRegion::Detail);
+    }
+
+    #[test]
+    fn hiding_detail_pane_moves_focus_back_to_results() {
+        use ftui::render::budget::DegradationLevel;
+        let mut app = app_with_hits(120);
+        render_at_degradation(&app, 140, 24, DegradationLevel::Full);
+
+        app.focus_manager.focus(focus_ids::DETAIL_PANE);
+        app.detail_content_lines.set(200);
+        app.detail_visible_height.set(20);
+        app.detail_scroll = 40;
+        let selected_before = app.panes[0].selected;
+
+        let _ = app.update(CassMsg::DetailPaneToggled);
+        assert!(app.detail_pane_hidden);
+        assert_eq!(app.focus_manager.current(), Some(focus_ids::RESULTS_LIST));
+        assert_eq!(app.focused_region(), FocusRegion::Results);
+
+        let _ = app.update(CassMsg::PageScrolled { delta: 1 });
+        assert_eq!(
+            app.detail_scroll, 40,
+            "hidden detail pane should not consume page scroll"
+        );
+        assert!(
+            app.panes[0].selected > selected_before,
+            "page scroll should move results selection when detail pane is hidden"
+        );
     }
 
     #[test]
@@ -35791,6 +36300,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         let dark_text = ftui_harness::buffer_to_text(&dark_buf);
 
         let _ = app.update(CassMsg::ThemeToggled);
+        app.toast_manager.clear(); // clear transient toast so snapshot is stable
         let light_buf = render_at_degradation(&app, 120, 24, DegradationLevel::Full);
         let light_text = ftui_harness::buffer_to_text(&light_buf);
 
@@ -35880,7 +36390,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         use ftui_harness::buffer_to_text;
 
         let modes = [
-            (InputMode::Query, "<type to search>"),
+            (InputMode::Query, "Search sessions, messages, code..."),
             (InputMode::Agent, "[agent]"),
             (InputMode::Workspace, "[workspace]"),
             (InputMode::CreatedFrom, "[from]"),
