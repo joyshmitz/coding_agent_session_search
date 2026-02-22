@@ -8572,6 +8572,31 @@ impl CassApp {
         }
     }
 
+    /// Refresh export-modal metadata after detail data becomes available.
+    ///
+    /// Preserves user-toggled options while updating derived session metadata.
+    fn refresh_open_export_modal_for_hit(&mut self, hit: &SearchHit) {
+        if !self.show_export_modal {
+            return;
+        }
+        let refreshed = self.detail_export_state_for_hit(hit);
+        let Some(state) = self.export_modal_state.as_mut() else {
+            return;
+        };
+
+        let fallback_filename = refreshed.filename_preview.clone();
+        state.filename_preview = unique_filename(&state.output_dir, &refreshed.filename_preview)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .unwrap_or(fallback_filename);
+        state.agent_name = refreshed.agent_name;
+        state.workspace = refreshed.workspace;
+        state.timestamp = refreshed.timestamp;
+        state.message_count = refreshed.message_count;
+        state.title_preview = refreshed.title_preview;
+    }
+
     /// Build rendered lines for the Export tab in the detail modal.
     fn build_export_lines(
         &self,
@@ -8590,7 +8615,7 @@ impl CassApp {
         let export_state = self.detail_export_state_for_hit(hit);
         let html_path = export_state.output_path();
         let markdown_filename = Self::markdown_filename_from_html(&export_state.filename_preview);
-        let markdown_path = export_state.output_dir.join(&markdown_filename);
+        let markdown_path = unique_filename(&export_state.output_dir, &markdown_filename);
         let max_path_chars = inner_width.saturating_sub(14).clamp(24, 160) as usize;
         let truncate_path = |path: &Path| {
             let rendered = path.display().to_string();
@@ -14575,6 +14600,7 @@ impl super::ftui_adapter::Model for CassApp {
                     && hit.source_path == loaded_path
                 {
                     self.sync_detail_session_hit_state(&hit);
+                    self.refresh_open_export_modal_for_hit(&hit);
                     self.detail_session_hit_scroll_pending.set(true);
                     self.detail_pending_scroll_to.set(None);
                 }
@@ -19054,10 +19080,15 @@ fn write_export_bytes_no_overwrite(
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("Invalid output filename: {}", output_path.display()))?
         .to_string();
+    let (stem, ext) = if let Some(dot_pos) = base_filename.rfind('.') {
+        (&base_filename[..dot_pos], &base_filename[dot_pos..])
+    } else {
+        (base_filename.as_str(), "")
+    };
     let mut candidate = output_path.to_path_buf();
 
     // Allow plenty of retries to match unique_filename's collision strategy.
-    for _attempt in 0..1024 {
+    for attempt in 0..1024 {
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -19065,12 +19096,21 @@ fn write_export_bytes_no_overwrite(
         {
             Ok(mut file) => {
                 if let Err(err) = file.write_all(payload) {
+                    // Avoid leaving a partially written export behind.
+                    let _ = std::fs::remove_file(&candidate);
                     return Err(format!("Failed to write export: {err}"));
                 }
                 return Ok(candidate);
             }
             Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                candidate = unique_filename(parent, &base_filename);
+                let next = unique_filename(parent, &base_filename);
+                if next == candidate {
+                    // Fallback path in unique_filename can repeat under extreme
+                    // collisions within the same second; force forward progress.
+                    candidate = parent.join(format!("{stem}_retry_{}{ext}", attempt + 1));
+                } else {
+                    candidate = next;
+                }
             }
             Err(err) => return Err(format!("Failed to write export: {err}")),
         }
@@ -25729,6 +25769,58 @@ mod tests {
             source_path: expected_path,
         });
         assert!(app.loading_context.is_none());
+    }
+
+    #[test]
+    fn detail_load_refreshes_open_export_modal_metadata_from_cached_detail() {
+        let mut app = app_with_hits(1);
+        let hit = app.selected_hit().cloned().expect("selected hit");
+
+        app.show_detail_modal = true;
+        app.show_export_modal = true;
+        app.cached_detail = None;
+        app.export_modal_state = Some(app.detail_export_state_for_hit(&hit));
+        assert_eq!(
+            app.export_modal_state
+                .as_ref()
+                .expect("stale export state")
+                .message_count,
+            0
+        );
+
+        let mut loaded_view = make_test_conversation_view();
+        loaded_view.convo.source_path = std::path::PathBuf::from(&hit.source_path);
+        loaded_view.messages = vec![
+            Message {
+                id: Some(1),
+                idx: 0,
+                role: crate::model::types::MessageRole::User,
+                author: Some("user".to_string()),
+                created_at: Some(1_700_000_001),
+                content: "hello".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            },
+            Message {
+                id: Some(2),
+                idx: 1,
+                role: crate::model::types::MessageRole::Agent,
+                author: Some("assistant".to_string()),
+                created_at: Some(1_700_000_111),
+                content: "hi".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            },
+        ];
+        app.cached_detail = Some((hit.source_path.clone(), loaded_view));
+
+        let _ = app.update(CassMsg::DetailLoadRequested {
+            source_path: hit.source_path.clone(),
+        });
+
+        let refreshed = app.export_modal_state.expect("refreshed export state");
+        assert_eq!(refreshed.message_count, 2);
+        assert_ne!(refreshed.timestamp, "Unknown date");
     }
 
     #[test]

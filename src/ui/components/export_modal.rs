@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use crate::html_export::{
     ExportOptions, FilenameMetadata, FilenameOptions, generate_filepath, get_downloads_dir,
+    unique_filename,
 };
 use crate::search::query::SearchHit;
 use crate::ui::data::ConversationView;
@@ -213,10 +214,14 @@ impl ExportModalState {
         };
         let downloads = get_downloads_dir();
         let filepath = generate_filepath(&downloads, &metadata, &options);
-        let filename_preview = filepath
+        let base_filename = filepath
             .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "session.html".to_string());
+            .and_then(|name| name.to_str())
+            .unwrap_or("session.html");
+        let filename_preview = unique_filename(&downloads, base_filename)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| base_filename.to_string());
 
         // Format timestamp for display
         let timestamp = started_at

@@ -3011,14 +3011,14 @@ impl SearchClient {
         newest_first: bool,
     ) -> Result<Vec<SearchHit>> {
         let order = if newest_first { "DESC" } else { "ASC" };
-        let mut sql = format!(
+        let mut sql =
             "SELECT c.title, m.content, a.slug, w.path, c.source_path, m.created_at, m.idx
              FROM messages m
              JOIN conversations c ON m.conversation_id = c.id
              JOIN agents a ON c.agent_id = a.id
              LEFT JOIN workspaces w ON c.workspace_id = w.id
              WHERE 1=1"
-        );
+                .to_string();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if !filters.agents.is_empty() {
@@ -3064,8 +3064,7 @@ impl SearchClient {
                 let created_at: Option<i64> = row.get(5).ok();
                 let idx: Option<i64> = row.get(6).ok();
                 let line_number = idx.map(|i| (i + 1) as usize);
-                let content_hash =
-                    stable_hit_hash(&content, &source_path, line_number, created_at);
+                let content_hash = stable_hit_hash(&content, &source_path, line_number, created_at);
                 Ok(SearchHit {
                     title,
                     snippet: String::new(),
