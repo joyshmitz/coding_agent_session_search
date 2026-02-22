@@ -19014,7 +19014,8 @@ fn write_export_bytes_no_overwrite(
         .to_string();
     let mut candidate = output_path.to_path_buf();
 
-    for _ in 0..32 {
+    // Allow plenty of retries to match unique_filename's collision strategy.
+    for _attempt in 0..1024 {
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -19034,7 +19035,8 @@ fn write_export_bytes_no_overwrite(
     }
 
     Err(format!(
-        "Failed to reserve unique output filename after multiple attempts: {}",
+        "Failed to reserve unique output filename after {} attempts: {}",
+        1024,
         output_path.display()
     ))
 }
