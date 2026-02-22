@@ -1,5 +1,9 @@
 # 🔎 coding-agent-search (cass)
 
+<div align="center">
+  <img src="cass_illustration.webp" alt="coding-agent-search (cass) illustration">
+</div>
+
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
 ![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)
 ![Status](https://img.shields.io/badge/status-alpha-purple.svg)
