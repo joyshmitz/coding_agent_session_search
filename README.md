@@ -2081,6 +2081,14 @@ cass completions powershell >> $PROFILE
 
 ---
 
+## System Requirements
+
+- **CPU**: x86_64 processor with **AVX** instruction support (any Intel/AMD CPU from ~2011 onwards). The ONNX Runtime dependency used for semantic search requires AVX instructions. On CPUs without AVX support, the binary will crash with a `SIGILL` (illegal instruction) signal. The `cass` binary includes a runtime check and will print a clear error message if AVX is not detected, but note that ONNX Runtime may be loaded before this check in some code paths.
+- **OS**: Linux, macOS, or Windows
+- **Disk**: Sufficient space for the search index (varies with session history size)
+
+---
+
 ## 🚀 Quickstart
 
 ### 1. Install

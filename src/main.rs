@@ -4,6 +4,25 @@ fn is_robot_mode_args() -> bool {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Check for AVX support before anything else. ONNX Runtime requires AVX
+    // instructions and will crash with SIGILL on CPUs that lack them.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if !std::arch::is_x86_feature_detected!("avx") {
+            eprintln!(
+                "Error: Your CPU does not support AVX instructions, which are required by cass.\n\
+                 \n\
+                 The ONNX Runtime dependency used for semantic search requires AVX support.\n\
+                 AVX is available on most x86_64 CPUs manufactured from ~2011 onwards\n\
+                 (Intel Sandy Bridge / AMD Bulldozer and later).\n\
+                 \n\
+                 Without AVX, the process would crash with a SIGILL (illegal instruction) signal.\n\
+                 Please run cass on a machine with a newer CPU that supports AVX."
+            );
+            std::process::exit(1);
+        }
+    }
+
     // Load .env early; ignore if missing.
     dotenvy::dotenv().ok();
 
