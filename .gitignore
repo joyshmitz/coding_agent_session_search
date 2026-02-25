@@ -88,6 +88,11 @@ session_export.html
 /storage.sqlite3
 /storage.sqlite3-wal
 /storage.sqlite3-shm
+*.sqlite3.bak
+*.sqlite3.bak-*
+*.sqlite3-wal.bak
+*.sqlite3.corrupt-*
+*.sqlite3-wal.corrupt-*
 
 # Agent probe/scratch files and temp directories
 .tmp_write_probe
