@@ -1,25 +1,32 @@
 class CodingAgentSearch < Formula
   desc "Unified TUI search over local coding agent histories"
-  homepage "https://github.com/coding-agent-search/coding-agent-search"
-  version "0.1.27"
-  url "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v0.1.27/coding-agent-search-v0.1.27-linux-x86_64.tar.gz"
-  sha256 "2a442a1fbff0f25841b2768e2578a66f5e1ea901a774443cf44742048e57d564"
+  homepage "https://github.com/Dicklesworthstone/coding_agent_session_search"
+  version "0.1.64"
   license :cannot_represent
 
-  def verify_checksum_placeholder!
-    if stable.checksum.to_s.include?("REPLACE_WITH_REAL_SHA256")
-      odie "Formula checksum placeholder detected; update to real SHA256 before publishing."
+  on_macos do
+    on_arm do
+      url "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v0.1.64/cass-darwin-arm64.tar.gz"
+      sha256 "797cd64b7e88171985480963fbcc07045b678bffc9a069904fd34c0ac938bfd7"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v0.1.64/cass-linux-amd64.tar.gz"
+      sha256 "6ea31940ef70286b598ed35e665ab20d3b7424a3ae36fa92b3ea010bca509165"
+    end
+    on_arm do
+      url "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v0.1.64/cass-linux-arm64.tar.gz"
+      sha256 "9d41d63bbfdaa2506284830f73e1723dcdceacc337b03e49cabfd430c74f25ee"
     end
   end
 
   def install
-    verify_checksum_placeholder!
-    bin.install "coding-agent-search"
-    generate_completions_from_executable(bin/"coding-agent-search", "completions", shells: [:bash, :zsh, :fish])
-    man1.install buildpath/"coding-agent-search.1" if File.exist?("coding-agent-search.1")
+    bin.install "cass"
   end
 
   test do
-    system "#{bin}/coding-agent-search", "--help"
+    system "#{bin}/cass", "--help"
   end
 end
