@@ -7746,64 +7746,27 @@ fn capabilities_connector_names() -> Vec<String> {
 }
 
 fn diagnostics_connector_paths(
-    home: &std::path::Path,
-    config_dir: &std::path::Path,
+    _home: &std::path::Path,
+    _config_dir: &std::path::Path,
 ) -> Vec<(String, PathBuf)> {
-    let codex_home = dotenvy::var("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".codex"));
-    let gemini_home = dotenvy::var("GEMINI_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".gemini"));
-    let opencode_path = dotenvy::var("OPENCODE_STORAGE_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| home.join(".local/share"))
-                .join("opencode/storage")
-        });
-    let aider_path = dotenvy::var("CASS_AIDER_DATA_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".aider.chat.history.md"));
-    let pi_home = dotenvy::var("PI_CODING_AGENT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".pi/agent"));
-    let pi_path = if pi_home.join("sessions").exists() {
-        pi_home.join("sessions")
-    } else {
-        pi_home
+    let opts = franken_agent_detection::AgentDetectOptions {
+        include_undetected: true,
+        ..Default::default()
     };
-
-    let cursor_path = crate::connectors::cursor::CursorConnector::app_support_dir()
-        .unwrap_or_else(|| home.join("Library/Application Support/Cursor/User"));
-    let chatgpt_path = crate::connectors::chatgpt::ChatGptConnector::app_support_dir()
-        .unwrap_or_else(|| home.join("Library/Application Support/com.openai.chat"));
-
-    vec![
-        ("codex".to_string(), codex_home.join("sessions")),
-        ("claude_code".to_string(), home.join(".claude/projects")),
-        (
-            "cline".to_string(),
-            config_dir.join("Code/User/globalStorage/saoudrizwan.claude-dev"),
-        ),
-        ("gemini".to_string(), gemini_home.join("tmp")),
-        ("clawdbot".to_string(), home.join(".clawdbot/sessions")),
-        ("vibe".to_string(), home.join(".vibe/logs/session")),
-        ("opencode".to_string(), opencode_path),
-        (
-            "amp".to_string(),
-            config_dir.join("Code/User/globalStorage/sourcegraph.amp"),
-        ),
-        ("aider".to_string(), aider_path),
-        ("cursor".to_string(), cursor_path),
-        ("chatgpt".to_string(), chatgpt_path),
-        ("pi_agent".to_string(), pi_path),
-        ("factory".to_string(), home.join(".factory/sessions")),
-        (
-            "openclaw".to_string(),
-            home.join(".openclaw/agents/openclaw/sessions"),
-        ),
-    ]
+    match franken_agent_detection::detect_installed_agents(&opts) {
+        Ok(report) => report
+            .installed_agents
+            .into_iter()
+            .flat_map(|entry| {
+                let slug = entry.slug;
+                entry
+                    .root_paths
+                    .into_iter()
+                    .map(move |path| (slug.clone(), PathBuf::from(path)))
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -8794,7 +8757,7 @@ fn run_doctor(
     if index_path.join("meta.json").exists() {
         match frankensearch::lexical::cass_open_search_reader(
             &index_path,
-            tantivy::ReloadPolicy::Manual,
+            frankensearch::lexical::ReloadPolicy::Manual,
         ) {
             Ok((reader, _fields)) => {
                 let searcher = reader.searcher();

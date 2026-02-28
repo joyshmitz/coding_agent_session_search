@@ -1,9 +1,11 @@
 use anyhow::{Result, anyhow, bail};
 use crossbeam_channel as mpsc;
 use frankensearch::lexical::{
-    CassQueryFilters as FsCassQueryFilters, CassQueryToken as FsCassQueryToken,
+    BooleanQuery, CassQueryFilters as FsCassQueryFilters, CassQueryToken as FsCassQueryToken,
     CassSourceFilter as FsCassSourceFilter, CassWildcardPattern as FsCassWildcardPattern,
-    SnippetConfig as FsSnippetConfig, cass_build_tantivy_query as fs_cass_build_tantivy_query,
+    IndexReader, IndexRecordOption, Occur, Query, ReloadPolicy, Searcher,
+    SnippetConfig as FsSnippetConfig, TantivyDocument, Term, TermQuery, TopDocs, Value,
+    cass_build_tantivy_query as fs_cass_build_tantivy_query,
     cass_has_boolean_operators as fs_cass_has_boolean_operators,
     cass_open_search_reader as fs_cass_open_search_reader,
     cass_parse_boolean_query as fs_cass_parse_boolean_query,
@@ -34,21 +36,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-// NOTE: Direct tantivy imports below will be replaced by frankensearch::lexical
-// re-exports once the rch sync constraint is resolved.  frankensearch-lexical
-// now re-exports all needed tantivy types.
-// Migration: s/use tantivy::/use frankensearch::lexical::/
-use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
-use tantivy::schema::{IndexRecordOption, Term, Value};
-use tantivy::{IndexReader, ReloadPolicy, Searcher, TantivyDocument};
 
 use rusqlite::Connection;
 
 use crate::search::canonicalize::canonicalize_for_embedding;
 use crate::search::embedder::Embedder;
 use crate::search::vector_index::{
-    SemanticFilter, SemanticFilterMaps, VectorIndex, VectorSearchResult,
+    SemanticFilter, SemanticFilterMaps, VectorIndex, VectorSearchResult, parse_semantic_doc_id,
 };
 
 use crate::sources::provenance::SourceFilter;
@@ -1253,106 +1247,22 @@ impl QueryCache {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct FsSemanticDocId {
-    message_id: u64,
-    chunk_idx: u8,
-    agent_id: u32,
-    workspace_id: u32,
-    source_id: u32,
-    role: u8,
-    created_at_ms: i64,
-}
-
-fn parse_fs_semantic_doc_id(doc_id: &str) -> Option<FsSemanticDocId> {
-    let mut parts = doc_id.split('|');
-    if parts.next()? != "m" {
-        return None;
-    }
-    let parsed = FsSemanticDocId {
-        message_id: parts.next()?.parse().ok()?,
-        chunk_idx: parts.next()?.parse().ok()?,
-        agent_id: parts.next()?.parse().ok()?,
-        workspace_id: parts.next()?.parse().ok()?,
-        source_id: parts.next()?.parse().ok()?,
-        role: parts.next()?.parse().ok()?,
-        created_at_ms: parts.next()?.parse().ok()?,
-    };
-    Some(parsed)
-}
-
-struct FsSemanticFilterAdapter<'a> {
-    filter: &'a SemanticFilter,
-}
-
-impl FsSearchFilter for FsSemanticFilterAdapter<'_> {
-    fn matches(&self, doc_id: &str, _metadata: Option<&serde_json::Value>) -> bool {
-        let Some(parsed) = parse_fs_semantic_doc_id(doc_id) else {
-            return false;
-        };
-
-        if let Some(agents) = &self.filter.agents
-            && !agents.contains(&parsed.agent_id)
-        {
-            return false;
-        }
-        if let Some(workspaces) = &self.filter.workspaces
-            && !workspaces.contains(&parsed.workspace_id)
-        {
-            return false;
-        }
-        if let Some(sources) = &self.filter.sources
-            && !sources.contains(&parsed.source_id)
-        {
-            return false;
-        }
-        if let Some(roles) = &self.filter.roles
-            && !roles.contains(&parsed.role)
-        {
-            return false;
-        }
-        if let Some(from) = self.filter.created_from
-            && parsed.created_at_ms < from
-        {
-            return false;
-        }
-        if let Some(to) = self.filter.created_to
-            && parsed.created_at_ms > to
-        {
-            return false;
-        }
-        true
-    }
-
-    fn matches_doc_id_hash(
-        &self,
-        _doc_id_hash: u64,
-        _metadata: Option<&serde_json::Value>,
-    ) -> Option<bool> {
-        None
-    }
-
-    fn name(&self) -> &str {
-        "cass_semantic_filter"
-    }
-}
-
-fn semantic_filter_is_unrestricted(filter: &SemanticFilter) -> bool {
-    filter.agents.is_none()
+/// Returns `Some(&filter)` when the filter has at least one active constraint,
+/// `None` when unrestricted (skip filtering for performance).
+fn semantic_filter_as_search_filter(
+    filter: &SemanticFilter,
+) -> Option<&dyn FsSearchFilter> {
+    let unrestricted = filter.agents.is_none()
         && filter.workspaces.is_none()
         && filter.sources.is_none()
         && filter.roles.is_none()
         && filter.created_from.is_none()
-        && filter.created_to.is_none()
-}
-
-fn build_fs_semantic_filter_adapter<'a>(
-    filter: &'a SemanticFilter,
-) -> Option<FsSemanticFilterAdapter<'a>> {
-    if semantic_filter_is_unrestricted(filter) {
-        return None;
+        && filter.created_to.is_none();
+    if unrestricted {
+        None
+    } else {
+        Some(filter)
     }
-    Some(FsSemanticFilterAdapter { filter })
 }
 
 fn open_fs_semantic_ann_index(fs_index: &FsVectorIndex, ann_path: &Path) -> Result<FsHnswIndex> {
@@ -2230,10 +2140,7 @@ impl SearchClient {
                 is_approximate: search_stats.is_approximate,
             });
 
-            let filter_adapter = build_fs_semantic_filter_adapter(&semantic_filter);
-            let fs_filter: Option<&dyn FsSearchFilter> = filter_adapter
-                .as_ref()
-                .map(|filter| filter as &dyn FsSearchFilter);
+            let fs_filter = semantic_filter_as_search_filter(&semantic_filter);
 
             let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
             for hit in ann_results {
@@ -2242,7 +2149,7 @@ impl SearchClient {
                 {
                     continue;
                 }
-                let Some(parsed) = parse_fs_semantic_doc_id(&hit.doc_id) else {
+                let Some(parsed) = parse_semantic_doc_id(&hit.doc_id) else {
                     continue;
                 };
                 best_by_message
@@ -2272,17 +2179,14 @@ impl SearchClient {
             ann_hits
         } else {
             let fs_index = &state.fs_semantic_index;
-            let filter_adapter = build_fs_semantic_filter_adapter(&semantic_filter);
-            let fs_filter: Option<&dyn FsSearchFilter> = filter_adapter
-                .as_ref()
-                .map(|filter| filter as &dyn FsSearchFilter);
+            let fs_filter = semantic_filter_as_search_filter(&semantic_filter);
             let fs_hits = fs_index
                 .search_top_k(&embedding, fetch, fs_filter)
                 .map_err(|err| anyhow!("frankensearch semantic search failed: {err}"))?;
 
             let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
             for hit in fs_hits {
-                let Some(parsed) = parse_fs_semantic_doc_id(&hit.doc_id) else {
+                let Some(parsed) = parse_semantic_doc_id(&hit.doc_id) else {
                     continue;
                 };
                 best_by_message
@@ -10189,10 +10093,10 @@ mod tests {
     }
 
     #[test]
-    fn fs_semantic_doc_id_roundtrip() {
+    fn semantic_doc_id_roundtrip_from_query() {
         let hash_hex = "00".repeat(32);
         let doc_id = format!("m|42|2|3|7|11|1|1700000000000|{hash_hex}");
-        let parsed = parse_fs_semantic_doc_id(&doc_id).expect("roundtrip parse");
+        let parsed = parse_semantic_doc_id(&doc_id).expect("roundtrip parse");
         assert_eq!(parsed.message_id, 42);
         assert_eq!(parsed.chunk_idx, 2);
         assert_eq!(parsed.agent_id, 3);
@@ -10203,7 +10107,9 @@ mod tests {
     }
 
     #[test]
-    fn fs_semantic_filter_adapter_applies_all_constraints() {
+    fn semantic_filter_applies_all_constraints() {
+        use frankensearch::core::filter::SearchFilter;
+
         let filter = SemanticFilter {
             agents: Some(HashSet::from([3])),
             workspaces: Some(HashSet::from([7])),
@@ -10213,11 +10119,10 @@ mod tests {
             created_to: Some(1_700_000_000_100),
         };
 
-        let adapter = FsSemanticFilterAdapter { filter: &filter };
-        assert!(adapter.matches("m|42|2|3|7|11|1|1700000000001", None));
-        assert!(!adapter.matches("m|42|2|99|7|11|1|1700000000001", None));
-        assert!(!adapter.matches("m|42|2|3|7|11|1|1699999999999", None));
-        assert!(!adapter.matches("not-a-doc-id", None));
+        assert!(filter.matches("m|42|2|3|7|11|1|1700000000001", None));
+        assert!(!filter.matches("m|42|2|99|7|11|1|1700000000001", None));
+        assert!(!filter.matches("m|42|2|3|7|11|1|1699999999999", None));
+        assert!(!filter.matches("not-a-doc-id", None));
     }
 
     #[test]
@@ -10261,12 +10166,12 @@ mod tests {
             created_from: None,
             created_to: None,
         };
-        let adapter = build_fs_semantic_filter_adapter(&filter).expect("expected active filter");
+        let fs_filter = semantic_filter_as_search_filter(&filter).expect("expected active filter");
         let hits = fs_index
-            .search_top_k(&[1.0, 0.0], 5, Some(&adapter))
+            .search_top_k(&[1.0, 0.0], 5, Some(fs_filter))
             .map_err(|err| anyhow!("frankensearch search failed: {err}"))?;
         assert_eq!(hits.len(), 1);
-        let parsed = parse_fs_semantic_doc_id(&hits[0].doc_id).expect("parse bridged doc_id");
+        let parsed = parse_semantic_doc_id(&hits[0].doc_id).expect("parse bridged doc_id");
         assert_eq!(parsed.message_id, 101);
         assert_eq!(parsed.agent_id, 1);
         Ok(())

@@ -1,22 +1,13 @@
-//! Two-tier progressive search for session search (bd-3dcw).
+//! Two-tier progressive search for session search (bd-3dcw, bd-2fu7e).
 //!
 //! This module implements a progressive search strategy that:
 //! 1. Returns instant results using a fast embedding model (in-process)
 //! 2. Refines rankings in the background using a quality model (daemon)
 //!
-//! **Relationship to frankensearch**: `frankensearch_fusion::searcher::TwoTierSearcher`
-//! is the canonical library-level search orchestrator (async, file-backed FSVI index,
-//! 21+ fields including lexical search, reranking, PRF, MMR, graph ranking, etc.).
-//! This module is the lightweight sync TUI-specific variant with:
-//! - Synchronous `Iterator`-based search (vs async callbacks)
-//! - In-memory flat vector storage with f16 quantization (vs file-backed FSVI)
-//! - Direct `DaemonClient` generic (vs `Arc<dyn Embedder>` + `DaemonFallbackEmbedder`)
-//! - Cass-specific types: `DocumentId` (Session/Turn/CodeBlock), `message_id` for SQLite
-//! - Inline SIMD dot product (`wide::f32x8`)
-//!
-//! Full consolidation requires solving the rch sync constraint (sibling path
-//! dependencies not synced to build workers).  The blending formula is shared:
-//! `blended = (1 - weight) * fast + weight * quality` with min-max normalization.
+//! **Delegates to frankensearch**: The vector storage and search are backed by
+//! `frankensearch_index::TwoTierIndex` (file-backed FSVI). This module adds
+//! cass-specific layers: synchronous `Iterator`-based search, `DocumentId`
+//! enum, `message_id` for SQLite, and `DaemonClient` integration.
 //!
 //! # Architecture
 //!
@@ -37,8 +28,8 @@
 //! ```ignore
 //! use cass::search::two_tier_search::{TwoTierIndex, TwoTierConfig, SearchPhase};
 //!
-//! let index = TwoTierIndex::load(&data_dir)?;
-//! let mut searcher = TwoTierSearcher::new(&index, daemon_client);
+//! let index = TwoTierIndex::build("fast", "quality", &config, entries)?;
+//! let searcher = TwoTierSearcher::new(&index, fast_embedder, Some(daemon), config);
 //!
 //! for phase in searcher.search("authentication middleware", 10) {
 //!     match phase {
@@ -56,7 +47,6 @@
 //! ```
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -66,6 +56,10 @@ use tracing::{debug, warn};
 
 use super::daemon_client::{DaemonClient, DaemonError};
 use super::embedder::Embedder;
+
+// Frankensearch types for vector storage and search delegation.
+use frankensearch::{TwoTierIndex as FsTwoTierIndex, VectorHit as FsVectorHit};
+use frankensearch::TwoTierConfig as FsTwoTierConfig;
 
 /// Configuration for two-tier search.
 #[derive(Debug, Clone)]
@@ -144,6 +138,15 @@ impl TwoTierConfig {
             ..Self::default()
         }
     }
+
+    /// Convert to frankensearch TwoTierConfig.
+    fn to_fs_config(&self) -> FsTwoTierConfig {
+        FsTwoTierConfig {
+            quality_weight: f64::from(self.quality_weight),
+            fast_only: self.fast_only,
+            ..FsTwoTierConfig::default()
+        }
+    }
 }
 
 /// Document identifier for two-tier index entries.
@@ -164,6 +167,15 @@ impl DocumentId {
             Self::Session(id) => id,
             Self::Turn(id, _) => id,
             Self::CodeBlock(id, _, _) => id,
+        }
+    }
+
+    /// Encode as a string for frankensearch doc_id storage.
+    fn encode(&self) -> String {
+        match self {
+            Self::Session(id) => format!("s:{id}"),
+            Self::Turn(id, turn) => format!("t:{id}:{turn}"),
+            Self::CodeBlock(id, turn, block) => format!("c:{id}:{turn}:{block}"),
         }
     }
 }
@@ -211,50 +223,55 @@ pub struct TwoTierEntry {
 }
 
 /// Two-tier index for progressive search.
+///
+/// Delegates vector storage and search to frankensearch's file-backed FSVI
+/// `TwoTierIndex`, with cass-specific side tables for `DocumentId` enum
+/// and `message_id` SQLite foreign keys.
 #[derive(Debug)]
 pub struct TwoTierIndex {
     /// Index metadata.
     pub metadata: TwoTierMetadata,
-    /// Fast embeddings (row-major, f16).
-    fast_embeddings: Vec<f16>,
-    /// Quality embeddings (row-major, f16).
-    quality_embeddings: Vec<f16>,
-    /// Document IDs in index order.
+    /// Frankensearch file-backed two-tier index.
+    fs_index: FsTwoTierIndex,
+    /// Document IDs in index order (cass-specific enum).
     doc_ids: Vec<DocumentId>,
-    /// Message IDs for SQLite lookup.
+    /// Message IDs for SQLite lookup (parallel to doc_ids).
     message_ids: Vec<u64>,
+    /// Temp directory holding FSVI files (kept alive for index lifetime).
+    _tmpdir: tempfile::TempDir,
 }
 
 impl TwoTierIndex {
-    fn fast_dimension(&self) -> usize {
-        self.fast_embeddings
-            .len()
-            .checked_div(self.metadata.doc_count)
-            .unwrap_or(0)
-    }
-
-    fn quality_dimension(&self) -> usize {
-        self.quality_embeddings
-            .len()
-            .checked_div(self.metadata.doc_count)
-            .unwrap_or(0)
-    }
-
     /// Build a two-tier index from entries.
+    ///
+    /// Creates a temporary FSVI index via frankensearch's `TwoTierIndexBuilder`,
+    /// then opens it for search. The temp directory is kept alive as long as the
+    /// index exists.
     pub fn build(
         fast_embedder_id: impl Into<String>,
         quality_embedder_id: impl Into<String>,
         config: &TwoTierConfig,
         entries: impl IntoIterator<Item = TwoTierEntry>,
     ) -> Result<Self> {
+        let fast_embedder_id = fast_embedder_id.into();
+        let quality_embedder_id = quality_embedder_id.into();
         let entries: Vec<TwoTierEntry> = entries.into_iter().collect();
         let doc_count = entries.len();
 
+        let tmpdir = tempfile::TempDir::new()?;
+
         if doc_count == 0 {
+            let fs_config = config.to_fs_config();
+            let builder = FsTwoTierIndex::create(tmpdir.path(), fs_config.clone())
+                .map_err(|e| anyhow::anyhow!("failed to create empty fs index: {e}"))?;
+            let fs_index = builder
+                .finish()
+                .map_err(|e| anyhow::anyhow!("failed to finish empty fs index: {e}"))?;
+
             return Ok(Self {
                 metadata: TwoTierMetadata {
-                    fast_embedder_id: fast_embedder_id.into(),
-                    quality_embedder_id: quality_embedder_id.into(),
+                    fast_embedder_id,
+                    quality_embedder_id,
                     doc_count: 0,
                     built_at: chrono::Utc::now().timestamp(),
                     status: IndexStatus::Complete {
@@ -262,10 +279,10 @@ impl TwoTierIndex {
                         quality_latency_ms: 0,
                     },
                 },
-                fast_embeddings: Vec::new(),
-                quality_embeddings: Vec::new(),
+                fs_index,
                 doc_ids: Vec::new(),
                 message_ids: Vec::new(),
+                _tmpdir: tmpdir,
             });
         }
 
@@ -289,23 +306,37 @@ impl TwoTierIndex {
             }
         }
 
-        // Build flat vectors
-        let mut fast_embeddings = Vec::with_capacity(doc_count * config.fast_dimension);
-        let mut quality_embeddings = Vec::with_capacity(doc_count * config.quality_dimension);
+        // Build frankensearch index
+        let fs_config = config.to_fs_config();
+        let mut builder = FsTwoTierIndex::create(tmpdir.path(), fs_config.clone())
+            .map_err(|e| anyhow::anyhow!("failed to create fs index builder: {e}"))?;
+        builder.set_fast_embedder_id(&fast_embedder_id);
+        builder.set_quality_embedder_id(&quality_embedder_id);
+
         let mut doc_ids = Vec::with_capacity(doc_count);
         let mut message_ids = Vec::with_capacity(doc_count);
 
         for entry in entries {
-            fast_embeddings.extend(entry.fast_embedding);
-            quality_embeddings.extend(entry.quality_embedding);
+            let doc_id_str = entry.doc_id.encode();
+            let fast_f32: Vec<f32> = entry.fast_embedding.iter().map(|v| f32::from(*v)).collect();
+            let quality_f32: Vec<f32> =
+                entry.quality_embedding.iter().map(|v| f32::from(*v)).collect();
+
+            builder
+                .add_record(&doc_id_str, &fast_f32, Some(&quality_f32))
+                .map_err(|e| anyhow::anyhow!("failed to add record {doc_id_str}: {e}"))?;
             doc_ids.push(entry.doc_id);
             message_ids.push(entry.message_id);
         }
 
+        let fs_index = builder
+            .finish()
+            .map_err(|e| anyhow::anyhow!("failed to finish fs index: {e}"))?;
+
         Ok(Self {
             metadata: TwoTierMetadata {
-                fast_embedder_id: fast_embedder_id.into(),
-                quality_embedder_id: quality_embedder_id.into(),
+                fast_embedder_id,
+                quality_embedder_id,
                 doc_count,
                 built_at: chrono::Utc::now().timestamp(),
                 status: IndexStatus::Complete {
@@ -313,10 +344,10 @@ impl TwoTierIndex {
                     quality_latency_ms: 0,
                 },
             },
-            fast_embeddings,
-            quality_embeddings,
+            fs_index,
             doc_ids,
             message_ids,
+            _tmpdir: tmpdir,
         })
     }
 
@@ -340,153 +371,111 @@ impl TwoTierIndex {
         self.message_ids.get(idx).copied()
     }
 
-    /// Get fast embedding at index.
-    fn fast_embedding(&self, idx: usize, dim: usize) -> Option<&[f16]> {
-        let start = idx * dim;
-        let end = start + dim;
-        if end <= self.fast_embeddings.len() {
-            Some(&self.fast_embeddings[start..end])
-        } else {
-            None
-        }
-    }
-
-    /// Get quality embedding at index.
-    fn quality_embedding(&self, idx: usize, dim: usize) -> Option<&[f16]> {
-        let start = idx * dim;
-        let end = start + dim;
-        if end <= self.quality_embeddings.len() {
-            Some(&self.quality_embeddings[start..end])
-        } else {
-            None
-        }
-    }
-
     /// Search using fast embeddings only.
+    ///
+    /// Delegates to frankensearch's `TwoTierIndex::search_fast()`.
     pub fn search_fast(&self, query_vec: &[f32], k: usize) -> Vec<ScoredResult> {
         if self.is_empty() || k == 0 {
             return Vec::new();
         }
 
-        let dim = self.fast_dimension();
-        if query_vec.len() != dim {
-            warn!(
-                expected_dimension = dim,
-                got_dimension = query_vec.len(),
-                "Fast query embedding dimension mismatch; returning no results"
-            );
-            return Vec::new();
-        }
-
-        let mut heap = BinaryHeap::with_capacity(k + 1);
-
-        for idx in 0..self.metadata.doc_count {
-            if let Some(embedding) = self.fast_embedding(idx, dim) {
-                let score = dot_product_f16(embedding, query_vec);
-                heap.push(std::cmp::Reverse(ScoredEntry { score, idx }));
-                if heap.len() > k {
-                    heap.pop();
-                }
+        match self.fs_index.search_fast(query_vec, k) {
+            Ok(hits) => self.hits_to_scored_results(hits),
+            Err(e) => {
+                warn!(error = %e, "frankensearch fast search failed");
+                Vec::new()
             }
         }
-
-        heap.into_sorted_vec()
-            .into_iter()
-            .map(|std::cmp::Reverse(entry)| ScoredResult {
-                idx: entry.idx,
-                message_id: self.message_ids[entry.idx],
-                score: entry.score,
-            })
-            .collect()
     }
 
     /// Search using quality embeddings only.
+    ///
+    /// Delegates to frankensearch's quality search via `search_fast` on the
+    /// quality index. Since frankensearch's `TwoTierIndex` stores both tiers,
+    /// we use `quality_scores_for_hits` with all documents as candidates.
     pub fn search_quality(&self, query_vec: &[f32], k: usize) -> Vec<ScoredResult> {
         if self.is_empty() || k == 0 {
             return Vec::new();
         }
 
-        let dim = self.quality_dimension();
-        if query_vec.len() != dim {
-            warn!(
-                expected_dimension = dim,
-                got_dimension = query_vec.len(),
-                "Quality query embedding dimension mismatch; returning no results"
-            );
-            return Vec::new();
-        }
+        // Build candidate hits for all docs to get quality scores
+        let all_hits: Vec<FsVectorHit> = (0..self.metadata.doc_count)
+            .map(|i| FsVectorHit {
+                index: i as u32,
+                score: 0.0,
+                doc_id: self.doc_ids[i].encode(),
+            })
+            .collect();
 
-        let mut heap = BinaryHeap::with_capacity(k + 1);
-
-        for idx in 0..self.metadata.doc_count {
-            if let Some(embedding) = self.quality_embedding(idx, dim) {
-                let score = dot_product_f16(embedding, query_vec);
-                heap.push(std::cmp::Reverse(ScoredEntry { score, idx }));
-                if heap.len() > k {
-                    heap.pop();
-                }
+        match self.fs_index.quality_scores_for_hits(query_vec, &all_hits) {
+            Ok(scores) => {
+                // Build scored results and sort by score descending
+                let mut results: Vec<ScoredResult> = scores
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, &score)| ScoredResult {
+                        idx,
+                        message_id: self.message_ids[idx],
+                        score,
+                    })
+                    .collect();
+                results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(Ordering::Equal)
+                });
+                results.truncate(k);
+                results
+            }
+            Err(e) => {
+                warn!(error = %e, "frankensearch quality search failed");
+                Vec::new()
             }
         }
-
-        heap.into_sorted_vec()
-            .into_iter()
-            .map(|std::cmp::Reverse(entry)| ScoredResult {
-                idx: entry.idx,
-                message_id: self.message_ids[entry.idx],
-                score: entry.score,
-            })
-            .collect()
     }
 
     /// Get quality scores for a set of document indices.
     pub fn quality_scores_for_indices(&self, query_vec: &[f32], indices: &[usize]) -> Vec<f32> {
-        let dim = self.quality_dimension();
-        if query_vec.len() != dim {
-            warn!(
-                expected_dimension = dim,
-                got_dimension = query_vec.len(),
-                "Quality query embedding dimension mismatch during refinement; using zero scores"
-            );
-            return vec![0.0; indices.len()];
-        }
-
-        indices
+        let hits: Vec<FsVectorHit> = indices
             .iter()
-            .map(|&idx| {
-                self.quality_embedding(idx, dim)
-                    .map(|emb| dot_product_f16(emb, query_vec))
-                    .unwrap_or(0.0)
+            .filter_map(|&idx| {
+                if idx < self.metadata.doc_count {
+                    Some(FsVectorHit {
+                        index: idx as u32,
+                        score: 0.0,
+                        doc_id: self.doc_ids[idx].encode(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        match self.fs_index.quality_scores_for_hits(query_vec, &hits) {
+            Ok(scores) => scores,
+            Err(e) => {
+                warn!(error = %e, "frankensearch quality scoring failed; using zero scores");
+                vec![0.0; indices.len()]
+            }
+        }
+    }
+
+    /// Convert frankensearch VectorHits to cass ScoredResults.
+    fn hits_to_scored_results(&self, hits: Vec<FsVectorHit>) -> Vec<ScoredResult> {
+        hits.into_iter()
+            .filter_map(|hit| {
+                let idx = hit.index as usize;
+                if idx < self.metadata.doc_count {
+                    Some(ScoredResult {
+                        idx,
+                        message_id: self.message_ids[idx],
+                        score: hit.score,
+                    })
+                } else {
+                    None
+                }
             })
             .collect()
-    }
-}
-
-/// Scored entry for heap-based top-k search.
-#[derive(Debug, Clone, Copy)]
-struct ScoredEntry {
-    score: f32,
-    idx: usize,
-}
-
-impl PartialEq for ScoredEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.score.total_cmp(&other.score) == Ordering::Equal && self.idx == other.idx
-    }
-}
-
-impl Eq for ScoredEntry {}
-
-impl PartialOrd for ScoredEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ScoredEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.score
-            .total_cmp(&other.score)
-            .then_with(|| self.idx.cmp(&other.idx))
     }
 }
 
@@ -653,9 +642,8 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                         let latency_ms = start.elapsed().as_millis() as u64;
                         self.fast_results = Some(results.clone());
 
-                        // If fast-only mode, skip refinement
                         if self.searcher.config.fast_only {
-                            self.phase = 2; // Skip refinement
+                            self.phase = 2;
                         }
 
                         Some(SearchPhase::Initial {
@@ -665,7 +653,7 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                     }
                     Err(e) => {
                         warn!(error = %e, "Fast embedding failed");
-                        self.phase = 2; // Skip to end
+                        self.phase = 2;
                         Some(SearchPhase::RefinementFailed {
                             error: format!("fast embedding failed: {e}"),
                         })
@@ -690,7 +678,6 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
 
                 match daemon.embed(&self.query, &request_id) {
                     Ok(query_vec) => {
-                        // If we have fast results, blend scores; otherwise full quality search
                         let results = if let Some(fast_results) = self.fast_results.as_ref() {
                             let refine_cap = self.searcher.config.max_refinement_docs;
                             let candidates: Vec<usize> = fast_results
@@ -706,8 +693,6 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                                     .index
                                     .quality_scores_for_indices(&query_vec, &candidates);
 
-                                // Blend normalized scores to avoid scale mismatch between
-                                // fast and quality embedding spaces.
                                 let weight = self.searcher.config.quality_weight;
                                 let fast_scores: Vec<f32> =
                                     fast_results.iter().map(|sr| sr.score).collect();
@@ -731,7 +716,6 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                                     });
                                 }
 
-                                // Re-sort by blended score
                                 blended.sort_by(|a, b| {
                                     b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal)
                                 });
@@ -801,61 +785,6 @@ pub fn blend_scores(fast: &[f32], quality: &[f32], quality_weight: f32) -> Vec<f
         .zip(quality_norm.iter())
         .map(|(&f, &q)| (1.0 - quality_weight) * f + quality_weight * q)
         .collect()
-}
-
-/// SIMD-accelerated f16 dot product.
-///
-/// # Panics
-/// Debug-asserts that `a.len() == b.len()`. In release mode, mismatched
-/// lengths will cause out-of-bounds access if `b` is shorter than `a`.
-#[inline]
-fn dot_product_f16(a: &[f16], b: &[f32]) -> f32 {
-    use wide::f32x8;
-
-    debug_assert_eq!(
-        a.len(),
-        b.len(),
-        "dot_product_f16: dimension mismatch (a={}, b={})",
-        a.len(),
-        b.len()
-    );
-
-    // Early return for mismatched lengths in release mode to avoid UB
-    if a.len() != b.len() {
-        return 0.0;
-    }
-
-    let chunks = a.len() / 8;
-    let mut sum = f32x8::ZERO;
-
-    for i in 0..chunks {
-        let base = i * 8;
-        let a_f32 = [
-            f32::from(a[base]),
-            f32::from(a[base + 1]),
-            f32::from(a[base + 2]),
-            f32::from(a[base + 3]),
-            f32::from(a[base + 4]),
-            f32::from(a[base + 5]),
-            f32::from(a[base + 6]),
-            f32::from(a[base + 7]),
-        ];
-        // Safety: We've verified a.len() == b.len() and base + 8 <= chunks * 8 <= a.len()
-        let b_arr: [f32; 8] = b[base..base + 8]
-            .try_into()
-            .expect("slice length mismatch in SIMD chunk");
-        sum += f32x8::from(a_f32) * f32x8::from(b_arr);
-    }
-
-    let mut result: f32 = sum.reduce_add();
-
-    // Handle remainder - bounds are guaranteed by the length check above
-    let remainder_start = chunks * 8;
-    for i in remainder_start..a.len() {
-        result += f32::from(a[i]) * b[i];
-    }
-
-    result
 }
 
 #[cfg(test)]
@@ -1080,7 +1009,6 @@ mod tests {
         let scores = vec![0.5, 0.5, 0.5];
         let normalized = normalize_scores(&scores);
 
-        // All same value should normalize to 1.0
         for n in &normalized {
             assert!((n - 1.0).abs() < 0.001);
         }
@@ -1100,7 +1028,6 @@ mod tests {
         let blended = blend_scores(&fast, &quality, 0.5);
 
         assert_eq!(blended.len(), 3);
-        // With 0.5 weight, blended should be average of normalized scores
     }
 
     #[test]
@@ -1144,30 +1071,6 @@ mod tests {
         let config = TwoTierConfig::quality_only();
         assert!(!config.fast_only);
         assert!(config.quality_only);
-    }
-
-    #[test]
-    fn test_dot_product_f16_basic() {
-        let a: Vec<f16> = vec![f16::from_f32(1.0); 8];
-        let b: Vec<f32> = vec![1.0; 8];
-        let result = dot_product_f16(&a, &b);
-        assert!((result - 8.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_dot_product_f16_with_remainder() {
-        let a: Vec<f16> = vec![f16::from_f32(1.0); 10];
-        let b: Vec<f32> = vec![1.0; 10];
-        let result = dot_product_f16(&a, &b);
-        assert!((result - 10.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_dot_product_f16_empty() {
-        let a: Vec<f16> = vec![];
-        let b: Vec<f32> = vec![];
-        let result = dot_product_f16(&a, &b);
-        assert_eq!(result, 0.0);
     }
 
     #[test]

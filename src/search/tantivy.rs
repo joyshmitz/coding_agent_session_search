@@ -1,21 +1,14 @@
-// NOTE: Direct tantivy imports below will be replaced by frankensearch::lexical
-// re-exports once the rch sync constraint is resolved.  frankensearch-lexical
-// now re-exports all needed tantivy types (Schema, Index, IndexReader, etc.).
-// Migration path:
-//   use tantivy::schema::Schema;        → use frankensearch::lexical::Schema;
-//   use tantivy::{Index, IndexReader};   → use frankensearch::lexical::{Index, IndexReader};
 use std::path::Path;
 
 use anyhow::{Error, Result};
 use frankensearch::lexical::{
     CASS_SCHEMA_HASH, CassDocument as FsCassDocument, CassFields as FsCassFields,
     CassMergeStatus as FsCassMergeStatus, CassTantivyIndex as FsCassTantivyIndex,
-    cass_build_schema as fs_build_schema, cass_ensure_tokenizer as fs_ensure_tokenizer,
+    Index, IndexReader, Schema, cass_build_schema as fs_build_schema,
+    cass_ensure_tokenizer as fs_ensure_tokenizer,
     cass_fields_from_schema as fs_fields_from_schema, cass_index_dir as fs_index_dir,
     cass_schema_hash_matches,
 };
-use tantivy::schema::Schema;
-use tantivy::{Index, IndexReader};
 
 use crate::connectors::NormalizedConversation;
 use crate::connectors::NormalizedMessage;
@@ -217,7 +210,7 @@ mod tests {
     #[test]
     fn tokenizer_registration_is_callable() {
         let dir = TempDir::new().expect("temp dir");
-        let mut idx = tantivy::Index::create_in_ram(build_schema());
+        let mut idx = Index::create_in_ram(build_schema());
         ensure_tokenizer(&mut idx);
         let _ = TantivyIndex::open_or_create(dir.path()).expect("open or create");
     }

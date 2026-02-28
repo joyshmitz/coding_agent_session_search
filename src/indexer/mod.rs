@@ -971,7 +971,7 @@ pub fn run_index(
     if !needs_rebuild
         && let Err(e) = frankensearch::lexical::cass_open_search_reader(
             &index_path,
-            tantivy::ReloadPolicy::Manual,
+            frankensearch::lexical::ReloadPolicy::Manual,
         )
     {
         tracing::warn!(
