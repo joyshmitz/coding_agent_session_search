@@ -231,14 +231,14 @@ pub struct TwoTierEntry {
 pub struct TwoTierIndex {
     /// Index metadata.
     pub metadata: TwoTierMetadata,
-    /// Frankensearch file-backed two-tier index.
-    fs_index: FsTwoTierIndex,
+    /// Frankensearch file-backed two-tier index (None when empty).
+    fs_index: Option<FsTwoTierIndex>,
     /// Document IDs in index order (cass-specific enum).
     doc_ids: Vec<DocumentId>,
     /// Message IDs for SQLite lookup (parallel to doc_ids).
     message_ids: Vec<u64>,
     /// Temp directory holding FSVI files (kept alive for index lifetime).
-    _tmpdir: tempfile::TempDir,
+    _tmpdir: Option<tempfile::TempDir>,
 }
 
 impl TwoTierIndex {
@@ -261,13 +261,6 @@ impl TwoTierIndex {
         let tmpdir = tempfile::TempDir::new()?;
 
         if doc_count == 0 {
-            let fs_config = config.to_fs_config();
-            let builder = FsTwoTierIndex::create(tmpdir.path(), fs_config.clone())
-                .map_err(|e| anyhow::anyhow!("failed to create empty fs index: {e}"))?;
-            let fs_index = builder
-                .finish()
-                .map_err(|e| anyhow::anyhow!("failed to finish empty fs index: {e}"))?;
-
             return Ok(Self {
                 metadata: TwoTierMetadata {
                     fast_embedder_id,
@@ -279,10 +272,10 @@ impl TwoTierIndex {
                         quality_latency_ms: 0,
                     },
                 },
-                fs_index,
+                fs_index: None,
                 doc_ids: Vec::new(),
                 message_ids: Vec::new(),
-                _tmpdir: tmpdir,
+                _tmpdir: None,
             });
         }
 
@@ -344,10 +337,10 @@ impl TwoTierIndex {
                     quality_latency_ms: 0,
                 },
             },
-            fs_index,
+            fs_index: Some(fs_index),
             doc_ids,
             message_ids,
-            _tmpdir: tmpdir,
+            _tmpdir: Some(tmpdir),
         })
     }
 
@@ -379,7 +372,11 @@ impl TwoTierIndex {
             return Vec::new();
         }
 
-        match self.fs_index.search_fast(query_vec, k) {
+        let Some(fs_index) = &self.fs_index else {
+            return Vec::new();
+        };
+
+        match fs_index.search_fast(query_vec, k) {
             Ok(hits) => self.hits_to_scored_results(hits),
             Err(e) => {
                 warn!(error = %e, "frankensearch fast search failed");
@@ -398,6 +395,10 @@ impl TwoTierIndex {
             return Vec::new();
         }
 
+        let Some(fs_index) = &self.fs_index else {
+            return Vec::new();
+        };
+
         // Build candidate hits for all docs to get quality scores
         let all_hits: Vec<FsVectorHit> = (0..self.metadata.doc_count)
             .map(|i| FsVectorHit {
@@ -407,7 +408,7 @@ impl TwoTierIndex {
             })
             .collect();
 
-        match self.fs_index.quality_scores_for_hits(query_vec, &all_hits) {
+        match fs_index.quality_scores_for_hits(query_vec, &all_hits) {
             Ok(scores) => {
                 // Build scored results and sort by score descending
                 let mut results: Vec<ScoredResult> = scores
@@ -436,6 +437,10 @@ impl TwoTierIndex {
 
     /// Get quality scores for a set of document indices.
     pub fn quality_scores_for_indices(&self, query_vec: &[f32], indices: &[usize]) -> Vec<f32> {
+        let Some(fs_index) = &self.fs_index else {
+            return vec![0.0; indices.len()];
+        };
+
         let hits: Vec<FsVectorHit> = indices
             .iter()
             .filter_map(|&idx| {
@@ -451,7 +456,7 @@ impl TwoTierIndex {
             })
             .collect();
 
-        match self.fs_index.quality_scores_for_hits(query_vec, &hits) {
+        match fs_index.quality_scores_for_hits(query_vec, &hits) {
             Ok(scores) => scores,
             Err(e) => {
                 warn!(error = %e, "frankensearch quality scoring failed; using zero scores");

@@ -199,10 +199,30 @@ impl ResourceInfo {
     pub const MIN_MEMORY_MB: u64 = 2048; // 2 GB
 }
 
-/// Bash probe script that gathers all information in one SSH call.
+/// Build the bash probe script that gathers all information in one SSH call.
+///
+/// Agent detection paths are sourced dynamically from `franken_agent_detection`
+/// so that new connectors are automatically included in SSH probes.
 ///
 /// Output format is key=value pairs, with special markers for sections.
-const PROBE_SCRIPT: &str = r#"#!/bin/bash
+fn build_probe_script() -> String {
+    // Build the `for dir in ...` path list from franken_agent_detection
+    let probe_paths = franken_agent_detection::default_probe_paths_tilde();
+    let mut dir_list = Vec::new();
+    for (_slug, paths) in &probe_paths {
+        for path in paths {
+            // Escape spaces for bash word splitting in `for dir in ...`
+            dir_list.push(path.replace(' ', "\\ "));
+        }
+    }
+    // Deduplicate (some connectors may share paths)
+    dir_list.sort();
+    dir_list.dedup();
+
+    let dirs_str = dir_list.join(" \\\n           ");
+
+    format!(
+        r#"#!/bin/bash
 echo "===PROBE_START==="
 
 # System info
@@ -222,7 +242,7 @@ if [ -f /etc/machine-id ]; then
     MACHINE_ID=$(cat /etc/machine-id 2>/dev/null | tr -d '\n')
     echo "MACHINE_ID=$MACHINE_ID"
 elif command -v ioreg &> /dev/null; then
-    MACHINE_ID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
+    MACHINE_ID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{{print $4}}')
     echo "MACHINE_ID=$MACHINE_ID"
 fi
 
@@ -240,7 +260,7 @@ elif [ -x "/usr/local/bin/cass" ]; then
 fi
 
 if [ -n "$CASS_BIN" ]; then
-    CASS_VER=$("$CASS_BIN" --version 2>/dev/null | head -1 | awk '{print $2}')
+    CASS_VER=$("$CASS_BIN" --version 2>/dev/null | head -1 | awk '{{print $2}}')
     if [ -z "$CASS_VER" ]; then
         # Binary exists but version command failed - treat as not found
         echo "CASS_VERSION=NOT_FOUND"
@@ -255,7 +275,7 @@ if [ -n "$CASS_BIN" ]; then
             if [ $? -eq 0 ] && [ -n "$STATS" ]; then
                 # Extract total conversations from JSON (allow whitespace/newlines)
                 SESSIONS=$(echo "$STATS" | tr -d '\n' | sed -n 's/.*"conversations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
-                echo "CASS_SESSIONS=${SESSIONS:-0}"
+                echo "CASS_SESSIONS=${{SESSIONS:-0}}"
             else
                 echo "CASS_SESSIONS=0"
             fi
@@ -282,36 +302,27 @@ command -v curl &> /dev/null && echo "HAS_CURL=1" || echo "HAS_CURL=0"
 command -v wget &> /dev/null && echo "HAS_WGET=1" || echo "HAS_WGET=0"
 
 # Resource info - disk (in KB, converted later)
-DISK_KB=$(df -k ~ 2>/dev/null | awk 'NR==2 {print $4}')
-echo "DISK_AVAIL_KB=${DISK_KB:-0}"
+DISK_KB=$(df -k ~ 2>/dev/null | awk 'NR==2 {{print $4}}')
+echo "DISK_AVAIL_KB=${{DISK_KB:-0}}"
 
 # Memory info (Linux)
 if [ -f /proc/meminfo ]; then
-    MEM_TOTAL=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
-    MEM_AVAIL=$(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{print $2}')
-    echo "MEM_TOTAL_KB=${MEM_TOTAL:-0}"
-    echo "MEM_AVAIL_KB=${MEM_AVAIL:-0}"
+    MEM_TOTAL=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{{print $2}}')
+    MEM_AVAIL=$(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{{print $2}}')
+    echo "MEM_TOTAL_KB=${{MEM_TOTAL:-0}}"
+    echo "MEM_AVAIL_KB=${{MEM_AVAIL:-0}}"
 else
     # macOS - use sysctl
     if command -v sysctl &> /dev/null; then
         MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null)
         MEM_KB=$((MEM_BYTES / 1024))
-        echo "MEM_TOTAL_KB=${MEM_KB:-0}"
-        echo "MEM_AVAIL_KB=${MEM_KB:-0}"  # macOS doesn't have easy available mem
+        echo "MEM_TOTAL_KB=${{MEM_KB:-0}}"
+        echo "MEM_AVAIL_KB=${{MEM_KB:-0}}"  # macOS doesn't have easy available mem
     fi
 fi
 
 # Agent data detection (with sizes and file counts)
-for dir in ~/.claude/projects ~/.codex/sessions ~/.cursor \
-           ~/.config/Code/User/globalStorage/saoudrizwan.claude-dev \
-           ~/.config/Cursor/User/globalStorage/saoudrizwan.claude-dev \
-           ~/Library/Application\ Support/Code/User/globalStorage/saoudrizwan.claude-dev \
-           ~/Library/Application\ Support/Cursor/User/globalStorage/saoudrizwan.claude-dev \
-           ~/.gemini/tmp ~/.pi/agent/sessions ~/.aider.chat.history.md \
-           ~/.local/share/opencode ~/.goose/sessions ~/.continue/sessions \
-           ~/.config/Code/User/globalStorage/github.copilot-chat \
-           ~/Library/Application\ Support/Code/User/globalStorage/github.copilot-chat \
-           ~/.config/gh-copilot; do
+for dir in {dirs}; do
     # Expand the path
     expanded_dir=$(eval echo "$dir" 2>/dev/null)
     if [ -e "$expanded_dir" ]; then
@@ -329,12 +340,15 @@ for dir in ~/.claude/projects ~/.codex/sessions ~/.cursor \
         else
             COUNT=1  # Single file
         fi
-        echo "AGENT_DATA=$dir|${SIZE:-0}|${COUNT:-0}"
+        echo "AGENT_DATA=$dir|${{SIZE:-0}}|${{COUNT:-0}}"
     fi
 done
 
 echo "===PROBE_END==="
-"#;
+"#,
+        dirs = dirs_str
+    )
+}
 
 /// Probe a single SSH host.
 ///
@@ -374,9 +388,10 @@ pub fn probe_host(host: &DiscoveredHost, timeout_secs: u64) -> HostProbeResult {
     };
 
     // Write probe script to stdin
+    let probe_script = build_probe_script();
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        if let Err(e) = stdin.write_all(PROBE_SCRIPT.as_bytes()) {
+        if let Err(e) = stdin.write_all(probe_script.as_bytes()) {
             return HostProbeResult::unreachable(
                 &host.name,
                 format!("Failed to write probe script: {}", e),
@@ -585,6 +600,16 @@ fn infer_agent_type(path: &str) -> String {
         "copilot".to_string()
     } else if path.contains(".continue") {
         "continue".to_string()
+    } else if path.contains("sourcegraph.amp") || path.contains("/amp") {
+        "amp".to_string()
+    } else if path.contains(".clawdbot") {
+        "clawdbot".to_string()
+    } else if path.contains(".factory") {
+        "factory".to_string()
+    } else if path.contains(".vibe") {
+        "vibe".to_string()
+    } else if path.contains(".windsurf") {
+        "windsurf".to_string()
     } else {
         "unknown".to_string()
     }
@@ -1015,7 +1040,7 @@ MEM_AVAIL_KB=4194304
         let mut child = cmd.spawn().expect("bash should be available");
         if let Some(mut stdin) = child.stdin.take() {
             stdin
-                .write_all(PROBE_SCRIPT.as_bytes())
+                .write_all(build_probe_script().as_bytes())
                 .expect("write probe script");
         }
         let output = child
@@ -1156,6 +1181,57 @@ MEM_AVAIL_KB=4194304
             sys.has_curl || sys.has_wget,
             "system should have at least curl or wget"
         );
+    }
+
+    #[test]
+    fn probe_script_contains_all_franken_agent_detection_paths() {
+        let script = build_probe_script();
+        // Verify key agent paths from franken_agent_detection are present
+        assert!(script.contains("~/.claude"), "missing claude paths");
+        assert!(script.contains("~/.codex/sessions"), "missing codex path");
+        assert!(script.contains("~/.gemini"), "missing gemini paths");
+        assert!(script.contains("~/.goose/sessions"), "missing goose path");
+        assert!(
+            script.contains("~/.continue/sessions"),
+            "missing continue path"
+        );
+        assert!(
+            script.contains("~/.aider"),
+            "missing aider path"
+        );
+        assert!(
+            script.contains("saoudrizwan.claude-dev"),
+            "missing cline path"
+        );
+        assert!(
+            script.contains("copilot-chat"),
+            "missing copilot path"
+        );
+        assert!(script.contains("~/.windsurf"), "missing windsurf path");
+        assert!(script.contains("~/.factory"), "missing factory path");
+        assert!(script.contains("~/.clawdbot"), "missing clawdbot path");
+        assert!(script.contains("~/.vibe"), "missing vibe path");
+        assert!(script.contains("sourcegraph.amp"), "missing amp path");
+        // Verify script structure
+        assert!(script.contains("===PROBE_START==="));
+        assert!(script.contains("===PROBE_END==="));
+        assert!(script.contains("for dir in"));
+    }
+
+    #[test]
+    fn infer_agent_type_covers_all_dynamic_agents() {
+        // Ensure infer_agent_type handles all agents from franken_agent_detection
+        assert_eq!(infer_agent_type("~/.goose/sessions"), "goose");
+        assert_eq!(infer_agent_type("~/.continue/sessions"), "continue");
+        assert_eq!(infer_agent_type("~/.clawdbot/sessions"), "clawdbot");
+        assert_eq!(infer_agent_type("~/.factory/sessions"), "factory");
+        assert_eq!(infer_agent_type("~/.vibe/logs/session"), "vibe");
+        assert_eq!(infer_agent_type("~/.windsurf"), "windsurf");
+        assert_eq!(
+            infer_agent_type("~/.config/Code/User/globalStorage/sourcegraph.amp"),
+            "amp"
+        );
+        assert_eq!(infer_agent_type("~/.pi/agent/sessions"), "pi_agent");
     }
 
     // =========================================================================
