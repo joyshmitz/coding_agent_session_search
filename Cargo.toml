@@ -33,7 +33,6 @@ shell-words = "*"
 dotenvy = "*"
 notify = "*"
 rusqlite = { version = "*", features = ["bundled", "modern_sqlite"] }
-tantivy = "*"
 rayon = "*"
 crossbeam-channel = "*"
 parking_lot = "*"
