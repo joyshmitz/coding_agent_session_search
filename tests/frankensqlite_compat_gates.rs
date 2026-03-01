@@ -7,9 +7,11 @@
 //! Gate 1: FTS5 full-text search (CREATE VIRTUAL TABLE, MATCH, highlight, etc.)
 //! Gate 2: Existing C SQLite database file compatibility (read rusqlite-created DBs)
 
-use fsqlite::Connection;
-use fsqlite_error::FrankenError;
+use frankensqlite::Connection;
 use fsqlite_types::value::SqliteValue;
+use std::fmt::Write as _;
+
+use coding_agent_search::storage::sqlite::{CURRENT_SCHEMA_VERSION, FrankenStorage, SqliteStorage};
 
 // ============================================================================
 // GATE 1: FTS5 Compatibility
@@ -349,8 +351,7 @@ fn gate2_file_compat_create_with_rusqlite_read_with_frankensqlite() {
 
     // Step 1: Create database with rusqlite (C SQLite)
     {
-        let conn =
-            rusqlite::Connection::open(&db_path).expect("rusqlite open for write");
+        let conn = rusqlite::Connection::open(&db_path).expect("rusqlite open for write");
         conn.execute_batch(
             "
             PRAGMA journal_mode=WAL;
@@ -667,6 +668,250 @@ fn gate2_file_compat_cass_schema_simulation() {
 }
 
 // ============================================================================
+// GATE 3: FrankenStorage Migration/Schema Parity
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TableInfoRow {
+    cid: i64,
+    name: String,
+    col_type: String,
+    not_null: i64,
+    default_value: Option<String>,
+    pk: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct IndexListRow {
+    name: String,
+    is_unique: i64,
+    origin: String,
+    is_partial: i64,
+}
+
+fn quoted_sql_literal(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 2);
+    out.push('\'');
+    for c in input.chars() {
+        if c == '\'' {
+            out.push('\'');
+            out.push('\'');
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn schema_tables(conn: &rusqlite::Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT name
+             FROM sqlite_master
+             WHERE type='table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name NOT LIKE 'fts_messages_%'
+             ORDER BY name",
+        )
+        .expect("prepare table listing");
+
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query table listing");
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .expect("collect table listing")
+}
+
+fn table_info(conn: &rusqlite::Connection, table_name: &str) -> Vec<TableInfoRow> {
+    let mut sql = String::new();
+    let _ = write!(
+        &mut sql,
+        "PRAGMA table_info({})",
+        quoted_sql_literal(table_name)
+    );
+
+    let mut stmt = conn.prepare(&sql).expect("prepare PRAGMA table_info");
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(TableInfoRow {
+                cid: row.get(0)?,
+                name: row.get(1)?,
+                col_type: row.get(2)?,
+                not_null: row.get(3)?,
+                default_value: row.get(4)?,
+                pk: row.get(5)?,
+            })
+        })
+        .expect("query PRAGMA table_info");
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .expect("collect PRAGMA table_info")
+}
+
+fn index_list(conn: &rusqlite::Connection, table_name: &str) -> Vec<IndexListRow> {
+    let mut sql = String::new();
+    let _ = write!(
+        &mut sql,
+        "PRAGMA index_list({})",
+        quoted_sql_literal(table_name)
+    );
+
+    let mut stmt = conn.prepare(&sql).expect("prepare PRAGMA index_list");
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(IndexListRow {
+                name: row.get(1)?,
+                is_unique: row.get(2)?,
+                origin: row.get(3)?,
+                is_partial: row.get(4)?,
+            })
+        })
+        .expect("query PRAGMA index_list");
+
+    let mut values = rows
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect PRAGMA index_list");
+    values.sort();
+    values
+}
+
+#[test]
+fn gate3_migration_transition_from_rusqlite_meta_to_schema_migrations() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let db_path = dir.path().join("transition_from_rusqlite.db");
+
+    // Step 1: Build an existing cass DB via rusqlite-backed storage.
+    {
+        let storage = SqliteStorage::open(&db_path).expect("create rusqlite-backed cass db");
+        assert_eq!(
+            storage.schema_version().expect("schema version"),
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    // Sanity check: legacy DB should not have _schema_migrations yet.
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("open db with rusqlite");
+        let has_schema_migrations: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name='_schema_migrations'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query _schema_migrations existence");
+        assert_eq!(
+            has_schema_migrations, 0,
+            "legacy db should not yet contain _schema_migrations"
+        );
+    }
+
+    // Step 2: Open with FrankenStorage to trigger transition + migration runner.
+    {
+        let storage = FrankenStorage::open(&db_path).expect("open with FrankenStorage");
+        assert_eq!(
+            storage.schema_version().expect("franken schema version"),
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    // Step 3: Validate transition artifacts and compatibility.
+    let conn = rusqlite::Connection::open(&db_path).expect("reopen transitioned db");
+    let max_version: i64 = conn
+        .query_row("SELECT MAX(version) FROM _schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .expect("query max migrated version");
+    assert_eq!(
+        max_version, CURRENT_SCHEMA_VERSION,
+        "transition should set _schema_migrations max(version) to CURRENT_SCHEMA_VERSION"
+    );
+
+    let migration_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM _schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .expect("query migrated row count");
+    assert_eq!(
+        migration_count, CURRENT_SCHEMA_VERSION,
+        "_schema_migrations should contain one row per migration version"
+    );
+
+    let meta_version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query meta.schema_version");
+    assert_eq!(
+        meta_version,
+        CURRENT_SCHEMA_VERSION.to_string(),
+        "meta.schema_version should stay synchronized after transition"
+    );
+}
+
+#[test]
+fn gate3_schema_parity_transitioned_db_matches_fresh_frankensqlite_db() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let db_a_path = dir.path().join("db_a_rusqlite_then_transition.db");
+    let db_b_path = dir.path().join("db_b_fresh_frankensqlite.db");
+
+    // DB-A: create with rusqlite-backed cass storage, then transition via FrankenStorage.
+    {
+        let storage = SqliteStorage::open(&db_a_path).expect("create db-a with SqliteStorage");
+        assert_eq!(
+            storage.schema_version().expect("db-a schema version"),
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+    {
+        let storage =
+            FrankenStorage::open(&db_a_path).expect("transition db-a with FrankenStorage");
+        assert_eq!(
+            storage
+                .schema_version()
+                .expect("db-a franken schema version"),
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    // DB-B: fresh frankensqlite migration path.
+    {
+        let storage = FrankenStorage::open(&db_b_path).expect("create db-b with FrankenStorage");
+        assert_eq!(
+            storage.schema_version().expect("db-b schema version"),
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    let conn_a = rusqlite::Connection::open(&db_a_path).expect("open db-a with rusqlite");
+    let conn_b = rusqlite::Connection::open(&db_b_path).expect("open db-b with rusqlite");
+
+    let tables_a = schema_tables(&conn_a);
+    let tables_b = schema_tables(&conn_b);
+    assert_eq!(
+        tables_a, tables_b,
+        "table sets differ between transitioned and fresh frankensqlite databases"
+    );
+
+    for table in &tables_a {
+        let cols_a = table_info(&conn_a, table);
+        let cols_b = table_info(&conn_b, table);
+        assert_eq!(
+            cols_a, cols_b,
+            "PRAGMA table_info mismatch for table {table}"
+        );
+
+        let idx_a = index_list(&conn_a, table);
+        let idx_b = index_list(&conn_b, table);
+        assert_eq!(idx_a, idx_b, "PRAGMA index_list mismatch for table {table}");
+    }
+}
+
+// ============================================================================
 // Additional Verification: Features cass relies on
 // ============================================================================
 
@@ -685,7 +930,8 @@ fn verify_count_aggregate() {
 #[test]
 fn verify_group_by_and_order_by() {
     let conn = Connection::open(":memory:").expect("in-memory connection");
-    conn.execute("CREATE TABLE t(agent TEXT, cnt INTEGER)").unwrap();
+    conn.execute("CREATE TABLE t(agent TEXT, cnt INTEGER)")
+        .unwrap();
     conn.execute("INSERT INTO t VALUES ('claude', 1)").unwrap();
     conn.execute("INSERT INTO t VALUES ('codex', 1)").unwrap();
     conn.execute("INSERT INTO t VALUES ('claude', 1)").unwrap();
@@ -729,18 +975,23 @@ fn verify_nullable_columns() {
 fn verify_like_operator() {
     let conn = Connection::open(":memory:").expect("in-memory connection");
     conn.execute("CREATE TABLE t(name TEXT)").unwrap();
-    conn.execute("INSERT INTO t VALUES ('authentication')").unwrap();
-    conn.execute("INSERT INTO t VALUES ('authorization')").unwrap();
+    conn.execute("INSERT INTO t VALUES ('authentication')")
+        .unwrap();
+    conn.execute("INSERT INTO t VALUES ('authorization')")
+        .unwrap();
     conn.execute("INSERT INTO t VALUES ('other')").unwrap();
 
-    let rows = conn.query("SELECT name FROM t WHERE name LIKE 'auth%'").unwrap();
+    let rows = conn
+        .query("SELECT name FROM t WHERE name LIKE 'auth%'")
+        .unwrap();
     assert_eq!(rows.len(), 2, "LIKE 'auth%' should match 2 rows");
 }
 
 #[test]
 fn verify_subquery() {
     let conn = Connection::open(":memory:").expect("in-memory connection");
-    conn.execute("CREATE TABLE t(id INTEGER, val INTEGER)").unwrap();
+    conn.execute("CREATE TABLE t(id INTEGER, val INTEGER)")
+        .unwrap();
     conn.execute("INSERT INTO t VALUES (1, 10)").unwrap();
     conn.execute("INSERT INTO t VALUES (2, 20)").unwrap();
     conn.execute("INSERT INTO t VALUES (3, 30)").unwrap();

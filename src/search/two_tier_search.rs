@@ -58,8 +58,8 @@ use super::daemon_client::{DaemonClient, DaemonError};
 use super::embedder::Embedder;
 
 // Frankensearch types for vector storage and search delegation.
-use frankensearch::{TwoTierIndex as FsTwoTierIndex, VectorHit as FsVectorHit};
 use frankensearch::TwoTierConfig as FsTwoTierConfig;
+use frankensearch::{TwoTierIndex as FsTwoTierIndex, VectorHit as FsVectorHit};
 
 /// Configuration for two-tier search.
 #[derive(Debug, Clone)]
@@ -312,8 +312,11 @@ impl TwoTierIndex {
         for entry in entries {
             let doc_id_str = entry.doc_id.encode();
             let fast_f32: Vec<f32> = entry.fast_embedding.iter().map(|v| f32::from(*v)).collect();
-            let quality_f32: Vec<f32> =
-                entry.quality_embedding.iter().map(|v| f32::from(*v)).collect();
+            let quality_f32: Vec<f32> = entry
+                .quality_embedding
+                .iter()
+                .map(|v| f32::from(*v))
+                .collect();
 
             builder
                 .add_record(&doc_id_str, &fast_f32, Some(&quality_f32))
@@ -420,11 +423,7 @@ impl TwoTierIndex {
                         score,
                     })
                     .collect();
-                results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(Ordering::Equal)
-                });
+                results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
                 results.truncate(k);
                 results
             }

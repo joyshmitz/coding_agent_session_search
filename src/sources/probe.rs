@@ -1195,18 +1195,12 @@ MEM_AVAIL_KB=4194304
             script.contains("~/.continue/sessions"),
             "missing continue path"
         );
-        assert!(
-            script.contains("~/.aider"),
-            "missing aider path"
-        );
+        assert!(script.contains("~/.aider"), "missing aider path");
         assert!(
             script.contains("saoudrizwan.claude-dev"),
             "missing cline path"
         );
-        assert!(
-            script.contains("copilot-chat"),
-            "missing copilot path"
-        );
+        assert!(script.contains("copilot-chat"), "missing copilot path");
         assert!(script.contains("~/.windsurf"), "missing windsurf path");
         assert!(script.contains("~/.factory"), "missing factory path");
         assert!(script.contains("~/.clawdbot"), "missing clawdbot path");

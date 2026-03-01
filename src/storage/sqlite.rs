@@ -3,6 +3,14 @@
 use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole, Snippet};
 use crate::sources::provenance::{LOCAL_SOURCE_ID, Source, SourceKind};
 use anyhow::{Context, Result, anyhow};
+use frankensqlite::{
+    Connection as FrankenConnection,
+    compat::{
+        ConnectionExt as FrankenConnectionExt, OpenFlags as FrankenOpenFlags, ParamValue,
+        RowExt as FrankenRowExt, open_with_flags as open_franken_with_flags,
+    },
+    migrate::MigrationRunner,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -978,6 +986,320 @@ pub struct EmbeddingJobRow {
 
 pub struct SqliteStorage {
     conn: Connection,
+}
+
+/// Migration foundation for the future frankensqlite-backed storage backend.
+///
+/// This intentionally coexists with `SqliteStorage` during the staged migration.
+/// Full CRUD parity is tracked in follow-on beads.
+pub struct FrankenStorage {
+    conn: FrankenConnection,
+}
+
+impl FrankenStorage {
+    /// Open a frankensqlite connection, run migrations, and apply config.
+    ///
+    /// Migrations run before PRAGMAs to avoid page lock contention in
+    /// frankensqlite's WAL mode on file-based databases.
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating db directory {}", parent.display()))?;
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+        let conn = FrankenConnection::open(&path_str)
+            .with_context(|| format!("opening frankensqlite db at {}", path.display()))?;
+        let storage = Self { conn };
+        storage.run_migrations()?;
+        storage.apply_config()?;
+        Ok(storage)
+    }
+
+    /// Open in read-only mode using frankensqlite compat flags.
+    ///
+    /// Note: current frankensqlite compat `open_with_flags` is a façade and may
+    /// not enforce strict read-only behavior yet; this constructor still provides
+    /// the migration-compatible call site.
+    pub fn open_readonly(path: &Path) -> Result<Self> {
+        let path_str = path.to_string_lossy().to_string();
+        let conn = open_franken_with_flags(&path_str, FrankenOpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("opening frankensqlite db readonly at {}", path.display()))?;
+        let storage = Self { conn };
+        storage.apply_config()?;
+        Ok(storage)
+    }
+
+    /// Access the raw frankensqlite connection.
+    pub fn raw(&self) -> &FrankenConnection {
+        &self.conn
+    }
+
+    /// Apply connection PRAGMAs for parity with SqliteStorage's `apply_pragmas()`.
+    ///
+    /// Frankensqlite supports all PRAGMAs cass uses (journal_mode, synchronous,
+    /// cache_size, foreign_keys, busy_timeout). Its default journal_mode is already
+    /// WAL and default synchronous is NORMAL, matching cass's requirements.
+    ///
+    /// Additional frankensqlite-specific observability PRAGMAs are enabled when
+    /// available.
+    pub fn apply_config(&self) -> Result<()> {
+        // journal_mode: frankensqlite defaults to WAL, same as cass.
+        // synchronous: frankensqlite defaults to NORMAL, same as cass.
+        // Both are set explicitly for clarity and to match rusqlite behavior.
+        self.conn
+            .execute("PRAGMA journal_mode = WAL;")
+            .with_context(|| "setting journal_mode")?;
+        self.conn
+            .execute("PRAGMA synchronous = NORMAL;")
+            .with_context(|| "setting synchronous")?;
+
+        // cache_size: 64MB (negative value = KiB).
+        self.conn
+            .execute("PRAGMA cache_size = -65536;")
+            .with_context(|| "setting cache_size")?;
+
+        // foreign_keys: enable constraint enforcement.
+        self.conn
+            .execute("PRAGMA foreign_keys = ON;")
+            .with_context(|| "setting foreign_keys")?;
+
+        // busy_timeout: 5 seconds (in milliseconds).
+        self.conn
+            .execute("PRAGMA busy_timeout = 5000;")
+            .with_context(|| "setting busy_timeout")?;
+
+        // temp_store = MEMORY and mmap_size are C SQLite performance knobs.
+        // In frankensqlite's architecture (in-memory MVCC engine with pager
+        // backend), temp_store is always memory-resident and mmap_size does not
+        // apply. Skipped intentionally — these are no-ops or errors.
+
+        // wal_autocheckpoint: frankensqlite manages WAL internally, but the
+        // PRAGMA is accepted for compatibility.
+        let _ = self.conn.execute("PRAGMA wal_autocheckpoint = 1000;");
+
+        Ok(())
+    }
+
+    /// Run all schema migrations, handling transition from meta table versioning.
+    ///
+    /// The existing `SqliteStorage` tracks schema version in a `meta` table entry.
+    /// The new `MigrationRunner` uses a `_schema_migrations` table. This method:
+    /// 1. Transitions existing databases from meta table → `_schema_migrations`
+    /// 2. Runs pending migrations via `MigrationRunner`
+    /// 3. Syncs `meta.schema_version` for backward compatibility
+    pub fn run_migrations(&self) -> Result<()> {
+        transition_from_meta_version(&self.conn)?;
+
+        // Disable foreign keys during migration (needed for V5 table recreation).
+        // In standard SQLite, PRAGMA foreign_keys is a no-op inside a transaction,
+        // so it must be set outside. The MigrationRunner wraps each migration in
+        // its own transaction.
+        self.conn
+            .execute("PRAGMA foreign_keys = OFF;")
+            .with_context(|| "disabling foreign_keys for migration")?;
+
+        let runner = build_cass_migrations();
+        let result = runner
+            .run(&self.conn)
+            .with_context(|| "running schema migrations")?;
+
+        // Re-enable foreign keys after migration.
+        self.conn
+            .execute("PRAGMA foreign_keys = ON;")
+            .with_context(|| "re-enabling foreign_keys after migration")?;
+
+        if !result.applied.is_empty() {
+            info!(
+                applied = ?result.applied,
+                current = result.current,
+                was_fresh = result.was_fresh,
+                "frankensqlite schema migrations applied"
+            );
+        }
+
+        // Keep meta.schema_version in sync for backward compatibility.
+        self.sync_meta_schema_version(result.current)?;
+
+        Ok(())
+    }
+
+    /// Return the current schema version from `_schema_migrations`.
+    pub fn schema_version(&self) -> Result<i64> {
+        let rows = self
+            .conn
+            .query("SELECT MAX(version) FROM _schema_migrations;")
+            .with_context(|| "reading schema version from _schema_migrations")?;
+
+        if let Some(row) = rows.first() {
+            if let Ok(v) = row.get_typed::<Option<i64>>(0) {
+                return Ok(v.unwrap_or(0));
+            }
+        }
+        Ok(0)
+    }
+
+    /// Keep `meta.schema_version` in sync for backward compatibility with `SqliteStorage`.
+    fn sync_meta_schema_version(&self, version: i64) -> Result<()> {
+        // The meta table is created by V1 migration. If it doesn't exist yet,
+        // there's nothing to sync.
+        let rows = self
+            .conn
+            .query("SELECT name FROM sqlite_master WHERE type='table' AND name='meta';")
+            .with_context(|| "checking for meta table")?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        self.conn
+            .execute_params(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?1);",
+                &[ParamValue::from(version.to_string())],
+            )
+            .with_context(|| "syncing meta schema_version")?;
+
+        Ok(())
+    }
+}
+
+// -------------------------------------------------------------------------
+// Frankensqlite migration helpers
+// -------------------------------------------------------------------------
+
+/// Build the `MigrationRunner` with all cass schema migrations V1-V13.
+///
+/// Migration names match the descriptions in `SqliteStorage`'s staircase
+/// migration. The SQL constants (`MIGRATION_V1` .. `MIGRATION_V13`) are
+/// shared between the old rusqlite path and this new frankensqlite path.
+fn build_cass_migrations() -> MigrationRunner {
+    MigrationRunner::new()
+        .add(1, "core_tables", MIGRATION_V1)
+        .add(2, "fts_messages", MIGRATION_V2)
+        .add(3, "fts_messages_rebuild", MIGRATION_V3)
+        .add(4, "sources", MIGRATION_V4)
+        .add(5, "provenance_columns", MIGRATION_V5)
+        .add(6, "source_path_index", MIGRATION_V6)
+        .add(7, "msgpack_columns", MIGRATION_V7)
+        .add(8, "daily_stats", MIGRATION_V8)
+        .add(9, "embedding_jobs", MIGRATION_V9)
+        .add(10, "token_analytics", MIGRATION_V10)
+        .add(11, "message_metrics", MIGRATION_V11)
+        .add(12, "model_dimensions", MIGRATION_V12)
+        .add(13, "plan_token_rollups", MIGRATION_V13)
+}
+
+/// Migration name lookup for backfilling `_schema_migrations` during transition.
+const MIGRATION_NAMES: [(i64, &str); 13] = [
+    (1, "core_tables"),
+    (2, "fts_messages"),
+    (3, "fts_messages_rebuild"),
+    (4, "sources"),
+    (5, "provenance_columns"),
+    (6, "source_path_index"),
+    (7, "msgpack_columns"),
+    (8, "daily_stats"),
+    (9, "embedding_jobs"),
+    (10, "token_analytics"),
+    (11, "message_metrics"),
+    (12, "model_dimensions"),
+    (13, "plan_token_rollups"),
+];
+
+/// Transitions an existing database from `meta` table schema versioning to the
+/// `_schema_migrations` table used by `MigrationRunner`.
+///
+/// The existing `SqliteStorage` tracks schema version as a string value in
+/// `meta WHERE key = 'schema_version'`. The bead spec references
+/// `PRAGMA user_version`, but the actual cass code uses the `meta` table.
+/// This function handles the real code path.
+///
+/// Behavior:
+/// - If `_schema_migrations` already exists → skip (already transitioned)
+/// - If `meta` table has `schema_version > 0` → create `_schema_migrations`
+///   and backfill entries for versions `1..=current_version`
+/// - If `meta` table missing or `schema_version = 0` with no tables → fresh DB,
+///   let `MigrationRunner` handle it
+/// - If `schema_version = 0` but tables exist → corrupted state, log warning
+fn transition_from_meta_version(conn: &FrankenConnection) -> Result<()> {
+    // Check if _schema_migrations already exists → already transitioned.
+    let rows = conn
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='_schema_migrations';")
+        .with_context(|| "checking for _schema_migrations table")?;
+    if !rows.is_empty() {
+        return Ok(());
+    }
+
+    // Check if the meta table exists.
+    let rows = conn
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='meta';")
+        .with_context(|| "checking for meta table")?;
+    if rows.is_empty() {
+        // No meta table → fresh database, let MigrationRunner handle it.
+        return Ok(());
+    }
+
+    // Read the current schema version from the meta table.
+    let rows = conn
+        .query("SELECT value FROM meta WHERE key = 'schema_version';")
+        .with_context(|| "reading schema_version from meta")?;
+
+    let current_version: i64 = rows
+        .first()
+        .and_then(|row| row.get_typed::<String>(0).ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    if current_version == 0 {
+        // Check if tables actually exist (corrupted state: tables present but version=0).
+        let rows = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='conversations';",
+            )
+            .with_context(|| "checking for conversations table")?;
+
+        if rows.is_empty() {
+            // Truly fresh DB (meta table exists but empty/reset). Let MigrationRunner handle it.
+            return Ok(());
+        }
+
+        // Tables exist but version=0: corrupted state. Log and skip transition;
+        // MigrationRunner will fail on "table already exists" and surface the error.
+        info!("meta.schema_version=0 but tables exist; skipping transition (corrupted state)");
+        return Ok(());
+    }
+
+    // Create _schema_migrations and backfill entries for all applied versions.
+    info!(
+        current_version,
+        "transitioning schema tracking from meta table to _schema_migrations"
+    );
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _schema_migrations (\
+            version INTEGER PRIMARY KEY, \
+            name TEXT NOT NULL, \
+            applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))\
+        );",
+    )
+    .with_context(|| "creating _schema_migrations table for transition")?;
+
+    for &(version, name) in &MIGRATION_NAMES {
+        if version > current_version {
+            break;
+        }
+        conn.execute_params(
+            "INSERT INTO _schema_migrations (version, name) VALUES (?1, ?2);",
+            &[ParamValue::from(version), ParamValue::from(name)],
+        )
+        .with_context(|| format!("backfilling _schema_migrations version {version}"))?;
+    }
+
+    info!(
+        current_version,
+        "schema version transition complete: backfilled entries for versions 1..={current_version}"
+    );
+
+    Ok(())
 }
 
 pub struct InsertOutcome {
@@ -6860,5 +7182,201 @@ mod tests {
         assert_eq!(diag.unknown_models.len(), 2);
         assert_eq!(diag.unknown_models["custom-model-v1"], 2);
         assert_eq!(diag.unknown_models["(none)"], 1);
+    }
+
+    // =========================================================================
+    // FrankenStorage migration tests (bead 2j6p6)
+    // =========================================================================
+
+    /// Helper: create a FrankenStorage wrapping an in-memory connection and
+    /// run migrations. This exercises the same code path as `open()` but avoids
+    /// frankensqlite's file-based autoindex renaming limitation (V5 uses
+    /// ALTER TABLE RENAME which triggers sqlite_autoindex lookup issues on
+    /// file-based pagers).
+    fn franken_storage_in_memory() -> FrankenStorage {
+        let conn = FrankenConnection::open(":memory:").unwrap();
+        let storage = FrankenStorage { conn };
+        storage.run_migrations().unwrap();
+        storage.apply_config().unwrap();
+        storage
+    }
+
+    #[test]
+    fn franken_migrations_create_all_tables() {
+        let storage = franken_storage_in_memory();
+
+        // Should be at CURRENT_SCHEMA_VERSION.
+        let version = storage.schema_version().unwrap();
+        assert_eq!(
+            version, CURRENT_SCHEMA_VERSION,
+            "fresh FrankenStorage should be at current schema version"
+        );
+
+        // Core tables from V1 should exist.
+        let rows = storage
+            .raw()
+            .query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
+            .unwrap();
+        let table_names: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.get_typed::<String>(0).ok())
+            .collect();
+
+        for required in [
+            "meta",
+            "agents",
+            "workspaces",
+            "conversations",
+            "messages",
+            "snippets",
+            "tags",
+            "conversation_tags",
+        ] {
+            assert!(
+                table_names.contains(&required.to_string()),
+                "missing table: {required}"
+            );
+        }
+
+        // V4 sources table.
+        assert!(table_names.contains(&"sources".to_string()), "missing sources table");
+
+        // V8 daily_stats table.
+        assert!(
+            table_names.contains(&"daily_stats".to_string()),
+            "missing daily_stats table"
+        );
+
+        // V9 embedding_jobs table.
+        assert!(
+            table_names.contains(&"embedding_jobs".to_string()),
+            "missing embedding_jobs table"
+        );
+
+        // V11 message_metrics, usage_hourly, usage_daily tables.
+        for analytics_table in ["message_metrics", "usage_hourly", "usage_daily"] {
+            assert!(
+                table_names.contains(&analytics_table.to_string()),
+                "missing table: {analytics_table}"
+            );
+        }
+
+        // _schema_migrations tracking table should exist with 13 entries.
+        let rows = storage
+            .raw()
+            .query("SELECT COUNT(*) FROM _schema_migrations;")
+            .unwrap();
+        let count: i64 = rows.first().unwrap().get_typed(0).unwrap();
+        assert_eq!(count, 13, "_schema_migrations should have 13 entries");
+    }
+
+    #[test]
+    fn franken_migrations_idempotent() {
+        let storage = franken_storage_in_memory();
+        assert_eq!(storage.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+
+        // Re-running migrations on the same connection is a no-op.
+        storage.run_migrations().unwrap();
+        assert_eq!(storage.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn franken_meta_schema_version_in_sync() {
+        let storage = franken_storage_in_memory();
+
+        // meta.schema_version should be kept in sync.
+        let rows = storage
+            .raw()
+            .query("SELECT value FROM meta WHERE key = 'schema_version';")
+            .unwrap();
+        let meta_version: String = rows.first().unwrap().get_typed(0).unwrap();
+        assert_eq!(
+            meta_version,
+            CURRENT_SCHEMA_VERSION.to_string(),
+            "meta.schema_version should match CURRENT_SCHEMA_VERSION"
+        );
+    }
+
+    #[test]
+    fn franken_transition_from_meta_version() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test_transition.db");
+
+        // Simulate an existing database created by SqliteStorage at version 10.
+        // We create just enough schema to test the transition.
+        let conn = FrankenConnection::open(db_path.to_string_lossy().to_string()).unwrap();
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', '10');")
+            .unwrap();
+        // Create a dummy conversations table so transition doesn't think it's corrupted.
+        conn.execute("CREATE TABLE conversations (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+
+        // Now run the transition function.
+        let conn = FrankenConnection::open(db_path.to_string_lossy().to_string()).unwrap();
+        transition_from_meta_version(&conn).unwrap();
+
+        // _schema_migrations should exist with entries for versions 1..=10.
+        let rows = conn
+            .query("SELECT version FROM _schema_migrations ORDER BY version;")
+            .unwrap();
+        let versions: Vec<i64> = rows.iter().filter_map(|r| r.get_typed(0).ok()).collect();
+        assert_eq!(
+            versions,
+            (1..=10).collect::<Vec<i64>>(),
+            "transition should backfill versions 1..=10"
+        );
+    }
+
+    #[test]
+    fn franken_transition_skips_when_already_done() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test_transition_skip.db");
+
+        // Create a DB that already has _schema_migrations.
+        let conn = FrankenConnection::open(db_path.to_string_lossy().to_string()).unwrap();
+        conn.execute(
+            "CREATE TABLE _schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT 'now');",
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO _schema_migrations (version, name) VALUES (1, 'test');",
+        ).unwrap();
+
+        // Transition should be a no-op.
+        transition_from_meta_version(&conn).unwrap();
+
+        // Should still have exactly 1 entry.
+        let rows = conn.query("SELECT COUNT(*) FROM _schema_migrations;").unwrap();
+        let count: i64 = rows.first().unwrap().get_typed(0).unwrap();
+        assert_eq!(count, 1, "transition should not re-run on already-transitioned DB");
+    }
+
+    #[test]
+    fn franken_transition_fresh_db_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test_fresh_noop.db");
+
+        // Empty database — no meta table, no tables at all.
+        let conn = FrankenConnection::open(db_path.to_string_lossy().to_string()).unwrap();
+        transition_from_meta_version(&conn).unwrap();
+
+        // _schema_migrations should NOT have been created.
+        let rows = conn
+            .query("SELECT name FROM sqlite_master WHERE type='table' AND name='_schema_migrations';")
+            .unwrap();
+        assert!(rows.is_empty(), "transition should not create _schema_migrations on fresh DB");
+    }
+
+    #[test]
+    fn build_cass_migrations_has_13_migrations() {
+        let runner = build_cass_migrations();
+        // Run on fresh in-memory DB to verify all 13 apply.
+        let conn = FrankenConnection::open(":memory:").unwrap();
+        let result = runner.run(&conn).unwrap();
+        assert!(result.was_fresh);
+        assert_eq!(result.applied.len(), 13, "should apply all 13 migrations");
+        assert_eq!(result.current, 13);
     }
 }

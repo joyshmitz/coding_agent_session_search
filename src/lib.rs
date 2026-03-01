@@ -5819,7 +5819,11 @@ fn run_cli_search(
 
         // Apply offset and limit to get display hits.
         // When limit_val == 0 (meaning "no limit"), take all results.
-        let agg_effective_limit = if limit_val == 0 { usize::MAX } else { limit_val };
+        let agg_effective_limit = if limit_val == 0 {
+            usize::MAX
+        } else {
+            limit_val
+        };
         let display_hits: Vec<_> = result
             .hits
             .iter()
@@ -5841,7 +5845,11 @@ fn run_cli_search(
         // No aggregation - result was over-fetched by one to derive pagination state.
         // When limit_val == 0 (meaning "no limit"), take all results.
         let has_more = limit_val > 0 && result.hits.len() > limit_val;
-        let effective_limit = if limit_val == 0 { usize::MAX } else { limit_val };
+        let effective_limit = if limit_val == 0 {
+            usize::MAX
+        } else {
+            limit_val
+        };
         let display_hits: Vec<_> = result.hits.into_iter().take(effective_limit).collect();
         let known_total = offset_val
             .saturating_add(display_hits.len())

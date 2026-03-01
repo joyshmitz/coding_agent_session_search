@@ -1232,10 +1232,10 @@ pub fn run_index(
                     // continuous watch mode operation. The cooldown logic inside
                     // optimize_if_idle() (300s, 4-segment threshold) prevents
                     // over-merging. See issue #87.
-                    if let Ok(mut guard) = t_index.lock() {
-                        if let Err(e) = guard.optimize_if_idle() {
-                            tracing::warn!(error = %e, "segment merge failed during watch");
-                        }
+                    if let Ok(mut guard) = t_index.lock()
+                        && let Err(e) = guard.optimize_if_idle()
+                    {
+                        tracing::warn!(error = %e, "segment merge failed during watch");
                     }
                 }
             },

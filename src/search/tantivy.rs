@@ -3,11 +3,10 @@ use std::path::Path;
 use anyhow::{Error, Result};
 use frankensearch::lexical::{
     CASS_SCHEMA_HASH, CassDocument as FsCassDocument, CassFields as FsCassFields,
-    CassMergeStatus as FsCassMergeStatus, CassTantivyIndex as FsCassTantivyIndex,
-    Index, IndexReader, Schema, cass_build_schema as fs_build_schema,
-    cass_ensure_tokenizer as fs_ensure_tokenizer,
-    cass_fields_from_schema as fs_fields_from_schema, cass_index_dir as fs_index_dir,
-    cass_schema_hash_matches,
+    CassMergeStatus as FsCassMergeStatus, CassTantivyIndex as FsCassTantivyIndex, Index,
+    IndexReader, Schema, cass_build_schema as fs_build_schema,
+    cass_ensure_tokenizer as fs_ensure_tokenizer, cass_fields_from_schema as fs_fields_from_schema,
+    cass_index_dir as fs_index_dir, cass_schema_hash_matches,
 };
 
 use crate::connectors::NormalizedConversation;

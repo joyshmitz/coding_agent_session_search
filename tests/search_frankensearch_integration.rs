@@ -11,7 +11,7 @@
 use coding_agent_search::search::query::{FieldMask, SearchClient, SearchFilters};
 use coding_agent_search::search::tantivy::TantivyIndex;
 use coding_agent_search::search::vector_index::{
-    SemanticFilter, VectorIndex, VectorIndexWriter, parse_semantic_doc_id,
+    SemanticFilter, VectorIndex, parse_semantic_doc_id,
 };
 use std::collections::HashSet;
 use tempfile::TempDir;
@@ -235,8 +235,12 @@ fn frankensearch_vector_index_write_and_search() {
     )
     .expect("create vector index");
 
-    writer.write_record(&doc_a, &[1.0, 0.0]).expect("write doc_a");
-    writer.write_record(&doc_b, &[0.0, 1.0]).expect("write doc_b");
+    writer
+        .write_record(&doc_a, &[1.0, 0.0])
+        .expect("write doc_a");
+    writer
+        .write_record(&doc_b, &[0.0, 1.0])
+        .expect("write doc_b");
     writer.finish().expect("finish writing");
 
     // Read and search
@@ -408,50 +412,63 @@ fn agent_filter_through_frankensearch_pipeline() {
 /// pipeline (which requires both lexical and semantic indexes).
 #[test]
 fn frankensearch_rrf_fuse_produces_valid_scores() {
-    use frankensearch::{RrfConfig, ScoredResult, ScoreSource, rrf_fuse};
+    use frankensearch::{RrfConfig, ScoreSource, ScoredResult, VectorHit, rrf_fuse};
 
     let lexical_results = vec![
         ScoredResult {
             doc_id: "doc_a".to_string(),
             score: 10.0,
             source: ScoreSource::Lexical,
+            index: None,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(10.0),
+            rerank_score: None,
+            explanation: None,
             metadata: None,
         },
         ScoredResult {
             doc_id: "doc_b".to_string(),
             score: 5.0,
             source: ScoreSource::Lexical,
+            index: None,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(5.0),
+            rerank_score: None,
+            explanation: None,
             metadata: None,
         },
     ];
 
     let semantic_results = vec![
-        ScoredResult {
-            doc_id: "doc_b".to_string(),
+        VectorHit {
+            index: 0,
             score: 0.95,
-            source: ScoreSource::Semantic,
-            metadata: None,
+            doc_id: "doc_b".to_string(),
         },
-        ScoredResult {
-            doc_id: "doc_c".to_string(),
+        VectorHit {
+            index: 1,
             score: 0.8,
-            source: ScoreSource::Semantic,
-            metadata: None,
+            doc_id: "doc_c".to_string(),
         },
     ];
 
-    let config = RrfConfig { k: 60 };
-    let fused = rrf_fuse(&[&lexical_results, &semantic_results], &config);
+    let config = RrfConfig { k: 60.0 };
+    let fused = rrf_fuse(&lexical_results, &semantic_results, 100, 0, &config);
 
     assert!(!fused.is_empty(), "RRF fusion should produce results");
 
     // doc_b appears in both lists, so should have highest RRF score
     let top = &fused[0];
-    assert_eq!(top.doc_id, "doc_b", "doc_b should be ranked highest (appears in both lists)");
+    assert_eq!(
+        top.doc_id, "doc_b",
+        "doc_b should be ranked highest (appears in both lists)"
+    );
 
     // Verify all scores are positive
     for result in &fused {
-        assert!(result.score > 0.0, "RRF scores should be positive");
+        assert!(result.rrf_score > 0.0, "RRF scores should be positive");
     }
 
     // Verify we see all three unique doc_ids
@@ -531,7 +548,10 @@ fn search_results_have_expected_fields() {
         .source_path(dir.path().join("session.jsonl"))
         .base_ts(1_700_000_000_000)
         .messages(1)
-        .with_content(0, "testing that all search hit fields are populated correctly")
+        .with_content(
+            0,
+            "testing that all search hit fields are populated correctly",
+        )
         .build_normalized();
 
     index.add_conversation(&conv).unwrap();
@@ -550,7 +570,10 @@ fn search_results_have_expected_fields() {
     let hit = &hits[0];
 
     assert!(!hit.content.is_empty(), "content should be populated");
-    assert!(!hit.source_path.is_empty(), "source_path should be populated");
+    assert!(
+        !hit.source_path.is_empty(),
+        "source_path should be populated"
+    );
     assert!(!hit.agent.is_empty(), "agent should be populated");
     assert_eq!(hit.agent, "claude_code");
     assert!(hit.score > 0.0, "score should be positive");

@@ -1249,20 +1249,14 @@ impl QueryCache {
 
 /// Returns `Some(&filter)` when the filter has at least one active constraint,
 /// `None` when unrestricted (skip filtering for performance).
-fn semantic_filter_as_search_filter(
-    filter: &SemanticFilter,
-) -> Option<&dyn FsSearchFilter> {
+fn semantic_filter_as_search_filter(filter: &SemanticFilter) -> Option<&dyn FsSearchFilter> {
     let unrestricted = filter.agents.is_none()
         && filter.workspaces.is_none()
         && filter.sources.is_none()
         && filter.roles.is_none()
         && filter.created_from.is_none()
         && filter.created_to.is_none();
-    if unrestricted {
-        None
-    } else {
-        Some(filter)
-    }
+    if unrestricted { None } else { Some(filter) }
 }
 
 fn open_fs_semantic_ann_index(fs_index: &FsVectorIndex, ann_path: &Path) -> Result<FsHnswIndex> {
