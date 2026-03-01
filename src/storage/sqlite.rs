@@ -1732,7 +1732,7 @@ impl FrankenStorage {
         self.conn.execute_params(
             "INSERT INTO agents(slug, name, version, kind, created_at, updated_at) VALUES(?1,?2,?3,?4,?5,?6)
              ON CONFLICT(slug) DO UPDATE SET name=excluded.name, version=excluded.version, kind=excluded.kind, updated_at=excluded.updated_at",
-            params![
+            fparams![
                 agent.slug.as_str(),
                 agent.name.as_str(),
                 agent.version.as_deref(),
@@ -1745,7 +1745,7 @@ impl FrankenStorage {
         self.conn
             .query_row_map(
                 "SELECT id FROM agents WHERE slug = ?1",
-                params![agent.slug.as_str()],
+                fparams![agent.slug.as_str()],
                 |row| row.get_typed(0),
             )
             .with_context(|| format!("fetching agent id for {}", agent.slug))
@@ -1757,13 +1757,13 @@ impl FrankenStorage {
         self.conn.execute_params(
             "INSERT INTO workspaces(path, display_name) VALUES(?1,?2)
              ON CONFLICT(path) DO UPDATE SET display_name=COALESCE(excluded.display_name, workspaces.display_name)",
-            params![path_str.as_str(), display_name],
+            fparams![path_str.as_str(), display_name],
         )?;
 
         self.conn
             .query_row_map(
                 "SELECT id FROM workspaces WHERE path = ?1",
-                params![path_str.as_str()],
+                fparams![path_str.as_str()],
                 |row| row.get_typed(0),
             )
             .with_context(|| format!("fetching workspace id for {path_str}"))
@@ -1807,7 +1807,7 @@ impl FrankenStorage {
     pub fn get_last_scan_ts(&self) -> Result<Option<i64>> {
         let result: Result<String, _> = self.conn.query_row_map(
             "SELECT value FROM meta WHERE key = 'last_scan_ts'",
-            params![],
+            fparams![],
             |row| row.get_typed(0),
         );
         match result.optional() {
@@ -1821,7 +1821,7 @@ impl FrankenStorage {
     pub fn set_last_scan_ts(&self, ts: i64) -> Result<()> {
         self.conn.execute_params(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('last_scan_ts', ?1)",
-            params![ts.to_string()],
+            fparams![ts.to_string()],
         )?;
         Ok(())
     }
@@ -1830,7 +1830,7 @@ impl FrankenStorage {
     pub fn set_last_indexed_at(&self, ts: i64) -> Result<()> {
         self.conn.execute_params(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('last_indexed_at', ?1)",
-            params![ts.to_string()],
+            fparams![ts.to_string()],
         )?;
         Ok(())
     }
@@ -1840,7 +1840,7 @@ impl FrankenStorage {
         self.conn
             .query_map_collect(
                 "SELECT id, slug, name, version, kind FROM agents ORDER BY slug",
-                params![],
+                fparams![],
                 |row| {
                     let kind: String = row.get_typed(4)?;
                     Ok(Agent {
@@ -1864,7 +1864,7 @@ impl FrankenStorage {
         self.conn
             .query_map_collect(
                 "SELECT id, path, display_name FROM workspaces ORDER BY path",
-                params![],
+                fparams![],
                 |row| {
                     let path_str: String = row.get_typed(1)?;
                     Ok(crate::model::types::Workspace {
@@ -1889,7 +1889,7 @@ impl FrankenStorage {
                 LEFT JOIN workspaces w ON c.workspace_id = w.id
                 ORDER BY c.started_at IS NULL, c.started_at DESC, c.id DESC
                 LIMIT ?1 OFFSET ?2",
-                params![limit, offset],
+                fparams![limit, offset],
                 |row| {
                     let workspace_path: Option<String> = row.get_typed(2)?;
                     let source_path: String = row.get_typed(5)?;
@@ -1919,7 +1919,7 @@ impl FrankenStorage {
         self.conn
             .query_map_collect(
                 "SELECT id, idx, role, author, created_at, content, extra_json, extra_bin FROM messages WHERE conversation_id = ?1 ORDER BY idx",
-                params![conversation_id],
+                fparams![conversation_id],
                 |row| {
                     let role: String = row.get_typed(2)?;
                     Ok(Message {
@@ -1947,7 +1947,7 @@ impl FrankenStorage {
     pub fn get_source(&self, id: &str) -> Result<Option<Source>> {
         let result = self.conn.query_row_map(
             "SELECT id, kind, host_label, machine_id, platform, config_json, created_at, updated_at FROM sources WHERE id = ?1",
-            params![id],
+            fparams![id],
             |row| {
                 let kind_str: String = row.get_typed(1)?;
                 Ok(Source {
@@ -1970,7 +1970,7 @@ impl FrankenStorage {
         self.conn
             .query_map_collect(
                 "SELECT id, kind, host_label, machine_id, platform, config_json, created_at, updated_at FROM sources ORDER BY id",
-                params![],
+                fparams![],
                 |row| {
                     let kind_str: String = row.get_typed(1)?;
                     Ok(Source {
@@ -1993,7 +1993,7 @@ impl FrankenStorage {
         self.conn
             .query_map_collect(
                 "SELECT id FROM sources WHERE id != 'local' ORDER BY id",
-                params![],
+                fparams![],
                 |row| row.get_typed(0),
             )
             .with_context(|| "listing source ids")
@@ -2002,7 +2002,12 @@ impl FrankenStorage {
     /// Create or update a source.
     pub fn upsert_source(&self, source: &Source) -> Result<()> {
         let now = Self::now_millis();
-        let kind_str = source.kind.as_str();
+        let kind_str = source.kind.to_string();
+        let config_json_str = source
+            .config_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
 
         self.conn.execute_params(
             "INSERT INTO sources(id, kind, host_label, machine_id, platform, config_json, created_at, updated_at)
@@ -2014,13 +2019,13 @@ impl FrankenStorage {
                 platform=excluded.platform,
                 config_json=excluded.config_json,
                 updated_at=excluded.updated_at",
-            params![
+            fparams![
                 source.id.as_str(),
-                kind_str,
+                kind_str.as_str(),
                 source.host_label.as_deref(),
                 source.machine_id.as_deref(),
                 source.platform.as_deref(),
-                source.config_json.as_deref(),
+                config_json_str.as_deref(),
                 source.created_at.unwrap_or(now),
                 now
             ],
@@ -2035,7 +2040,7 @@ impl FrankenStorage {
         }
         let count = self.conn.execute_params(
             "DELETE FROM sources WHERE id = ?1",
-            params![id],
+            fparams![id],
         )?;
         Ok(count > 0)
     }
@@ -2053,7 +2058,7 @@ impl FrankenStorage {
                 .conn
                 .query_row_map(
                     "SELECT id FROM conversations WHERE source_id = ?1 AND agent_id = ?2 AND external_id = ?3",
-                    params![conv.source_id.as_str(), agent_id, ext.as_str()],
+                    fparams![conv.source_id.as_str(), agent_id, ext.as_str()],
                     |row| row.get_typed(0),
                 )
                 .optional()?;
@@ -2102,7 +2107,7 @@ impl FrankenStorage {
 
         let rows = tx.query_with_params(
             "SELECT MAX(idx) FROM messages WHERE conversation_id = ?1",
-            &[frankensqlite::value::SqliteValue::Integer(conversation_id)],
+            fparams![conversation_id],
         )?;
         let cutoff: i64 = rows
             .first()
