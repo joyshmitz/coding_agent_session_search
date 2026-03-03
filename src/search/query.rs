@@ -1,7 +1,8 @@
 use anyhow::{Result, anyhow, bail};
 use crossbeam_channel as mpsc;
 use frankensearch::lexical::{
-    BooleanQuery, CassQueryFilters as FsCassQueryFilters, CassQueryToken as FsCassQueryToken,
+    BooleanQuery, CASS_SCHEMA_HASH as FS_CASS_SCHEMA_HASH, CassFields as FsCassFields,
+    CassQueryFilters as FsCassQueryFilters, CassQueryToken as FsCassQueryToken,
     CassSourceFilter as FsCassSourceFilter, CassWildcardPattern as FsCassWildcardPattern,
     IndexReader, IndexRecordOption, Occur, Query, ReloadPolicy, Searcher,
     SnippetConfig as FsSnippetConfig, TantivyDocument, Term, TermQuery, TopDocs, Value,
@@ -1420,7 +1421,7 @@ impl SemanticSearchState {
 }
 
 pub struct SearchClient {
-    reader: Option<(IndexReader, crate::search::tantivy::Fields)>,
+    reader: Option<(IndexReader, FsCassFields)>,
     sqlite: Mutex<Option<SendConnection>>,
     sqlite_path: Option<PathBuf>,
     prefix_cache: Mutex<CacheShards>,
@@ -1858,11 +1859,7 @@ impl SearchClient {
         let shared_filters = Arc::new(Mutex::new(()));
         let reload_epoch = Arc::new(AtomicU64::new(0));
         let metrics = Metrics::default();
-        let cache_namespace = format!(
-            "v{}|schema:{}",
-            CACHE_KEY_VERSION,
-            crate::search::tantivy::SCHEMA_HASH
-        );
+        let cache_namespace = format!("v{}|schema:{}", CACHE_KEY_VERSION, FS_CASS_SCHEMA_HASH);
 
         let warm_pair = if options.enable_warm
             && let Some((reader, fields)) = &tantivy
@@ -2847,7 +2844,7 @@ impl SearchClient {
     fn search_tantivy(
         &self,
         reader: &IndexReader,
-        fields: &crate::search::tantivy::Fields,
+        fields: &FsCassFields,
         raw_query: &str,
         sanitized_query: &str,
         filters: SearchFilters,
@@ -3436,7 +3433,7 @@ impl Metrics {
 
 fn maybe_spawn_warm_worker(
     reader: IndexReader,
-    fields: crate::search::tantivy::Fields,
+    fields: FsCassFields,
     filters_guard: std::sync::Weak<Mutex<()>>,
     reload_epoch: Arc<AtomicU64>,
     metrics: Metrics,
