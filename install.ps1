@@ -46,7 +46,37 @@ $checksumToUse = $Checksum
 if (-not $checksumToUse) {
   if (-not $ChecksumUrl) { $ChecksumUrl = "$url.sha256" }
   Write-Host "Fetching checksum from $ChecksumUrl"
-  try { $checksumToUse = (Invoke-WebRequest -Uri $ChecksumUrl -UseBasicParsing).Content.Trim().Split(' ')[0] } catch { Write-Error "Checksum file not found or invalid; refusing to install."; exit 1 }
+  $checksumFetched = $false
+  # Try per-file .sha256 first, then fall back to SHA256SUMS.txt
+  foreach ($tryUrl in @($ChecksumUrl, "https://github.com/$Owner/$Repo/releases/download/$Version/SHA256SUMS.txt")) {
+    if ($checksumFetched) { break }
+    try {
+      # Use Invoke-RestMethod which returns the body as a string and follows
+      # redirects reliably across all PowerShell versions (Windows PS 5.x and
+      # PS Core 7+).  Invoke-WebRequest with -UseBasicParsing can return
+      # .Content as a byte array in PS 5.x, breaking .Trim().
+      $raw = Invoke-RestMethod -Uri $tryUrl -ErrorAction Stop
+      if ($tryUrl -like "*/SHA256SUMS.txt") {
+        # SHA256SUMS.txt contains lines like: <hash>  <filename>
+        foreach ($line in $raw -split "`n") {
+          if ($line -match $zip) {
+            $checksumToUse = ($line.Trim() -split '\s+')[0]
+            $checksumFetched = $true
+            break
+          }
+        }
+      } else {
+        $checksumToUse = ($raw.Trim() -split '\s+')[0]
+        $checksumFetched = $true
+      }
+    } catch {
+      Write-Host "Could not fetch checksum from $tryUrl, trying next source..."
+    }
+  }
+  if (-not $checksumFetched -or -not $checksumToUse) {
+    Write-Error "Checksum file not found or invalid; refusing to install."
+    exit 1
+  }
 }
 
 $hash = Get-FileHash $zipFile -Algorithm SHA256

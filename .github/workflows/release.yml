@@ -387,6 +387,19 @@ jobs:
             echo "skip=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: Resolve Windows checksum
+        if: steps.check.outputs.skip != 'true'
+        id: checksums
+        shell: bash
+        run: |
+          BASE_URL="https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v${{ needs.release.outputs.version }}"
+          windows_amd64="$(curl -fsSL "${BASE_URL}/cass-windows-amd64.zip.sha256" | awk '{print $1}')"
+          if [[ ! "${windows_amd64}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Invalid checksum for windows_amd64: ${windows_amd64}"
+            exit 1
+          fi
+          echo "windows_amd64=${windows_amd64}" >> "$GITHUB_OUTPUT"
+
       - name: Trigger manifest update
         if: steps.check.outputs.skip != 'true'
         uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
@@ -397,7 +410,10 @@ jobs:
           client-payload: |
             {
               "tool": "cass",
-              "version": "${{ needs.release.outputs.version }}"
+              "version": "${{ needs.release.outputs.version }}",
+              "url": "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v${{ needs.release.outputs.version }}/cass-windows-amd64.zip",
+              "hash": "${{ steps.checksums.outputs.windows_amd64 }}",
+              "asset_name": "cass-windows-amd64.zip"
             }
 
       - name: Log dispatch
@@ -406,3 +422,5 @@ jobs:
           echo "Dispatched manifest-update event to scoop-bucket"
           echo "   Tool: cass"
           echo "   Version: ${{ needs.release.outputs.version }}"
+          echo "   Asset: cass-windows-amd64.zip"
+          echo "   Checksum: ${{ steps.checksums.outputs.windows_amd64 }}"
