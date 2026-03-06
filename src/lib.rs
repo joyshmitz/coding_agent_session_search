@@ -8056,7 +8056,7 @@ fn run_health(
     let start = Instant::now();
     let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
-    let state = state_meta_json(&data_dir, &db_path, stale_threshold, false);
+    let state = state_meta_json(&data_dir, &db_path, stale_threshold, true);
 
     let index_exists = state
         .get("index")
@@ -12246,6 +12246,14 @@ fn run_export_html(
                 content
             };
 
+            // Skip non-message records (queue-operation, summary, etc.)
+            // These are internal bookkeeping entries, not actual conversation messages.
+            // Only user, assistant, system, and unknown are valid message roles.
+            match role.as_str() {
+                "user" | "assistant" | "system" | "unknown" => {}
+                _ => return None,
+            }
+
             // Skip empty messages: no content AND no tool call AND unknown role
             // This filters out malformed/empty entries that would look broken
             if content.is_empty() && tool_call.is_none() && role == "unknown" {
@@ -13578,6 +13586,10 @@ fn format_as_markdown(
 
     for msg in messages {
         let role = extract_role(msg);
+        // Skip non-message records (queue-operation, summary, etc.)
+        if !matches!(role.as_str(), "user" | "assistant" | "system" | "unknown") {
+            continue;
+        }
         match role.as_str() {
             "user" => md.push_str("## 👤 User\n\n"),
             "assistant" => md.push_str("## 🤖 Assistant\n\n"),
@@ -13639,6 +13651,10 @@ fn format_as_text(messages: &[serde_json::Value], include_tools: bool) -> String
     let mut text = String::new();
     for msg in messages {
         let role = extract_role(msg);
+        // Skip non-message records (queue-operation, summary, etc.)
+        if !matches!(role.as_str(), "user" | "assistant" | "system" | "unknown") {
+            continue;
+        }
         text.push_str(&format!("=== {} ===\n\n", role.to_uppercase()));
 
         let content = extract_text_content(msg);
@@ -13719,6 +13735,10 @@ fn format_as_html(
 
     for msg in messages {
         let role = extract_role(msg);
+        // Skip non-message records (queue-operation, summary, etc.)
+        if !matches!(role.as_str(), "user" | "assistant" | "system" | "unknown") {
+            continue;
+        }
         let role_class = if role == "user" { "user" } else { "assistant" };
         let role_display = match role.as_str() {
             "user" => "👤 User",
@@ -14042,7 +14062,9 @@ fn extract_role(msg: &serde_json::Value) -> String {
         match type_val {
             "user" => return "user".to_string(),
             "assistant" => return "assistant".to_string(),
-            _ => {}
+            // Return the actual type for non-message records (e.g. "queue-operation",
+            // "system", etc.) so callers can filter them rather than rendering as blank
+            other => return other.to_string(),
         }
     }
     "unknown".to_string()
