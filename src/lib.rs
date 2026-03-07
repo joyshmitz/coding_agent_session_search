@@ -12248,9 +12248,9 @@ fn run_export_html(
 
             // Skip non-message records (queue-operation, summary, etc.)
             // These are internal bookkeeping entries, not actual conversation messages.
-            // Only user, assistant, system, and unknown are valid message roles.
+            // Only user, assistant, system, tool, and unknown are valid message roles.
             match role.as_str() {
-                "user" | "assistant" | "system" | "unknown" => {}
+                "user" | "assistant" | "system" | "tool" | "unknown" => {}
                 _ => return None,
             }
 
@@ -13587,7 +13587,7 @@ fn format_as_markdown(
     for msg in messages {
         let role = extract_role(msg);
         // Skip non-message records (queue-operation, summary, etc.)
-        if !matches!(role.as_str(), "user" | "assistant" | "system" | "unknown") {
+        if !matches!(role.as_str(), "user" | "assistant" | "system" | "tool" | "unknown") {
             continue;
         }
         match role.as_str() {
@@ -13652,7 +13652,7 @@ fn format_as_text(messages: &[serde_json::Value], include_tools: bool) -> String
     for msg in messages {
         let role = extract_role(msg);
         // Skip non-message records (queue-operation, summary, etc.)
-        if !matches!(role.as_str(), "user" | "assistant" | "system" | "unknown") {
+        if !matches!(role.as_str(), "user" | "assistant" | "system" | "tool" | "unknown") {
             continue;
         }
         text.push_str(&format!("=== {} ===\n\n", role.to_uppercase()));
@@ -13736,7 +13736,7 @@ fn format_as_html(
     for msg in messages {
         let role = extract_role(msg);
         // Skip non-message records (queue-operation, summary, etc.)
-        if !matches!(role.as_str(), "user" | "assistant" | "system" | "unknown") {
+        if !matches!(role.as_str(), "user" | "assistant" | "system" | "tool" | "unknown") {
             continue;
         }
         let role_class = if role == "user" { "user" } else { "assistant" };
