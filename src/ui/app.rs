@@ -17942,7 +17942,7 @@ impl super::ftui_adapter::Model for CassApp {
                             .constraints([Constraint::Fixed(1), Constraint::Min(1)])
                             .split(query_inner)
                     } else {
-                        vec![query_inner]
+                        smallvec::smallvec![query_inner]
                     };
 
                     let query_row = rows[0];
@@ -18579,7 +18579,7 @@ impl super::ftui_adapter::Model for CassApp {
                             .constraints([Constraint::Fixed(1), Constraint::Min(1)])
                             .split(header_inner)
                     } else {
-                        vec![header_inner]
+                        smallvec::smallvec![header_inner]
                     };
 
                     let tab_line = self.analytics_tabs_line(

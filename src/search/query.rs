@@ -2893,7 +2893,7 @@ impl SearchClient {
         // Compute match type once for all results (not per-hit)
         let query_match_type = dominant_match_type(sanitized_query);
         let mut hits = Vec::new();
-        for ranked_hit in top_docs {
+        for ranked_hit in top_docs.hits {
             let score = ranked_hit.bm25_score;
             let doc: TantivyDocument = fs_load_doc(&searcher, ranked_hit.doc_address)?;
             let title = if field_mask.wants_title() {
