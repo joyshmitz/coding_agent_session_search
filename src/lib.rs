@@ -8710,26 +8710,56 @@ fn run_doctor(
                         // FTS table missing - attempt to recreate it if --fix is set
                         if fix {
                             use frankensqlite::compat::BatchExt as _;
-                            let create_result = conn.execute_batch(
-                                r#"
-                                CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
-                                    content,
-                                    title,
-                                    agent,
-                                    workspace,
-                                    source_path,
-                                    created_at UNINDEXED,
-                                    message_id UNINDEXED,
-                                    tokenize='porter'
+                            let create_result = (|| -> Result<(), frankensqlite::FrankenError> {
+                                conn.execute_batch(
+                                    r#"
+                                    CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
+                                        content,
+                                        title,
+                                        agent,
+                                        workspace,
+                                        source_path,
+                                        created_at UNINDEXED,
+                                        message_id UNINDEXED,
+                                        tokenize='porter'
+                                    );
+                                    "#,
+                                )?;
+
+                                // Batch the INSERT to avoid OOM on large databases (#110)
+                                let total_count: i64 = conn.query_row_map(
+                                    "SELECT COUNT(*) FROM messages WHERE content IS NOT NULL",
+                                    &[],
+                                    |r: &frankensqlite::Row| r.get_typed(0),
+                                )?;
+                                let batch_size: i64 = 10_000;
+                                let mut offset: i64 = 0;
+
+                                while offset < total_count {
+                                    info!(
+                                        "Rebuilding FTS: {}/{} rows...",
+                                        offset.min(total_count),
+                                        total_count
+                                    );
+                                    conn.execute_batch(&format!(
+                                        "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+                                         SELECT m.content, m.title, a.name, w.name, m.source_path, m.created_at, m.id
+                                         FROM messages m
+                                         LEFT JOIN agents a ON m.agent_id = a.id
+                                         LEFT JOIN workspaces w ON m.workspace_id = w.id
+                                         WHERE m.content IS NOT NULL
+                                         ORDER BY m.rowid
+                                         LIMIT {} OFFSET {};",
+                                        batch_size, offset
+                                    ))?;
+                                    offset += batch_size;
+                                }
+                                info!(
+                                    "Rebuilding FTS: {}/{} rows complete.",
+                                    total_count, total_count
                                 );
-                                INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
-                                SELECT m.content, m.title, a.name, w.name, m.source_path, m.created_at, m.id
-                                FROM messages m
-                                LEFT JOIN agents a ON m.agent_id = a.id
-                                LEFT JOIN workspaces w ON m.workspace_id = w.id
-                                WHERE m.content IS NOT NULL;
-                                "#,
-                            );
+                                Ok(())
+                            })();
                             match create_result {
                                 Ok(_) => {
                                     checks.push(Check {

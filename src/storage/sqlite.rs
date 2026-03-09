@@ -2591,17 +2591,38 @@ impl FrankenStorage {
         })
     }
 
-    /// Rebuild the FTS5 index from scratch.
+    /// Rebuild the FTS5 index from scratch (chunked to avoid OOM on large databases, #110).
     pub fn rebuild_fts(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "DELETE FROM fts_messages;
-             INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
-             SELECT m.content, c.title, a.slug, w.path, c.source_path, m.created_at, m.id
-             FROM messages m
-             JOIN conversations c ON m.conversation_id = c.id
-             JOIN agents a ON c.agent_id = a.id
-             LEFT JOIN workspaces w ON c.workspace_id = w.id;",
+        self.conn.execute_batch("DELETE FROM fts_messages;")?;
+
+        let total_count: i64 = self.conn.query_row_map(
+            "SELECT COUNT(*) FROM messages",
+            &[],
+            |r: &FrankenRow| r.get_typed(0),
         )?;
+        let batch_size: i64 = 10_000;
+        let mut offset: i64 = 0;
+
+        while offset < total_count {
+            info!(
+                "Rebuilding FTS: {}/{} rows...",
+                offset.min(total_count),
+                total_count
+            );
+            self.conn.execute_batch(&format!(
+                "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+                 SELECT m.content, c.title, a.slug, w.path, c.source_path, m.created_at, m.id
+                 FROM messages m
+                 JOIN conversations c ON m.conversation_id = c.id
+                 JOIN agents a ON c.agent_id = a.id
+                 LEFT JOIN workspaces w ON c.workspace_id = w.id
+                 ORDER BY m.rowid
+                 LIMIT {} OFFSET {};",
+                batch_size, offset
+            ))?;
+            offset += batch_size;
+        }
+        info!("Rebuilding FTS: {}/{} rows complete.", total_count, total_count);
         Ok(())
     }
 
@@ -5821,14 +5842,34 @@ impl SqliteStorage {
 
     pub fn rebuild_fts(&mut self) -> Result<()> {
         self.conn.execute("DELETE FROM fts_messages", [])?;
-        self.conn.execute_batch(
-            r"INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
-               SELECT m.content, c.title, a.slug, w.path, c.source_path, m.created_at, m.id
-               FROM messages m
-               JOIN conversations c ON m.conversation_id = c.id
-               JOIN agents a ON c.agent_id = a.id
-               LEFT JOIN workspaces w ON c.workspace_id = w.id;",
-        )?;
+
+        // Chunked insert to avoid OOM on large databases (#110)
+        let total_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
+        let batch_size: i64 = 10_000;
+        let mut offset: i64 = 0;
+
+        while offset < total_count {
+            info!(
+                "Rebuilding FTS: {}/{} rows...",
+                offset.min(total_count),
+                total_count
+            );
+            self.conn.execute(
+                "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+                 SELECT m.content, c.title, a.slug, w.path, c.source_path, m.created_at, m.id
+                 FROM messages m
+                 JOIN conversations c ON m.conversation_id = c.id
+                 JOIN agents a ON c.agent_id = a.id
+                 LEFT JOIN workspaces w ON c.workspace_id = w.id
+                 ORDER BY m.rowid
+                 LIMIT ?1 OFFSET ?2",
+                params![batch_size, offset],
+            )?;
+            offset += batch_size;
+        }
+        info!("Rebuilding FTS: {}/{} rows complete.", total_count, total_count);
         Ok(())
     }
 
