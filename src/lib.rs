@@ -8659,6 +8659,18 @@ fn run_doctor(
         match frankensqlite::Connection::open(db_path.to_string_lossy().as_ref()) {
             Ok(conn) => {
                 use frankensqlite::compat::{ConnectionExt as _, RowExt as _};
+
+                // Fix #115: Register the FTS5 virtual table so FrankenSQLite
+                // can see it.  Without this, databases created by stock
+                // rusqlite have rootpage=0 for virtual tables and
+                // FrankenSQLite's sqlite_master parsing silently skips them.
+                if let Err(e) = crate::storage::sqlite::register_fts5_on_connection(&conn) {
+                    tracing::debug!(
+                        error = %e,
+                        "doctor: fts_messages virtual table registration failed (non-fatal)"
+                    );
+                }
+
                 let conv_count: Option<i64> = conn
                     .query_row_map(
                         "SELECT COUNT(*) FROM conversations",
@@ -8782,7 +8794,12 @@ fn run_doctor(
                                     add_check!(
                                         "fts_table",
                                         "fail",
-                                        format!("FTS table missing and recreation failed: {}", e),
+                                        format!(
+                                            "FTS table missing and recreation failed: {}. \
+                                             This may indicate the FTS5 module was not registered \
+                                             on this connection (see #115).",
+                                            e
+                                        ),
                                         true
                                     );
                                     needs_rebuild = true;

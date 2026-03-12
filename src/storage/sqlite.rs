@@ -574,6 +574,31 @@ pub fn is_user_data_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// SQL to register the FTS5 virtual table on a frankensqlite connection.
+///
+/// FrankenSQLite skips virtual-table entries (rootpage=0) when loading
+/// `sqlite_master` from a stock-SQLite database.  Executing this CREATE
+/// triggers the legacy FTS5 fallback path and materialises the table so
+/// subsequent FTS queries work.
+pub const FTS5_REGISTER_SQL: &str = "\
+    CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(\
+        content, title, agent, workspace, source_path, \
+        created_at UNINDEXED, message_id UNINDEXED, \
+        tokenize='porter'\
+    )";
+
+/// Register the `fts_messages` FTS5 virtual table on a frankensqlite
+/// [`Connection`](FrankenConnection).
+///
+/// This is idempotent (`IF NOT EXISTS`) and safe to call on every open.
+/// Returns `Ok(())` on success or if the table already exists.  On failure
+/// the error is returned so callers can decide whether to log or propagate.
+pub fn register_fts5_on_connection(
+    conn: &FrankenConnection,
+) -> std::result::Result<(), frankensqlite::FrankenError> {
+    conn.execute(FTS5_REGISTER_SQL)
+}
+
 /// Create a timestamped backup of the database file.
 ///
 /// Returns the path to the backup file, or None if the source doesn't exist.
