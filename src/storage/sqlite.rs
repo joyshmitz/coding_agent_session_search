@@ -1534,8 +1534,19 @@ impl FrankenStorage {
     fn sync_meta_schema_version(&self, version: i64) -> Result<()> {
         // The meta table is created by V1 migration. If it doesn't exist yet,
         // there's nothing to sync.
-        if self.conn.query("SELECT key FROM meta;").is_err() {
+        if self.conn.query("SELECT key FROM meta LIMIT 1;").is_err() {
             return Ok(());
+        }
+
+        // Only write if the version needs updating to avoid write lock contention
+        if let Ok(rows) = self
+            .conn
+            .query("SELECT value FROM meta WHERE key = 'schema_version';")
+            && let Some(row) = rows.first()
+            && let Ok(val) = row.get_typed::<String>(0)
+            && val == version.to_string()
+        {
+            return Ok(()); // Already up to date
         }
 
         self.conn
@@ -2080,15 +2091,18 @@ const MIGRATION_NAMES: [(i64, &str); 13] = [
 /// - If `schema_version = 0` but tables exist → corrupted state, log warning
 fn transition_from_meta_version(conn: &FrankenConnection) -> Result<()> {
     // Check if _schema_migrations already exists → already transitioned.
-    if conn
-        .query("SELECT version FROM \"_schema_migrations\";")
-        .is_ok()
-    {
+    let rows = conn
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='_schema_migrations';")
+        .with_context(|| "checking for _schema_migrations table")?;
+    if !rows.is_empty() {
         return Ok(());
     }
 
     // Check if the meta table exists.
-    if conn.query("SELECT key FROM meta;").is_err() {
+    let rows = conn
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='meta';")
+        .with_context(|| "checking for meta table")?;
+    if rows.is_empty() {
         // No meta table → fresh database, let MigrationRunner handle it.
         return Ok(());
     }
@@ -2720,8 +2734,10 @@ impl FrankenStorage {
             fparams![db_path, model_id, total_docs],
         )?;
         let rows = self.conn.query("SELECT last_insert_rowid();")?;
-        let id: i64 = rows.first().and_then(|r| r.get_typed(0).ok()).unwrap_or(0);
-        Ok(id)
+        rows.first()
+            .and_then(|r| r.get_typed::<i64>(0).ok())
+            .filter(|&id| id > 0)
+            .with_context(|| "last_insert_rowid() returned NULL or 0 after embedding job INSERT")
     }
 
     /// Mark an embedding job as started.
@@ -3285,10 +3301,10 @@ impl FrankenStorage {
 /// Get last_insert_rowid from a frankensqlite transaction.
 fn franken_last_rowid(tx: &FrankenTransaction<'_>) -> Result<i64> {
     let rows = tx.query("SELECT last_insert_rowid();")?;
-    Ok(rows
-        .first()
+    rows.first()
         .and_then(|r| r.get_typed::<i64>(0).ok())
-        .unwrap_or(0))
+        .filter(|&id| id > 0)
+        .with_context(|| "last_insert_rowid() returned NULL or 0 after INSERT")
 }
 
 /// Insert a conversation into the DB within a frankensqlite transaction.
@@ -10171,13 +10187,9 @@ mod tests {
         transition_from_meta_version(&conn).unwrap();
 
         // _schema_migrations should NOT have been created.
-        let rows = conn
-            .query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='_schema_migrations';",
-            )
-            .unwrap();
+        let res = conn.query("SELECT * FROM \"_schema_migrations\";");
         assert!(
-            rows.is_empty(),
+            res.is_err(),
             "transition should not create _schema_migrations on fresh DB"
         );
     }

@@ -14268,8 +14268,11 @@ fn smart_truncate(s: &str, max_len: usize) -> String {
     }
 
     // Look for last word boundary (space)
-    let last_idx = char_indices.last().map(|(i, _)| *i).unwrap_or(0);
-    let truncated = &s[..=last_idx];
+    let end_byte = char_indices
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let truncated = &s[..end_byte];
 
     // Find last space to break at word boundary
     if let Some(last_space) = truncated.rfind(|c: char| c.is_whitespace())

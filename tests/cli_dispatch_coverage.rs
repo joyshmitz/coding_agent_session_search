@@ -29,11 +29,27 @@ fn base_cmd(temp_home: &Path) -> Command {
     cmd
 }
 
-/// Create base command without HOME isolation (for simple tests).
+/// Create base command without HOME isolation (for simple tests), but with isolated XDG_DATA_HOME.
 fn simple_cmd() -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cass"));
     cmd.env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1");
     cmd.env("NO_COLOR", "1");
+
+    // Create an isolated empty database with schema to avoid hitting the real user DB
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_dir = tmp.path().join("coding-agent-search");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    let db_path = db_dir.join("agent_search.db");
+
+    // Initialize the schema
+    let fs = coding_agent_search::storage::sqlite::FrankenStorage::open(&db_path).unwrap();
+    drop(fs);
+
+    cmd.env("XDG_DATA_HOME", tmp.path());
+
+    // Leak the temp dir so it survives the command execution
+    std::mem::forget(tmp);
+
     cmd
 }
 

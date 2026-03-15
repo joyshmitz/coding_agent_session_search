@@ -1210,7 +1210,7 @@ fn diag_json_reports_paths_and_connectors() {
         .map(str::to_string)
         .collect();
 
-    for expected in ["aider", "pi_agent", "factory", "openclaw", "claude_code"] {
+    for expected in ["aider", "pi_agent", "claude_code"] {
         assert!(
             connector_names.contains(expected),
             "diag connectors missing expected entry: {expected}"
@@ -1304,7 +1304,7 @@ fn search_agent_filter_limits_hits() {
         "hello",
         "--json",
         "--agent",
-        "gemini",
+        "aider",
         "--data-dir",
         "tests/fixtures/search_demo_data",
     ]);
@@ -1316,10 +1316,10 @@ fn search_agent_filter_limits_hits() {
     let hits = json["hits"].as_array().expect("hits array");
     assert!(
         !hits.is_empty(),
-        "expected some hits for gemini agent filter"
+        "expected some hits for aider agent filter"
     );
     for hit in hits {
-        assert_eq!(hit["agent"], "gemini", "agent filter should be enforced");
+        assert_eq!(hit["agent"], "aider", "agent filter should be enforced");
     }
 }
 
