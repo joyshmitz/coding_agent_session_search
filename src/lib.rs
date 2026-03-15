@@ -2992,15 +2992,7 @@ async fn execute_cli(
                         }
 
                         // Get database path
-                        let db_path = cli.db.clone().unwrap_or_else(|| {
-                            directories::ProjectDirs::from(
-                                "com",
-                                "dicklesworthstone",
-                                "coding-agent-search",
-                            )
-                            .map(|dirs| dirs.data_dir().join("agent_search.db"))
-                            .unwrap_or_else(default_db_path)
-                        });
+                        let db_path = cli.db.clone().unwrap_or_else(default_db_path);
 
                         // Convert config to WizardState and run export
                         let wizard_state =
@@ -3119,15 +3111,7 @@ async fn execute_cli(
                             });
                         }
                     } else if scan_secrets {
-                        let db_path = cli.db.clone().unwrap_or_else(|| {
-                            directories::ProjectDirs::from(
-                                "com",
-                                "dicklesworthstone",
-                                "coding-agent-search",
-                            )
-                            .map(|dirs| dirs.data_dir().join("agent_search.db"))
-                            .unwrap_or_else(default_db_path)
-                        });
+                        let db_path = cli.db.clone().unwrap_or_else(default_db_path);
 
                         let workspaces_path = workspaces
                             .clone()

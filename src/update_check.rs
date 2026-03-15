@@ -366,10 +366,7 @@ async fn fetch_latest_release() -> Result<GitHubRelease> {
 
 /// Get path to update state file
 fn state_path() -> PathBuf {
-    directories::ProjectDirs::from("com", "dicklesworthstone", "coding-agent-search").map_or_else(
-        || PathBuf::from("update_state.json"),
-        |dirs| dirs.data_dir().join("update_state.json"),
-    )
+    crate::default_data_dir().join("update_state.json")
 }
 
 fn legacy_state_path() -> PathBuf {

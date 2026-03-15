@@ -355,10 +355,7 @@ fn row_to_bookmark(row: &frankensqlite::Row) -> Result<Bookmark, frankensqlite::
 
 /// Get the default bookmarks database path
 pub fn default_bookmarks_path() -> PathBuf {
-    directories::ProjectDirs::from("com", "coding-agent-search", "coding-agent-search").map_or_else(
-        || PathBuf::from("bookmarks.db"),
-        |dirs| dirs.data_dir().join("bookmarks.db"),
-    )
+    crate::default_data_dir().join("bookmarks.db")
 }
 
 /// SQL schema for bookmarks database
