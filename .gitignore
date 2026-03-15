@@ -131,8 +131,8 @@ path_test
 scan.txt
 
 # Core dumps and agent config backups
-core.*
-core
+/core.*
+/core
 *.mcp.json.*.bak
 cline.mcp.json
 opencode.json
