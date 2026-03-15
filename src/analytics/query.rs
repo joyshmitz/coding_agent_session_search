@@ -1647,6 +1647,7 @@ mod tests {
         conn
     }
 
+    #[allow(dead_code)]
     /// Legacy Track A schema fixture (pre plan-token rollup columns).
     fn setup_usage_daily_legacy_db() -> Connection {
         let conn = Connection::open(":memory:").unwrap();
