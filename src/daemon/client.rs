@@ -237,7 +237,9 @@ impl UdsDaemonClient {
             .map_err(|e| DaemonError::Failed(format!("failed to encode request: {}", e)))?;
 
         let mut stream_guard = self.get_connection_locked()?;
-        let stream = stream_guard.as_mut().unwrap();
+        let stream = stream_guard
+            .as_mut()
+            .ok_or_else(|| DaemonError::Unavailable("connection not established".to_string()))?;
 
         // Send request
         if let Err(e) = stream.write_all(&encoded) {

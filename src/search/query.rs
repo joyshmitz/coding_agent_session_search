@@ -3235,7 +3235,7 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                     let group = if pending_or_group.len() > 1 {
                         format!("({})", pending_or_group.join(" OR "))
                     } else {
-                        pending_or_group.pop().unwrap()
+                        pending_or_group.pop().unwrap_or_default()
                     };
                     fts_clauses.push(("AND", group));
                     pending_or_group.clear();
@@ -3270,7 +3270,7 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                     let group = if pending_or_group.len() > 1 {
                         format!("({})", pending_or_group.join(" OR "))
                     } else {
-                        pending_or_group.pop().unwrap()
+                        pending_or_group.pop().unwrap_or_default()
                     };
                     fts_clauses.push(("AND", group));
                     pending_or_group.clear();
@@ -3367,7 +3367,7 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
         let group = if pending_or_group.len() > 1 {
             format!("({})", pending_or_group.join(" OR "))
         } else {
-            pending_or_group.pop().unwrap()
+            pending_or_group.pop().unwrap_or_default()
         };
         fts_clauses.push((next_op, group));
     }
@@ -4469,7 +4469,6 @@ mod tests {
             .search("duplicate", SearchFilters::default(), 1, 0, FieldMask::FULL)
             .unwrap();
         assert_eq!(page1.len(), 1);
-        let content1 = page1[0].content.clone();
 
         // Search page 2: limit 1, offset 1
         let page2 = client
@@ -4477,20 +4476,10 @@ mod tests {
             .unwrap();
 
         // IF deduplication works globally, page 2 should be EMPTY (because we only have 1 unique content).
-        // IF deduplication is per-page (bug), page 2 will contain the second duplicate.
-        //
-        // Note: The bug fix we intend to implement will make page 2 empty.
-        // The current behavior (buggy) returns the duplicate.
-
-        if !page2.is_empty() {
-            assert_eq!(
-                page2[0].content, content1,
-                "Found duplicate content on page 2"
-            );
-            // println!("Reproduced: Duplicate found on page 2");
-        } else {
-            // println!("Not Reproduced: Page 2 is empty (dedup worked)");
-        }
+        assert!(
+            page2.is_empty(),
+            "Page 2 should be empty because deduplication works globally"
+        );
     }
 
     #[test]

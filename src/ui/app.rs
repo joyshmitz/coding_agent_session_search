@@ -25105,7 +25105,7 @@ mod tests {
         let storage = SqliteStorage::open(&db_path).unwrap();
         
         let conn = storage.raw();
-        conn.execute("INSERT INTO agents (id, slug, name) VALUES (1, 'claude_code', 'Claude Code')", []).unwrap();
+        conn.execute("INSERT INTO agents (id, slug, name, kind, created_at, updated_at) VALUES (1, 'claude_code', 'Claude Code', 'remote', 0, 0)", []).unwrap();
         conn.execute(
             "INSERT INTO conversations (id, agent_id, external_id, title, source_path, source_id, approx_tokens) 
              VALUES (1, 1, 'ext', 'Test', '/fake/session.jsonl', 'local', 10)",
