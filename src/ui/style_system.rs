@@ -1431,12 +1431,13 @@ fn synthwave_84_theme() -> Theme {
 /// identical to Tokyo Night.
 fn colorblind_theme() -> Theme {
     ThemeBuilder::from_theme(tokyo_night_theme())
-        // success → teal-cyan (distinct from the blue primary)
-        .success(Color::rgb(125, 207, 255)) // #7dcfff cyan (was green #73daca)
-        // warning → warm yellow (was amber, still yellow family but brighter)
-        .warning(Color::rgb(224, 175, 104)) // #e0af68 (unchanged, already CB-safe)
-        // error → light magenta instead of red (distinct from accent_alt #bb9af7)
-        .error(Color::rgb(208, 154, 247)) // #d09af7 (was red #f7768e)
+        .primary(Color::rgb(0, 114, 178))
+        .secondary(Color::rgb(204, 121, 167))
+        .accent(Color::rgb(230, 159, 0))
+        .success(Color::rgb(0, 158, 115))
+        .warning(Color::rgb(240, 228, 66))
+        .error(Color::rgb(213, 94, 0))
+        .info(Color::rgb(86, 180, 233))
         .build()
 }
 

@@ -1518,7 +1518,7 @@ mod tests {
         preset = preset.prev();
         assert_eq!(preset, ThemePreset::Colorblind);
         preset = preset.prev();
-        assert_eq!(preset, ThemePreset::Synthwave84);
+        assert_eq!(preset, ThemePreset::HighContrast);
     }
 
     #[test]
