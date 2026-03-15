@@ -91,6 +91,10 @@ pub(crate) fn strict_ssh_cli_tokens(connect_timeout_secs: u64) -> Vec<String> {
         "-o".to_string(),
         format!("ConnectTimeout={connect_timeout_secs}"),
         "-o".to_string(),
+        "ServerAliveInterval=15".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
+        "-o".to_string(),
         "StrictHostKeyChecking=yes".to_string(),
     ]
 }
@@ -98,7 +102,7 @@ pub(crate) fn strict_ssh_cli_tokens(connect_timeout_secs: u64) -> Vec<String> {
 /// Build strict SSH command string for tools that require a single shell fragment.
 pub(crate) fn strict_ssh_command_for_rsync(connect_timeout_secs: u64) -> String {
     format!(
-        "ssh -o BatchMode=yes -o ConnectTimeout={connect_timeout_secs} -o StrictHostKeyChecking=yes"
+        "ssh -o BatchMode=yes -o ConnectTimeout={connect_timeout_secs} -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes"
     )
 }
 

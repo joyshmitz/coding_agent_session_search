@@ -711,7 +711,7 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                                         let quality_s = quality_norm[idx];
                                         (1.0 - weight) * fast_s + weight * quality_s
                                     } else {
-                                        fast_norm.get(idx).copied().unwrap_or(fast.score)
+                                        fast_norm.get(idx).copied().unwrap_or(0.0)
                                     };
                                     blended.push(ScoredResult {
                                         idx: fast.idx,

@@ -53,7 +53,7 @@ pub fn content_hash(text: &str) -> [u8; 32] {
 /// Convenience wrapper around [`content_hash`] that returns a hex-encoded string.
 pub fn content_hash_hex(text: &str) -> String {
     let hash = content_hash(text);
-    hash.iter().map(|b| format!("{b:02x}")).collect()
+    hex::encode(hash)
 }
 
 #[cfg(test)]
