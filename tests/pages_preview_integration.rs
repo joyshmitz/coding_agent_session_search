@@ -494,6 +494,7 @@ fn preview_serves_static_files() -> Result<()> {
 
     let mut response = vec![0u8; 4096];
     let n = stream.read(&mut response)?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     assert!(
@@ -524,6 +525,7 @@ fn preview_serves_static_files() -> Result<()> {
 
     let mut response = vec![0u8; 4096];
     let n = stream.read(&mut response)?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     assert!(
@@ -545,6 +547,7 @@ fn preview_serves_static_files() -> Result<()> {
 
     let mut response = vec![0u8; 4096];
     let n = stream.read(&mut response)?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     assert!(
@@ -583,6 +586,7 @@ fn preview_blocks_traversal() -> Result<()> {
 
     let mut response = vec![0u8; 4096];
     let n = stream.read(&mut response)?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     let response_str = String::from_utf8_lossy(&response[..n]);
 
     assert!(
@@ -661,6 +665,7 @@ fn integration_build_and_preview() -> Result<()> {
 
         let mut response = vec![0u8; 8192];
         let n = stream.read(&mut response)?;
+        let _ = stream.shutdown(std::net::Shutdown::Both);
         let response_str = String::from_utf8_lossy(&response[..n]);
 
         assert!(

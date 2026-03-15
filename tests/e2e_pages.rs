@@ -1147,10 +1147,10 @@ fn test_exclusion_pattern_matching() {
         .expect("add PRIVATE pattern");
 
     // Verify pattern matching works
-    assert!(exclusions.matches_pattern("SECRET: API key rotation"));
-    assert!(exclusions.matches_pattern("PRIVATE: Personal notes"));
-    assert!(!exclusions.matches_pattern("Fix authentication bug"));
-    assert!(!exclusions.matches_pattern("Implement search feature"));
+    assert!(exclusions.is_excluded("SECRET: API key rotation"));
+    assert!(exclusions.is_excluded("PRIVATE: Personal notes"));
+    assert!(!exclusions.is_excluded("Fix authentication bug"));
+    assert!(!exclusions.is_excluded("Implement search feature"));
 
     // Verify should_exclude integrates patterns
     assert!(exclusions.should_exclude(None, 1, "SECRET: Something"));

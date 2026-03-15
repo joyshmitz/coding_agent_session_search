@@ -94,7 +94,7 @@ impl UpdateState {
                 .await
                 .with_context(|| format!("creating update state directory {}", parent.display()))?;
         }
-        let json = serde_json::to_string_pretty(self)?;
+        let json = serde_json::to_string_pretty(self).context("serializing update state")?;
         asupersync::fs::write(&path, json)
             .await
             .with_context(|| format!("writing {}", path.display()))?;
