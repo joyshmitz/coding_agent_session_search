@@ -2408,6 +2408,56 @@ fn elide_text(text: &str, max_cols: usize) -> String {
     format!("{kept}...")
 }
 
+/// Decode common HTML entities to their plain-text equivalents.
+/// Handles numeric (`&#xNN;`, `&#DDD;`) and named (`&amp;`, `&lt;`, etc.) entities.
+fn decode_html_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        if ch != '&' {
+            out.push(ch);
+            continue;
+        }
+        // Find the semicolon to delimit the entity.
+        let rest = &text[i + 1..];
+        if let Some(semi) = rest.find(';') {
+            if semi <= 10 {
+                let entity = &rest[..semi];
+                let decoded = if entity.starts_with("#x") || entity.starts_with("#X") {
+                    u32::from_str_radix(&entity[2..], 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                } else if entity.starts_with('#') {
+                    entity[1..].parse::<u32>().ok().and_then(char::from_u32)
+                } else {
+                    match entity {
+                        "amp" => Some('&'),
+                        "lt" => Some('<'),
+                        "gt" => Some('>'),
+                        "quot" => Some('"'),
+                        "apos" => Some('\''),
+                        "nbsp" => Some('\u{00a0}'),
+                        _ => None,
+                    }
+                };
+                if let Some(c) = decoded {
+                    out.push(c);
+                    // Skip past the entity (advance the iterator past the semicolon).
+                    for _ in 0..semi + 1 {
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
+        }
+        out.push('&');
+    }
+    out
+}
+
 fn clamp_cursor_boundary(text: &str, cursor: usize) -> usize {
     let mut idx = cursor.min(text.len());
     while idx > 0 && !text.is_char_boundary(idx) {
@@ -2577,7 +2627,7 @@ impl ResultItem {
         }
     }
 
-    fn snippet_source(&self) -> &str {
+    fn snippet_source_raw(&self) -> &str {
         let snippet = self.hit.snippet.trim();
         if !snippet.is_empty() {
             return snippet;
@@ -2648,10 +2698,12 @@ impl ResultItem {
             return Vec::new();
         }
 
-        let source = self.snippet_source();
-        if source.is_empty() {
+        let raw_source = self.snippet_source_raw();
+        if raw_source.is_empty() {
             return vec!["<no snippet>".to_string()];
         }
+        let source_owned = decode_html_entities(raw_source);
+        let source = source_owned.as_str();
 
         let width = max_width.max(8);
         let mut out: Vec<String> = Vec::new();
@@ -2740,10 +2792,11 @@ impl RenderItem for ResultItem {
     ) {
         let hit = &self.hit;
         let location_full = self.location_label();
-        let title = if hit.title.trim().is_empty() {
-            "<untitled>"
+        let title_decoded = decode_html_entities(hit.title.trim());
+        let title = if title_decoded.is_empty() {
+            "<untitled>".to_string()
         } else {
-            hit.title.trim()
+            title_decoded
         };
 
         let bg_style = if selected {
@@ -2823,7 +2876,7 @@ impl RenderItem for ResultItem {
             self.text_primary_style
         };
         let elided_title = elide_text(
-            title,
+            &title,
             content_width.saturating_sub(display_width(&agent_name) + 10),
         );
         let hl_spans = highlight_query_spans(
@@ -9237,13 +9290,61 @@ impl CassApp {
             let mut hint_lines: Vec<ftui::text::Line<'static>> = Vec::new();
             if self.panes.is_empty() {
                 // No results at all — guide user to search.
-                hint_lines.push(ftui::text::Line::from_spans(vec![
-                    ftui::text::Span::styled(
-                        "\u{2500}\u{2500} Preview Pane \u{2500}\u{2500}",
-                        subtle_s,
-                    ),
-                ]));
-                hint_lines.push(ftui::text::Line::from(""));
+                if content_area.height >= 16 {
+                    hint_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            "  ██████╗  █████╗ ███████╗███████╗ ",
+                            accent_s,
+                        ),
+                    ]));
+                    hint_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            " ██╔════╝ ██╔══██╗██╔════╝██╔════╝ ",
+                            accent_s,
+                        ),
+                    ]));
+                    hint_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            " ██║      ███████║███████╗███████╗ ",
+                            accent_s,
+                        ),
+                    ]));
+                    hint_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            " ██║      ██╔══██║╚════██║╚════██║ ",
+                            accent_s,
+                        ),
+                    ]));
+                    hint_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            " ╚██████╗ ██║  ██║███████║███████║ ",
+                            accent_s,
+                        ),
+                    ]));
+                    hint_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            "  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝ ",
+                            accent_s,
+                        ),
+                    ]));
+                    hint_lines.push(ftui::text::Line::from(""));
+                    hint_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            "CODING AGENT SESSION SEARCH",
+                            subtle_s.bold(),
+                        ),
+                    ]));
+                    hint_lines.push(ftui::text::Line::from(""));
+                } else {
+                    hint_lines.push(ftui::text::Line::from_spans(vec![
+                        ftui::text::Span::styled(
+                            "\u{2500}\u{2500} CASS Preview Pane \u{2500}\u{2500}",
+                            subtle_s,
+                        ),
+                    ]));
+                    hint_lines.push(ftui::text::Line::from(""));
+                }
+                
                 hint_lines.push(ftui::text::Line::from_spans(vec![
                     ftui::text::Span::styled("Search results will appear here", accent_s),
                 ]));
@@ -18020,7 +18121,7 @@ impl super::ftui_adapter::Model for CassApp {
                 };
                 let vertical = Flex::vertical()
                     .constraints([
-                        Constraint::Fixed(5),           // Search bar (query + pills + breadcrumbs)
+                        Constraint::Fixed(4),           // Search bar (query + pills)
                         Constraint::Min(4),             // Content area (results + detail)
                         Constraint::Fixed(footer_rows), // Status footer (status + key hints [+ progress])
                     ])
@@ -18068,15 +18169,7 @@ impl super::ftui_adapter::Model for CassApp {
                 query_block.render(vertical[0], frame);
                 self.last_pill_rects.borrow_mut().clear();
                 if !query_inner.is_empty() {
-                    let rows = if query_inner.height >= 3 {
-                        Flex::vertical()
-                            .constraints([
-                                Constraint::Fixed(1),
-                                Constraint::Fixed(1),
-                                Constraint::Min(1),
-                            ])
-                            .split(query_inner)
-                    } else if query_inner.height == 2 {
+                    let rows = if query_inner.height >= 2 {
                         Flex::vertical()
                             .constraints([Constraint::Fixed(1), Constraint::Min(1)])
                             .split(query_inner)
@@ -18223,22 +18316,6 @@ impl super::ftui_adapter::Model for CassApp {
                             pill_line,
                         )]))
                         .render(rows[1], frame);
-                    }
-
-                    if rows.len() > 2 {
-                        let crumb_active_style = styles.style(style_system::STYLE_CRUMB_ACTIVE);
-                        let crumb_inactive_style = styles.style(style_system::STYLE_CRUMB_INACTIVE);
-                        let crumb_sep_style = styles.style(style_system::STYLE_CRUMB_SEPARATOR);
-                        let crumb_line = self.breadcrumb_line(
-                            rows[2].width,
-                            crumb_active_style,
-                            crumb_inactive_style,
-                            crumb_sep_style,
-                        );
-                        Paragraph::new(ftui::text::Text::from_lines(vec![line_into_static(
-                            crumb_line,
-                        )]))
-                        .render(rows[2], frame);
                     }
                 }
 
@@ -19392,6 +19469,8 @@ fn export_session_task(
         message_count: messages.len(),
         duration: None,
         project: None,
+        human_turns: 0,
+        tool_calls: 0,
     };
 
     let groups = crate::group_messages_for_export(messages);

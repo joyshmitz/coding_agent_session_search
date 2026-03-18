@@ -21,6 +21,27 @@ tests/fixtures/search_demo_data/watch_state.json
 # Temporary scratch files
 temp_*.rs
 
+# Build artifacts
+a.out
+
+# Clippy / UBS / analysis output
+clippy_output.txt
+ubs.json
+ubs_filtered.txt
+ubs-report.*
+*.sarif
+
+# Agent-generated scratch scripts
+parse_ubs.py
+fix_*.py
+
+# One-off test source files
+test_empty_db.rs
+
+# Ephemeral test fixture data
+tests/fixtures/search_demo_data/index/
+tests/fixtures/search_demo_data/tmp_home/
+
 # bv (beads viewer) local config and caches
 .bv/
 
