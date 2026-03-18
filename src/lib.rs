@@ -492,6 +492,9 @@ pub enum Commands {
         /// Include tool use details in export
         #[arg(long)]
         include_tools: bool,
+        /// Include skill content in export (default: stripped for privacy)
+        #[arg(long)]
+        include_skills: bool,
     },
     /// Export session as beautiful, self-contained HTML (with optional encryption)
     #[command(name = "export-html")]
@@ -3411,8 +3414,9 @@ async fn execute_cli(
                     format,
                     output,
                     include_tools,
+                    include_skills,
                 } => {
-                    run_export(&path, format, output.as_deref(), include_tools)?;
+                    run_export(&path, format, output.as_deref(), include_tools, include_skills)?;
                 }
                 Commands::ExportHtml {
                     session,
@@ -11987,6 +11991,7 @@ fn run_export(
     format: ConvExportFormat,
     output: Option<&Path>,
     include_tools: bool,
+    include_skills: bool,
 ) -> CliResult<()> {
     use std::fs::File;
     use std::io::{BufRead, BufReader, Write};
@@ -12067,6 +12072,19 @@ fn run_export(
                 messages.push(msg);
             }
         }
+    }
+
+    // Drop entire messages that are skill injections (unless opted in)
+    if !include_skills {
+        messages.retain(|msg| {
+            let content = extract_text_content(msg);
+            if content.contains("Base directory for this skill:") { return false; }
+            if content.contains("<system-reminder>") { return false; }
+            if content.contains("The following skills are available for use with the Skill tool:") { return false; }
+            if content.contains("skillInjection:") && content.contains("matchedSkills") { return false; }
+            if content.contains("<!-- skillInjection:") { return false; }
+            true
+        });
     }
 
     if messages.is_empty() {
