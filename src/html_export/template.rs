@@ -258,11 +258,14 @@ pub struct TemplateMetadata {
     /// Total rendered message count (internal)
     pub message_count: usize,
 
-    /// Human-typed turns (user messages that aren't tool results)
+    /// Human-typed prompts (user messages that aren't tool results)
     pub human_turns: usize,
 
-    /// Tool call count
-    pub tool_calls: usize,
+    /// Assistant response count
+    pub assistant_msgs: usize,
+
+    /// Tool use invocations (individual tool_use blocks in assistant messages)
+    pub tool_use_count: usize,
 
     /// Duration of session
     pub duration: Option<String>,
@@ -474,22 +477,24 @@ impl HtmlTemplate {
         }
 
         if self.metadata.message_count > 0 {
-            // Show human turns + tool calls instead of raw message count.
-            // "577 messages" is misleading; "19 turns, 284 tool calls" is accurate.
-            let turns_str = if self.metadata.human_turns > 0 {
+            // Show accurate breakdown: human prompts, assistant responses, tool calls.
+            // "577 messages" is misleading when only 20 were human-typed.
+            let count_str = if self.metadata.human_turns > 0 {
                 format!(
-                    "{} turn{}, {} tool call{}",
+                    "{} prompt{}, {} response{}, {} tool use{}",
                     self.metadata.human_turns,
                     if self.metadata.human_turns == 1 { "" } else { "s" },
-                    self.metadata.tool_calls,
-                    if self.metadata.tool_calls == 1 { "" } else { "s" },
+                    self.metadata.assistant_msgs,
+                    if self.metadata.assistant_msgs == 1 { "" } else { "s" },
+                    self.metadata.tool_use_count,
+                    if self.metadata.tool_use_count == 1 { "" } else { "s" },
                 )
             } else {
                 format!("{} messages", self.metadata.message_count)
             };
             meta_items.push(format!(
                 r#"<span>{}</span>"#,
-                turns_str
+                count_str
             ));
         }
 

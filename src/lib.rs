@@ -12473,17 +12473,49 @@ fn run_export_html(
         })
         .collect();
 
-    // Count human turns vs tool calls for accurate display.
-    // "577 messages" is misleading for a 19-turn conversation. Show the
-    // breakdown that actually matters: human prompts and tool interactions.
+    // Count message types from RAW messages (not processed Messages) for accuracy.
+    // Must distinguish human-typed prompts from tool results, which both have role "user".
+    // Tool results have content as an array containing {"type": "tool_result", ...} blocks.
     let mut human_turns = 0usize;
-    let mut tool_calls = 0usize;
-    for msg in &messages {
-        if msg.role == "user" && msg.tool_call.is_none() {
-            human_turns += 1;
-        }
-        if msg.tool_call.is_some() {
-            tool_calls += 1;
+    let mut assistant_msgs = 0usize;
+    let mut tool_use_count = 0usize;
+    for msg in &raw_messages {
+        let role = extract_role(msg);
+        match role.as_str() {
+            "user" => {
+                // Check if this is a tool result return or a human-typed message.
+                // Tool results have content as an array with tool_result type blocks.
+                let is_tool_result = msg
+                    .get("message")
+                    .or_else(|| Some(msg))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|arr| {
+                        arr.iter()
+                            .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                    });
+                if !is_tool_result {
+                    human_turns += 1;
+                }
+            }
+            "assistant" => {
+                assistant_msgs += 1;
+                // Count tool_use blocks within assistant messages
+                if let Some(content) = msg
+                    .get("message")
+                    .or_else(|| Some(msg))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    tool_use_count += content
+                        .iter()
+                        .filter(|item| {
+                            item.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                        })
+                        .count();
+                }
+            }
+            _ => {}
         }
     }
     let message_count = messages.len();
@@ -12514,7 +12546,8 @@ fn run_export_html(
         agent: agent_name.clone(),
         message_count,
         human_turns,
-        tool_calls,
+        assistant_msgs,
+        tool_use_count,
         duration,
         project: workspace.clone(),
     };
@@ -12701,8 +12734,8 @@ fn run_export_html(
         }
         if human_turns > 0 {
             println!(
-                "  {} turns, {} tool calls ({} total messages), {} bytes",
-                human_turns, tool_calls, message_count, file_size
+                "  {} prompts, {} responses, {} tool uses, {} bytes",
+                human_turns, assistant_msgs, tool_use_count, file_size
             );
         } else {
             println!("  {} messages, {} bytes", message_count, file_size);
