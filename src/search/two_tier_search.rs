@@ -417,10 +417,13 @@ impl TwoTierIndex {
                 let mut results: Vec<ScoredResult> = scores
                     .iter()
                     .enumerate()
-                    .map(|(idx, &score)| ScoredResult {
-                        idx,
-                        message_id: self.message_ids[idx],
-                        score,
+                    .filter_map(|(idx, &score)| {
+                        let message_id = *self.message_ids.get(idx)?;
+                        Some(ScoredResult {
+                            idx,
+                            message_id,
+                            score,
+                        })
                     })
                     .collect();
                 results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
@@ -708,7 +711,8 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                                 for (idx, fast) in fast_results.iter().enumerate() {
                                     let score = if idx < quality_norm.len() {
                                         let fast_s = fast_norm.get(idx).copied().unwrap_or(0.0);
-                                        let quality_s = quality_norm[idx];
+                                        let quality_s =
+                                            quality_norm.get(idx).copied().unwrap_or(0.0);
                                         (1.0 - weight) * fast_s + weight * quality_s
                                     } else {
                                         // Unrefined documents get a penalized score that assumes 0.0 for quality
@@ -771,9 +775,14 @@ pub fn normalize_scores(scores: &[f32]) -> Vec<f32> {
         return Vec::new();
     }
 
-    let valid_scores = scores.iter().copied().filter(|s| !s.is_nan());
-    let min = valid_scores.clone().fold(f32::INFINITY, f32::min);
-    let max = valid_scores.fold(f32::NEG_INFINITY, f32::max);
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for &s in scores {
+        if s.is_finite() {
+            min = f32::min(min, s);
+            max = f32::max(max, s);
+        }
+    }
 
     if min.is_infinite() || max.is_infinite() {
         return vec![0.0; scores.len()];
@@ -784,13 +793,19 @@ pub fn normalize_scores(scores: &[f32]) -> Vec<f32> {
     if range.abs() < f32::EPSILON {
         return scores
             .iter()
-            .map(|&s| if s.is_nan() { 0.0 } else { 1.0 })
+            .map(|&s| if s.is_finite() { 1.0 } else { 0.0 })
             .collect();
     }
 
     scores
         .iter()
-        .map(|&s| if s.is_nan() { 0.0 } else { (s - min) / range })
+        .map(|&s| {
+            if s.is_finite() {
+                (s - min) / range
+            } else {
+                0.0
+            }
+        })
         .collect()
 }
 
@@ -1042,6 +1057,18 @@ mod tests {
         assert_eq!(normalized[0], 0.0);
         assert!((normalized[1] - 1.0).abs() < 0.001);
         assert!((normalized[2] - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_score_normalization_with_infinite_values_keeps_non_finite_zeroed() {
+        let scores = vec![f32::NEG_INFINITY, 2.0, f32::INFINITY, 4.0];
+        let normalized = normalize_scores(&scores);
+
+        assert_eq!(normalized.len(), 4);
+        assert_eq!(normalized[0], 0.0);
+        assert_eq!(normalized[2], 0.0);
+        assert!((normalized[1] - 0.0).abs() < 0.001);
+        assert!((normalized[3] - 1.0).abs() < 0.001);
     }
 
     #[test]

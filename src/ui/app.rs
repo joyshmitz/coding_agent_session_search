@@ -1583,7 +1583,7 @@ impl FrameTimingStats {
         }
         let mut sorted: Vec<u64> = self.frame_times_us.iter().copied().collect();
         sorted.sort_unstable();
-        let idx = (sorted.len() as f64 * 0.95) as usize;
+        let idx = ((sorted.len() - 1) as f64 * 0.95).round() as usize;
         sorted[idx.min(sorted.len() - 1)]
     }
 
@@ -3770,7 +3770,7 @@ fn score_bar_str(score: f32) -> String {
     let total_steps = ((clamped / 10.0) * 24.0).round() as usize;
     let mut bar = String::with_capacity(6);
     for col in 0..3 {
-        let col_level = total_steps.saturating_sub(col * 8).min(8);
+        let col_level = total_steps.saturating_sub(col * 8).min(BLOCKS.len() - 1);
         bar.push(BLOCKS[col_level]);
     }
     let tier = if clamped >= 8.0 {
@@ -7146,8 +7146,10 @@ impl CassApp {
                     let sparkline: String = buckets
                         .iter()
                         .map(|&bucket| {
-                            let level = (bucket as f64 / max_bucket as f64 * 8.0) as usize;
-                            blocks[level.min(8)]
+                            let level = (bucket as f64 / max_bucket as f64
+                                * (blocks.len() - 1) as f64)
+                                as usize;
+                            blocks[level.min(blocks.len() - 1)]
                         })
                         .collect();
                     spans.push(sep);
@@ -7203,8 +7205,8 @@ impl CassApp {
             ];
             let level = |count: usize| -> char {
                 let ratio = count as f64 / total_match_kinds as f64;
-                let idx = (ratio * 8.0).round() as usize;
-                BLOCKS[idx.min(8)]
+                let idx = (ratio * (BLOCKS.len() - 1) as f64).round() as usize;
+                BLOCKS[idx.min(BLOCKS.len() - 1)]
             };
             format!("{}{}{}", level(exact), level(prefix), level(fuzzy))
         };
@@ -8283,8 +8285,8 @@ impl CassApp {
         buckets
             .iter()
             .map(|&count| {
-                let level = (count as f64 / max_count as f64 * 8.0) as usize;
-                BLOCKS[level.min(8)]
+                let level = (count as f64 / max_count as f64 * (BLOCKS.len() - 1) as f64) as usize;
+                BLOCKS[level.min(BLOCKS.len() - 1)]
             })
             .collect()
     }
@@ -9325,8 +9327,8 @@ impl CassApp {
                     let idx =
                         (i as f64 / spark_width as f64 * (cumulative.len() - 1) as f64) as usize;
                     let level = (cumulative[idx.min(cumulative.len() - 1)] as f64 / max_cum as f64
-                        * 8.0) as usize;
-                    spark_str.push(blocks[level.min(8)]);
+                        * (blocks.len() - 1) as f64) as usize;
+                    spark_str.push(blocks[level.min(blocks.len() - 1)]);
                 }
                 lines.push(ftui::text::Line::from_spans(vec![
                     ftui::text::Span::styled("  ", label_style),
@@ -14057,6 +14059,20 @@ impl super::ftui_adapter::Model for CassApp {
             recorder.record_event(raw_event.clone());
         }
 
+        let raw_alt_update_shortcut = matches!(
+            &msg,
+            CassMsg::UpdateUpgradeRequested
+                | CassMsg::UpdateSkipped
+                | CassMsg::UpdateReleaseNotesRequested
+        ) && matches!(
+            raw_event.as_ref(),
+            Some(super::ftui_adapter::Event::Key(ke))
+                if ke.modifiers.contains(super::ftui_adapter::Modifiers::ALT)
+        );
+        if raw_alt_update_shortcut && !self.can_handle_update_shortcuts() {
+            return ftui::Cmd::none();
+        }
+
         // Consent dialog intercepts D/H keys and blocks other query input
         if self.show_consent_dialog
             && let CassMsg::QueryChanged(ref text) = msg
@@ -14188,7 +14204,9 @@ impl super::ftui_adapter::Model for CassApp {
         // - Alt+N: open release notes
         // - Alt+I: ignore/skip version
         // - Esc: dismiss banner for this session
-        if self.can_handle_update_shortcuts() && let CassMsg::QuitRequested = msg {
+        if self.can_handle_update_shortcuts()
+            && let CassMsg::QuitRequested = msg
+        {
             return self.update(CassMsg::UpdateDismissed);
         }
 
@@ -24229,6 +24247,29 @@ mod tests {
 
         let event = Event::Key(KeyEvent::new(KeyCode::Char('i')).with_modifiers(Modifiers::ALT));
         assert!(matches!(CassMsg::from(event), CassMsg::UpdateSkipped));
+    }
+
+    #[test]
+    fn update_shortcuts_ignore_raw_alt_keys_when_banner_cannot_handle_them() {
+        use crate::ui::ftui_adapter::{Event, KeyCode, KeyEvent, Modifiers};
+
+        let mut app = CassApp::default();
+        let _ = app.update(CassMsg::UpdateCheckCompleted(sample_update_info()));
+        app.show_export_modal = true;
+
+        stash_raw_event(&Event::Key(
+            KeyEvent::new(KeyCode::Char('u')).with_modifiers(Modifiers::ALT),
+        ));
+        let _ = app.update(CassMsg::UpdateUpgradeRequested);
+
+        assert!(
+            !app.update_upgrade_armed,
+            "raw Alt+U should be ignored while a modal blocks update shortcuts"
+        );
+        assert!(
+            !app.status.contains("Confirm upgrade"),
+            "blocked raw shortcut should not mutate update status"
+        );
     }
 
     #[test]

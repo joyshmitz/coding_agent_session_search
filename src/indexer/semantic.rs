@@ -262,7 +262,12 @@ impl SemanticIndexer {
         if let Err(e) = &write_result {
             // Clean up partial index file to prevent corruption
             tracing::warn!("removing partial vector index after write failure: {e}");
-            let _ = std::fs::remove_file(&index_path);
+            if let Err(rm_err) = std::fs::remove_file(&index_path) {
+                tracing::error!(
+                    "failed to remove partial index file {}: {rm_err}",
+                    index_path.display()
+                );
+            }
             return Err(anyhow::anyhow!("{e}"));
         }
 

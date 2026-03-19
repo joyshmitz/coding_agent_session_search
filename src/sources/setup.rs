@@ -372,7 +372,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template("│ {bar:50.cyan/blue} {pos}/{len} {msg}")
-                    .unwrap()
+                    .expect("valid progress bar template")
                     .progress_chars("██░"),
             );
             Some(pb)
