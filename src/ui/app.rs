@@ -5454,6 +5454,54 @@ impl CassApp {
         self.cursor_pos = self.query.len();
     }
 
+    fn set_query_cursor_from_search_bar_click(&mut self, x: u16) {
+        let Some(area) = *self.last_search_bar_area.borrow() else {
+            self.cursor_pos = self.query.len();
+            return;
+        };
+        let query_inner = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        if query_inner.is_empty() {
+            self.cursor_pos = self.query.len();
+            return;
+        }
+        let query_row = Rect::new(query_inner.x, query_inner.y, query_inner.width, 1);
+        let search_prefix_width = if query_row.width >= 50 {
+            display_width(" 🔎 ") as u16
+        } else {
+            0
+        };
+        let click_cols = x
+            .saturating_sub(query_row.x)
+            .saturating_sub(search_prefix_width) as usize;
+        if self.query.is_empty() || click_cols == 0 {
+            self.cursor_pos = 0;
+            return;
+        }
+
+        let mut consumed_cols = 0usize;
+        let mut cursor = self.query.len();
+        for (byte_idx, ch) in self.query.char_indices() {
+            let mut buf = [0u8; 4];
+            let char_width = display_width(ch.encode_utf8(&mut buf)) as usize;
+            let next_cols = consumed_cols.saturating_add(char_width.max(1));
+            if click_cols <= consumed_cols {
+                cursor = byte_idx;
+                break;
+            }
+            if click_cols < next_cols {
+                cursor = byte_idx + ch.len_utf8();
+                break;
+            }
+            consumed_cols = next_cols;
+        }
+        self.cursor_pos = cursor.min(self.query.len());
+    }
+
     fn enter_detail_focus_context(&mut self) {
         self.focus_manager.focus(focus_ids::DETAIL_PANE);
     }
@@ -5531,11 +5579,6 @@ impl CassApp {
             self.clear_loading_context(LoadingContext::Search);
             ftui::Cmd::none()
         }
-    }
-
-    fn should_refine_search(&self) -> bool {
-        !self.query.trim().is_empty()
-            && matches!(self.search_mode, SearchMode::Semantic | SearchMode::Hybrid)
     }
 
     fn progressive_subscription_id(generation: u64) -> SubId {
@@ -12935,6 +12978,8 @@ impl TantivySearchService {
         });
 
         let client = Arc::clone(&self.client);
+        let phase_sender = sender.clone();
+        let phase_stop = stop.clone();
         let live_result = runtime.block_on(async move {
             client
                 .search_progressive_with_callback(
@@ -12946,7 +12991,7 @@ impl TantivySearchService {
                     crate::search::query::FieldMask::new(false, true, true, true),
                     params.mode,
                     |event| {
-                        if stop.is_stopped() {
+                        if phase_stop.is_stopped() {
                             return;
                         }
                         let message = match event {
@@ -12980,7 +13025,7 @@ impl TantivySearchService {
                                 error,
                             },
                         };
-                        let _ = sender.send(message);
+                        let _ = phase_sender.send(message);
                     },
                 )
                 .await
@@ -13126,7 +13171,6 @@ impl SearchService for TantivySearchService {
 }
 
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(16);
-const SEARCH_UPGRADE_DELAY: std::time::Duration = std::time::Duration::from_millis(90);
 const STATE_SAVE_DEBOUNCE: Duration = Duration::from_millis(450);
 
 /// Minimum distance (in terminal cells) for a drag event to be considered
@@ -17542,6 +17586,7 @@ impl super::ftui_adapter::Model for CassApp {
                     // ── Click in search bar: enter query editing ───────
                     (MouseEventKind::LeftClick, MouseHitRegion::SearchBar) => {
                         self.enter_query_input_context();
+                        self.set_query_cursor_from_search_bar_click(x);
                         ftui::Cmd::none()
                     }
                     // ── Scroll outside tracked regions: default to results
@@ -20198,8 +20243,8 @@ pub fn run_tui_ftui(
                 };
 
                 let client = Arc::new(client);
-                let prefer_hash = EmbedderRegistry::new(&data_dir).best_available().name
-                    == HASH_EMBEDDER;
+                let prefer_hash =
+                    EmbedderRegistry::new(&data_dir).best_available().name == HASH_EMBEDDER;
                 let setup = if prefer_hash {
                     load_hash_semantic_context(&data_dir, &model.db_path)
                 } else {
@@ -23763,14 +23808,31 @@ mod tests {
     }
 
     #[test]
-    fn interactive_search_completion_schedules_upgrade() {
+    fn interactive_search_completion_enters_refining_when_live_request_is_progressive() {
         let mut app = CassApp::default();
         app.query = "semantic".to_string();
         app.search_mode = SearchMode::Semantic;
         app.search_page_size = 250;
+        let generation = 7;
+        app.search_generation = generation;
+        app.live_search_request = Some(LiveSearchRequest {
+            generation,
+            params: SearchParams {
+                query: app.query.clone(),
+                filters: app.filters.clone(),
+                pass: SearchPass::Interactive,
+                mode: app.search_mode,
+                match_mode: app.match_mode,
+                ranking: app.ranking_mode,
+                context_window: app.context_window,
+                limit: app.interactive_search_limit(),
+                offset: 0,
+            },
+            progressive: true,
+        });
 
         let cmd = app.update(CassMsg::SearchCompleted {
-            generation: app.search_generation,
+            generation,
             pass: SearchPass::Interactive,
             requested_limit: app.interactive_search_limit(),
             hits: vec![],
@@ -23780,16 +23842,49 @@ mod tests {
             append: false,
         });
 
-        let debug = format!("{cmd:?}");
         assert!(
-            debug.contains("Task"),
-            "interactive completion should defer an upgrade task, got: {debug}"
+            matches!(cmd, ftui::Cmd::None),
+            "live progressive completion should not enqueue a fake upgrade task"
         );
-        assert!(app.status.contains("fast results"));
+        assert!(app.search_refining);
+        assert!(app.status.contains("refining"));
     }
 
     #[test]
-    fn lexical_interactive_completion_does_not_schedule_upgrade() {
+    fn search_stream_finished_clears_live_refining_state() {
+        let mut app = CassApp::default();
+        let generation = 11;
+        app.search_generation = generation;
+        app.search_refining = true;
+        app.last_search_ms = Some(14);
+        app.results = vec![make_test_hit()];
+        app.search_has_more = true;
+        app.status = "Loaded 1 fast results in 14ms · refining".to_string();
+        app.live_search_request = Some(LiveSearchRequest {
+            generation,
+            params: SearchParams {
+                query: "semantic".to_string(),
+                filters: SearchFilters::default(),
+                pass: SearchPass::Interactive,
+                mode: SearchMode::Semantic,
+                match_mode: MatchMode::Standard,
+                ranking: RankingMode::Balanced,
+                context_window: ContextWindow::Medium,
+                limit: 16,
+                offset: 0,
+            },
+            progressive: true,
+        });
+
+        let cmd = app.update(CassMsg::SearchStreamFinished { generation });
+        assert!(matches!(cmd, ftui::Cmd::None));
+        assert!(!app.search_refining);
+        assert!(app.live_search_request.is_none());
+        assert!(!app.status.contains("refining"));
+    }
+
+    #[test]
+    fn interactive_search_completion_without_live_request_does_not_refine() {
         let mut app = CassApp::default();
         app.query = "lexical".to_string();
         app.search_mode = SearchMode::Lexical;
@@ -23806,25 +23901,8 @@ mod tests {
             append: false,
         });
 
-        assert!(
-            !format!("{cmd:?}").contains("Task"),
-            "lexical interactive completion should not schedule a refinement task"
-        );
-    }
-
-    #[test]
-    fn upgrade_scheduling_is_limited_to_semantic_modes() {
-        let mut app = CassApp::default();
-        app.query = "auth".to_string();
-
-        app.search_mode = SearchMode::Lexical;
-        assert!(!app.should_schedule_search_upgrade());
-
-        app.search_mode = SearchMode::Semantic;
-        assert!(app.should_schedule_search_upgrade());
-
-        app.search_mode = SearchMode::Hybrid;
-        assert!(app.should_schedule_search_upgrade());
+        assert!(matches!(cmd, ftui::Cmd::None));
+        assert!(!app.search_refining);
     }
 
     // ==================== VirtualizedList integration tests ====================
@@ -24682,8 +24760,17 @@ mod tests {
 
         // Simulate hover state changes directly (hit testing requires
         // rendered layout rects which aren't available in unit tests).
-        app.hovered_result = Some(1);
-        assert_eq!(app.hovered_result, Some(1));
+        app.hovered_result = Some(HoveredResult {
+            pane_idx: 2,
+            item_idx: 1,
+        });
+        assert_eq!(
+            app.hovered_result,
+            Some(HoveredResult {
+                pane_idx: 2,
+                item_idx: 1
+            })
+        );
 
         // Clear on move outside results
         app.hovered_result = None;
@@ -29166,6 +29253,22 @@ mod tests {
     }
 
     #[test]
+    fn hit_test_returns_pane_header_for_pane_title_area() {
+        let app = app_with_rich_visual_fixture();
+        render_at_degradation(&app, 180, 32, ftui::render::budget::DegradationLevel::Full);
+
+        let first_idx = *app.last_pane_first_index.borrow();
+        let pane_rect = app.last_pane_rects.borrow()[0];
+        let region = app.hit_test(pane_rect.x.saturating_add(2), pane_rect.y);
+        assert_eq!(
+            region,
+            MouseHitRegion::PaneHeader {
+                pane_idx: first_idx,
+            }
+        );
+    }
+
+    #[test]
     fn mouse_click_in_non_active_pane_switches_active_pane() {
         use ftui::Model;
         let mut app = app_with_rich_visual_fixture();
@@ -29188,6 +29291,31 @@ mod tests {
             app.active_pane,
             first_idx + 1,
             "clicking a non-active pane should switch active pane"
+        );
+    }
+
+    #[test]
+    fn mouse_move_over_non_active_pane_tracks_pane_aware_hover() {
+        use ftui::Model;
+        let mut app = app_with_rich_visual_fixture();
+        app.active_pane = 0;
+        render_at_degradation(&app, 180, 32, ftui::render::budget::DegradationLevel::Full);
+
+        let first_idx = *app.last_pane_first_index.borrow();
+        let pane_rects = app.last_pane_rects.borrow().clone();
+        let target = pane_rects[1];
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::Moved,
+            x: target.x.saturating_add(2),
+            y: target.y.saturating_add(2),
+        });
+
+        assert_eq!(
+            app.hovered_result,
+            Some(HoveredResult {
+                pane_idx: first_idx + 1,
+                item_idx: 0,
+            })
         );
     }
 
@@ -29832,6 +29960,7 @@ mod tests {
     fn mouse_click_in_search_bar_enters_query_context() {
         use ftui::Model;
         let mut app = app_with_hits(5);
+        app.query = "semantic".to_string();
         app.input_mode = InputMode::Agent;
         app.input_buffer = "codex".to_string();
         app.focus_manager.focus(focus_ids::DETAIL_PANE);
@@ -29847,7 +29976,7 @@ mod tests {
         assert_eq!(app.focus_manager.current(), Some(focus_ids::SEARCH_BAR));
         assert_eq!(app.input_mode, InputMode::Query);
         assert!(app.input_buffer.is_empty());
-        assert_eq!(app.cursor_pos, app.query.len());
+        assert_eq!(app.cursor_pos, 0);
     }
 
     #[test]

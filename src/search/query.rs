@@ -16,15 +16,13 @@ use frankensearch::lexical::{
     try_build_snippet_generator as fs_try_build_snippet_generator,
 };
 use frankensearch::{
-    Cx as FsCx, LexicalSearch as FsLexicalSearch,
-    InMemoryTwoTierIndex as FsInMemoryTwoTierIndex, InMemoryVectorIndex as FsInMemoryVectorIndex,
+    Cx as FsCx, InMemoryTwoTierIndex as FsInMemoryTwoTierIndex,
+    InMemoryVectorIndex as FsInMemoryVectorIndex, LexicalSearch as FsLexicalSearch,
     QueryClass as FsQueryClass, RrfConfig as FsRrfConfig, ScoreSource as FsScoreSource,
-    ScoredResult as FsScoredResult, SearchError as FsSearchError,
-    SearchFuture as FsSearchFuture, SearchPhase as FsSearchPhase,
-    SyncEmbedderAdapter as FsSyncEmbedderAdapter,
+    ScoredResult as FsScoredResult, SearchError as FsSearchError, SearchFuture as FsSearchFuture,
+    SearchPhase as FsSearchPhase, SyncEmbedderAdapter as FsSyncEmbedderAdapter,
     SyncTwoTierSearcher as FsSyncTwoTierSearcher, TwoTierConfig as FsTwoTierConfig,
-    TwoTierIndex as FsTwoTierIndex, TwoTierSearcher as FsTwoTierSearcher,
-    VectorHit as FsVectorHit,
+    TwoTierIndex as FsTwoTierIndex, TwoTierSearcher as FsTwoTierSearcher, VectorHit as FsVectorHit,
     candidate_count as fs_candidate_count,
     core::filter::SearchFilter as FsSearchFilter,
     index::{
@@ -74,8 +72,7 @@ use crate::search::canonicalize::{canonicalize_for_embedding, content_hash};
 use crate::search::embedder::Embedder;
 use crate::search::vector_index::{
     ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_USER, SemanticDocId, SemanticFilter,
-    SemanticFilterMaps, VectorIndex, VectorSearchResult, parse_semantic_doc_id,
-    role_code_from_str,
+    SemanticFilterMaps, VectorIndex, VectorSearchResult, parse_semantic_doc_id, role_code_from_str,
 };
 
 use crate::sources::provenance::SourceFilter;
@@ -1630,9 +1627,7 @@ impl FsLexicalSearch for CassProgressiveLexicalAdapter {
         Box::pin(async move {
             Err(FsSearchError::SubsystemError {
                 subsystem: "cass_lexical_adapter",
-                source: Box::new(std::io::Error::other(
-                    "cass lexical adapter is read-only",
-                )),
+                source: Box::new(std::io::Error::other("cass lexical adapter is read-only")),
             })
         })
     }
@@ -2439,9 +2434,9 @@ impl SearchClient {
         };
         self.load_progressive_context(state)
             .map(|context| {
-                context
-                    .as_ref()
-                    .is_some_and(|ctx| ctx.quality_embedder.is_some() && ctx.index.has_quality_index())
+                context.as_ref().is_some_and(|ctx| {
+                    ctx.quality_embedder.is_some() && ctx.index.has_quality_index()
+                })
             })
             .unwrap_or(false)
     }
@@ -2539,8 +2534,11 @@ impl SearchClient {
                 .ok_or_else(|| anyhow!("cannot resolve data dir for progressive embedder load"))?;
             let model_dir =
                 crate::search::fastembed_embedder::FastEmbedder::default_model_dir(data_dir);
-            let embedder = crate::search::fastembed_embedder::FastEmbedder::load_from_dir(&model_dir)
-                .with_context(|| format!("loading FastEmbed model from {}", model_dir.display()))?;
+            let embedder =
+                crate::search::fastembed_embedder::FastEmbedder::load_from_dir(&model_dir)
+                    .with_context(|| {
+                        format!("loading FastEmbed model from {}", model_dir.display())
+                    })?;
             if embedder.dimension() != dimension {
                 bail!(
                     "progressive embedder dimension mismatch: {} index expects {}, model has {}",
@@ -2614,8 +2612,8 @@ impl SearchClient {
             params.push(ParamValue::from(*line_idx));
         }
 
-        let rows: Vec<Option<((String, String, i64), ResolvedSemanticDocId)>> =
-            conn.query_map_collect(&sql, &params, |row: &frankensqlite::Row| {
+        let rows: Vec<Option<((String, String, i64), ResolvedSemanticDocId)>> = conn
+            .query_map_collect(&sql, &params, |row: &frankensqlite::Row| {
                 let source_id: String = row.get_typed(0)?;
                 let source_path: String = row.get_typed(1)?;
                 let idx: i64 = row.get_typed(2)?;
@@ -2923,8 +2921,14 @@ impl SearchClient {
         match mode {
             SearchMode::Lexical => {
                 let started = Instant::now();
-                let result =
-                    self.search_with_fallback(query, filters, limit, 0, sparse_threshold, field_mask)?;
+                let result = self.search_with_fallback(
+                    query,
+                    filters,
+                    limit,
+                    0,
+                    sparse_threshold,
+                    field_mask,
+                )?;
                 on_event(ProgressiveSearchEvent::Phase {
                     kind: ProgressivePhaseKind::Initial,
                     elapsed_ms: started.elapsed().as_millis(),
@@ -2940,9 +2944,9 @@ impl SearchClient {
                 .semantic
                 .lock()
                 .map_err(|_| anyhow!("semantic lock poisoned"))?;
-            let state = guard
-                .as_mut()
-                .ok_or_else(|| anyhow!("semantic search unavailable (no embedder or vector index)"))?;
+            let state = guard.as_mut().ok_or_else(|| {
+                anyhow!("semantic search unavailable (no embedder or vector index)")
+            })?;
             self.load_progressive_context(state)?
                 .ok_or_else(|| anyhow!("progressive two-tier context unavailable"))?
         };
@@ -2958,7 +2962,10 @@ impl SearchClient {
             {
                 return Some(text.clone());
             }
-            let loaded = text_client.load_message_text_by_id(parsed.message_id).ok().flatten()?;
+            let loaded = text_client
+                .load_message_text_by_id(parsed.message_id)
+                .ok()
+                .flatten()?;
             if let Ok(mut cache) = text_cache_for_lookup.lock() {
                 cache.insert(parsed.message_id, loaded.clone());
             }
@@ -2968,8 +2975,11 @@ impl SearchClient {
         let fast_embedder: Arc<dyn frankensearch::Embedder> = Arc::new(FsSyncEmbedderAdapter(
             SharedCassSyncEmbedder::new(Arc::clone(&progressive_context.fast_embedder)),
         ));
-        let mut searcher =
-            FsTwoTierSearcher::new(Arc::clone(&progressive_context.index), fast_embedder, FsTwoTierConfig::default());
+        let mut searcher = FsTwoTierSearcher::new(
+            Arc::clone(&progressive_context.index),
+            fast_embedder,
+            FsTwoTierConfig::default(),
+        );
 
         if let Some(quality_embedder) = progressive_context.quality_embedder.as_ref() {
             let quality: Arc<dyn frankensearch::Embedder> = Arc::new(FsSyncEmbedderAdapter(
@@ -3003,37 +3013,35 @@ impl SearchClient {
                 let lexical_snapshot = phase_cache.lock().ok().map(|guard| guard.clone());
                 let event_result = match phase {
                     FsSearchPhase::Initial {
-                        results,
-                        latency,
-                        ..
-                    } => phase_client.progressive_phase_to_result(
-                        &results,
-                        &phase_filters,
-                        field_mask,
-                        lexical_snapshot.as_ref(),
-                        limit,
-                    )
-                    .map(|result| ProgressiveSearchEvent::Phase {
-                        kind: ProgressivePhaseKind::Initial,
-                        elapsed_ms: latency.as_millis(),
-                        result,
-                    }),
+                        results, latency, ..
+                    } => phase_client
+                        .progressive_phase_to_result(
+                            &results,
+                            &phase_filters,
+                            field_mask,
+                            lexical_snapshot.as_ref(),
+                            limit,
+                        )
+                        .map(|result| ProgressiveSearchEvent::Phase {
+                            kind: ProgressivePhaseKind::Initial,
+                            elapsed_ms: latency.as_millis(),
+                            result,
+                        }),
                     FsSearchPhase::Refined {
-                        results,
-                        latency,
-                        ..
-                    } => phase_client.progressive_phase_to_result(
-                        &results,
-                        &phase_filters,
-                        field_mask,
-                        lexical_snapshot.as_ref(),
-                        limit,
-                    )
-                    .map(|result| ProgressiveSearchEvent::Phase {
-                        kind: ProgressivePhaseKind::Refined,
-                        elapsed_ms: latency.as_millis(),
-                        result,
-                    }),
+                        results, latency, ..
+                    } => phase_client
+                        .progressive_phase_to_result(
+                            &results,
+                            &phase_filters,
+                            field_mask,
+                            lexical_snapshot.as_ref(),
+                            limit,
+                        )
+                        .map(|result| ProgressiveSearchEvent::Phase {
+                            kind: ProgressivePhaseKind::Refined,
+                            elapsed_ms: latency.as_millis(),
+                            result,
+                        }),
                     FsSearchPhase::RefinementFailed { error, latency, .. } => {
                         Ok(ProgressiveSearchEvent::RefinementFailed {
                             latency_ms: latency.as_millis(),
