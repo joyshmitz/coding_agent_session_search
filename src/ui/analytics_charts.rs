@@ -644,7 +644,7 @@ pub fn render_dashboard(
                 let label_w = items
                     .iter()
                     .take(8)
-                    .map(|(name, _)| name.len().min(14))
+                    .map(|(name, _)| display_width(name).min(14))
                     .max()
                     .unwrap_or(6) as u16;
 
@@ -685,11 +685,19 @@ pub fn render_dashboard(
                     } else {
                         cc.emphasis
                     };
-                    let truncated_name: String = name.chars().take(label_w as usize).collect();
+
+                    // Correctly handle display width for truncation
+                    let truncated_name = shorten_label(name, label_w as usize);
                     let val_str = format_compact(*val as i64);
 
+                    // To avoid padding issues with wide characters, we calculate exactly how many
+                    // spaces are needed instead of relying on the std::fmt width padder which uses chars
+                    let current_w = display_width(&truncated_name);
+                    let pad_w = (label_w as usize).saturating_sub(current_w);
+                    let pad = " ".repeat(pad_w);
+
                     let label_span = ftui::text::Span::styled(
-                        format!(" {:<label_w$}", truncated_name, label_w = label_w as usize),
+                        format!(" {truncated_name}{pad}"),
                         ftui::Style::new().fg(cc.axis),
                     );
                     Paragraph::new(ftui::text::Line::from_spans(vec![label_span])).render(
