@@ -444,7 +444,7 @@ pub fn estimate_password_entropy(password: &str) -> f64 {
     }
 
     let bits_per_char = (pool_size as f64).log2();
-    let length = password.len() as f64;
+    let length = password.chars().count() as f64;
 
     bits_per_char * length
 }

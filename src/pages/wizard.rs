@@ -528,7 +528,7 @@ impl PagesWizard {
             .with_prompt("Archive password (min 8 characters)")
             .with_confirmation("Confirm password", "Passwords don't match")
             .validate_with(|input: &String| -> Result<(), &str> {
-                if input.len() >= 8 {
+                if input.chars().count() >= 8 {
                     Ok(())
                 } else {
                     Err("Password must be at least 8 characters")

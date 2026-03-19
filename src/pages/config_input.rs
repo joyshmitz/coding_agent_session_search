@@ -496,7 +496,7 @@ impl PagesConfig {
             .encryption
             .password
             .as_ref()
-            .is_some_and(|p| p.len() < 12)
+            .is_some_and(|p| p.chars().count() < 12)
         {
             warnings.push(
                 "Password is less than 12 characters. Consider using a stronger password."

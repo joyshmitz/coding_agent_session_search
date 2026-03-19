@@ -491,8 +491,8 @@ pub fn load_chart_data(
     }
     if data.total_api_tokens > 0 {
         let plan_token_total: f64 = data.daily_plan_messages.iter().map(|(_, v)| *v).sum();
-        if plan_token_total > 0.0 && data.total_messages > 0 {
-            data.plan_api_token_share = plan_token_total / data.total_messages as f64 * 100.0;
+        if plan_token_total > 0.0 && data.total_api_tokens > 0 {
+            data.plan_api_token_share = plan_token_total / data.total_api_tokens as f64 * 100.0;
         }
     }
 
@@ -1841,7 +1841,8 @@ fn parse_day_label(label: &str) -> Option<(i32, u32, u32)> {
 fn weekday_index(y: i32, m: u32, d: u32) -> usize {
     static T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
     let y = if m < 3 { y - 1 } else { y };
-    let dow = (y + y / 4 - y / 100 + y / 400 + T[m as usize - 1] + d as i32) % 7;
+    let m_idx = (m as usize).clamp(1, 12) - 1;
+    let dow = (y + y / 4 - y / 100 + y / 400 + T[m_idx] + d as i32) % 7;
     // Sakamoto gives Sun=0, Mon=1 … Sat=6; convert to Mon=0 … Sun=6.
     ((dow + 6) % 7) as usize
 }

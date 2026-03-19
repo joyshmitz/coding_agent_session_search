@@ -6639,7 +6639,12 @@ fn output_robot_results(
                 map.serialize_entry("agent", &hit.agent)?;
                 map.serialize_entry("title", &hit.title)?;
                 // Preserve existing score rendering behavior from serde_json::Value path.
-                map.serialize_entry("score", &(hit.score as f64))?;
+                let safe_score = if hit.score.is_finite() {
+                    hit.score as f64
+                } else {
+                    0.0
+                };
+                map.serialize_entry("score", &safe_score)?;
                 map.end()
             }
         }
@@ -6747,7 +6752,12 @@ fn output_robot_results(
                 map.serialize_entry("title", &hit.title)?;
                 map.serialize_entry("snippet", &hit.snippet)?;
                 map.serialize_entry("content", &hit.content)?;
-                map.serialize_entry("score", &(hit.score as f64))?;
+                let safe_score = if hit.score.is_finite() {
+                    hit.score as f64
+                } else {
+                    0.0
+                };
+                map.serialize_entry("score", &safe_score)?;
                 map.serialize_entry("source_path", &hit.source_path)?;
                 map.serialize_entry("agent", &hit.agent)?;
                 map.serialize_entry("workspace", &hit.workspace)?;

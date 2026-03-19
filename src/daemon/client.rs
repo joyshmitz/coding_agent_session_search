@@ -168,9 +168,11 @@ impl UdsDaemonClient {
                 DaemonError::Unavailable("cannot determine daemon binary path".to_string())
             })?;
 
-        // Remove existing socket if present
-        if self.config.socket_path.exists() {
-            let _ = std::fs::remove_file(&self.config.socket_path);
+        // Remove existing socket if present (ignore NotFound — avoids TOCTOU race)
+        if let Err(e) = std::fs::remove_file(&self.config.socket_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(error = %e, "failed to remove stale daemon socket");
         }
 
         // Spawn daemon in background
@@ -184,13 +186,18 @@ impl UdsDaemonClient {
             .spawn();
 
         match result {
-            Ok(child) => {
+            Ok(mut child) => {
                 info!(
                     pid = child.id(),
                     binary = %binary.display(),
                     socket = %self.config.socket_path.display(),
                     "Spawned daemon process"
                 );
+                // Reap the child in a background thread to avoid zombie processes.
+                // The daemon is long-lived, so we just detach and let it run.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
                 Ok(())
             }
             Err(e) => Err(DaemonError::Unavailable(format!(

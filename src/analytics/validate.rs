@@ -651,11 +651,14 @@ fn validate_cross_track_drift(
         for row in rows {
             drift_checked += 1;
             let (day_id, agent_slug, source_id, a_total, b_total) = row;
-            let delta = a_total - b_total;
+            let delta = a_total.saturating_sub(b_total);
             let denom = a_total.max(b_total).max(1);
-            let delta_pct = (delta.abs() as f64 / denom as f64) * 100.0;
+            let abs_delta = delta.unsigned_abs();
+            let delta_pct = (abs_delta as f64 / denom as f64) * 100.0;
 
-            if delta.abs() > config.drift_abs_threshold && delta_pct > config.drift_pct_threshold {
+            if abs_delta > config.drift_abs_threshold as u64
+                && delta_pct > config.drift_pct_threshold
+            {
                 drift_count += 1;
                 let likely_cause = if a_total > 0 && b_total == 0 {
                     "Track B missing rows (rebuild needed or not yet ingested)"
@@ -692,11 +695,14 @@ fn validate_cross_track_drift(
         for row in rows {
             drift_checked += 1;
             let (day_id, agent_slug, source_id, a_total, b_total) = row;
-            let delta = a_total - b_total;
+            let delta = a_total.saturating_sub(b_total);
             let denom = a_total.max(b_total).max(1);
-            let delta_pct = (delta.abs() as f64 / denom as f64) * 100.0;
+            let abs_delta = delta.unsigned_abs();
+            let delta_pct = (abs_delta as f64 / denom as f64) * 100.0;
 
-            if delta.abs() > config.drift_abs_threshold && delta_pct > config.drift_pct_threshold {
+            if abs_delta > config.drift_abs_threshold as u64
+                && delta_pct > config.drift_pct_threshold
+            {
                 drift_count += 1;
                 entries.push(DriftEntry {
                     day_id,
