@@ -1008,6 +1008,32 @@ pub fn render_explorer(
     let cc = ChartColors::for_theme(dark_mode);
 
     if metric_data.is_empty() {
+        if area.height >= 12 && area.width >= 40 {
+            let accent = if dark_mode { PackedRgba::rgb(90, 180, 255) } else { PackedRgba::rgb(20, 100, 200) };
+            let primary = if dark_mode { PackedRgba::rgb(60, 120, 200) } else { PackedRgba::rgb(40, 80, 160) };
+            
+            let mut lines = Vec::new();
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("             ▃▄▅▇██▇▅▄▃             ", ftui::Style::new().fg(accent)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("         ▂▄▆████████████▆▄▂         ", ftui::Style::new().fg(primary)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("       ▃▆██████████████████▆▃       ", ftui::Style::new().fg(cc.muted)),
+            ]));
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(
+                    " No analytics timeseries yet. If data exists, cass is rebuilding automatically.",
+                    ftui::Style::new().fg(cc.axis).bold(),
+                ),
+            ]));
+            Paragraph::new(ftui::text::Text::from_lines(lines)).render(area, frame);
+            return;
+        }
+
         Paragraph::new(
             " No analytics timeseries yet. If data exists, cass is rebuilding automatically.",
         )
@@ -1755,6 +1781,44 @@ pub fn render_heatmap(
     let cc = ChartColors::for_theme(dark_mode);
 
     if series.is_empty() {
+        if area.height >= 12 && area.width >= 40 {
+            let muted = if dark_mode { PackedRgba::rgb(120, 125, 140) } else { PackedRgba::rgb(100, 105, 115) };
+            let accent = if dark_mode { PackedRgba::rgb(90, 180, 255) } else { PackedRgba::rgb(20, 100, 200) };
+            let primary = if dark_mode { PackedRgba::rgb(60, 120, 200) } else { PackedRgba::rgb(40, 80, 160) };
+            let mut lines = Vec::new();
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ░░░ ▒▒▒ ▓▓▓ ███ ▓▓▓ ▒▒▒ ░░░", ftui::Style::new().fg(muted)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ▒▒▒ ▓▓▓ ███ ███ ███ ▓▓▓ ▒▒▒", ftui::Style::new().fg(primary)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ▓▓▓ ███ ███ ███ ███ ███ ▓▓▓", ftui::Style::new().fg(accent)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ███ ███ ███ ███ ███ ███ ███", ftui::Style::new().fg(accent)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ▓▓▓ ███ ███ ███ ███ ███ ▓▓▓", ftui::Style::new().fg(accent)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ▒▒▒ ▓▓▓ ███ ███ ███ ▓▓▓ ▒▒▒", ftui::Style::new().fg(primary)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ░░░ ▒▒▒ ▓▓▓ ███ ▓▓▓ ▒▒▒ ░░░", ftui::Style::new().fg(muted)),
+            ]));
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(
+                    " No daily data available for this view yet.",
+                    ftui::Style::new().fg(cc.axis).bold(),
+                ),
+            ]));
+            Paragraph::new(ftui::text::Text::from_lines(lines)).render(area, frame);
+            return;
+        }
+
         Paragraph::new(" No daily data available for this view yet.")
             .style(ftui::Style::new().fg(cc.subtle))
             .render(area, frame);
@@ -2087,6 +2151,37 @@ pub fn render_breakdowns(
             " No {} breakdown data for the current filters.",
             tab.label()
         );
+        
+        if area.height >= 12 && area.width >= 40 {
+            let accent = if dark_mode { PackedRgba::rgb(90, 180, 255) } else { PackedRgba::rgb(20, 100, 200) };
+            let primary = if dark_mode { PackedRgba::rgb(60, 120, 200) } else { PackedRgba::rgb(40, 80, 160) };
+            
+            let mut lines = Vec::new();
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ██████████      ", ftui::Style::new().fg(accent)),
+                ftui::text::Span::styled("   ██████████      ", ftui::Style::new().fg(primary)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ████████████    ", ftui::Style::new().fg(accent)),
+                ftui::text::Span::styled("   ██████████████  ", ftui::Style::new().fg(primary)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ████████████████", ftui::Style::new().fg(accent)),
+                ftui::text::Span::styled("   ████████        ", ftui::Style::new().fg(primary)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ██████          ", ftui::Style::new().fg(accent)),
+                ftui::text::Span::styled("   ████████████████", ftui::Style::new().fg(primary)),
+            ]));
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(msg, ftui::Style::new().fg(cc.axis).bold()),
+            ]));
+            Paragraph::new(ftui::text::Text::from_lines(lines)).render(area, frame);
+            return;
+        }
+
         Paragraph::new(msg)
             .style(ftui::Style::new().fg(cc.subtle))
             .render(area, frame);
@@ -2245,23 +2340,34 @@ fn render_breakdown_tabs(
 }
 
 /// Shorten a label (e.g., workspace path) to fit in `max_len` characters.
-fn shorten_label(s: &str, max_len: usize) -> String {
-    if max_len == 0 {
+fn shorten_label(s: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
         return String::new();
     }
-    if s.chars().count() <= max_len {
+    if display_width(s) <= max_cols {
         return s.to_string();
     }
     if s.contains('/') {
         let last = s.rsplit('/').next().unwrap_or(s);
-        if last.chars().count() <= max_len {
+        if display_width(last) <= max_cols {
             return last.to_string();
         }
     }
-    if max_len == 1 {
+    if max_cols == 1 {
         return "\u{2026}".to_string();
     }
-    let mut truncated: String = s.chars().take(max_len - 1).collect();
+    // Take characters until we would exceed the column budget (minus 1 for ellipsis).
+    let budget = max_cols - 1;
+    let mut truncated = String::new();
+    let mut w = 0;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        truncated.push(ch);
+        w += cw;
+    }
     truncated.push('\u{2026}');
     truncated
 }
@@ -2287,6 +2393,38 @@ pub fn render_tools(
     let cc = ChartColors::for_theme(dark_mode);
 
     if data.tool_rows.is_empty() {
+        if area.height >= 12 && area.width >= 40 {
+            let accent = if dark_mode { PackedRgba::rgb(90, 180, 255) } else { PackedRgba::rgb(20, 100, 200) };
+            let primary = if dark_mode { PackedRgba::rgb(60, 120, 200) } else { PackedRgba::rgb(40, 80, 160) };
+            
+            let mut lines = Vec::new();
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   Agent                 Calls   Msgs   Tokens   Trend  ", ftui::Style::new().fg(cc.muted)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ██████████               ██     ██       ██     ███  ", ftui::Style::new().fg(primary)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ████████████             ██     ██       ██     ███  ", ftui::Style::new().fg(accent)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ██████                   ██     ██       ██     ███  ", ftui::Style::new().fg(primary)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ████████                 ██     ██       ██     ███  ", ftui::Style::new().fg(accent)),
+            ]));
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(
+                    " No tool usage data available for the current filters.",
+                    ftui::Style::new().fg(cc.axis).bold(),
+                ),
+            ]));
+            Paragraph::new(ftui::text::Text::from_lines(lines)).render(area, frame);
+            return;
+        }
+
         Paragraph::new(" No tool usage data available for the current filters.")
             .style(ftui::Style::new().fg(cc.subtle))
             .render(area, frame);
@@ -2731,6 +2869,29 @@ pub fn render_coverage(
             .gradient(PackedRgba::rgb(60, 60, 120), PackedRgba::rgb(80, 200, 80));
         sparkline.render(spark_area, frame);
     } else {
+        if chunks[2].height >= 8 && chunks[2].width >= 40 {
+            let accent = if dark_mode { PackedRgba::rgb(90, 180, 255) } else { PackedRgba::rgb(20, 100, 200) };
+            let primary = if dark_mode { PackedRgba::rgb(60, 120, 200) } else { PackedRgba::rgb(40, 80, 160) };
+            
+            let mut lines = Vec::new();
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ▂▂▃▄▅▆▇██████████████▇▆▅▄▃▂▂   ", ftui::Style::new().fg(accent)),
+            ]));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled("   ████████████████████████████   ", ftui::Style::new().fg(primary)),
+            ]));
+            lines.push(ftui::text::Line::from(""));
+            lines.push(ftui::text::Line::from_spans(vec![
+                ftui::text::Span::styled(
+                    " No daily data for sparkline",
+                    ftui::Style::new().fg(cc.axis).bold(),
+                ),
+            ]));
+            Paragraph::new(ftui::text::Text::from_lines(lines)).render(chunks[2], frame);
+            return;
+        }
+
         Paragraph::new(" No daily data for sparkline")
             .style(ftui::Style::new().fg(cc.subtle))
             .render(chunks[2], frame);
