@@ -1149,14 +1149,16 @@ impl SyncStatus {
         }
     }
 
-    /// Save sync status to disk.
+    /// Save sync status to disk (atomic write via temp file + rename).
     pub fn save(&self, data_dir: &Path) -> Result<(), std::io::Error> {
         let path = Self::status_path(data_dir);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, content)
+        let tmp_path = unique_atomic_temp_path(&path);
+        std::fs::write(&tmp_path, content)?;
+        std::fs::rename(&tmp_path, &path)
     }
 
     /// Update status for a source from a sync report.
@@ -1208,9 +1210,31 @@ impl SyncStatus {
     }
 }
 
+fn unique_atomic_temp_path(path: &Path) -> PathBuf {
+    static NEXT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let nonce = NEXT_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("sync_status.json");
+
+    path.with_file_name(format!(
+        ".{file_name}.{}.{}.{}.tmp",
+        std::process::id(),
+        timestamp,
+        nonce
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_path_to_safe_dirname() {
@@ -1433,6 +1457,39 @@ Total transferred file size: 1,234 bytes
 
         let info = status.get("dead-host").unwrap();
         assert!(matches!(info.last_result, SyncResult::Failed(_)));
+    }
+
+    #[test]
+    fn test_sync_status_save_round_trips() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut status = SyncStatus::default();
+        let mut report = SyncReport::new("laptop", SyncMethod::Rsync);
+        report.add_path_result(PathSyncResult {
+            files_transferred: 3,
+            bytes_transferred: 42,
+            success: true,
+            ..Default::default()
+        });
+        status.update("laptop", &report);
+
+        status.save(temp.path()).expect("save status");
+        let loaded = SyncStatus::load(temp.path()).expect("load status");
+
+        let info = loaded.get("laptop").expect("round-tripped source");
+        assert_eq!(info.files_synced, 3);
+        assert_eq!(info.bytes_transferred, 42);
+        assert!(matches!(info.last_result, SyncResult::Success));
+    }
+
+    #[test]
+    fn test_unique_atomic_temp_path_changes_each_call() {
+        let final_path = Path::new("/tmp/sync_status.json");
+        let first = unique_atomic_temp_path(final_path);
+        let second = unique_atomic_temp_path(final_path);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), final_path.parent());
+        assert_eq!(second.parent(), final_path.parent());
     }
 
     #[test]

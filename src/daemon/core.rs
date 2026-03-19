@@ -205,9 +205,11 @@ impl ModelDaemon {
             );
         }
 
-        // Remove stale socket if exists
-        if self.config.socket_path.exists() {
-            std::fs::remove_file(&self.config.socket_path)?;
+        // Remove stale socket if present (ignore NotFound — avoids TOCTOU race)
+        if let Err(e) = std::fs::remove_file(&self.config.socket_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(e);
         }
 
         // Create parent directory if needed

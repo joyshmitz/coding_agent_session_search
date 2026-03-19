@@ -149,7 +149,7 @@ impl Default for EncryptionEngine {
 impl EncryptionEngine {
     /// Create new encryption engine with random DEK
     pub fn new(chunk_size: usize) -> Self {
-        let chunk_size = chunk_size.min(MAX_CHUNK_SIZE);
+        let chunk_size = chunk_size.clamp(1, MAX_CHUNK_SIZE);
         let mut export_id = [0u8; 16];
         let mut base_nonce = [0u8; 12];
         let mut rng = rand::rng();

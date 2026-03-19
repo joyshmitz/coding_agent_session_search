@@ -13521,7 +13521,7 @@ impl TantivySearchService {
         let cancel_stop = stop.clone();
         let cancel_cx = cx.clone();
         let cancel_thread = std::thread::spawn(move || {
-            while !cancel_done.load(std::sync::atomic::Ordering::Relaxed) {
+            while !cancel_done.load(std::sync::atomic::Ordering::Acquire) {
                 if cancel_stop.wait_timeout(Duration::from_millis(4)) {
                     cancel_cx.set_cancel_requested(true);
                     break;
@@ -13585,7 +13585,7 @@ impl TantivySearchService {
                 .await
         });
 
-        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        done.store(true, std::sync::atomic::Ordering::Release);
         let _ = cancel_thread.join();
 
         if let Err(err) = live_result
@@ -14868,7 +14868,7 @@ impl super::ftui_adapter::Model for CassApp {
                     let trimmed = self.input_buffer.trim_end();
                     let new_end = trimmed
                         .rfind(|c: char| c.is_whitespace())
-                        .map(|i| i + 1)
+                        .map(|i| i + trimmed[i..].chars().next().map_or(1, |ch| ch.len_utf8()))
                         .unwrap_or(0);
                     self.input_buffer.truncate(new_end);
                     if self.input_mode == InputMode::PaneFilter {
@@ -15003,7 +15003,7 @@ impl super::ftui_adapter::Model for CassApp {
                     let trimmed = before.trim_end();
                     let new_end = trimmed
                         .rfind(|c: char| c.is_whitespace())
-                        .map(|i| i + 1)
+                        .map(|i| i + trimmed[i..].chars().next().map_or(1, |ch| ch.len_utf8()))
                         .unwrap_or(0);
                     self.query.drain(new_end..cursor);
                     self.cursor_pos = new_end;

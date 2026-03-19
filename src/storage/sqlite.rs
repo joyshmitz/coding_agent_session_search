@@ -319,8 +319,9 @@ impl FrankenConnectionManager {
         let db_path = db_path.into();
         let path_str = db_path.to_string_lossy().to_string();
 
-        let mut readers = Vec::with_capacity(config.reader_count);
-        for _ in 0..config.reader_count {
+        let reader_count = config.reader_count.max(1);
+        let mut readers = Vec::with_capacity(reader_count);
+        for _ in 0..reader_count {
             let conn = FrankenConnection::open(&path_str)
                 .with_context(|| format!("opening reader connection at {}", db_path.display()))?;
             // Apply read-tuned config (no migration, no write PRAGMAs)
@@ -5096,6 +5097,19 @@ fn sql_like_match(value: &str, pattern: &str) -> bool {
     )
 }
 
+/// Determine the byte length of the UTF-8 character starting at `b`.
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
 fn sql_like_match_bytes(val: &[u8], pat: &[u8]) -> bool {
     if pat.is_empty() {
         return val.is_empty();
@@ -5107,14 +5121,28 @@ fn sql_like_match_bytes(val: &[u8], pat: &[u8]) -> bool {
                 p += 1;
             }
             let rest = &pat[p..];
-            for i in 0..=val.len() {
+            // Iterate only at UTF-8 char boundaries
+            let mut i = 0;
+            while i <= val.len() {
                 if sql_like_match_bytes(&val[i..], rest) {
                     return true;
+                }
+                if i < val.len() {
+                    i += utf8_char_len(val[i]);
+                } else {
+                    break;
                 }
             }
             false
         }
-        b'_' => !val.is_empty() && sql_like_match_bytes(&val[1..], &pat[1..]),
+        b'_' => {
+            // Match one full UTF-8 character, not just one byte
+            if val.is_empty() {
+                return false;
+            }
+            let char_len = utf8_char_len(val[0]);
+            val.len() >= char_len && sql_like_match_bytes(&val[char_len..], &pat[1..])
+        }
         c => !val.is_empty() && val[0] == c && sql_like_match_bytes(&val[1..], &pat[1..]),
     }
 }

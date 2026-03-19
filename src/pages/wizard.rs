@@ -757,7 +757,7 @@ impl PagesWizard {
                 }
 
                 if !months.is_empty() {
-                    let month_max = months.values().max().copied().unwrap_or(1);
+                    let month_max = months.values().max().copied().unwrap_or(1).max(1);
                     let sparkline: String = months
                         .values()
                         .map(|&count| {

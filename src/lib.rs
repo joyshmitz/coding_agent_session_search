@@ -4773,7 +4773,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "    --json | --robot  JSON output for automation".to_string(),
             "    --fields F1,F2    Select specific fields in hits (reduces token usage)".to_string(),
             "                      Presets: minimal (path,line,agent), summary (+title,score), provenance (source_id,origin_kind,origin_host)".to_string(),
-            "                      Fields: score,agent,workspace,source_path,snippet,content,title,created_at,line_number,match_type,source_id,origin_kind,origin_host".to_string(),
+            "                      Fields: score,agent,workspace,workspace_original,source_path,snippet,content,title,created_at,line_number,match_type,source_id,origin_kind,origin_host".to_string(),
             "    --max-content-length N  Truncate content/snippet/title to N chars (UTF-8 safe, adds '...')".to_string(),
             "                            Adds *_truncated: true indicator for each truncated field".to_string(),
             "    --today           Filter to today only".to_string(),
@@ -6298,12 +6298,16 @@ fn resolve_field_mask(
 }
 
 /// Filter a search hit to only include the requested fields
+fn safe_robot_score_value(score: f32) -> serde_json::Value {
+    serde_json::Value::from(if score.is_finite() { score as f64 } else { 0.0 })
+}
+
 fn projected_hit_field_value(
     hit: &crate::search::query::SearchHit,
     field: &str,
 ) -> Option<serde_json::Value> {
     match field {
-        "score" => serde_json::to_value(hit.score).ok(),
+        "score" => Some(safe_robot_score_value(hit.score)),
         "agent" => Some(serde_json::Value::String(hit.agent.clone())),
         "workspace" => Some(serde_json::Value::String(hit.workspace.clone())),
         "source_path" => Some(serde_json::Value::String(hit.source_path.clone())),
@@ -6334,9 +6338,17 @@ fn filter_hit_fields(
     hit: &crate::search::query::SearchHit,
     fields: &Option<Vec<String>>,
 ) -> serde_json::Value {
+    // Sanitize NaN/Infinity score before serialization — serde_json rejects non-finite floats.
+    let sanitize = |h: &crate::search::query::SearchHit| -> serde_json::Value {
+        let mut h = h.clone();
+        if !h.score.is_finite() {
+            h.score = 0.0;
+        }
+        serde_json::to_value(&h).unwrap_or_default()
+    };
     match fields {
-        None => serde_json::to_value(hit).unwrap_or_default(), // No filtering
-        Some(field_list) if field_list.is_empty() => serde_json::to_value(hit).unwrap_or_default(), // "all" or "*" preset
+        None => sanitize(hit),
+        Some(field_list) if field_list.is_empty() => sanitize(hit),
         Some(field_list) => {
             let mut filtered = serde_json::Map::new();
             let known_fields = [
@@ -6354,6 +6366,7 @@ fn filter_hit_fields(
                 "source_id",
                 "origin_kind",
                 "origin_host",
+                "workspace_original",
             ];
 
             for field in field_list {
@@ -6638,12 +6651,7 @@ fn output_robot_results(
                 map.serialize_entry("line_number", &hit.line_number)?;
                 map.serialize_entry("agent", &hit.agent)?;
                 map.serialize_entry("title", &hit.title)?;
-                // Preserve existing score rendering behavior from serde_json::Value path.
-                let safe_score = if hit.score.is_finite() {
-                    hit.score as f64
-                } else {
-                    0.0
-                };
+                let safe_score = safe_robot_score_value(hit.score);
                 map.serialize_entry("score", &safe_score)?;
                 map.end()
             }
@@ -6752,11 +6760,7 @@ fn output_robot_results(
                 map.serialize_entry("title", &hit.title)?;
                 map.serialize_entry("snippet", &hit.snippet)?;
                 map.serialize_entry("content", &hit.content)?;
-                let safe_score = if hit.score.is_finite() {
-                    hit.score as f64
-                } else {
-                    0.0
-                };
+                let safe_score = safe_robot_score_value(hit.score);
                 map.serialize_entry("score", &safe_score)?;
                 map.serialize_entry("source_path", &hit.source_path)?;
                 map.serialize_entry("agent", &hit.agent)?;
@@ -6877,15 +6881,25 @@ fn output_robot_results(
                     "title".to_string(),
                     serde_json::Value::String(hit.title.clone()),
                 );
-                map.insert(
-                    "score".to_string(),
-                    serde_json::to_value(hit.score).unwrap_or_default(),
-                );
+                map.insert("score".to_string(), safe_robot_score_value(hit.score));
                 serde_json::Value::Object(map)
             })
             .collect()
     } else if passthrough_all_fields && !needs_truncation {
-        match serde_json::to_value(&result.hits).unwrap_or_default() {
+        // Sanitize NaN/Infinity scores before bulk serialization — serde_json
+        // cannot represent non-finite floats, which would silently drop all hits.
+        let sanitized: Vec<_> = result
+            .hits
+            .iter()
+            .map(|hit| {
+                let mut h = hit.clone();
+                if !h.score.is_finite() {
+                    h.score = 0.0;
+                }
+                h
+            })
+            .collect();
+        match serde_json::to_value(&sanitized).unwrap_or_default() {
             serde_json::Value::Array(values) => values,
             _ => Vec::new(),
         }
@@ -10521,6 +10535,7 @@ fn build_response_schemas() -> std::collections::HashMap<String, serde_json::Val
                             "line_number": { "type": ["integer", "null"] },
                             "agent": { "type": "string" },
                             "workspace": { "type": ["string", "null"] },
+                            "workspace_original": { "type": ["string", "null"], "description": "Original workspace path before remote path mapping" },
                             "title": { "type": ["string", "null"] },
                             "content": { "type": ["string", "null"] },
                             "snippet": { "type": ["string", "null"] },
@@ -13442,6 +13457,66 @@ mod indexed_conversation_fallback_tests {
         assert_eq!(
             extract_message_timestamp(&raw_messages[0]),
             Some(1_733_000_000_000)
+        );
+    }
+}
+
+#[cfg(test)]
+mod robot_output_score_tests {
+    use super::{filter_hit_fields, projected_hit_field_value, safe_robot_score_value};
+    use crate::search::query::{MatchType, SearchHit};
+
+    fn test_hit(score: f32) -> SearchHit {
+        SearchHit {
+            title: "Title".to_string(),
+            snippet: "Snippet".to_string(),
+            content: "Content".to_string(),
+            content_hash: 0,
+            score,
+            source_path: "/tmp/session.jsonl".to_string(),
+            agent: "codex".to_string(),
+            workspace: "/tmp".to_string(),
+            workspace_original: None,
+            created_at: Some(1_733_000_000_000),
+            line_number: Some(1),
+            match_type: MatchType::Exact,
+            source_id: "local".to_string(),
+            origin_kind: "local".to_string(),
+            origin_host: None,
+        }
+    }
+
+    #[test]
+    fn safe_robot_score_value_coerces_non_finite_scores() {
+        assert_eq!(safe_robot_score_value(f32::NAN), serde_json::json!(0.0));
+        assert_eq!(
+            safe_robot_score_value(f32::INFINITY),
+            serde_json::json!(0.0)
+        );
+        assert_eq!(
+            safe_robot_score_value(f32::NEG_INFINITY),
+            serde_json::json!(0.0)
+        );
+        assert_eq!(safe_robot_score_value(1.25), serde_json::json!(1.25));
+    }
+
+    #[test]
+    fn projected_hit_score_never_serializes_to_null() {
+        let projected = projected_hit_field_value(&test_hit(f32::NAN), "score");
+        assert_eq!(projected, Some(serde_json::json!(0.0)));
+    }
+
+    #[test]
+    fn filter_hit_fields_supports_workspace_original_projection() {
+        let mut hit = test_hit(1.0);
+        hit.workspace_original = Some("/remote/workspace".to_string());
+
+        let filtered = filter_hit_fields(&hit, &Some(vec!["workspace_original".to_string()]));
+        assert_eq!(
+            filtered,
+            serde_json::json!({
+                "workspace_original": "/remote/workspace"
+            })
         );
     }
 }

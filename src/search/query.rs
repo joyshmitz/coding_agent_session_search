@@ -2926,10 +2926,7 @@ impl SearchClient {
         }
 
         let mut hits: Vec<SearchHit> = hydrated.into_iter().map(|(_, hit)| hit).collect();
-        hits = deduplicate_hits(hits);
-        if !filters.session_paths.is_empty() {
-            hits.retain(|hit| filters.session_paths.contains(&hit.source_path));
-        }
+        (_, hits) = self.postprocess_hits_page(hits, filters, limit, 0);
 
         let (wildcard_fallback, suggestions) = lexical_cache
             .map(|cache| {
@@ -3178,69 +3175,78 @@ impl SearchClient {
         } else {
             limit
         };
-        let fetch = limit.saturating_add(offset);
-        if fetch == 0 {
+        let target_hits = limit.saturating_add(offset);
+        if target_hits == 0 {
             return Ok((Vec::new(), None));
         }
+        let initial_fetch_limit = target_hits;
+        let fallback_fetch_limit = target_hits.saturating_mul(3);
 
-        let collapse = |best_by_message: HashMap<u64, VectorSearchResult>| {
+        let collapse = |best_by_message: HashMap<u64, VectorSearchResult>, fetch_limit: usize| {
             let mut collapsed: Vec<VectorSearchResult> = best_by_message.into_values().collect();
             collapsed.sort_by(|a, b| {
                 b.score
                     .total_cmp(&a.score)
                     .then_with(|| a.message_id.cmp(&b.message_id))
             });
-            if collapsed.len() > fetch {
-                collapsed.truncate(fetch);
+            if collapsed.len() > fetch_limit {
+                collapsed.truncate(fetch_limit);
             }
             collapsed
         };
 
-        // Track ANN stats if approximate search is used
-        let mut ann_stats: Option<crate::search::ann_index::AnnSearchStats> = None;
+        let mut search_candidates = |fetch_limit: usize| -> Result<(
+            Vec<VectorSearchResult>,
+            bool,
+            Option<crate::search::ann_index::AnnSearchStats>,
+        )> {
+            if tier_mode.wants_two_tier() && !approximate {
+                let fs_filter = semantic_filter_as_search_filter(&semantic_filter);
+                if let Some(two_tier_index) = state.load_in_memory_two_tier_index(tier_mode) {
+                    let config = tier_mode.to_frankensearch_config();
+                    let searcher = FsSyncTwoTierSearcher::new(two_tier_index, config);
+                    let (tier_hits, metrics) = searcher
+                        .search_collect_with_filter(&embedding, fetch_limit, fs_filter)
+                        .map_err(|err| {
+                            anyhow!("frankensearch two-tier semantic search failed: {err}")
+                        })?;
 
-        let mut results = if tier_mode.wants_two_tier() && !approximate {
-            let fs_filter = semantic_filter_as_search_filter(&semantic_filter);
-            if let Some(two_tier_index) = state.load_in_memory_two_tier_index(tier_mode) {
-                let config = tier_mode.to_frankensearch_config();
-                let searcher = FsSyncTwoTierSearcher::new(two_tier_index, config);
-                let (tier_hits, metrics) = searcher
-                    .search_collect_with_filter(&embedding, fetch, fs_filter)
-                    .map_err(|err| {
-                        anyhow!("frankensearch two-tier semantic search failed: {err}")
-                    })?;
+                    tracing::debug!(
+                        tier_mode = ?tier_mode,
+                        phase1_ms = metrics.phase1_total_ms,
+                        phase2_ms = metrics.phase2_total_ms,
+                        skip_reason = ?metrics.skip_reason,
+                        returned = tier_hits.len(),
+                        "semantic two-tier search executed"
+                    );
 
-                tracing::debug!(
-                    tier_mode = ?tier_mode,
-                    phase1_ms = metrics.phase1_total_ms,
-                    phase2_ms = metrics.phase2_total_ms,
-                    skip_reason = ?metrics.skip_reason,
-                    returned = tier_hits.len(),
-                    "semantic two-tier search executed"
-                );
+                    let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
+                    for hit in tier_hits.iter() {
+                        let Some(parsed) = parse_semantic_doc_id(&hit.doc_id) else {
+                            continue;
+                        };
+                        best_by_message
+                            .entry(parsed.message_id)
+                            .and_modify(|entry| {
+                                if hit.score > entry.score {
+                                    entry.score = hit.score;
+                                    entry.chunk_idx = parsed.chunk_idx;
+                                }
+                            })
+                            .or_insert(VectorSearchResult {
+                                message_id: parsed.message_id,
+                                chunk_idx: parsed.chunk_idx,
+                                score: hit.score,
+                            });
+                    }
 
-                let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
-                for hit in tier_hits {
-                    let Some(parsed) = parse_semantic_doc_id(&hit.doc_id) else {
-                        continue;
-                    };
-                    best_by_message
-                        .entry(parsed.message_id)
-                        .and_modify(|entry| {
-                            if hit.score > entry.score {
-                                entry.score = hit.score;
-                                entry.chunk_idx = parsed.chunk_idx;
-                            }
-                        })
-                        .or_insert(VectorSearchResult {
-                            message_id: parsed.message_id,
-                            chunk_idx: parsed.chunk_idx,
-                            score: hit.score,
-                        });
+                    return Ok((
+                        collapse(best_by_message, fetch_limit),
+                        tier_hits.len() >= fetch_limit,
+                        None,
+                    ));
                 }
 
-                collapse(best_by_message)
-            } else {
                 tracing::debug!(
                     tier_mode = ?tier_mode,
                     "two-tier semantic unavailable; falling back to exact single-tier search"
@@ -3248,11 +3254,11 @@ impl SearchClient {
 
                 let fs_index = &state.fs_semantic_index;
                 let fs_hits = fs_index
-                    .search_top_k(&embedding, fetch, fs_filter)
+                    .search_top_k(&embedding, fetch_limit, fs_filter)
                     .map_err(|err| anyhow!("frankensearch semantic search failed: {err}"))?;
 
                 let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
-                for hit in fs_hits {
+                for hit in fs_hits.iter() {
                     let Some(parsed) = parse_semantic_doc_id(&hit.doc_id) else {
                         continue;
                     };
@@ -3271,84 +3277,96 @@ impl SearchClient {
                         });
                 }
 
-                collapse(best_by_message)
-            }
-        } else if approximate {
-            if tier_mode.wants_two_tier() {
-                tracing::debug!(
-                    tier_mode = ?tier_mode,
-                    "approximate search requested; bypassing two-tier mode"
-                );
-            }
-            let fs_index = &state.fs_semantic_index;
-
-            if state.fs_ann_index.is_none() {
-                let ann_path = state.ann_path.as_ref().ok_or_else(|| {
-                    anyhow!(
-                        "approximate search unavailable: HNSW index missing (run 'cass index --semantic --build-hnsw')"
-                    )
-                })?;
-                let ann = open_fs_semantic_ann_index(fs_index, ann_path)?;
-                state.fs_ann_index = Some(ann);
+                return Ok((
+                    collapse(best_by_message, fetch_limit),
+                    fs_hits.len() >= fetch_limit,
+                    None,
+                ));
             }
 
-            let ann = state
-                .fs_ann_index
-                .as_ref()
-                .ok_or_else(|| anyhow!("HNSW index failed to initialize"))?;
-            let candidate = fetch.saturating_mul(ANN_CANDIDATE_MULTIPLIER).max(fetch);
-            let ef = FS_HNSW_DEFAULT_EF_SEARCH.max(candidate);
-            let (ann_results, search_stats) = ann
-                .knn_search_with_stats(&embedding, candidate, ef)
-                .map_err(|err| anyhow!("frankensearch approximate search failed: {err}"))?;
-            ann_stats = Some(crate::search::ann_index::AnnSearchStats {
-                index_size: search_stats.index_size,
-                dimension: search_stats.dimension,
-                ef_search: search_stats.ef_search,
-                k_requested: search_stats.k_requested,
-                k_returned: search_stats.k_returned,
-                search_time_us: search_stats.search_time_us,
-                estimated_recall: search_stats.estimated_recall as f32,
-                is_approximate: search_stats.is_approximate,
-            });
-
-            let fs_filter = semantic_filter_as_search_filter(&semantic_filter);
-
-            let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
-            for hit in ann_results {
-                if let Some(filter) = fs_filter
-                    && !filter.matches(&hit.doc_id, None)
-                {
-                    continue;
+            if approximate {
+                if tier_mode.wants_two_tier() {
+                    tracing::debug!(
+                        tier_mode = ?tier_mode,
+                        "approximate search requested; bypassing two-tier mode"
+                    );
                 }
-                let Some(parsed) = parse_semantic_doc_id(&hit.doc_id) else {
-                    continue;
-                };
-                best_by_message
-                    .entry(parsed.message_id)
-                    .and_modify(|entry| {
-                        if hit.score > entry.score {
-                            entry.score = hit.score;
-                            entry.chunk_idx = parsed.chunk_idx;
-                        }
-                    })
-                    .or_insert(VectorSearchResult {
-                        message_id: parsed.message_id,
-                        chunk_idx: parsed.chunk_idx,
-                        score: hit.score,
-                    });
+                let fs_index = &state.fs_semantic_index;
+
+                if state.fs_ann_index.is_none() {
+                    let ann_path = state.ann_path.as_ref().ok_or_else(|| {
+                        anyhow!(
+                            "approximate search unavailable: HNSW index missing (run 'cass index --semantic --build-hnsw')"
+                        )
+                    })?;
+                    let ann = open_fs_semantic_ann_index(fs_index, ann_path)?;
+                    state.fs_ann_index = Some(ann);
+                }
+
+                let ann = state
+                    .fs_ann_index
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("HNSW index failed to initialize"))?;
+                let candidate = fetch_limit
+                    .saturating_mul(ANN_CANDIDATE_MULTIPLIER)
+                    .max(fetch_limit);
+                let ef = FS_HNSW_DEFAULT_EF_SEARCH.max(candidate);
+                let (ann_results, search_stats) = ann
+                    .knn_search_with_stats(&embedding, candidate, ef)
+                    .map_err(|err| anyhow!("frankensearch approximate search failed: {err}"))?;
+                let ann_stats = Some(crate::search::ann_index::AnnSearchStats {
+                    index_size: search_stats.index_size,
+                    dimension: search_stats.dimension,
+                    ef_search: search_stats.ef_search,
+                    k_requested: search_stats.k_requested,
+                    k_returned: search_stats.k_returned,
+                    search_time_us: search_stats.search_time_us,
+                    estimated_recall: search_stats.estimated_recall as f32,
+                    is_approximate: search_stats.is_approximate,
+                });
+
+                let fs_filter = semantic_filter_as_search_filter(&semantic_filter);
+
+                let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
+                for hit in ann_results.iter() {
+                    if let Some(filter) = fs_filter
+                        && !filter.matches(&hit.doc_id, None)
+                    {
+                        continue;
+                    }
+                    let Some(parsed) = parse_semantic_doc_id(&hit.doc_id) else {
+                        continue;
+                    };
+                    best_by_message
+                        .entry(parsed.message_id)
+                        .and_modify(|entry| {
+                            if hit.score > entry.score {
+                                entry.score = hit.score;
+                                entry.chunk_idx = parsed.chunk_idx;
+                            }
+                        })
+                        .or_insert(VectorSearchResult {
+                            message_id: parsed.message_id,
+                            chunk_idx: parsed.chunk_idx,
+                            score: hit.score,
+                        });
+                }
+
+                return Ok((
+                    collapse(best_by_message, fetch_limit),
+                    ann_results.len() >= candidate,
+                    ann_stats,
+                ));
             }
 
-            collapse(best_by_message)
-        } else {
             let fs_index = &state.fs_semantic_index;
             let fs_filter = semantic_filter_as_search_filter(&semantic_filter);
             let fs_hits = fs_index
-                .search_top_k(&embedding, fetch, fs_filter)
+                .search_top_k(&embedding, fetch_limit, fs_filter)
                 .map_err(|err| anyhow!("frankensearch semantic search failed: {err}"))?;
 
             let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
-            for hit in fs_hits {
+            for hit in fs_hits.iter() {
                 let Some(parsed) = parse_semantic_doc_id(&hit.doc_id) else {
                     continue;
                 };
@@ -3367,23 +3385,49 @@ impl SearchClient {
                     });
             }
 
-            collapse(best_by_message)
+            Ok((
+                collapse(best_by_message, fetch_limit),
+                fs_hits.len() >= fetch_limit,
+                None,
+            ))
         };
-        if offset > 0 {
-            results = results.into_iter().skip(offset).collect();
+
+        let finalize_hits = |results: &[VectorSearchResult]| -> Result<(usize, Vec<SearchHit>)> {
+            let hits = self.hydrate_semantic_hits(results, field_mask)?;
+            Ok(self.postprocess_hits_page(hits, &filters, limit, offset))
+        };
+
+        let (results, search_was_truncated, mut ann_stats) =
+            search_candidates(initial_fetch_limit)?;
+        let (mut available_hits, mut paged_hits) = finalize_hits(&results)?;
+
+        let needs_retry = available_hits < target_hits
+            && search_was_truncated
+            && initial_fetch_limit < fallback_fetch_limit;
+
+        if needs_retry {
+            tracing::debug!(
+                query = canonical,
+                target_hits,
+                available_hits,
+                initial_fetch_limit,
+                fallback_fetch_limit,
+                "retrying semantic fetch due to post-filter shortfall"
+            );
+            let (retry_results, _, retry_ann_stats) = search_candidates(fallback_fetch_limit)?;
+            (available_hits, paged_hits) = finalize_hits(&retry_results)?;
+            ann_stats = retry_ann_stats;
         }
 
-        let hits = self.hydrate_semantic_hits(&results, field_mask)?;
+        tracing::trace!(
+            query = canonical,
+            target_hits,
+            available_hits,
+            returned = paged_hits.len(),
+            "semantic fetch complete"
+        );
 
-        // Deduplicate semantic hits (filter noise and keep best version of same content)
-        // This aligns behavior with lexical search
-        let mut hits = deduplicate_hits(hits);
-
-        // Apply session_paths filter (not supported at SemanticFilter level)
-        if !filters.session_paths.is_empty() {
-            hits.retain(|h| filters.session_paths.contains(&h.source_path));
-        }
-        Ok((hits, ann_stats))
+        Ok((paged_hits, ann_stats))
     }
 
     fn hydrate_semantic_hits(
@@ -3393,6 +3437,22 @@ impl SearchClient {
     ) -> Result<Vec<SearchHit>> {
         self.hydrate_semantic_hits_with_ids(results, field_mask)
             .map(|rows| rows.into_iter().map(|(_, hit)| hit).collect())
+    }
+
+    fn postprocess_hits_page(
+        &self,
+        hits: Vec<SearchHit>,
+        filters: &SearchFilters,
+        limit: usize,
+        offset: usize,
+    ) -> (usize, Vec<SearchHit>) {
+        let mut hits = deduplicate_hits(hits);
+        if !filters.session_paths.is_empty() {
+            hits.retain(|hit| filters.session_paths.contains(&hit.source_path));
+        }
+        let available_hits = hits.len();
+        let paged_hits = hits.into_iter().skip(offset).take(limit).collect();
+        (available_hits, paged_hits)
     }
 
     /// Search with automatic wildcard fallback for sparse results.
@@ -3640,7 +3700,12 @@ impl SearchClient {
             && let Ok(sqlite_guard) = self.sqlite_guard()
             && let Some(conn) = sqlite_guard.as_ref()
             && let Ok(rows) = conn.query_map_collect(
-                "SELECT DISTINCT agent_slug FROM conversations ORDER BY id DESC LIMIT 3",
+                "SELECT a.slug
+                 FROM conversations c
+                 JOIN agents a ON c.agent_id = a.id
+                 GROUP BY a.slug
+                 ORDER BY MAX(c.id) DESC
+                 LIMIT 3",
                 &[],
                 |row: &frankensqlite::Row| row.get_typed::<String>(0),
             )
@@ -4075,7 +4140,13 @@ impl SearchClient {
                 } else {
                     String::new()
                 };
-                let content_hash = stable_hit_hash(&content, &source_path, line_number, created_at);
+                let hash_basis = if content.is_empty() {
+                    snippet.as_str()
+                } else {
+                    content.as_str()
+                };
+                let content_hash =
+                    stable_hit_hash(hash_basis, &source_path, line_number, created_at);
                 Ok(SearchHit {
                     title,
                     snippet,
@@ -4815,9 +4886,178 @@ impl SearchClient {
 mod tests {
     use super::*;
     use crate::connectors::{NormalizedConversation, NormalizedMessage, NormalizedSnippet};
+    use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
     use crate::search::tantivy::TantivyIndex;
+    use crate::storage::sqlite::FrankenStorage;
     use frankensqlite::compat::BatchExt;
+    use serde_json::json;
     use tempfile::TempDir;
+
+    #[derive(Debug)]
+    struct FixedTestEmbedder {
+        id: String,
+        vector: Vec<f32>,
+    }
+
+    impl FixedTestEmbedder {
+        fn new(id: &str, vector: &[f32]) -> Self {
+            Self {
+                id: id.to_string(),
+                vector: vector.to_vec(),
+            }
+        }
+    }
+
+    impl crate::search::embedder::Embedder for FixedTestEmbedder {
+        fn embed_sync(&self, _text: &str) -> crate::search::embedder::EmbedderResult<Vec<f32>> {
+            Ok(self.vector.clone())
+        }
+
+        fn dimension(&self) -> usize {
+            self.vector.len()
+        }
+
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn is_semantic(&self) -> bool {
+            false
+        }
+
+        fn category(&self) -> frankensearch::ModelCategory {
+            frankensearch::ModelCategory::HashEmbedder
+        }
+    }
+
+    struct SemanticTestFixture {
+        _dir: TempDir,
+        client: SearchClient,
+        source_paths: Vec<String>,
+    }
+
+    fn build_semantic_test_fixture() -> Result<SemanticTestFixture> {
+        let dir = TempDir::new()?;
+        let db_path = dir.path().join("cass.db");
+        let storage = FrankenStorage::open(&db_path)?;
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent)?;
+        let workspace_path = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace_path)?;
+        let workspace_id = storage.ensure_workspace(&workspace_path, None)?;
+
+        let documents = [
+            ("session-a.jsonl", "top semantic match", [1.0_f32, 0.0_f32]),
+            (
+                "session-b.jsonl",
+                "middle semantic match",
+                [0.9_f32, 0.1_f32],
+            ),
+            ("session-c.jsonl", "late semantic match", [0.8_f32, 0.2_f32]),
+        ];
+        let base_ts = 1_700_000_000_000_i64;
+        let mut source_paths = Vec::with_capacity(documents.len());
+
+        for (idx, (name, content, _vector)) in documents.iter().enumerate() {
+            let source_path = dir.path().join(name);
+            source_paths.push(source_path.to_string_lossy().to_string());
+
+            let conversation = Conversation {
+                id: None,
+                agent_slug: agent.slug.clone(),
+                workspace: Some(workspace_path.clone()),
+                external_id: Some(format!("semantic-{idx}")),
+                title: Some(format!("semantic session {idx}")),
+                source_path,
+                started_at: Some(base_ts + idx as i64),
+                ended_at: Some(base_ts + idx as i64),
+                approx_tokens: Some(16),
+                metadata_json: json!({"fixture": "semantic_search"}),
+                messages: vec![Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: Some("user".into()),
+                    created_at: Some(base_ts + idx as i64),
+                    content: (*content).to_string(),
+                    extra_json: json!({}),
+                    snippets: Vec::new(),
+                }],
+                source_id: crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
+                origin_host: None,
+            };
+
+            storage.insert_conversation_tree(agent_id, Some(workspace_id), &conversation)?;
+        }
+
+        let message_rows: Vec<(u64, i64)> = storage.raw().query_map_collect(
+            "SELECT m.id, COALESCE(m.created_at, c.started_at, 0)
+             FROM messages m
+             JOIN conversations c ON m.conversation_id = c.id
+             ORDER BY c.id",
+            &[],
+            |row: &frankensqlite::Row| {
+                let message_id: i64 = row.get_typed(0)?;
+                let created_at: i64 = row.get_typed(1)?;
+                Ok((u64::try_from(message_id).unwrap_or(u64::MAX), created_at))
+            },
+        )?;
+        assert_eq!(
+            message_rows.len(),
+            documents.len(),
+            "fixture should create 3 messages"
+        );
+
+        let filter_maps = SemanticFilterMaps::from_storage(&storage)?;
+        let embedder = Arc::new(FixedTestEmbedder::new("test-fixed-2d", &[1.0, 0.0]));
+        let source_hash = crc32fast::hash(crate::sources::provenance::LOCAL_SOURCE_ID.as_bytes());
+        let vector_path = dir
+            .path()
+            .join("vector_index")
+            .join("index-test-fixed-2d.fsvi");
+        std::fs::create_dir_all(vector_path.parent().expect("vector directory"))?;
+        let mut writer = VectorIndex::create_with_revision(
+            &vector_path,
+            embedder.id(),
+            "rev-1",
+            embedder.dimension(),
+            frankensearch::index::Quantization::F16,
+        )?;
+
+        for ((message_id, created_at_ms), (_, _, vector)) in message_rows.iter().zip(documents) {
+            let doc_id = SemanticDocId {
+                message_id: *message_id,
+                chunk_idx: 0,
+                agent_id: u32::try_from(agent_id)?,
+                workspace_id: u32::try_from(workspace_id)?,
+                source_id: source_hash,
+                role: ROLE_USER,
+                created_at_ms: *created_at_ms,
+                content_hash: None,
+            }
+            .to_doc_id_string();
+            writer.write_record(&doc_id, &vector)?;
+        }
+        writer.finish()?;
+        let vector_index = VectorIndex::open(&vector_path)?;
+        drop(storage);
+
+        let client = SearchClient::open(dir.path(), Some(&db_path))?.expect("db-backed client");
+        client.set_semantic_context(embedder, vector_index, filter_maps, None, None)?;
+
+        Ok(SemanticTestFixture {
+            _dir: dir,
+            client,
+            source_paths,
+        })
+    }
 
     fn sanitize_query(raw: &str) -> String {
         fs_cass_sanitize_query(raw)
@@ -7287,6 +7527,81 @@ mod tests {
     }
 
     #[test]
+    fn generate_suggestions_includes_recent_alternate_agents() -> Result<()> {
+        let dir = TempDir::new()?;
+        let db_path = dir.path().join("cass.db");
+        let storage = FrankenStorage::open(&db_path)?;
+        let workspace_id = storage.ensure_workspace(dir.path(), None)?;
+        let base_ts = 1_700_000_010_000_i64;
+
+        for (idx, slug) in ["claude_code", "codex"].iter().enumerate() {
+            let agent = Agent {
+                id: None,
+                slug: (*slug).to_string(),
+                name: (*slug).to_string(),
+                version: None,
+                kind: AgentKind::Cli,
+            };
+            let agent_id = storage.ensure_agent(&agent)?;
+            let conversation = Conversation {
+                id: None,
+                agent_slug: (*slug).to_string(),
+                workspace: Some(dir.path().to_path_buf()),
+                external_id: Some(format!("alt-agent-{idx}")),
+                title: Some(format!("alternate agent {idx}")),
+                source_path: dir.path().join(format!("{slug}.jsonl")),
+                started_at: Some(base_ts + idx as i64),
+                ended_at: Some(base_ts + idx as i64),
+                approx_tokens: Some(8),
+                metadata_json: json!({}),
+                messages: vec![Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: Some("user".into()),
+                    created_at: Some(base_ts + idx as i64),
+                    content: format!("content from {slug}"),
+                    extra_json: json!({}),
+                    snippets: Vec::new(),
+                }],
+                source_id: crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
+                origin_host: None,
+            };
+            storage.insert_conversation_tree(agent_id, Some(workspace_id), &conversation)?;
+        }
+        drop(storage);
+
+        let client = SearchClient::open(dir.path(), Some(&db_path))?.expect("db-backed client");
+        let result = client.search_with_fallback(
+            "ghost",
+            SearchFilters::default(),
+            5,
+            0,
+            3,
+            FieldMask::FULL,
+        )?;
+
+        let alternate_agents: HashSet<String> = result
+            .suggestions
+            .iter()
+            .filter(|suggestion| matches!(suggestion.kind, SuggestionKind::AlternateAgent))
+            .filter_map(|suggestion| suggestion.suggested_filters.as_ref())
+            .flat_map(|filters| filters.agents.iter().cloned())
+            .collect();
+
+        assert!(
+            alternate_agents.contains("claude_code"),
+            "should suggest claude_code from normalized conversations schema"
+        );
+        assert!(
+            alternate_agents.contains("codex"),
+            "should suggest codex from normalized conversations schema"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn sanitize_query_preserves_wildcards() {
         // Wildcards should be preserved
         assert_eq!(fs_cass_sanitize_query("*foo*"), "*foo*");
@@ -9098,6 +9413,73 @@ mod tests {
 
         let hits = client.search("needle", filters, 10, 0, FieldMask::FULL)?;
         assert_eq!(hits.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_search_session_paths_filter_retries_past_initial_candidates() -> Result<()> {
+        let fixture = build_semantic_test_fixture()?;
+        let mut filters = SearchFilters::default();
+        filters
+            .session_paths
+            .insert(fixture.source_paths[2].clone());
+
+        let (hits, ann_stats) = fixture.client.search_semantic(
+            "semantic fixture query",
+            filters,
+            1,
+            0,
+            FieldMask::FULL,
+            false,
+        )?;
+
+        assert!(
+            ann_stats.is_none(),
+            "exact search should not emit ANN stats"
+        );
+        assert_eq!(
+            hits.len(),
+            1,
+            "filtered semantic search should still return a hit"
+        );
+        assert_eq!(
+            hits[0].source_path, fixture.source_paths[2],
+            "semantic search should keep searching until it finds the requested session path"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_search_offsets_after_session_paths_filtering() -> Result<()> {
+        let fixture = build_semantic_test_fixture()?;
+        let mut filters = SearchFilters::default();
+        filters
+            .session_paths
+            .insert(fixture.source_paths[1].clone());
+        filters
+            .session_paths
+            .insert(fixture.source_paths[2].clone());
+
+        let (hits, _) = fixture.client.search_semantic(
+            "semantic fixture query",
+            filters,
+            1,
+            1,
+            FieldMask::FULL,
+            false,
+        )?;
+
+        assert_eq!(
+            hits.len(),
+            1,
+            "second filtered page should still return one hit"
+        );
+        assert_eq!(
+            hits[0].source_path, fixture.source_paths[2],
+            "offset must apply after semantic deduplication and session path filtering"
+        );
 
         Ok(())
     }
