@@ -10294,7 +10294,10 @@ fn run_config_based_export(
         } else {
             println!("  Encryption: DISABLED (content is public)");
         }
-        println!("  Fingerprint: {}", &bundle_result.fingerprint[..8]);
+        println!(
+            "  Fingerprint: {}",
+            bundle_result.fingerprint.get(..8).unwrap_or(&bundle_result.fingerprint)
+        );
 
         if let Some(deploy) = deploy_result {
             println!("  Deployment: {}", deploy);
@@ -13974,7 +13977,8 @@ fn format_as_html(
     include_tools: bool,
 ) -> String {
     use chrono::{TimeZone, Utc};
-    let title_str = title.as_deref().unwrap_or("Conversation Export");
+    let title_raw = title.as_deref().unwrap_or("Conversation Export");
+    let title_str = html_escape(title_raw);
     let date_str = start_ts
         .and_then(|ts| Utc.timestamp_millis_opt(ts).single())
         .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
@@ -14130,6 +14134,7 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Show messages around a specific line in a session file
