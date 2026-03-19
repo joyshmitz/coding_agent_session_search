@@ -5511,8 +5511,8 @@ impl CassApp {
         let visible_panes = self.last_pane_rects.borrow().len().max(1);
         let live_window = visible_rows
             .saturating_mul(visible_panes)
-            .saturating_mul(2)
-            .clamp(16, 32);
+            .saturating_add(4)
+            .clamp(12, 24);
         live_window.min(self.search_page_size.max(1)).max(1)
     }
 
@@ -12902,11 +12902,25 @@ pub trait PersistenceService: Send + Sync {
 #[derive(Clone)]
 struct TantivySearchService {
     client: Arc<crate::search::query::SearchClient>,
+    live_runtime: Option<asupersync::runtime::Runtime>,
 }
 
 impl TantivySearchService {
     fn new(client: Arc<crate::search::query::SearchClient>) -> Self {
-        Self { client }
+        let live_runtime = match asupersync::runtime::RuntimeBuilder::current_thread().build() {
+            Ok(runtime) => Some(runtime),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to initialize shared progressive search runtime; falling back to sync live search"
+                );
+                None
+            }
+        };
+        Self {
+            client,
+            live_runtime,
+        }
     }
 
     fn progressive_enabled() -> bool {
@@ -12917,7 +12931,8 @@ impl TantivySearchService {
     }
 
     fn supports_progressive(&self, params: &SearchParams) -> bool {
-        Self::progressive_enabled()
+        self.live_runtime.is_some()
+            && Self::progressive_enabled()
             && matches!(params.pass, SearchPass::Interactive)
             && params.offset == 0
             && !params.query.trim().is_empty()
@@ -12951,19 +12966,26 @@ impl TantivySearchService {
             return;
         }
 
-        let runtime = match asupersync::runtime::RuntimeBuilder::current_thread().build() {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                let _ = sender.send(CassMsg::SearchFailed {
+        let Some(runtime) = self.live_runtime.clone() else {
+            let message = match self.execute(&params) {
+                Ok(result) => CassMsg::SearchCompleted {
                     generation,
-                    error: format!("failed to start progressive runtime: {err}"),
-                });
-                let _ = sender.send(CassMsg::SearchStreamFinished { generation });
-                return;
-            }
+                    pass: params.pass,
+                    requested_limit: params.limit,
+                    hits: result.hits,
+                    elapsed_ms: result.elapsed_ms,
+                    suggestions: result.suggestions,
+                    wildcard_fallback: result.wildcard_fallback,
+                    append: matches!(params.pass, SearchPass::Pagination),
+                },
+                Err(error) => CassMsg::SearchFailed { generation, error },
+            };
+            let _ = sender.send(message);
+            let _ = sender.send(CassMsg::SearchStreamFinished { generation });
+            return;
         };
 
-        let cx = asupersync::Cx::for_request();
+        let cx = frankensearch::Cx::for_request();
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel_done = Arc::clone(&done);
         let cancel_stop = stop.clone();
@@ -12971,7 +12993,7 @@ impl TantivySearchService {
         let cancel_thread = std::thread::spawn(move || {
             while !cancel_done.load(std::sync::atomic::Ordering::Relaxed) {
                 if cancel_stop.wait_timeout(Duration::from_millis(10)) {
-                    cancel_cx.cancel_fast(asupersync::CancelKind::RaceLost);
+                    cancel_cx.set_cancel_requested(true);
                     break;
                 }
             }
@@ -17133,12 +17155,13 @@ impl super::ftui_adapter::Model for CassApp {
                 if let Some(dirty_ts) = self.search_dirty_since
                     && dirty_ts.elapsed() >= SEARCH_DEBOUNCE
                 {
-                    // Never overlap searches: if a search is already in-flight,
-                    // leave `search_dirty_since` set and let SearchCompleted/Failed
-                    // schedule the next attempt once the current request finishes.
-                    if !self.search_in_flight {
-                        cmds.push(ftui::Cmd::msg(CassMsg::SearchRequested));
-                    }
+                    // Fire the new search even if one is already in-flight.
+                    // The generation counter ensures stale results from the
+                    // previous search are safely ignored when they arrive.
+                    // This prevents the user from waiting 60+ seconds for an
+                    // initial empty-query search to finish before their typed
+                    // query starts executing.
+                    cmds.push(ftui::Cmd::msg(CassMsg::SearchRequested));
                 }
                 if let Some(dirty_ts) = self.dirty_since
                     && dirty_ts.elapsed() >= STATE_SAVE_DEBOUNCE
@@ -29295,6 +29318,53 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_on_pane_header_preserves_target_pane_selection() {
+        use ftui::Model;
+        let mut app = CassApp::default();
+        let pane_a_hits = vec![make_hit(1, "/pane-a/1"), make_hit(2, "/pane-a/2")];
+        let pane_b_hits = vec![make_hit(3, "/pane-b/1"), make_hit(4, "/pane-b/2")];
+        app.results = pane_a_hits
+            .iter()
+            .chain(pane_b_hits.iter())
+            .cloned()
+            .collect();
+        app.panes = vec![
+            AgentPane {
+                agent: "claude_code".into(),
+                total_count: pane_a_hits.len(),
+                hits: pane_a_hits,
+                selected: 0,
+            },
+            AgentPane {
+                agent: "codex".into(),
+                total_count: pane_b_hits.len(),
+                hits: pane_b_hits,
+                selected: 1,
+            },
+        ];
+        app.active_pane = 0;
+        app.results_list_state.borrow_mut().select(Some(0));
+        render_at_degradation(&app, 180, 32, ftui::render::budget::DegradationLevel::Full);
+
+        let first_idx = *app.last_pane_first_index.borrow();
+        let pane_rects = app.last_pane_rects.borrow().clone();
+        assert!(
+            pane_rects.len() >= 2,
+            "test fixture should render at least two panes"
+        );
+
+        let cmd = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: pane_rects[1].x.saturating_add(2),
+            y: pane_rects[1].y,
+        });
+
+        assert!(matches!(cmd, ftui::Cmd::None));
+        assert_eq!(app.active_pane, first_idx + 1);
+        assert_eq!(app.results_list_state.borrow().selected, Some(1));
+    }
+
+    #[test]
     fn mouse_move_over_non_active_pane_tracks_pane_aware_hover() {
         use ftui::Model;
         let mut app = app_with_rich_visual_fixture();
@@ -29337,6 +29407,40 @@ mod tests {
         let search = app.last_search_bar_area.borrow().unwrap();
         let region = app.hit_test(search.x + 1, search.y);
         assert_eq!(region, MouseHitRegion::SearchBar);
+    }
+
+    #[test]
+    fn mouse_click_in_search_bar_places_cursor_at_click_offset() {
+        use ftui::Model;
+
+        let mut app = app_with_hits(5);
+        app.query = "abcdef".to_string();
+        app.cursor_pos = 0;
+        app.input_mode = InputMode::Agent;
+        app.input_buffer = "codex".to_string();
+        render_at_degradation(&app, 120, 24, ftui::render::budget::DegradationLevel::Full);
+
+        let search = app.last_search_bar_area.borrow().unwrap();
+        let query_row_x = search.x.saturating_add(1);
+        let search_prefix_width = if search.width >= 50 {
+            display_width(" 🔎 ") as u16
+        } else {
+            0
+        };
+        let click_x = query_row_x
+            .saturating_add(search_prefix_width)
+            .saturating_add(2);
+
+        let _ = app.update(CassMsg::MouseEvent {
+            kind: MouseEventKind::LeftClick,
+            x: click_x,
+            y: search.y,
+        });
+
+        assert_eq!(app.focus_manager.current(), Some(focus_ids::SEARCH_BAR));
+        assert_eq!(app.input_mode, InputMode::Query);
+        assert!(app.input_buffer.is_empty());
+        assert_eq!(app.cursor_pos, 2);
     }
 
     #[test]
