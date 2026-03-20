@@ -1590,6 +1590,56 @@ fn analytics_rebuild_json_envelope_structure() {
 }
 
 #[test]
+fn analytics_validate_reports_query_failure_for_malformed_schema() {
+    let tmp_home = TempDir::new().expect("temp home");
+    let data_dir = tmp_home.path().join("cass_data");
+    fs::create_dir_all(&data_dir).expect("create data dir");
+    let db_path = data_dir.join("agent_search.db");
+
+    let conn = rusqlite::Connection::open(&db_path).expect("create sqlite db");
+    conn.execute_batch(
+        "CREATE TABLE message_metrics (day_id INTEGER);
+         CREATE TABLE usage_daily (day_id INTEGER);
+         INSERT INTO usage_daily (day_id) VALUES (20254);",
+    )
+    .expect("create malformed analytics tables");
+    drop(conn);
+
+    let mut cmd = base_cmd(tmp_home.path());
+    cmd.args([
+        "analytics",
+        "validate",
+        "--json",
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+    ]);
+
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid analytics validate JSON");
+
+    assert_eq!(json["command"], "analytics/validate");
+    let checks = json["data"]["checks"].as_array().expect("checks array");
+    let query_failure = checks
+        .iter()
+        .find(|check| check["id"] == "track_a.query_exec")
+        .expect("track_a query failure should be reported");
+
+    assert_eq!(query_failure["ok"], false);
+    assert_eq!(query_failure["severity"], "error");
+    assert!(
+        query_failure["details"]
+            .as_str()
+            .unwrap()
+            .contains("Track A invariant query failed")
+    );
+    assert!(
+        json["data"]["summary"]["errors"].as_u64().unwrap_or(0) >= 1,
+        "malformed analytics schema should surface at least one error"
+    );
+}
+
+#[test]
 fn analytics_rebuild_help_shows_force_flag() {
     let mut cmd = simple_cmd();
     cmd.args(["analytics", "rebuild", "--help"]);

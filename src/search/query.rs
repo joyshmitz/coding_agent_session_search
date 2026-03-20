@@ -1666,7 +1666,9 @@ impl FsLexicalSearch for CassProgressiveLexicalAdapter {
                 };
                 hits_by_message
                     .entry(resolved_doc.message_id)
-                    .or_insert_with(|| ProgressiveLexicalHit::from_search_hit(hit, self.field_mask));
+                    .or_insert_with(|| {
+                        ProgressiveLexicalHit::from_search_hit(hit, self.field_mask)
+                    });
                 scored.push(FsScoredResult {
                     doc_id: resolved_doc.doc_id,
                     score: hit.score,
