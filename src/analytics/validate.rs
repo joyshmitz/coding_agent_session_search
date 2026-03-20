@@ -926,6 +926,8 @@ pub struct PerfMeasurement {
     pub elapsed_ms: u64,
     pub budget_ms: u64,
     pub within_budget: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub details: String,
 }
 
@@ -935,24 +937,41 @@ pub fn perf_query_guardrail(conn: &Connection) -> PerfMeasurement {
 
     // Run a basic rollup query — same as query_tokens_timeseries with no filters.
     let budget_ms = 500_u64; // 500ms budget for rollup timeseries query
-    let row_count: i64 = if table_exists(conn, "usage_daily") {
-        let sql = "SELECT COUNT(*) FROM (
-            SELECT day_id, SUM(message_count) FROM usage_daily GROUP BY day_id
-        )";
-        conn.query_row_map(sql, &[], |r: &Row| r.get_typed(0))
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    if !table_exists(conn, "usage_daily") {
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        return PerfMeasurement {
+            id: "perf.query_timeseries".into(),
+            elapsed_ms,
+            budget_ms,
+            within_budget: true,
+            error: None,
+            details: "Skipped timeseries rollup query: usage_daily table missing".into(),
+        };
+    }
 
+    let sql = "SELECT COUNT(*) FROM (
+        SELECT day_id, SUM(message_count) FROM usage_daily GROUP BY day_id
+    )";
+    let row_count = conn.query_row_map(sql, &[], |r: &Row| r.get_typed::<i64>(0));
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
-    PerfMeasurement {
-        id: "perf.query_timeseries".into(),
-        elapsed_ms,
-        budget_ms,
-        within_budget: elapsed_ms <= budget_ms,
-        details: format!("Timeseries rollup query: {row_count} day buckets in {elapsed_ms}ms"),
+    match row_count {
+        Ok(row_count) => PerfMeasurement {
+            id: "perf.query_timeseries".into(),
+            elapsed_ms,
+            budget_ms,
+            within_budget: elapsed_ms <= budget_ms,
+            error: None,
+            details: format!("Timeseries rollup query: {row_count} day buckets in {elapsed_ms}ms"),
+        },
+        Err(err) => PerfMeasurement {
+            id: "perf.query_timeseries".into(),
+            elapsed_ms,
+            budget_ms,
+            within_budget: false,
+            error: Some(err.to_string()),
+            details: format!("Timeseries rollup query failed after {elapsed_ms}ms: {err}"),
+        },
     }
 }
 
@@ -961,25 +980,42 @@ pub fn perf_breakdown_guardrail(conn: &Connection) -> PerfMeasurement {
     let start = std::time::Instant::now();
     let budget_ms = 200_u64;
 
-    let row_count: i64 = if table_exists(conn, "usage_daily") {
-        let sql = "SELECT COUNT(*) FROM (
-            SELECT agent_slug, SUM(api_tokens_total)
-            FROM usage_daily GROUP BY agent_slug
-        )";
-        conn.query_row_map(sql, &[], |r: &Row| r.get_typed(0))
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    if !table_exists(conn, "usage_daily") {
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        return PerfMeasurement {
+            id: "perf.query_breakdown".into(),
+            elapsed_ms,
+            budget_ms,
+            within_budget: true,
+            error: None,
+            details: "Skipped breakdown query: usage_daily table missing".into(),
+        };
+    }
 
+    let sql = "SELECT COUNT(*) FROM (
+        SELECT agent_slug, SUM(api_tokens_total)
+        FROM usage_daily GROUP BY agent_slug
+    )";
+    let row_count = conn.query_row_map(sql, &[], |r: &Row| r.get_typed::<i64>(0));
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
-    PerfMeasurement {
-        id: "perf.query_breakdown".into(),
-        elapsed_ms,
-        budget_ms,
-        within_budget: elapsed_ms <= budget_ms,
-        details: format!("Breakdown query: {row_count} agent groups in {elapsed_ms}ms"),
+    match row_count {
+        Ok(row_count) => PerfMeasurement {
+            id: "perf.query_breakdown".into(),
+            elapsed_ms,
+            budget_ms,
+            within_budget: elapsed_ms <= budget_ms,
+            error: None,
+            details: format!("Breakdown query: {row_count} agent groups in {elapsed_ms}ms"),
+        },
+        Err(err) => PerfMeasurement {
+            id: "perf.query_breakdown".into(),
+            elapsed_ms,
+            budget_ms,
+            within_budget: false,
+            error: Some(err.to_string()),
+            details: format!("Breakdown query failed after {elapsed_ms}ms: {err}"),
+        },
     }
 }
 
@@ -1343,6 +1379,7 @@ mod tests {
             m.within_budget,
             "Query should be within 500ms budget on fixture"
         );
+        assert!(m.error.is_none());
     }
 
     #[test]
@@ -1353,6 +1390,31 @@ mod tests {
             m.within_budget,
             "Breakdown should be within 200ms budget on fixture"
         );
+        assert!(m.error.is_none());
+    }
+
+    #[test]
+    fn perf_query_guardrail_reports_query_failure() {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch("CREATE TABLE usage_daily (day_id INTEGER);")
+            .unwrap();
+
+        let m = perf_query_guardrail(&conn);
+        assert!(!m.within_budget);
+        assert!(m.error.is_some());
+        assert!(m.details.contains("failed"));
+    }
+
+    #[test]
+    fn perf_breakdown_guardrail_reports_query_failure() {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch("CREATE TABLE usage_daily (day_id INTEGER);")
+            .unwrap();
+
+        let m = perf_breakdown_guardrail(&conn);
+        assert!(!m.within_budget);
+        assert!(m.error.is_some());
+        assert!(m.details.contains("failed"));
     }
 
     #[test]

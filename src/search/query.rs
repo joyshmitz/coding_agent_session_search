@@ -1556,8 +1556,17 @@ struct ProgressiveLexicalHit {
     title: String,
     snippet: String,
     content: String,
+    content_hash: u64,
+    source_path: String,
+    agent: String,
+    workspace: String,
+    workspace_original: Option<String>,
+    created_at: Option<i64>,
     match_type: MatchType,
     line_number: Option<usize>,
+    source_id: String,
+    origin_kind: String,
+    origin_host: Option<String>,
 }
 
 impl ProgressiveLexicalHit {
@@ -1578,8 +1587,37 @@ impl ProgressiveLexicalHit {
             } else {
                 String::new()
             },
+            content_hash: hit.content_hash,
+            source_path: hit.source_path.clone(),
+            agent: hit.agent.clone(),
+            workspace: hit.workspace.clone(),
+            workspace_original: hit.workspace_original.clone(),
+            created_at: hit.created_at,
             match_type: hit.match_type,
             line_number: hit.line_number,
+            source_id: hit.source_id.clone(),
+            origin_kind: hit.origin_kind.clone(),
+            origin_host: hit.origin_host.clone(),
+        }
+    }
+
+    fn to_search_hit(&self, score: f32) -> SearchHit {
+        SearchHit {
+            title: self.title.clone(),
+            snippet: self.snippet.clone(),
+            content: self.content.clone(),
+            content_hash: self.content_hash,
+            score,
+            source_path: self.source_path.clone(),
+            agent: self.agent.clone(),
+            workspace: self.workspace.clone(),
+            workspace_original: self.workspace_original.clone(),
+            created_at: self.created_at,
+            line_number: self.line_number,
+            match_type: self.match_type,
+            source_id: self.source_id.clone(),
+            origin_kind: self.origin_kind.clone(),
+            origin_host: self.origin_host.clone(),
         }
     }
 }
@@ -1721,6 +1759,10 @@ pub struct SearchClient {
     reader: Option<(IndexReader, FsCassFields)>,
     sqlite: Mutex<Option<SendConnection>>,
     sqlite_path: Option<PathBuf>,
+    /// rusqlite connection for FTS5 queries. FrankenSQLite cannot handle FTS5
+    /// virtual tables, so the FTS5 fallback search path uses rusqlite (which
+    /// bundles FTS5 via the `bundled` feature) instead. Fix for #121/#122/#126.
+    rusqlite_fts: Mutex<Option<rusqlite::Connection>>,
     prefix_cache: Mutex<CacheShards>,
     reload_on_search: bool,
     last_reload: Mutex<Option<Instant>>,
@@ -2188,6 +2230,7 @@ impl SearchClient {
             reader: tantivy,
             sqlite: Mutex::new(None),
             sqlite_path,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: options.enable_reload,
             last_reload: Mutex::new(None),
@@ -2229,6 +2272,42 @@ impl SearchClient {
                         error = %e,
                         path = %path.display(),
                         "sqlite open failed"
+                    );
+                }
+            }
+        }
+
+        Ok(guard)
+    }
+
+    /// Lazily open a rusqlite connection for FTS5 queries.
+    ///
+    /// FrankenSQLite cannot handle FTS5 virtual tables, so the FTS5 fallback
+    /// search path uses rusqlite (which bundles FTS5 via `bundled` feature).
+    /// Fix for #121/#122/#126.
+    fn rusqlite_fts_guard(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<rusqlite::Connection>>> {
+        let mut guard = self
+            .rusqlite_fts
+            .lock()
+            .map_err(|_| anyhow!("rusqlite_fts lock poisoned"))?;
+
+        if guard.is_none()
+            && let Some(path) = &self.sqlite_path
+        {
+            match rusqlite::Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ) {
+                Ok(conn) => {
+                    *guard = Some(conn);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        path = %path.display(),
+                        "rusqlite FTS5 open failed"
                     );
                 }
             }
@@ -2418,17 +2497,20 @@ impl SearchClient {
             return Ok(Vec::new());
         }
 
-        let sqlite_guard = self.sqlite_guard()?;
-        if let Some(conn) = sqlite_guard.as_ref() {
+        // Fix #121/#122/#126: Use rusqlite for FTS5 fallback queries.
+        // FrankenSQLite cannot handle FTS5 virtual tables, so we use rusqlite
+        // (which bundles FTS5 via the `bundled` feature) instead.
+        let rusqlite_guard = self.rusqlite_fts_guard()?;
+        if let Some(rconn) = rusqlite_guard.as_ref() {
             tracing::info!(
-                backend = "sqlite",
+                backend = "sqlite-fts5-rusqlite",
                 query = sanitized,
                 limit = fallback_fetch_limit,
                 offset = 0,
                 "search_start"
             );
-            let hits = self.search_sqlite(
-                conn,
+            let hits = self.search_sqlite_fts5(
+                rconn,
                 query,
                 filters.clone(),
                 fallback_fetch_limit,
@@ -2932,28 +3014,23 @@ impl SearchClient {
         Ok(ordered)
     }
 
-    fn overlay_progressive_lexical_fields(
+    fn overlay_progressive_lexical_hit(
         &self,
-        hits: &mut [(u64, SearchHit)],
-        cache: &ProgressiveLexicalCache,
+        hit: &mut SearchHit,
+        lexical: &ProgressiveLexicalHit,
         field_mask: FieldMask,
     ) {
-        for (message_id, hit) in hits.iter_mut() {
-            let Some(lexical) = cache.hits_by_message.get(message_id) else {
-                continue;
-            };
-            if field_mask.wants_title() && !lexical.title.is_empty() {
-                hit.title = lexical.title.clone();
-            }
-            if field_mask.wants_snippet() && !lexical.snippet.is_empty() {
-                hit.snippet = lexical.snippet.clone();
-            }
-            if field_mask.needs_content() && !lexical.content.is_empty() {
-                hit.content = lexical.content.clone();
-            }
-            hit.match_type = lexical.match_type;
-            hit.line_number = lexical.line_number.or(hit.line_number);
+        if field_mask.wants_title() && !lexical.title.is_empty() {
+            hit.title = lexical.title.clone();
         }
+        if field_mask.wants_snippet() && !lexical.snippet.is_empty() {
+            hit.snippet = lexical.snippet.clone();
+        }
+        if field_mask.needs_content() && !lexical.content.is_empty() {
+            hit.content = lexical.content.clone();
+        }
+        hit.match_type = lexical.match_type;
+        hit.line_number = lexical.line_number.or(hit.line_number);
     }
 
     fn progressive_phase_to_result(
@@ -2966,9 +3043,40 @@ impl SearchClient {
         fetch_limit: usize,
     ) -> Result<SearchResult> {
         let collapsed = self.collapse_progressive_scored_results(results, fetch_limit);
-        let mut hydrated = self.hydrate_semantic_hits_with_ids(&collapsed, field_mask)?;
-        if let Some(cache) = lexical_cache {
-            self.overlay_progressive_lexical_fields(&mut hydrated, cache, field_mask);
+        let missing: Vec<VectorSearchResult> = collapsed
+            .iter()
+            .filter(|result| {
+                lexical_cache
+                    .and_then(|cache| cache.hits_by_message.get(&result.message_id))
+                    .is_none()
+            })
+            .map(|result| VectorSearchResult {
+                message_id: result.message_id,
+                chunk_idx: result.chunk_idx,
+                score: result.score,
+            })
+            .collect();
+        let mut hydrated_by_id: HashMap<u64, SearchHit> = self
+            .hydrate_semantic_hits_with_ids(&missing, field_mask)?
+            .into_iter()
+            .collect();
+
+        let mut hydrated: Vec<(u64, SearchHit)> = Vec::with_capacity(collapsed.len());
+        for result in &collapsed {
+            if let Some(cache) = lexical_cache
+                && let Some(lexical) = cache.hits_by_message.get(&result.message_id)
+            {
+                hydrated.push((result.message_id, lexical.to_search_hit(result.score)));
+                continue;
+            }
+            if let Some(mut hit) = hydrated_by_id.remove(&result.message_id) {
+                if let Some(cache) = lexical_cache
+                    && let Some(lexical) = cache.hits_by_message.get(&result.message_id)
+                {
+                    self.overlay_progressive_lexical_hit(&mut hit, lexical, field_mask);
+                }
+                hydrated.push((result.message_id, hit));
+            }
         }
 
         let mut hits: Vec<SearchHit> = hydrated.into_iter().map(|(_, hit)| hit).collect();
@@ -3967,23 +4075,26 @@ impl SearchClient {
         Ok(hits)
     }
 
-    fn search_sqlite(
+    /// FTS5 fallback search using rusqlite (fix #121/#122/#126).
+    ///
+    /// FrankenSQLite cannot handle FTS5 virtual tables, so this method uses
+    /// rusqlite (which bundles FTS5 via the `bundled` feature) for the FTS5
+    /// query path. The query structure mirrors `search_sqlite` but uses
+    /// rusqlite parameter binding instead of FrankenSQLite's `ParamValue`.
+    fn search_sqlite_fts5(
         &self,
-        conn: &Connection,
+        conn: &rusqlite::Connection,
         raw_query: &str,
         filters: SearchFilters,
         limit: usize,
         offset: usize,
         field_mask: FieldMask,
     ) -> Result<Vec<SearchHit>> {
-        // Transpile raw query to FTS5 syntax
-        // Returns None if unsupported features (leading wildcards) are used or query is empty
         let fts_query = match transpile_to_fts5(raw_query) {
             Some(q) if !q.trim().is_empty() => q,
             _ => return Ok(Vec::new()),
         };
 
-        // Compute match type once for all results
         let query_match_type = dominant_match_type(raw_query);
 
         let content_expr = if field_mask.needs_content() {
@@ -4001,83 +4112,127 @@ impl SearchClient {
         } else {
             "''"
         };
+
+        // Build the SQL and collect dynamic params.
+        // rusqlite uses positional ?NNN or plain ?, so we collect Box<dyn rusqlite::types::ToSql>.
         let mut sql = format!(
             "SELECT {title_expr}, {content_expr}, f.agent, f.workspace, f.source_path, f.created_at, bm25(fts_messages) AS score, {snippet_expr} AS snippet, m.idx
              FROM fts_messages f
              LEFT JOIN messages m ON f.message_id = m.id
-             WHERE fts_messages MATCH ?"
+             WHERE fts_messages MATCH ?1"
         );
-        let mut params: Vec<ParamValue> = vec![ParamValue::from(fts_query.as_str())];
+        let mut param_idx: usize = 2; // next placeholder index
+        let mut dyn_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(fts_query.clone())];
 
         if !filters.agents.is_empty() {
-            let placeholders = sql_placeholders(filters.agents.len());
-            sql.push_str(&format!(" AND f.agent IN ({placeholders})"));
-            for a in filters.agents {
-                params.push(ParamValue::from(a.as_str()));
+            let phs: Vec<String> = filters
+                .agents
+                .iter()
+                .map(|_| {
+                    let p = format!("?{param_idx}");
+                    param_idx += 1;
+                    p
+                })
+                .collect();
+            sql.push_str(&format!(" AND f.agent IN ({})", phs.join(",")));
+            for a in &filters.agents {
+                dyn_params.push(Box::new(a.clone()));
             }
         }
 
         if !filters.workspaces.is_empty() {
-            let placeholders = sql_placeholders(filters.workspaces.len());
-            sql.push_str(&format!(" AND f.workspace IN ({placeholders})"));
-            for w in filters.workspaces {
-                params.push(ParamValue::from(w.as_str()));
+            let phs: Vec<String> = filters
+                .workspaces
+                .iter()
+                .map(|_| {
+                    let p = format!("?{param_idx}");
+                    param_idx += 1;
+                    p
+                })
+                .collect();
+            sql.push_str(&format!(" AND f.workspace IN ({})", phs.join(",")));
+            for w in &filters.workspaces {
+                dyn_params.push(Box::new(w.clone()));
             }
         }
 
         if let Some(created_from) = filters.created_from {
-            sql.push_str(" AND f.created_at >= ?");
-            params.push(ParamValue::from(created_from));
+            sql.push_str(&format!(" AND f.created_at >= ?{param_idx}"));
+            param_idx += 1;
+            dyn_params.push(Box::new(created_from));
         }
         if let Some(created_to) = filters.created_to {
-            sql.push_str(" AND f.created_at <= ?");
-            params.push(ParamValue::from(created_to));
+            sql.push_str(&format!(" AND f.created_at <= ?{param_idx}"));
+            param_idx += 1;
+            dyn_params.push(Box::new(created_to));
         }
 
-        sql.push_str(" ORDER BY score LIMIT ? OFFSET ?");
-        params.push(ParamValue::from(limit as i64));
-        params.push(ParamValue::from(offset as i64));
+        sql.push_str(&format!(
+            " ORDER BY score LIMIT ?{} OFFSET ?{}",
+            param_idx,
+            param_idx + 1
+        ));
+        dyn_params.push(Box::new(limit as i64));
+        dyn_params.push(Box::new(offset as i64));
 
-        let rows: Vec<SearchHit> =
-            conn.query_map_collect(&sql, &params, |row: &frankensqlite::Row| {
-                let title: String = row.get_typed(0)?;
-                let content: String = row.get_typed(1)?;
-                let agent: String = row.get_typed(2)?;
-                let workspace: Option<String> = row.get_typed(3)?;
-                let source_path: String = row.get_typed(4)?;
-                let created_at: Option<i64> = row.get_typed(5)?;
-                let score: f32 = row.get_typed::<f64>(6)? as f32;
-                let snippet: String = row.get_typed(7)?;
-                // idx is 0-indexed message index; convert to 1-indexed line number for JSONL files
-                let idx: Option<i64> = row.get_typed(8)?;
-                let line_number = idx.map(|i| (i + 1) as usize);
-                let hash_basis = if content.is_empty() {
-                    snippet.as_str()
-                } else {
-                    content.as_str()
-                };
-                let content_hash =
-                    stable_hit_hash(hash_basis, &source_path, line_number, created_at);
-                // SQLite FTS doesn't have provenance or workspace_original - use defaults
-                Ok(SearchHit {
-                    title,
-                    snippet,
-                    content,
-                    content_hash,
-                    score,
-                    source_path,
-                    agent,
-                    workspace: workspace.unwrap_or_default(),
-                    workspace_original: None,
-                    created_at,
-                    line_number,
-                    match_type: query_match_type,
-                    source_id: default_source_id(),
-                    origin_kind: default_origin_kind(),
-                    origin_host: None,
-                })
-            })?;
-        Ok(rows)
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            dyn_params.iter().map(|b| b.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            let title: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            let agent: String = row.get(2)?;
+            let workspace: Option<String> = row.get(3)?;
+            let source_path: String = row.get(4)?;
+            let created_at: Option<i64> = row.get(5)?;
+            let score: f64 = row.get(6)?;
+            let snippet: String = row.get(7)?;
+            let idx: Option<i64> = row.get(8)?;
+            Ok((
+                title,
+                content,
+                agent,
+                workspace,
+                source_path,
+                created_at,
+                score,
+                snippet,
+                idx,
+            ))
+        })?;
+
+        let mut hits = Vec::new();
+        for row_result in rows {
+            let (title, content, agent, workspace, source_path, created_at, score, snippet, idx) =
+                row_result?;
+            let line_number = idx.map(|i| (i + 1) as usize);
+            let hash_basis = if content.is_empty() {
+                snippet.as_str()
+            } else {
+                content.as_str()
+            };
+            let content_hash = stable_hit_hash(hash_basis, &source_path, line_number, created_at);
+            hits.push(SearchHit {
+                title,
+                snippet,
+                content,
+                content_hash,
+                score: score as f32,
+                source_path,
+                agent,
+                workspace: workspace.unwrap_or_default(),
+                workspace_original: None,
+                created_at,
+                line_number,
+                match_type: query_match_type,
+                source_id: default_source_id(),
+                origin_kind: default_origin_kind(),
+                origin_host: None,
+            });
+        }
+        Ok(hits)
     }
 
     /// Browse messages ordered by date, without any text query.
@@ -5340,6 +5495,7 @@ mod tests {
             reader,
             sqlite: Mutex::new(Some(SendConnection(conn))),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -6004,6 +6160,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -6054,6 +6211,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -6156,10 +6314,92 @@ mod tests {
         );
         assert_eq!(snippet_only.match_type, hit.match_type);
         assert_eq!(snippet_only.line_number, hit.line_number);
+        assert_eq!(snippet_only.source_path, hit.source_path);
+        assert_eq!(snippet_only.agent, hit.agent);
+        assert_eq!(snippet_only.workspace, hit.workspace);
 
         let full =
             ProgressiveLexicalHit::from_search_hit(&hit, FieldMask::new(true, true, true, true));
         assert_eq!(full.content, hit.content);
+    }
+
+    #[test]
+    fn progressive_phase_reuses_lexical_cache_without_db_hydration() -> Result<()> {
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+        };
+        let field_mask = FieldMask::new(false, true, true, true);
+        let lexical_hit = SearchHit {
+            title: "lexical title".into(),
+            snippet: "lexical snippet".into(),
+            content: "full lexical body".into(),
+            content_hash: stable_content_hash("full lexical body"),
+            score: 0.0,
+            source_path: "/tmp/session.jsonl".into(),
+            agent: "codex".into(),
+            workspace: "/tmp".into(),
+            workspace_original: Some("/original".into()),
+            created_at: Some(1_700_000_000_000),
+            line_number: Some(7),
+            match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+        };
+        let mut lexical_cache = ProgressiveLexicalCache::default();
+        lexical_cache.hits_by_message.insert(
+            42,
+            ProgressiveLexicalHit::from_search_hit(&lexical_hit, field_mask),
+        );
+
+        let hash_hex = "00".repeat(32);
+        let results = vec![FsScoredResult {
+            doc_id: format!("m|42|0|1|1|1|1|1700000000000|{hash_hex}"),
+            score: 0.91,
+            source: FsScoreSource::Lexical,
+            index: None,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.91),
+            rerank_score: None,
+            explanation: None,
+            metadata: None,
+        }];
+
+        let result = client.progressive_phase_to_result(
+            &results,
+            &SearchFilters::default(),
+            field_mask,
+            Some(&lexical_cache),
+            1,
+            1,
+        )?;
+
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].title, lexical_hit.title);
+        assert_eq!(result.hits[0].snippet, lexical_hit.snippet);
+        assert!(
+            result.hits[0].content.is_empty(),
+            "masked lexical cache should still avoid carrying full content"
+        );
+        assert_eq!(result.hits[0].source_path, lexical_hit.source_path);
+        assert_eq!(result.hits[0].score, 0.91);
+
+        Ok(())
     }
 
     #[test]
@@ -6585,6 +6825,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(Some(SendConnection(conn))),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -6641,6 +6882,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(Some(SendConnection(conn))),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -6755,6 +6997,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -6812,6 +7055,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(2, 0)), // tiny entry cap, no byte cap
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -6865,6 +7109,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -6899,6 +7144,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(2, 0)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -6963,6 +7209,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(1000, 100)), // byte cap of 100
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -7755,6 +8002,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -7846,6 +8094,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -7890,6 +8139,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -8569,6 +8819,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -9382,6 +9633,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),
@@ -9420,6 +9672,7 @@ mod tests {
             reader: None,
             sqlite: Mutex::new(None),
             sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
             prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
             reload_on_search: true,
             last_reload: Mutex::new(None),

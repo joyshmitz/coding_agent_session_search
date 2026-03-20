@@ -13465,14 +13465,17 @@ impl TantivySearchService {
             .unwrap_or(true)
     }
 
-    fn supports_progressive(&self, params: &SearchParams) -> bool {
-        self.live_runtime.is_some()
+    fn request_is_progressive_eligible(params: &SearchParams, live_runtime_ready: bool) -> bool {
+        live_runtime_ready
             && Self::progressive_enabled()
             && matches!(params.pass, SearchPass::Interactive)
             && params.offset == 0
             && !params.query.trim().is_empty()
             && matches!(params.mode, SearchMode::Semantic | SearchMode::Hybrid)
-            && self.client.can_progressively_refine()
+    }
+
+    fn request_eligible_for_progressive(&self, params: &SearchParams) -> bool {
+        Self::request_is_progressive_eligible(params, self.live_runtime.is_some())
     }
 
     fn run_live_search_stream(
@@ -13482,7 +13485,9 @@ impl TantivySearchService {
         sender: std::sync::mpsc::Sender<CassMsg>,
         stop: StopSignal,
     ) {
-        if !self.supports_progressive(&params) {
+        if !self.request_eligible_for_progressive(&params)
+            || !self.client.can_progressively_refine()
+        {
             let message = match self.execute(&params) {
                 Ok(result) => CassMsg::SearchCompleted {
                     generation,
@@ -13792,15 +13797,23 @@ impl From<super::ftui_adapter::Event> for CassMsg {
                     KeyCode::Char('g') if alt && shift => CassMsg::FilterAgentSet(HashSet::new()),
                     KeyCode::Char('G') if alt && shift => CassMsg::FilterAgentSet(HashSet::new()),
                     KeyCode::F(3) => CassMsg::InputModeEntered(InputMode::Agent),
-                    KeyCode::Char('g') if alt && !shift => CassMsg::InputModeEntered(InputMode::Agent),
-                    KeyCode::Char('G') if alt && !shift => CassMsg::InputModeEntered(InputMode::Agent),
+                    KeyCode::Char('g') if alt && !shift => {
+                        CassMsg::InputModeEntered(InputMode::Agent)
+                    }
+                    KeyCode::Char('G') if alt && !shift => {
+                        CassMsg::InputModeEntered(InputMode::Agent)
+                    }
 
                     KeyCode::F(4) if shift => CassMsg::FiltersClearAll,
                     KeyCode::Char('w') if alt && shift => CassMsg::FiltersClearAll,
                     KeyCode::Char('W') if alt && shift => CassMsg::FiltersClearAll,
                     KeyCode::F(4) => CassMsg::InputModeEntered(InputMode::Workspace),
-                    KeyCode::Char('w') if alt && !shift => CassMsg::InputModeEntered(InputMode::Workspace),
-                    KeyCode::Char('W') if alt && !shift => CassMsg::InputModeEntered(InputMode::Workspace),
+                    KeyCode::Char('w') if alt && !shift => {
+                        CassMsg::InputModeEntered(InputMode::Workspace)
+                    }
+                    KeyCode::Char('W') if alt && !shift => {
+                        CassMsg::InputModeEntered(InputMode::Workspace)
+                    }
 
                     KeyCode::F(5) if shift => CassMsg::TimePresetCycled,
                     KeyCode::F(5) => CassMsg::InputModeEntered(InputMode::CreatedFrom),
@@ -15070,7 +15083,7 @@ impl super::ftui_adapter::Model for CassApp {
                 let progressive = self
                     .progressive_search_service
                     .as_ref()
-                    .is_some_and(|service| service.supports_progressive(&params));
+                    .is_some_and(|service| service.request_eligible_for_progressive(&params));
                 self.trace_search_requested(
                     generation,
                     params.query.clone(),
@@ -24382,6 +24395,52 @@ mod tests {
         // allowed by the handler (fix #79) but still require a service.
         assert!(app.status.is_empty());
         assert!(app.loading_context.is_none());
+    }
+
+    #[test]
+    fn progressive_request_eligibility_is_shape_only() {
+        let params = SearchParams {
+            query: "semantic".to_string(),
+            filters: SearchFilters::default(),
+            pass: SearchPass::Interactive,
+            mode: SearchMode::Semantic,
+            match_mode: MatchMode::Standard,
+            ranking: RankingMode::Balanced,
+            context_window: ContextWindow::Medium,
+            limit: 16,
+            offset: 0,
+        };
+        assert!(TantivySearchService::request_is_progressive_eligible(
+            &params, true
+        ));
+
+        let mut empty_query = params.clone();
+        empty_query.query = "   ".to_string();
+        assert!(!TantivySearchService::request_is_progressive_eligible(
+            &empty_query,
+            true
+        ));
+
+        let mut lexical = params.clone();
+        lexical.mode = SearchMode::Lexical;
+        assert!(!TantivySearchService::request_is_progressive_eligible(
+            &lexical, true
+        ));
+
+        let mut upgrade = params.clone();
+        upgrade.pass = SearchPass::Upgrade;
+        assert!(!TantivySearchService::request_is_progressive_eligible(
+            &upgrade, true
+        ));
+
+        let mut paged = params;
+        paged.offset = 5;
+        assert!(!TantivySearchService::request_is_progressive_eligible(
+            &paged, true
+        ));
+        assert!(!TantivySearchService::request_is_progressive_eligible(
+            &paged, false
+        ));
     }
 
     #[test]

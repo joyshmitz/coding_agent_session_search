@@ -3919,12 +3919,16 @@ fn run_analytics_validate(
         } else {
             eprintln!("  {} all checks passed", "OK".green().bold());
         }
-        let ts_status = if perf_ts.within_budget {
+        let ts_status = if perf_ts.error.is_some() {
+            "ERR".red().to_string()
+        } else if perf_ts.within_budget {
             "OK".green().to_string()
         } else {
             "SLOW".red().to_string()
         };
-        let bd_status = if perf_bd.within_budget {
+        let bd_status = if perf_bd.error.is_some() {
+            "ERR".red().to_string()
+        } else if perf_bd.within_budget {
             "OK".green().to_string()
         } else {
             "SLOW".red().to_string()
@@ -3950,11 +3954,15 @@ fn run_analytics_validate(
                 "elapsed_ms": perf_ts.elapsed_ms,
                 "budget_ms": perf_ts.budget_ms,
                 "within_budget": perf_ts.within_budget,
+                "error": perf_ts.error,
+                "details": perf_ts.details,
             },
             "breakdown": {
                 "elapsed_ms": perf_bd.elapsed_ms,
                 "budget_ms": perf_bd.budget_ms,
                 "within_budget": perf_bd.within_budget,
+                "error": perf_bd.error,
+                "details": perf_bd.details,
             }
         }
     }))
@@ -5190,8 +5198,8 @@ fn render_analytics_docs() -> Vec<String> {
         "      track_b.{tokens,agents}_match, cross_track.drift, non_negative.counters".into(),
         "  data.drift: [{ day_id, agent_slug, source_id, track_a_total,".into(),
         "                 track_b_total, delta, delta_pct, likely_cause }]".into(),
-        "  data.perf: { timeseries: { elapsed_ms, budget_ms, within_budget },".into(),
-        "              breakdown: { elapsed_ms, budget_ms, within_budget } }".into(),
+        "  data.perf: { timeseries: { elapsed_ms, budget_ms, within_budget, error?, details },".into(),
+        "              breakdown: { elapsed_ms, budget_ms, within_budget, error?, details } }".into(),
         "  --fix: attempt automatic repair (not yet implemented)".into(),
         String::new(),
         "## Coverage & Uncertainty Semantics".into(),
@@ -7574,7 +7582,10 @@ fn run_stats(
 
     let lazy =
         crate::storage::sqlite::LazyFrankenDb::from_overrides(data_dir_override, db_override);
-    let conn = lazy.get("stats").map_err(lazy_db_to_cli_error)?;
+    // Fix #128: Use timeout to prevent hanging on degraded databases.
+    let conn = lazy
+        .get_with_timeout("stats", Duration::from_secs(30))
+        .map_err(lazy_db_to_cli_error)?;
 
     // Parse source filter (P3.7)
     let source_filter = source.map(SourceFilter::parse);
@@ -8897,7 +8908,7 @@ fn run_doctor(
                 false
             );
         }
-    } else {
+    } else if fix {
         if std::fs::create_dir_all(&data_dir).is_ok() {
             checks.push(Check {
                 name: "data_directory".to_string(),
@@ -8912,10 +8923,20 @@ fn run_doctor(
             add_check!(
                 "data_directory",
                 "fail",
-                format!("Data directory missing: {}", data_dir.display()),
+                format!("Cannot create data directory: {}", data_dir.display()),
                 true
             );
         }
+    } else {
+        add_check!(
+            "data_directory",
+            "fail",
+            format!(
+                "Data directory missing: {} (run with --fix to create)",
+                data_dir.display()
+            ),
+            true
+        );
     }
 
     // 2. Check for stale lock files
@@ -8927,21 +8948,30 @@ fn run_doctor(
             .unwrap_or(true);
 
         if is_stale {
-            if std::fs::remove_file(&lock_path).is_ok() {
-                checks.push(Check {
-                    name: "lock_file".to_string(),
-                    status: "pass".to_string(),
-                    message: "Stale lock file removed".to_string(),
-                    fix_available: true,
-                    fix_applied: true,
-                });
-                auto_fix_actions.push("Removed stale lock file".to_string());
-                auto_fix_applied = true;
+            if fix {
+                if std::fs::remove_file(&lock_path).is_ok() {
+                    checks.push(Check {
+                        name: "lock_file".to_string(),
+                        status: "pass".to_string(),
+                        message: "Stale lock file removed".to_string(),
+                        fix_available: true,
+                        fix_applied: true,
+                    });
+                    auto_fix_actions.push("Removed stale lock file".to_string());
+                    auto_fix_applied = true;
+                } else {
+                    add_check!(
+                        "lock_file",
+                        "warn",
+                        "Stale lock file found (older than 1 hour) and removal failed",
+                        true
+                    );
+                }
             } else {
                 add_check!(
                     "lock_file",
                     "warn",
-                    "Stale lock file found (older than 1 hour)",
+                    "Stale lock file found (older than 1 hour) - run with --fix to remove",
                     true
                 );
             }
@@ -8958,8 +8988,24 @@ fn run_doctor(
     }
 
     // 3. Check database exists and is readable
+    // Fix #128: Wrap the DB open in a timeout to prevent hanging on degraded databases.
     if db_path.exists() {
-        match frankensqlite::Connection::open(db_path.to_string_lossy().as_ref()) {
+        let db_open_result = {
+            let db_path_str = db_path.to_string_lossy().to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(
+                    frankensqlite::Connection::open(&db_path_str)
+                        .map(crate::storage::sqlite::SendFrankenConnection::new),
+                );
+            });
+            rx.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| {
+                Err(frankensqlite::FrankenError::internal(
+                    "database open timed out after 30s (possible corruption or lock contention)",
+                ))
+            })
+        };
+        match db_open_result {
             Ok(conn) => {
                 use frankensqlite::compat::{ConnectionExt as _, RowExt as _};
 
@@ -9006,18 +9052,21 @@ fn run_doctor(
                     // Check for FTS table (fts_messages) - this can be missing if table was
                     // dropped after migrations completed.
                     //
-                    // Fix #116/#117: Do NOT query sqlite_master here.  FrankenSQLite
-                    // filters virtual tables with rootpage=0, which makes the table
-                    // invisible even when it exists.  Instead, probe the table directly
-                    // with a cheap query that will fail with a "no such table" error
-                    // only when the table is genuinely absent.
-                    let fts_exists = conn
-                        .query_row_map(
-                            "SELECT COUNT(*) FROM fts_messages LIMIT 1",
-                            &[],
-                            |r: &frankensqlite::Row| r.get_typed::<i64>(0),
-                        )
-                        .is_ok();
+                    // Fix #121/#122/#126: Use rusqlite (which bundles FTS5 support) instead
+                    // of FrankenSQLite for probing and recreating the FTS5 virtual table.
+                    // FrankenSQLite cannot properly handle FTS5 virtual tables, causing
+                    // false negatives that trigger unnecessary rebuilds.
+                    let fts_exists = match rusqlite::Connection::open_with_flags(
+                        &db_path,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                    ) {
+                        Ok(rconn) => rconn
+                            .query_row("SELECT COUNT(*) FROM fts_messages LIMIT 1", [], |r| {
+                                r.get::<_, i64>(0)
+                            })
+                            .is_ok(),
+                        Err(_) => false,
+                    };
 
                     if fts_exists {
                         add_check!(
@@ -9029,9 +9078,9 @@ fn run_doctor(
                     } else {
                         // FTS table missing - attempt to recreate it if --fix is set
                         if fix {
-                            use frankensqlite::compat::BatchExt as _;
-                            let create_result = (|| -> Result<(), frankensqlite::FrankenError> {
-                                conn.execute_batch(
+                            let create_result = (|| -> Result<()> {
+                                let rconn = rusqlite::Connection::open(&db_path)?;
+                                rconn.execute_batch(
                                     r#"
                                     CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
                                         content,
@@ -9047,22 +9096,22 @@ fn run_doctor(
                                 )?;
 
                                 // Batch the INSERT to avoid OOM on large databases (#110)
-                                let total_count: i64 = conn.query_row_map(
+                                let total_count: i64 = rconn.query_row(
                                     "SELECT COUNT(*) FROM messages m JOIN conversations c ON m.conversation_id = c.id JOIN agents a ON c.agent_id = a.id LEFT JOIN workspaces w ON c.workspace_id = w.id",
-                                    &[],
-                                    |r: &frankensqlite::Row| r.get_typed(0),
+                                    [],
+                                    |r| r.get(0),
                                 )?;
                                 let batch_size: i64 = 10_000;
-                                let mut offset: i64 = 0;
+                                let mut fts_offset: i64 = 0;
 
-                                conn.execute_batch("BEGIN;")?;
-                                while offset < total_count {
+                                let tx = rconn.unchecked_transaction()?;
+                                while fts_offset < total_count {
                                     info!(
                                         "Rebuilding FTS: {}/{} rows...",
-                                        offset.min(total_count),
+                                        fts_offset.min(total_count),
                                         total_count
                                     );
-                                    conn.execute_batch(&format!(
+                                    tx.execute_batch(&format!(
                                         "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
                                          SELECT m.content, c.title, a.slug, w.path, c.source_path, m.created_at, m.id
                                          FROM messages m
@@ -9071,11 +9120,11 @@ fn run_doctor(
                                          LEFT JOIN workspaces w ON c.workspace_id = w.id
                                          ORDER BY m.rowid
                                          LIMIT {} OFFSET {};",
-                                        batch_size, offset
+                                        batch_size, fts_offset
                                     ))?;
-                                    offset += batch_size;
+                                    fts_offset += batch_size;
                                 }
-                                conn.execute_batch("COMMIT;")?;
+                                tx.commit()?;
                                 info!(
                                     "Rebuilding FTS: {}/{} rows complete.",
                                     total_count, total_count
@@ -9097,30 +9146,23 @@ fn run_doctor(
                                     auto_fix_applied = true;
                                 }
                                 Err(e) => {
-                                    // Rollback dangling transaction from failed INSERT loop
-                                    let _ = conn.execute_batch("ROLLBACK;");
                                     add_check!(
                                         "fts_table",
                                         "fail",
-                                        format!(
-                                            "FTS table missing and recreation failed: {}. \
-                                             This may indicate the FTS5 module was not registered \
-                                             on this connection (see #115).",
-                                            e
-                                        ),
+                                        format!("FTS table missing and recreation failed: {}", e),
                                         true
                                     );
-                                    needs_rebuild = true;
+                                    // Don't trigger full rebuild solely on FTS failure (#123)
                                 }
                             }
                         } else {
                             add_check!(
                                 "fts_table",
-                                "fail",
+                                "warn",
                                 "FTS search table (fts_messages) missing - run with --fix to recreate",
                                 true
                             );
-                            needs_rebuild = true;
+                            // Don't trigger full rebuild solely on FTS probe failure (#123)
                         }
                     }
                 } else {
@@ -9296,25 +9338,18 @@ fn run_doctor(
         );
     }
 
-    // Apply fix: rebuild index if needed
-    if needs_rebuild {
+    // Apply fix: rebuild index if needed (only when --fix is passed)
+    if needs_rebuild && fix {
         let stderr_is_tty = std::io::stderr().is_terminal();
         let show_progress = !json && stderr_is_tty;
         let show_plain = !json && !stderr_is_tty;
 
         if !json {
             println!();
-            if fix {
-                println!(
-                    "{} Rebuilding index (this may take a moment)...",
-                    "→".cyan()
-                );
-            } else {
-                println!(
-                    "{} Auto-repair: rebuilding index (this may take a moment)...",
-                    "→".cyan()
-                );
-            }
+            println!(
+                "{} Rebuilding index (this may take a moment)...",
+                "→".cyan()
+            );
         }
 
         let progress = std::sync::Arc::new(indexer::IndexingProgress::default());

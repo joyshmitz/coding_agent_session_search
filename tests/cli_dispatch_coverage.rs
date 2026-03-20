@@ -1633,6 +1633,26 @@ fn analytics_validate_reports_query_failure_for_malformed_schema() {
             .unwrap()
             .contains("Track A invariant query failed")
     );
+    assert_eq!(json["data"]["perf"]["timeseries"]["within_budget"], false);
+    assert!(
+        json["data"]["perf"]["timeseries"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no such column")
+    );
+    assert!(
+        json["data"]["perf"]["timeseries"]["details"]
+            .as_str()
+            .unwrap()
+            .contains("failed")
+    );
+    assert_eq!(json["data"]["perf"]["breakdown"]["within_budget"], false);
+    assert!(
+        json["data"]["perf"]["breakdown"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no such column")
+    );
     assert!(
         json["data"]["summary"]["errors"].as_u64().unwrap_or(0) >= 1,
         "malformed analytics schema should surface at least one error"

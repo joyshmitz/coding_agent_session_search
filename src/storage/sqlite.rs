@@ -157,6 +157,12 @@ pub struct SendFrankenConnection(FrankenConnection);
 // The Mutex<Option<SendFrankenConnection>> ensures exclusive access.
 unsafe impl Send for SendFrankenConnection {}
 
+impl SendFrankenConnection {
+    pub(crate) fn new(conn: FrankenConnection) -> Self {
+        Self(conn)
+    }
+}
+
 impl std::ops::Deref for SendFrankenConnection {
     type Target = FrankenConnection;
     fn deref(&self) -> &FrankenConnection {
@@ -238,6 +244,53 @@ impl LazyFrankenDb {
                 "lazily opened FrankenSQLite database"
             );
             *guard = Some(SendFrankenConnection(conn));
+        }
+        Ok(LazyFrankenDbGuard(guard))
+    }
+
+    /// Get the connection with a timeout, opening the database on first access.
+    ///
+    /// Like [`get`] but spawns the open in a background thread and waits up to
+    /// `timeout` for it to complete. Returns `LazyDbError::FrankenOpenFailed`
+    /// with a descriptive message if the timeout elapses. Fix for #128.
+    pub fn get_with_timeout(
+        &self,
+        reason: &str,
+        timeout: Duration,
+    ) -> std::result::Result<LazyFrankenDbGuard<'_>, LazyDbError> {
+        let mut guard = self.conn.lock();
+        if guard.is_none() {
+            if !self.path.exists() {
+                return Err(LazyDbError::NotFound(self.path.clone()));
+            }
+            let start = Instant::now();
+            let path_owned = self.path.to_string_lossy().into_owned();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ =
+                    tx.send(FrankenConnection::open(path_owned).map(SendFrankenConnection::new));
+            });
+            let conn = rx
+                .recv_timeout(timeout)
+                .map_err(|_| LazyDbError::FrankenOpenFailed {
+                    path: self.path.clone(),
+                    source: frankensqlite::FrankenError::Internal(format!(
+                        "database open timed out after {}s (possible corruption or lock contention)",
+                        timeout.as_secs()
+                    )),
+                })?
+                .map_err(|e| LazyDbError::FrankenOpenFailed {
+                    path: self.path.clone(),
+                    source: e,
+                })?;
+            let elapsed_ms = start.elapsed().as_millis();
+            info!(
+                path = %self.path.display(),
+                elapsed_ms = elapsed_ms,
+                reason = reason,
+                "lazily opened FrankenSQLite database (with timeout)"
+            );
+            *guard = Some(conn);
         }
         Ok(LazyFrankenDbGuard(guard))
     }
