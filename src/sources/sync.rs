@@ -1609,12 +1609,11 @@ impl SyncStatus {
     /// Load sync status from disk.
     pub fn load(data_dir: &Path) -> Result<Self, std::io::Error> {
         let path = Self::status_path(data_dir);
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&content)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-        } else {
-            Ok(Self::default())
+        match std::fs::read_to_string(&path) {
+            Ok(content) => serde_json::from_str(&content)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e),
         }
     }
 
@@ -1792,7 +1791,10 @@ Total transferred file size: 1,234 bytes
     fn test_detect_sync_method() {
         // This test is platform-dependent but should at least not panic
         let method = SyncEngine::detect_sync_method();
-        assert!(matches!(method, SyncMethod::Rsync | SyncMethod::Sftp));
+        assert!(matches!(
+            method,
+            SyncMethod::Rsync | SyncMethod::WslRsync | SyncMethod::Scp | SyncMethod::Sftp
+        ));
     }
 
     #[test]

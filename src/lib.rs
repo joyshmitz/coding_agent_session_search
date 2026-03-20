@@ -9050,23 +9050,14 @@ fn run_doctor(
                     );
 
                     // Check for FTS table (fts_messages) - this can be missing if table was
-                    // dropped after migrations completed.
-                    //
-                    // Fix #121/#122/#126: Use rusqlite (which bundles FTS5 support) instead
-                    // of FrankenSQLite for probing and recreating the FTS5 virtual table.
-                    // FrankenSQLite cannot properly handle FTS5 virtual tables, causing
-                    // false negatives that trigger unnecessary rebuilds.
-                    let fts_exists = match rusqlite::Connection::open_with_flags(
-                        &db_path,
-                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                    ) {
-                        Ok(rconn) => rconn
-                            .query_row("SELECT COUNT(*) FROM fts_messages LIMIT 1", [], |r| {
-                                r.get::<_, i64>(0)
-                            })
-                            .is_ok(),
-                        Err(_) => false,
-                    };
+                    // dropped after migrations completed. Probe it via frankensqlite after the
+                    // virtual table registration above so the repair/reporting path stays on the
+                    // same backend as the live search fallback.
+                    let fts_exists = conn
+                        .query_row_map("SELECT COUNT(*) FROM fts_messages LIMIT 1", &[], |r| {
+                            r.get_typed::<i64>(0)
+                        })
+                        .is_ok();
 
                     if fts_exists {
                         add_check!(
@@ -9079,56 +9070,8 @@ fn run_doctor(
                         // FTS table missing - attempt to recreate it if --fix is set
                         if fix {
                             let create_result = (|| -> Result<()> {
-                                let rconn = rusqlite::Connection::open(&db_path)?;
-                                rconn.execute_batch(
-                                    r#"
-                                    CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
-                                        content,
-                                        title,
-                                        agent,
-                                        workspace,
-                                        source_path,
-                                        created_at UNINDEXED,
-                                        message_id UNINDEXED,
-                                        tokenize='porter'
-                                    );
-                                    "#,
-                                )?;
-
-                                // Batch the INSERT to avoid OOM on large databases (#110)
-                                let total_count: i64 = rconn.query_row(
-                                    "SELECT COUNT(*) FROM messages m JOIN conversations c ON m.conversation_id = c.id JOIN agents a ON c.agent_id = a.id LEFT JOIN workspaces w ON c.workspace_id = w.id",
-                                    [],
-                                    |r| r.get(0),
-                                )?;
-                                let batch_size: i64 = 10_000;
-                                let mut fts_offset: i64 = 0;
-
-                                let tx = rconn.unchecked_transaction()?;
-                                while fts_offset < total_count {
-                                    info!(
-                                        "Rebuilding FTS: {}/{} rows...",
-                                        fts_offset.min(total_count),
-                                        total_count
-                                    );
-                                    tx.execute_batch(&format!(
-                                        "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
-                                         SELECT m.content, c.title, a.slug, w.path, c.source_path, m.created_at, m.id
-                                         FROM messages m
-                                         JOIN conversations c ON m.conversation_id = c.id
-                                         JOIN agents a ON c.agent_id = a.id
-                                         LEFT JOIN workspaces w ON c.workspace_id = w.id
-                                         ORDER BY m.rowid
-                                         LIMIT {} OFFSET {};",
-                                        batch_size, fts_offset
-                                    ))?;
-                                    fts_offset += batch_size;
-                                }
-                                tx.commit()?;
-                                info!(
-                                    "Rebuilding FTS: {}/{} rows complete.",
-                                    total_count, total_count
-                                );
+                                crate::storage::sqlite::register_fts5_on_connection(&conn)?;
+                                crate::storage::sqlite::rebuild_fts_on_connection(&conn)?;
                                 Ok(())
                             })();
                             match create_result {
@@ -9727,10 +9670,13 @@ fn run_sessions(
         )?),
         (None, false) => None,
     };
+    // Default to 1 only when --current is the actual workspace source
+    // (i.e., no explicit --workspace was provided).
+    let current_determined_workspace = workspace.is_none() && current;
     let effective_limit = match limit {
         Some(0) => None,
         Some(n) => Some(n),
-        None if current => Some(1),
+        None if current_determined_workspace => Some(1),
         None => Some(10),
     };
 

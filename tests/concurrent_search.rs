@@ -43,7 +43,7 @@ fn concurrent_10_simultaneous_searches() {
     }
     index.commit().unwrap();
 
-    // Each thread creates its own SearchClient (rusqlite::Connection is not Sync)
+    // Each thread creates its own SearchClient so the search state stays thread-local.
     let index_path = dir.path().to_path_buf();
 
     let barrier = Arc::new(Barrier::new(10));
@@ -124,7 +124,7 @@ fn concurrent_search_during_indexing() {
     index.add_conversation(&conv).unwrap();
     index.commit().unwrap();
 
-    // Each thread creates its own SearchClient (rusqlite::Connection is not Sync)
+    // Each thread creates its own SearchClient so the search state stays thread-local.
     let index_path = dir.path().to_path_buf();
 
     let indexing_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -215,7 +215,7 @@ fn concurrent_cache_contention() {
     index.add_conversation(&conv).unwrap();
     index.commit().unwrap();
 
-    // Each thread creates its own SearchClient (rusqlite::Connection is not Sync)
+    // Each thread creates its own SearchClient so the search state stays thread-local.
     let index_path = dir.path().to_path_buf();
 
     // Pre-test: verify the content exists
@@ -307,7 +307,7 @@ fn concurrent_reader_handle_exhaustion() {
     }
     index.commit().unwrap();
 
-    // Each thread creates its own SearchClient (rusqlite::Connection is not Sync)
+    // Each thread creates its own SearchClient so the search state stays thread-local.
     let index_path = dir.path().to_path_buf();
 
     let barrier = Arc::new(Barrier::new(50));
@@ -395,7 +395,7 @@ fn concurrent_different_filters_no_interference() {
     }
     index.commit().unwrap();
 
-    // Each thread creates its own SearchClient (rusqlite::Connection is not Sync)
+    // Each thread creates its own SearchClient so the search state stays thread-local.
     let index_path = dir.path().to_path_buf();
 
     let barrier = Arc::new(Barrier::new(6));
@@ -496,7 +496,7 @@ fn concurrent_no_deadlock_mixed_operations() {
     index.add_conversation(&conv).unwrap();
     index.commit().unwrap();
 
-    // Each thread creates its own SearchClient (rusqlite::Connection is not Sync)
+    // Each thread creates its own SearchClient so the search state stays thread-local.
     let index_path = dir.path().to_path_buf();
 
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));

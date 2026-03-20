@@ -653,6 +653,53 @@ pub fn register_fts5_on_connection(
     conn.execute(FTS5_REGISTER_SQL).map(|_| ())
 }
 
+/// Rebuild the `fts_messages` table from the canonical messages/conversations
+/// tables using a frankensqlite connection.
+pub(crate) fn rebuild_fts_on_connection(conn: &FrankenConnection) -> Result<()> {
+    let total_count: i64 = conn.query_row_map(
+        "SELECT COUNT(*) FROM messages m JOIN conversations c ON m.conversation_id = c.id JOIN agents a ON c.agent_id = a.id LEFT JOIN workspaces w ON c.workspace_id = w.id",
+        &[],
+        |r: &FrankenRow| r.get_typed(0),
+    )?;
+    let batch_size: i64 = 10_000;
+    let mut offset: i64 = 0;
+
+    conn.execute_batch("BEGIN;")?;
+    let result = (|| -> Result<()> {
+        conn.execute_batch("DELETE FROM fts_messages;")?;
+        while offset < total_count {
+            info!(
+                "Rebuilding FTS: {}/{} rows...",
+                offset.min(total_count),
+                total_count
+            );
+            conn.execute_batch(&format!(
+                "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+                 SELECT m.content, c.title, a.slug, w.path, c.source_path, m.created_at, m.id
+                 FROM messages m
+                 JOIN conversations c ON m.conversation_id = c.id
+                 JOIN agents a ON c.agent_id = a.id
+                 LEFT JOIN workspaces w ON c.workspace_id = w.id
+                 ORDER BY m.rowid
+                 LIMIT {} OFFSET {};",
+                batch_size, offset
+            ))?;
+            offset += batch_size;
+        }
+        conn.execute_batch("COMMIT;")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK;");
+    } else {
+        info!(
+            "Rebuilding FTS: {}/{} rows complete.",
+            total_count, total_count
+        );
+    }
+    result
+}
+
 /// Create a timestamped backup of the database file.
 ///
 /// Returns the path to the backup file, or None if the source doesn't exist.
@@ -2679,48 +2726,7 @@ impl FrankenStorage {
 
     /// Rebuild the FTS5 index from scratch (chunked to avoid OOM on large databases, #110).
     pub fn rebuild_fts(&self) -> Result<()> {
-        let total_count: i64 = self.conn.query_row_map(
-            "SELECT COUNT(*) FROM messages m JOIN conversations c ON m.conversation_id = c.id JOIN agents a ON c.agent_id = a.id LEFT JOIN workspaces w ON c.workspace_id = w.id",
-            &[],
-            |r: &FrankenRow| r.get_typed(0),
-        )?;
-        let batch_size: i64 = 10_000;
-        let mut offset: i64 = 0;
-
-        self.conn.execute_batch("BEGIN;")?;
-        let result = (|| -> Result<()> {
-            self.conn.execute_batch("DELETE FROM fts_messages;")?;
-            while offset < total_count {
-                info!(
-                    "Rebuilding FTS: {}/{} rows...",
-                    offset.min(total_count),
-                    total_count
-                );
-                self.conn.execute_batch(&format!(
-                    "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
-                     SELECT m.content, c.title, a.slug, w.path, c.source_path, m.created_at, m.id
-                     FROM messages m
-                     JOIN conversations c ON m.conversation_id = c.id
-                     JOIN agents a ON c.agent_id = a.id
-                     LEFT JOIN workspaces w ON c.workspace_id = w.id
-                     ORDER BY m.rowid
-                     LIMIT {} OFFSET {};",
-                    batch_size, offset
-                ))?;
-                offset += batch_size;
-            }
-            self.conn.execute_batch("COMMIT;")?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = self.conn.execute_batch("ROLLBACK;");
-        } else {
-            info!(
-                "Rebuilding FTS: {}/{} rows complete.",
-                total_count, total_count
-            );
-        }
-        result
+        rebuild_fts_on_connection(&self.conn)
     }
 
     /// Fetch all messages for embedding generation.

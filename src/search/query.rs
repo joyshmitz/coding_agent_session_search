@@ -1759,9 +1759,9 @@ pub struct SearchClient {
     reader: Option<(IndexReader, FsCassFields)>,
     sqlite: Mutex<Option<SendConnection>>,
     sqlite_path: Option<PathBuf>,
-    /// rusqlite connection for FTS5 queries. FrankenSQLite cannot handle FTS5
-    /// virtual tables, so the FTS5 fallback search path uses rusqlite (which
-    /// bundles FTS5 via the `bundled` feature) instead. Fix for #121/#122/#126.
+    /// rusqlite connection for FTS5 queries (#121/#122/#126).
+    /// FrankenSQLite cannot handle FTS5 virtual tables, so the fallback
+    /// search path uses rusqlite (bundled FTS5) instead.
     rusqlite_fts: Mutex<Option<rusqlite::Connection>>,
     prefix_cache: Mutex<CacheShards>,
     reload_on_search: bool,
@@ -2280,11 +2280,10 @@ impl SearchClient {
         Ok(guard)
     }
 
-    /// Lazily open a rusqlite connection for FTS5 queries.
+    /// Lazily open a rusqlite connection for FTS5 queries (#121/#122/#126).
     ///
     /// FrankenSQLite cannot handle FTS5 virtual tables, so the FTS5 fallback
     /// search path uses rusqlite (which bundles FTS5 via `bundled` feature).
-    /// Fix for #121/#122/#126.
     fn rusqlite_fts_guard(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, Option<rusqlite::Connection>>> {
@@ -2485,15 +2484,12 @@ impl SearchClient {
         // Skip SQLite fallback when the query contains leading/internal wildcards that
         // FTS5 cannot parse (e.g., "*handler" or "f*o").
         // We ALLOW trailing wildcards ("foo*") as FTS5 supports prefix matching.
-        // Also skip SQLite fallback when source filtering is applied, since the FTS table
-        // doesn't have a source_id column (P3.1 limitation).
         let unsupported_wildcards = sanitized.split_whitespace().any(|t| {
             let core = t.trim_end_matches('*');
             core.contains('*') // Any star remaining after trimming end is unsupported (leading or internal)
         });
 
-        let has_source_filter = !matches!(filters.source_filter, SourceFilter::All);
-        if unsupported_wildcards || has_source_filter {
+        if unsupported_wildcards {
             return Ok(Vec::new());
         }
 
@@ -4075,12 +4071,180 @@ impl SearchClient {
         Ok(hits)
     }
 
+    /// FTS5 fallback search using frankensqlite.
+    ///
+    /// This path intentionally speaks the SQL surface that frankensqlite
+    /// already supports today: `MATCH` on the FTS5 virtual table plus normal
+    /// projections/joins. Snippets are derived in cass after the query rather
+    /// than via SQLite's FTS5 auxiliary `snippet(table, ...)` function.
+    fn search_sqlite(
+        &self,
+        conn: &Connection,
+        raw_query: &str,
+        filters: SearchFilters,
+        limit: usize,
+        offset: usize,
+        field_mask: FieldMask,
+    ) -> Result<Vec<SearchHit>> {
+        let fts_query = match transpile_to_fts5(raw_query) {
+            Some(q) if !q.trim().is_empty() => q,
+            _ => return Ok(Vec::new()),
+        };
+
+        let query_match_type = dominant_match_type(raw_query);
+
+        let needs_raw_content = field_mask.needs_content() || field_mask.wants_snippet();
+        let content_expr = if needs_raw_content {
+            "fts_messages.content"
+        } else {
+            "''"
+        };
+        let title_expr = if field_mask.wants_title() {
+            "fts_messages.title"
+        } else {
+            "''"
+        };
+        let mut sql = format!(
+            "SELECT {title_expr}, {content_expr}, fts_messages.agent, fts_messages.workspace,
+                    fts_messages.source_path, fts_messages.created_at, m.idx,
+                    c.source_id, c.origin_host, COALESCE(s.kind, 'local')
+             FROM fts_messages
+             LEFT JOIN messages m ON fts_messages.message_id = m.id
+             LEFT JOIN conversations c ON m.conversation_id = c.id
+             LEFT JOIN sources s ON c.source_id = s.id
+             WHERE fts_messages MATCH ?"
+        );
+        let mut params: Vec<ParamValue> = vec![ParamValue::from(fts_query.as_str())];
+
+        if !filters.agents.is_empty() {
+            let placeholders = sql_placeholders(filters.agents.len());
+            sql.push_str(&format!(" AND fts_messages.agent IN ({placeholders})"));
+            for a in &filters.agents {
+                params.push(ParamValue::from(a.as_str()));
+            }
+        }
+
+        if !filters.workspaces.is_empty() {
+            let placeholders = sql_placeholders(filters.workspaces.len());
+            sql.push_str(&format!(
+                " AND COALESCE(fts_messages.workspace, '') IN ({placeholders})"
+            ));
+            for w in &filters.workspaces {
+                params.push(ParamValue::from(w.as_str()));
+            }
+        }
+
+        if let Some(created_from) = filters.created_from {
+            sql.push_str(" AND fts_messages.created_at >= ?");
+            params.push(ParamValue::from(created_from));
+        }
+        if let Some(created_to) = filters.created_to {
+            sql.push_str(" AND fts_messages.created_at <= ?");
+            params.push(ParamValue::from(created_to));
+        }
+
+        match &filters.source_filter {
+            SourceFilter::All => {}
+            SourceFilter::Local => {
+                sql.push_str(" AND COALESCE(c.source_id, 'local') = 'local'");
+            }
+            SourceFilter::Remote => {
+                sql.push_str(" AND COALESCE(c.source_id, 'local') != 'local'");
+            }
+            SourceFilter::SourceId(id) => {
+                sql.push_str(" AND COALESCE(c.source_id, 'local') = ?");
+                params.push(ParamValue::from(id.as_str()));
+            }
+        }
+
+        sql.push_str(" LIMIT ? OFFSET ?");
+        params.push(ParamValue::from(limit as i64));
+        params.push(ParamValue::from(offset as i64));
+
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            String,
+        )> = conn.query_map_collect(&sql, &params, |row: &frankensqlite::Row| {
+            Ok((
+                row.get_typed(0)?,
+                row.get_typed(1)?,
+                row.get_typed(2)?,
+                row.get_typed(3)?,
+                row.get_typed(4)?,
+                row.get_typed(5)?,
+                row.get_typed(6)?,
+                row.get_typed(7)?,
+                row.get_typed(8)?,
+                row.get_typed::<Option<String>>(9)?
+                    .unwrap_or_else(default_origin_kind),
+            ))
+        })?;
+
+        let mut hits = Vec::with_capacity(rows.len());
+        for (rank, row) in rows.into_iter().enumerate() {
+            let (
+                title,
+                raw_content,
+                agent,
+                workspace,
+                source_path,
+                created_at,
+                idx,
+                source_id,
+                origin_host,
+                origin_kind,
+            ) = row;
+            let line_number = idx.map(|i| (i + 1) as usize);
+            let snippet = if field_mask.wants_snippet() {
+                snippet_from_content(&raw_content)
+            } else {
+                String::new()
+            };
+            let content = if field_mask.needs_content() {
+                raw_content
+            } else {
+                String::new()
+            };
+            let hash_basis = if content.is_empty() {
+                snippet.as_str()
+            } else {
+                content.as_str()
+            };
+            let content_hash = stable_hit_hash(hash_basis, &source_path, line_number, created_at);
+            hits.push(SearchHit {
+                title,
+                snippet,
+                content,
+                content_hash,
+                score: 1.0 / (rank as f32 + 1.0),
+                source_path,
+                agent,
+                workspace: workspace.unwrap_or_default(),
+                workspace_original: None,
+                created_at,
+                line_number,
+                match_type: query_match_type,
+                source_id: source_id.unwrap_or_else(default_source_id),
+                origin_kind,
+                origin_host,
+            });
+        }
+        Ok(hits)
+    }
+
     /// FTS5 fallback search using rusqlite (fix #121/#122/#126).
     ///
     /// FrankenSQLite cannot handle FTS5 virtual tables, so this method uses
     /// rusqlite (which bundles FTS5 via the `bundled` feature) for the FTS5
-    /// query path. The query structure mirrors `search_sqlite` but uses
-    /// rusqlite parameter binding instead of FrankenSQLite's `ParamValue`.
+    /// fallback search path. Mirrors `search_sqlite` query logic.
     fn search_sqlite_fts5(
         &self,
         conn: &rusqlite::Connection,
@@ -4097,31 +4261,29 @@ impl SearchClient {
 
         let query_match_type = dominant_match_type(raw_query);
 
-        let content_expr = if field_mask.needs_content() {
-            "f.content"
+        let needs_raw_content = field_mask.needs_content() || field_mask.wants_snippet();
+        let content_expr = if needs_raw_content {
+            "fts_messages.content"
         } else {
             "''"
         };
         let title_expr = if field_mask.wants_title() {
-            "f.title"
-        } else {
-            "''"
-        };
-        let snippet_expr = if field_mask.wants_snippet() {
-            "snippet(fts_messages, 0, '**', '**', '...', 64)"
+            "fts_messages.title"
         } else {
             "''"
         };
 
-        // Build the SQL and collect dynamic params.
-        // rusqlite uses positional ?NNN or plain ?, so we collect Box<dyn rusqlite::types::ToSql>.
         let mut sql = format!(
-            "SELECT {title_expr}, {content_expr}, f.agent, f.workspace, f.source_path, f.created_at, bm25(fts_messages) AS score, {snippet_expr} AS snippet, m.idx
-             FROM fts_messages f
-             LEFT JOIN messages m ON f.message_id = m.id
+            "SELECT {title_expr}, {content_expr}, fts_messages.agent, fts_messages.workspace,
+                    fts_messages.source_path, fts_messages.created_at, m.idx,
+                    c.source_id, c.origin_host, COALESCE(s.kind, 'local')
+             FROM fts_messages
+             LEFT JOIN messages m ON fts_messages.message_id = m.id
+             LEFT JOIN conversations c ON m.conversation_id = c.id
+             LEFT JOIN sources s ON c.source_id = s.id
              WHERE fts_messages MATCH ?1"
         );
-        let mut param_idx: usize = 2; // next placeholder index
+        let mut param_idx: usize = 2;
         let mut dyn_params: Vec<Box<dyn rusqlite::types::ToSql>> =
             vec![Box::new(fts_query.clone())];
 
@@ -4135,7 +4297,7 @@ impl SearchClient {
                     p
                 })
                 .collect();
-            sql.push_str(&format!(" AND f.agent IN ({})", phs.join(",")));
+            sql.push_str(&format!(" AND fts_messages.agent IN ({})", phs.join(",")));
             for a in &filters.agents {
                 dyn_params.push(Box::new(a.clone()));
             }
@@ -4151,28 +4313,44 @@ impl SearchClient {
                     p
                 })
                 .collect();
-            sql.push_str(&format!(" AND f.workspace IN ({})", phs.join(",")));
+            sql.push_str(&format!(
+                " AND COALESCE(fts_messages.workspace, '') IN ({})",
+                phs.join(",")
+            ));
             for w in &filters.workspaces {
                 dyn_params.push(Box::new(w.clone()));
             }
         }
 
         if let Some(created_from) = filters.created_from {
-            sql.push_str(&format!(" AND f.created_at >= ?{param_idx}"));
+            sql.push_str(&format!(" AND fts_messages.created_at >= ?{param_idx}"));
             param_idx += 1;
             dyn_params.push(Box::new(created_from));
         }
         if let Some(created_to) = filters.created_to {
-            sql.push_str(&format!(" AND f.created_at <= ?{param_idx}"));
+            sql.push_str(&format!(" AND fts_messages.created_at <= ?{param_idx}"));
             param_idx += 1;
             dyn_params.push(Box::new(created_to));
         }
 
-        sql.push_str(&format!(
-            " ORDER BY score LIMIT ?{} OFFSET ?{}",
-            param_idx,
-            param_idx + 1
-        ));
+        match &filters.source_filter {
+            SourceFilter::All => {}
+            SourceFilter::Local => {
+                sql.push_str(" AND COALESCE(c.source_id, 'local') = 'local'");
+            }
+            SourceFilter::Remote => {
+                sql.push_str(" AND COALESCE(c.source_id, 'local') != 'local'");
+            }
+            SourceFilter::SourceId(id) => {
+                sql.push_str(&format!(
+                    " AND COALESCE(c.source_id, 'local') = ?{param_idx}"
+                ));
+                param_idx += 1;
+                dyn_params.push(Box::new(id.clone()));
+            }
+        }
+
+        sql.push_str(&format!(" LIMIT ?{} OFFSET ?{}", param_idx, param_idx + 1));
         dyn_params.push(Box::new(limit as i64));
         dyn_params.push(Box::new(offset as i64));
 
@@ -4181,33 +4359,46 @@ impl SearchClient {
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            let title: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            let agent: String = row.get(2)?;
-            let workspace: Option<String> = row.get(3)?;
-            let source_path: String = row.get(4)?;
-            let created_at: Option<i64> = row.get(5)?;
-            let score: f64 = row.get(6)?;
-            let snippet: String = row.get(7)?;
-            let idx: Option<i64> = row.get(8)?;
             Ok((
-                title,
-                content,
-                agent,
-                workspace,
-                source_path,
-                created_at,
-                score,
-                snippet,
-                idx,
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?
+                    .unwrap_or_else(default_origin_kind),
             ))
         })?;
 
         let mut hits = Vec::new();
-        for row_result in rows {
-            let (title, content, agent, workspace, source_path, created_at, score, snippet, idx) =
-                row_result?;
+        for (rank, row_result) in rows.enumerate() {
+            let (
+                title,
+                raw_content,
+                agent,
+                workspace,
+                source_path,
+                created_at,
+                idx,
+                source_id,
+                origin_host,
+                origin_kind,
+            ) = row_result?;
             let line_number = idx.map(|i| (i + 1) as usize);
+            let snippet = if field_mask.wants_snippet() {
+                snippet_from_content(&raw_content)
+            } else {
+                String::new()
+            };
+            let content = if field_mask.needs_content() {
+                raw_content
+            } else {
+                String::new()
+            };
             let hash_basis = if content.is_empty() {
                 snippet.as_str()
             } else {
@@ -4219,7 +4410,7 @@ impl SearchClient {
                 snippet,
                 content,
                 content_hash,
-                score: score as f32,
+                score: 1.0 / (rank as f32 + 1.0),
                 source_path,
                 agent,
                 workspace: workspace.unwrap_or_default(),
@@ -4227,9 +4418,9 @@ impl SearchClient {
                 created_at,
                 line_number,
                 match_type: query_match_type,
-                source_id: default_source_id(),
-                origin_kind: default_origin_kind(),
-                origin_host: None,
+                source_id: source_id.unwrap_or_else(default_source_id),
+                origin_kind,
+                origin_host,
             });
         }
         Ok(hits)
@@ -4302,7 +4493,7 @@ impl SearchClient {
 
         if !filters.workspaces.is_empty() {
             let placeholders = sql_placeholders(filters.workspaces.len());
-            sql.push_str(&format!(" AND w.path IN ({placeholders})"));
+            sql.push_str(&format!(" AND COALESCE(w.path, '') IN ({placeholders})"));
             for w in &filters.workspaces {
                 params.push(ParamValue::from(w.as_str()));
             }
@@ -4320,10 +4511,10 @@ impl SearchClient {
         // Apply source filter
         match &filters.source_filter {
             SourceFilter::All => {}
-            SourceFilter::Local => sql.push_str(" AND c.source_id = 'local'"),
-            SourceFilter::Remote => sql.push_str(" AND c.source_id != 'local'"),
+            SourceFilter::Local => sql.push_str(" AND COALESCE(c.source_id, 'local') = 'local'"),
+            SourceFilter::Remote => sql.push_str(" AND COALESCE(c.source_id, 'local') != 'local'"),
             SourceFilter::SourceId(id) => {
-                sql.push_str(" AND c.source_id = ?");
+                sql.push_str(" AND COALESCE(c.source_id, 'local') = ?");
                 params.push(ParamValue::from(id.as_str()));
             }
         }
@@ -6849,11 +7040,20 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "FTS5 virtual tables not supported by frankensqlite"]
     fn sqlite_backend_handles_null_workspace() -> Result<()> {
         let conn = Connection::open(":memory:")?;
         conn.execute_batch(
-            "CREATE TABLE messages (id INTEGER PRIMARY KEY, idx INTEGER);
+            "CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                source_id TEXT,
+                origin_host TEXT
+             );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER,
+                idx INTEGER
+             );
              CREATE VIRTUAL TABLE fts_messages USING fts5(
                 content,
                 title,
@@ -6864,7 +7064,11 @@ mod tests {
                 message_id UNINDEXED
              );",
         )?;
-        conn.execute("INSERT INTO messages(id, idx) VALUES(1, 0)")?;
+        conn.execute("INSERT INTO sources(id, kind) VALUES('local', 'local')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, source_id, origin_host) VALUES(1, 'local', NULL)",
+        )?;
+        conn.execute("INSERT INTO messages(id, conversation_id, idx) VALUES(1, 1, 0)")?;
         conn.execute_compat(
             "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
              VALUES(?1, ?2, ?3, NULL, ?4, ?5, ?6)",
@@ -6899,6 +7103,280 @@ mod tests {
         let hits = client.search("auth", SearchFilters::default(), 5, 0, FieldMask::FULL)?;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].workspace, "");
+        assert_eq!(hits[0].line_number, Some(1));
+        assert_eq!(hits[0].source_id, "local");
+        assert_eq!(hits[0].origin_kind, "local");
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_backend_respects_source_filter() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                source_id TEXT,
+                origin_host TEXT
+             );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER,
+                idx INTEGER
+             );
+             CREATE VIRTUAL TABLE fts_messages USING fts5(
+                content,
+                title,
+                agent,
+                workspace,
+                source_path,
+                created_at UNINDEXED,
+                message_id UNINDEXED
+             );",
+        )?;
+        conn.execute("INSERT INTO sources(id, kind) VALUES('local', 'local')")?;
+        conn.execute("INSERT INTO sources(id, kind) VALUES('laptop', 'ssh')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, source_id, origin_host) VALUES(1, 'local', NULL)",
+        )?;
+        conn.execute("INSERT INTO conversations(id, source_id, origin_host) VALUES(2, 'laptop', 'dev@laptop')")?;
+        conn.execute("INSERT INTO messages(id, conversation_id, idx) VALUES(1, 1, 0)")?;
+        conn.execute("INSERT INTO messages(id, conversation_id, idx) VALUES(2, 2, 0)")?;
+        conn.execute_compat(
+            "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                "auth token failure",
+                "local title",
+                "codex",
+                "/local",
+                "/tmp/local.jsonl",
+                42_i64,
+                1_i64
+            ],
+        )?;
+        conn.execute_compat(
+            "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                "auth token failure",
+                "remote title",
+                "codex",
+                "/remote",
+                "/tmp/remote.jsonl",
+                43_i64,
+                2_i64
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+        };
+
+        let local_hits = client.search(
+            "auth",
+            SearchFilters {
+                source_filter: SourceFilter::Local,
+                ..SearchFilters::default()
+            },
+            5,
+            0,
+            FieldMask::FULL,
+        )?;
+        assert_eq!(local_hits.len(), 1);
+        assert_eq!(local_hits[0].source_id, "local");
+
+        let remote_hits = client.search(
+            "auth",
+            SearchFilters {
+                source_filter: SourceFilter::SourceId("laptop".to_string()),
+                ..SearchFilters::default()
+            },
+            5,
+            0,
+            FieldMask::FULL,
+        )?;
+        assert_eq!(remote_hits.len(), 1);
+        assert_eq!(remote_hits[0].source_id, "laptop");
+        assert_eq!(remote_hits[0].origin_kind, "ssh");
+
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_backend_workspace_filter_matches_null_workspace_as_empty_string() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                source_id TEXT,
+                origin_host TEXT
+             );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER,
+                idx INTEGER
+             );
+             CREATE VIRTUAL TABLE fts_messages USING fts5(
+                content,
+                title,
+                agent,
+                workspace,
+                source_path,
+                created_at UNINDEXED,
+                message_id UNINDEXED
+             );",
+        )?;
+        conn.execute("INSERT INTO sources(id, kind) VALUES('local', 'local')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, source_id, origin_host) VALUES(1, 'local', NULL)",
+        )?;
+        conn.execute("INSERT INTO messages(id, conversation_id, idx) VALUES(1, 1, 0)")?;
+        conn.execute("INSERT INTO messages(id, conversation_id, idx) VALUES(2, 1, 1)")?;
+        conn.execute_compat(
+            "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+             VALUES(?1, ?2, ?3, NULL, ?4, ?5, ?6)",
+            params![
+                "auth token failure",
+                "null workspace",
+                "codex",
+                "/tmp/null-workspace.jsonl",
+                42_i64,
+                1_i64
+            ],
+        )?;
+        conn.execute_compat(
+            "INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                "auth token failure",
+                "named workspace",
+                "codex",
+                "/named",
+                "/tmp/named-workspace.jsonl",
+                43_i64,
+                2_i64
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+        };
+
+        let hits = client.search(
+            "auth",
+            SearchFilters {
+                workspaces: HashSet::from_iter([String::new()]),
+                ..SearchFilters::default()
+            },
+            5,
+            0,
+            FieldMask::FULL,
+        )?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].workspace, "");
+        assert_eq!(hits[0].source_path, "/tmp/null-workspace.jsonl");
+
+        Ok(())
+    }
+
+    #[test]
+    fn browse_by_date_treats_null_workspace_and_source_as_local() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL
+             );
+             CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL);
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );
+             CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
+             VALUES(1, 1, NULL, NULL, NULL, 'browse title', '/tmp/browse.jsonl')",
+        )?;
+        conn.execute(
+            "INSERT INTO messages(id, conversation_id, idx, content, created_at)
+             VALUES(1, 1, 0, 'browse auth token failure', 123)",
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            rusqlite_fts: Mutex::new(None),
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+        };
+
+        let hits = client.browse_by_date(
+            SearchFilters {
+                workspaces: HashSet::from_iter([String::new()]),
+                source_filter: SourceFilter::Local,
+                ..SearchFilters::default()
+            },
+            5,
+            0,
+            true,
+            FieldMask::FULL,
+        )?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].workspace, "");
+        assert_eq!(hits[0].source_id, "local");
+        assert_eq!(hits[0].origin_kind, "local");
+
         Ok(())
     }
 
