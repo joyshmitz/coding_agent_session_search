@@ -17,9 +17,10 @@ use crate::connectors::NormalizedConversation;
 use crate::connectors::{
     Connector, ScanRoot, aider::AiderConnector, amp::AmpConnector, chatgpt::ChatGptConnector,
     claude_code::ClaudeCodeConnector, clawdbot::ClawdbotConnector, cline::ClineConnector,
-    codex::CodexConnector, copilot::CopilotConnector, cursor::CursorConnector,
-    factory::FactoryConnector, gemini::GeminiConnector, openclaw::OpenClawConnector,
-    opencode::OpenCodeConnector, pi_agent::PiAgentConnector, vibe::VibeConnector,
+    codex::CodexConnector, copilot::CopilotConnector, copilot_cli::CopilotCliConnector,
+    cursor::CursorConnector, factory::FactoryConnector, gemini::GeminiConnector,
+    kimi::KimiConnector, openclaw::OpenClawConnector, opencode::OpenCodeConnector,
+    pi_agent::PiAgentConnector, qwen::QwenConnector, vibe::VibeConnector,
 };
 use crate::search::tantivy::{TantivyIndex, index_dir, schema_hash_matches};
 use crate::search::vector_index::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_USER};
@@ -1512,6 +1513,9 @@ impl ConnectorKind {
             "factory" => Some(Self::Factory),
             "openclaw" => Some(Self::OpenClaw),
             "copilot" => Some(Self::Copilot),
+            "kimi" => Some(Self::Kimi),
+            "copilot_cli" => Some(Self::CopilotCli),
+            "qwen" => Some(Self::Qwen),
             _ => None,
         }
     }
@@ -1535,6 +1539,9 @@ impl ConnectorKind {
             Self::Factory => Box::new(FactoryConnector::new()),
             Self::OpenClaw => Box::new(OpenClawConnector::new()),
             Self::Copilot => Box::new(CopilotConnector::new()),
+            Self::Kimi => Box::new(KimiConnector::new()),
+            Self::CopilotCli => Box::new(CopilotCliConnector::new()),
+            Self::Qwen => Box::new(QwenConnector::new()),
         }
     }
 }
@@ -1854,6 +1861,12 @@ enum ConnectorKind {
     OpenClaw,
     #[serde(rename = "cp", alias = "Copilot")]
     Copilot,
+    #[serde(rename = "ki", alias = "Kimi")]
+    Kimi,
+    #[serde(rename = "cc", alias = "CopilotCli")]
+    CopilotCli,
+    #[serde(rename = "qw", alias = "Qwen")]
+    Qwen,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]

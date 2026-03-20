@@ -90,6 +90,17 @@ impl PaletteMatchMode {
     }
 }
 
+/// Simple fuzzy match: every character in `pattern` must appear in `text` in order.
+fn fuzzy_match(text: &str, pattern: &str) -> bool {
+    let mut chars = text.chars();
+    for p in pattern.chars() {
+        if !chars.any(|c| c == p) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Categorical grouping for palette actions. Used for section headers,
 /// icons, and migration validation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -437,18 +448,28 @@ impl PaletteState {
         }
     }
 
-    /// Recompute filtered list using simple case-insensitive substring matching.
+    /// Recompute filtered list respecting the current [`PaletteMatchMode`].
     pub fn refilter(&mut self) {
         if self.query.trim().is_empty() {
             self.filtered = self.all_actions.clone();
         } else {
             let q = self.query.to_lowercase();
+            let matches = |text: &str| -> bool {
+                let t = text.to_lowercase();
+                match self.match_mode {
+                    PaletteMatchMode::All | PaletteMatchMode::Substring => t.contains(&q),
+                    PaletteMatchMode::Exact => t == q,
+                    PaletteMatchMode::Prefix => t.starts_with(&q),
+                    PaletteMatchMode::WordStart => {
+                        t.split_whitespace().any(|word| word.starts_with(&q))
+                    }
+                    PaletteMatchMode::Fuzzy => fuzzy_match(&t, &q),
+                }
+            };
             self.filtered = self
                 .all_actions
                 .iter()
-                .filter(|a| {
-                    a.label.to_lowercase().contains(&q) || a.hint.to_lowercase().contains(&q)
-                })
+                .filter(|a| matches(&a.label) || matches(&a.hint))
                 .cloned()
                 .collect();
         }

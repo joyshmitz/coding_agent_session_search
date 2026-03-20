@@ -20485,7 +20485,7 @@ fn export_session_task(
             content,
             timestamp: timestamp_str,
             tool_call: None,
-            index: Some(msg.idx as usize),
+            index: Some(msg.idx.max(0) as usize),
             author: msg.author,
         });
     }

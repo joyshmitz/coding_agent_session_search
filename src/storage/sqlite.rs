@@ -5074,14 +5074,23 @@ impl PricingTable {
         }
 
         let mut cost = 0.0;
-        cost += input_tokens.unwrap_or(0) as f64 * pricing.input_cost_per_mtok / 1_000_000.0;
+        let cache_read = cache_read_tokens.unwrap_or(0);
+        let cache_creation = cache_creation_tokens.unwrap_or(0);
+        // input_tokens includes cache tokens as a subset; subtract them
+        // so we don't charge at both the full input rate AND the cache rate.
+        let non_cache_input = input_tokens
+            .unwrap_or(0)
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_creation)
+            .max(0);
+        cost += non_cache_input as f64 * pricing.input_cost_per_mtok / 1_000_000.0;
         cost += output_tokens.unwrap_or(0) as f64 * pricing.output_cost_per_mtok / 1_000_000.0;
 
         if let Some(cache_price) = pricing.cache_read_cost_per_mtok {
-            cost += cache_read_tokens.unwrap_or(0) as f64 * cache_price / 1_000_000.0;
+            cost += cache_read as f64 * cache_price / 1_000_000.0;
         }
         if let Some(cache_price) = pricing.cache_creation_cost_per_mtok {
-            cost += cache_creation_tokens.unwrap_or(0) as f64 * cache_price / 1_000_000.0;
+            cost += cache_creation as f64 * cache_price / 1_000_000.0;
         }
 
         Some(cost)

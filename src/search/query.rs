@@ -272,6 +272,12 @@ fn frankensearch_two_tier_config() -> FsTwoTierConfig {
     FRANKENSEARCH_TWO_TIER_CONFIG.clone()
 }
 
+#[inline]
+const fn progressive_phase_fetch_limit(limit: usize) -> usize {
+    let limit = if limit == 0 { 1 } else { limit };
+    limit.saturating_mul(3)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HybridCandidateBudget {
     lexical_candidates: usize,
@@ -1286,11 +1292,8 @@ pub fn rrf_fuse_hits(
         &FsRrfConfig::default(),
     );
 
-    // Deduplicate by content hash to ensure diversity
-    // Key: (source_id, source_path, content_hash) -> seen
-    // We include source_path to allow the same content to appear if it's in different files/sessions,
-    // but collapse identical messages within the same file (e.g. repeated logs).
-    let mut seen_content: HashSet<(String, String, u64)> = HashSet::with_capacity(fused.len());
+    // Dedup by (source_id, content_hash) — consistent with deduplicate_hits.
+    let mut seen_content: HashSet<(String, u64)> = HashSet::with_capacity(fused.len());
     let mut unique_hits = Vec::with_capacity(fused.len());
 
     for fused_hit in fused {
@@ -1303,11 +1306,8 @@ pub fn rrf_fuse_hits(
             continue;
         }
 
-        let key = (
-            hit.source_id.clone(),
-            hit.source_path.clone(),
-            hit.content_hash,
-        );
+        // Dedup key: (source_id, content_hash) — consistent with deduplicate_hits.
+        let key = (hit.source_id.clone(), hit.content_hash);
         if !seen_content.contains(&key) {
             seen_content.insert(key);
             hit.score = fused_hit.rrf_score as f32;
@@ -2228,6 +2228,14 @@ impl SearchClient {
             });
         }
 
+        // Invalidate prefix cache if the index has been updated since last search.
+        // This must happen BEFORE the cache check below to avoid serving stale results.
+        if let Some((reader, _)) = &self.reader {
+            let _ = self.maybe_reload_reader(reader);
+            let searcher = self.searcher_for_thread(reader);
+            self.track_generation(searcher.generation().generation_id());
+        }
+
         // Fast path: reuse cached prefix when user is typing forward (offset 0 only).
         // Only use cache for simple queries (no wildcards, no boolean operators) because
         // the cache matching logic enforces strict prefix AND semantics which is incorrect
@@ -2734,9 +2742,9 @@ impl SearchClient {
     fn collapse_progressive_scored_results(
         &self,
         results: &[FsScoredResult],
-        limit: usize,
+        fetch_limit: usize,
     ) -> Vec<VectorSearchResult> {
-        let fetch = limit.max(1);
+        let fetch = fetch_limit.max(1);
         let mut best_by_message: HashMap<u64, VectorSearchResult> = HashMap::new();
         for hit in results {
             let Some(parsed) = parse_semantic_doc_id(&hit.doc_id) else {
@@ -2918,8 +2926,9 @@ impl SearchClient {
         field_mask: FieldMask,
         lexical_cache: Option<&ProgressiveLexicalCache>,
         limit: usize,
+        fetch_limit: usize,
     ) -> Result<SearchResult> {
-        let collapsed = self.collapse_progressive_scored_results(results, limit);
+        let collapsed = self.collapse_progressive_scored_results(results, fetch_limit);
         let mut hydrated = self.hydrate_semantic_hits_with_ids(&collapsed, field_mask)?;
         if let Some(cache) = lexical_cache {
             self.overlay_progressive_lexical_fields(&mut hydrated, cache, field_mask);
@@ -2964,6 +2973,7 @@ impl SearchClient {
         } = request;
         let field_mask = effective_field_mask(field_mask);
         let limit = limit.max(1);
+        let fetch_limit = progressive_phase_fetch_limit(limit);
 
         match mode {
             SearchMode::Lexical => {
@@ -3046,7 +3056,7 @@ impl SearchClient {
         let mut phase_error: Option<anyhow::Error> = None;
 
         let search_result = searcher
-            .search(cx, query, limit, text_fn, |phase| {
+            .search(cx, query, fetch_limit, text_fn, |phase| {
                 if phase_error.is_some() {
                     return;
                 }
@@ -3061,6 +3071,7 @@ impl SearchClient {
                             field_mask,
                             lexical_snapshot.as_ref(),
                             limit,
+                            fetch_limit,
                         )
                         .map(|result| ProgressiveSearchEvent::Phase {
                             kind: ProgressivePhaseKind::Initial,
@@ -3076,6 +3087,7 @@ impl SearchClient {
                             field_mask,
                             lexical_snapshot.as_ref(),
                             limit,
+                            fetch_limit,
                         )
                         .map(|result| ProgressiveSearchEvent::Phase {
                             kind: ProgressivePhaseKind::Refined,
@@ -4908,7 +4920,7 @@ mod tests {
     use crate::connectors::{NormalizedConversation, NormalizedMessage, NormalizedSnippet};
     use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
     use crate::search::tantivy::TantivyIndex;
-    use crate::storage::sqlite::FrankenStorage;
+    use crate::storage::sqlite::{FrankenStorage, SqliteStorage};
     use frankensqlite::compat::BatchExt;
     use serde_json::json;
     use tempfile::TempDir;
@@ -4953,7 +4965,14 @@ mod tests {
     struct SemanticTestFixture {
         _dir: TempDir,
         client: SearchClient,
+        doc_ids: Vec<String>,
         source_paths: Vec<String>,
+    }
+
+    struct ProgressiveHybridFixture {
+        _dir: TempDir,
+        client: Arc<SearchClient>,
+        query: String,
     }
 
     fn build_semantic_test_fixture() -> Result<SemanticTestFixture> {
@@ -4983,6 +5002,7 @@ mod tests {
             ("session-c.jsonl", "late semantic match", [0.8_f32, 0.2_f32]),
         ];
         let base_ts = 1_700_000_000_000_i64;
+        let mut doc_ids = Vec::with_capacity(documents.len());
         let mut source_paths = Vec::with_capacity(documents.len());
 
         for (idx, (name, content, _vector)) in documents.iter().enumerate() {
@@ -5063,6 +5083,7 @@ mod tests {
                 content_hash: None,
             }
             .to_doc_id_string();
+            doc_ids.push(doc_id.clone());
             writer.write_record(&doc_id, &vector)?;
         }
         writer.finish()?;
@@ -5075,7 +5096,200 @@ mod tests {
         Ok(SemanticTestFixture {
             _dir: dir,
             client,
+            doc_ids,
             source_paths,
+        })
+    }
+
+    fn build_progressive_hybrid_fixture() -> Result<ProgressiveHybridFixture> {
+        let dir = TempDir::new()?;
+        let db_path = dir.path().join("cass.db");
+        let mut storage = SqliteStorage::open(&db_path)?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent)?;
+        let workspace_path = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace_path)?;
+        let workspace_id = storage.ensure_workspace(&workspace_path, None)?;
+
+        let query = "oauth refresh token middleware session cache".to_string();
+        let filler = " context window ranking provenance semantic upgrade lexical overlay";
+        let base_ts = 1_700_000_100_000_i64;
+        let doc_count = 64usize;
+
+        for idx in 0..doc_count {
+            let source_path = dir.path().join(format!("progressive-{idx:03}.jsonl"));
+            let repeated = filler.repeat(48);
+            let content = if idx % 4 == 0 {
+                format!(
+                    "{query} hot path candidate {idx} with detailed search diagnostics.{repeated}"
+                )
+            } else if idx % 4 == 1 {
+                format!(
+                    "search pipeline benchmark {idx} with lexical overlay and semantic ranking.{repeated}"
+                )
+            } else if idx % 4 == 2 {
+                format!(
+                    "interactive typing debounce benchmark {idx} for hybrid two tier search.{repeated}"
+                )
+            } else {
+                format!(
+                    "unrelated background chatter {idx} about build systems and formatting checks.{repeated}"
+                )
+            };
+            let created_at = base_ts + idx as i64;
+
+            let conversation = Conversation {
+                id: None,
+                agent_slug: agent.slug.clone(),
+                workspace: Some(workspace_path.clone()),
+                external_id: Some(format!("progressive-{idx}")),
+                title: Some(format!("progressive fixture {idx}")),
+                source_path: source_path.clone(),
+                started_at: Some(created_at),
+                ended_at: Some(created_at),
+                approx_tokens: Some(256),
+                metadata_json: json!({"fixture": "progressive_hybrid"}),
+                messages: vec![Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: Some("user".into()),
+                    created_at: Some(created_at),
+                    content: content.clone(),
+                    extra_json: json!({}),
+                    snippets: Vec::new(),
+                }],
+                source_id: crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
+                origin_host: None,
+            };
+            storage.insert_conversation_tree(agent_id, Some(workspace_id), &conversation)?;
+
+            let normalized = NormalizedConversation {
+                agent_slug: agent.slug.clone(),
+                external_id: Some(format!("progressive-{idx}")),
+                title: Some(format!("progressive fixture {idx}")),
+                workspace: Some(workspace_path.clone()),
+                source_path,
+                started_at: Some(created_at),
+                ended_at: Some(created_at),
+                metadata: json!({}),
+                messages: vec![NormalizedMessage {
+                    idx: 0,
+                    role: "user".into(),
+                    author: Some("user".into()),
+                    created_at: Some(created_at),
+                    content,
+                    extra: json!({}),
+                    snippets: Vec::new(),
+                }],
+            };
+            index.add_conversation(&normalized)?;
+        }
+        index.commit()?;
+
+        let message_rows: Vec<(u64, i64, String)> = {
+            let mut stmt = storage.raw().prepare(
+                "SELECT m.id, COALESCE(m.created_at, c.started_at, 0), m.content
+                 FROM messages m
+                 JOIN conversations c ON m.conversation_id = c.id
+                 ORDER BY c.id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let message_id: i64 = row.get(0)?;
+                let created_at: i64 = row.get(1)?;
+                let content: String = row.get(2)?;
+                Ok((
+                    u64::try_from(message_id).unwrap_or(u64::MAX),
+                    created_at,
+                    content,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        assert_eq!(
+            message_rows.len(),
+            doc_count,
+            "fixture should create the requested number of messages"
+        );
+
+        let fast_embedder = Arc::new(crate::search::hash_embedder::HashEmbedder::new(256));
+        let quality_embedder = crate::search::hash_embedder::HashEmbedder::new(384);
+        let source_hash = crc32fast::hash(crate::sources::provenance::LOCAL_SOURCE_ID.as_bytes());
+        let filter_maps = SemanticFilterMaps::for_tests(
+            HashMap::from([(agent.slug.clone(), u32::try_from(agent_id)?)]),
+            HashMap::from([(
+                workspace_path.to_string_lossy().to_string(),
+                u32::try_from(workspace_id)?,
+            )]),
+            HashMap::from([(
+                crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
+                source_hash,
+            )]),
+            HashSet::new(),
+        );
+        let fast_path = dir.path().join("vector.fast.idx");
+        let quality_path = dir.path().join("vector.quality.idx");
+
+        let mut fast_writer = VectorIndex::create_with_revision(
+            &fast_path,
+            fast_embedder.id(),
+            "rev-progressive-fast",
+            fast_embedder.dimension(),
+            frankensearch::index::Quantization::F16,
+        )?;
+        let mut quality_writer = VectorIndex::create_with_revision(
+            &quality_path,
+            quality_embedder.id(),
+            "rev-progressive-quality",
+            quality_embedder.dimension(),
+            frankensearch::index::Quantization::F16,
+        )?;
+
+        for (message_id, created_at_ms, content) in &message_rows {
+            let canonical = canonicalize_for_embedding(content);
+            let doc_id = SemanticDocId {
+                message_id: *message_id,
+                chunk_idx: 0,
+                agent_id: u32::try_from(agent_id)?,
+                workspace_id: u32::try_from(workspace_id)?,
+                source_id: source_hash,
+                role: ROLE_USER,
+                created_at_ms: *created_at_ms,
+                content_hash: Some(content_hash(&canonical)),
+            }
+            .to_doc_id_string();
+
+            let fast_vec = fast_embedder.embed_sync(content)?;
+            fast_writer.write_record(&doc_id, &fast_vec)?;
+            let quality_vec = quality_embedder.embed_sync(content)?;
+            quality_writer.write_record(&doc_id, &quality_vec)?;
+        }
+        fast_writer.finish()?;
+        quality_writer.finish()?;
+        drop(storage);
+
+        let client = SearchClient::open(dir.path(), Some(&db_path))?.expect("db-backed client");
+        let semantic_embedder: Arc<dyn Embedder> = fast_embedder;
+        client.set_semantic_context(
+            semantic_embedder,
+            VectorIndex::open(&fast_path)?,
+            filter_maps,
+            None,
+            Some(fast_path),
+        )?;
+
+        Ok(ProgressiveHybridFixture {
+            _dir: dir,
+            client: Arc::new(client),
+            query,
         })
     }
 
@@ -5090,6 +5304,83 @@ mod tests {
     type QueryToken = FsCassQueryToken;
     type WildcardPattern = FsCassWildcardPattern;
     type QueryTokenList = Vec<QueryToken>;
+
+    #[test]
+    #[ignore = "profiling harness for live hybrid progressive search"]
+    fn progressive_hybrid_profile_harness() -> Result<()> {
+        let fixture = build_progressive_hybrid_fixture()?;
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| anyhow!("build test runtime failed: {err}"))?;
+        let iterations = 24usize;
+
+        runtime.block_on(async {
+            let cx = FsCx::for_request();
+            fixture
+                .client
+                .search_progressive_with_callback(
+                    ProgressiveSearchRequest {
+                        cx: &cx,
+                        query: &fixture.query,
+                        filters: SearchFilters::default(),
+                        limit: 16,
+                        sparse_threshold: 0,
+                        field_mask: FieldMask::new(false, true, true, true),
+                        mode: SearchMode::Hybrid,
+                    },
+                    |_| {},
+                )
+                .await
+        })?;
+
+        let mut initial_events = 0usize;
+        let mut refined_events = 0usize;
+        let mut total_hits = 0usize;
+        for _ in 0..iterations {
+            runtime.block_on(async {
+                let cx = FsCx::for_request();
+                fixture
+                    .client
+                    .search_progressive_with_callback(
+                        ProgressiveSearchRequest {
+                            cx: &cx,
+                            query: &fixture.query,
+                            filters: SearchFilters::default(),
+                            limit: 16,
+                            sparse_threshold: 0,
+                            field_mask: FieldMask::new(false, true, true, true),
+                            mode: SearchMode::Hybrid,
+                        },
+                        |event| match event {
+                            ProgressiveSearchEvent::Phase { kind, result, .. } => {
+                                assert!(
+                                    !result.hits.is_empty(),
+                                    "progressive harness expects non-empty hits for each phase"
+                                );
+                                total_hits += result.hits.len();
+                                match kind {
+                                    ProgressivePhaseKind::Initial => initial_events += 1,
+                                    ProgressivePhaseKind::Refined => refined_events += 1,
+                                }
+                            }
+                            ProgressiveSearchEvent::RefinementFailed { error, .. } => {
+                                panic!("progressive harness refinement failed: {error}");
+                            }
+                        },
+                    )
+                    .await
+            })?;
+        }
+
+        assert_eq!(initial_events, iterations);
+        assert_eq!(refined_events, iterations);
+        assert!(
+            total_hits >= iterations.saturating_mul(16),
+            "harness should observe a full page for each phase"
+        );
+
+        Ok(())
+    }
 
     // ==========================================================================
     // StringInterner Tests (Opt 2.3)
@@ -9499,6 +9790,75 @@ mod tests {
         assert_eq!(
             hits[0].source_path, fixture.source_paths[2],
             "offset must apply after semantic deduplication and session path filtering"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn progressive_phase_overfetches_before_session_paths_filtering() -> Result<()> {
+        let fixture = build_semantic_test_fixture()?;
+        let mut filters = SearchFilters::default();
+        filters
+            .session_paths
+            .insert(fixture.source_paths[2].clone());
+
+        let results = vec![
+            FsScoredResult {
+                doc_id: fixture.doc_ids[0].clone(),
+                score: 1.0,
+                source: FsScoreSource::SemanticFast,
+                index: None,
+                fast_score: Some(1.0),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                explanation: None,
+                metadata: None,
+            },
+            FsScoredResult {
+                doc_id: fixture.doc_ids[1].clone(),
+                score: 0.9,
+                source: FsScoreSource::SemanticFast,
+                index: None,
+                fast_score: Some(0.9),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                explanation: None,
+                metadata: None,
+            },
+            FsScoredResult {
+                doc_id: fixture.doc_ids[2].clone(),
+                score: 0.8,
+                source: FsScoreSource::SemanticFast,
+                index: None,
+                fast_score: Some(0.8),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                explanation: None,
+                metadata: None,
+            },
+        ];
+
+        let result = fixture.client.progressive_phase_to_result(
+            &results,
+            &filters,
+            FieldMask::FULL,
+            None,
+            1,
+            3,
+        )?;
+
+        assert_eq!(
+            result.hits.len(),
+            1,
+            "progressive phase should retain enough overfetched hits to satisfy post-search session path filtering"
+        );
+        assert_eq!(
+            result.hits[0].source_path, fixture.source_paths[2],
+            "progressive phase should page after session path filtering"
         );
 
         Ok(())

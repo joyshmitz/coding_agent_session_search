@@ -280,6 +280,21 @@ impl SemanticFilterMaps {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        agent_slug_to_id: HashMap<String, u32>,
+        workspace_path_to_id: HashMap<String, u32>,
+        source_id_to_id: HashMap<String, u32>,
+        remote_source_ids: HashSet<u32>,
+    ) -> Self {
+        Self {
+            agent_slug_to_id,
+            workspace_path_to_id,
+            source_id_to_id,
+            remote_source_ids,
+        }
+    }
+
     fn sources_from_filter(&self, filter: &SourceFilter) -> Result<Option<HashSet<u32>>> {
         let result = match filter {
             SourceFilter::All => None,

@@ -109,9 +109,9 @@ impl TwoTierConfig {
         }
 
         if let Ok(val) = dotenvy::var("CASS_TWO_TIER_QUALITY_WEIGHT")
-            && let Ok(weight) = val.parse()
+            && let Ok(weight) = val.parse::<f32>()
         {
-            cfg.quality_weight = weight;
+            cfg.quality_weight = weight.clamp(0.0, 1.0);
         }
 
         if let Ok(val) = dotenvy::var("CASS_TWO_TIER_MAX_REFINEMENT")

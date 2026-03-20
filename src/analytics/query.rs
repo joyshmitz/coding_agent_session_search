@@ -584,6 +584,14 @@ pub fn query_cost_timeseries(
         where_parts.push(format!("day_id <= ?{}", bind_values.len()));
     }
 
+    // Exclude pre-aggregated "all" permutation rows from token_daily_stats
+    // to avoid double/multi-counting. The SUM in the query does aggregation.
+    if table == "token_daily_stats" {
+        where_parts.push("model_family != 'all'".into());
+        where_parts.push("agent_slug != 'all'".into());
+        where_parts.push("source_id != 'all'".into());
+    }
+
     let where_clause = if where_parts.is_empty() {
         String::new()
     } else {
@@ -755,6 +763,14 @@ pub fn query_breakdown(
     if let Some(max) = day_max {
         bind_values.push(ParamValue::from(max));
         where_parts.push(format!("day_id <= ?{}", bind_values.len()));
+    }
+
+    // Exclude pre-aggregated "all" permutation rows from token_daily_stats
+    // to avoid double-counting. The SUM in the query handles aggregation.
+    if use_track_b {
+        where_parts.push("model_family != 'all'".into());
+        where_parts.push("agent_slug != 'all'".into());
+        where_parts.push("source_id != 'all'".into());
     }
 
     let where_clause = if where_parts.is_empty() {

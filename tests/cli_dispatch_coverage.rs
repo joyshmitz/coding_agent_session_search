@@ -950,6 +950,98 @@ fn sessions_json_reports_recent_and_current_workspace_sessions() {
 }
 
 #[test]
+fn sessions_current_prefers_closest_workspace_over_newer_parent_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let db_path = data_dir.join("agent_search.db");
+    let storage = coding_agent_search::storage::sqlite::FrankenStorage::open(&db_path).unwrap();
+
+    let workspace_root = tmp.path().join("repo");
+    let workspace_nested = workspace_root.join("apps/web");
+    let cwd = workspace_nested.join("src/components");
+    fs::create_dir_all(&cwd).unwrap();
+
+    let nested_session_path = tmp.path().join("nested.jsonl");
+    let root_session_path = tmp.path().join("root.jsonl");
+    fs::write(&nested_session_path, "{\"session\":\"nested\"}\n").unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    fs::write(&root_session_path, "{\"session\":\"root\"}\n").unwrap();
+
+    let claude_id = storage
+        .ensure_agent(&sample_agent("claude_code", "Claude Code"))
+        .unwrap();
+    let workspace_root_id = storage
+        .ensure_workspace(&workspace_root, Some("repo"))
+        .unwrap();
+    let workspace_nested_id = storage
+        .ensure_workspace(&workspace_nested, Some("repo-web"))
+        .unwrap();
+
+    storage
+        .insert_conversation_tree(
+            claude_id,
+            Some(workspace_nested_id),
+            &sample_conversation(
+                "claude_code",
+                &workspace_nested,
+                &nested_session_path,
+                "nested-session",
+                "Nested Session",
+                1_700_000_100_000,
+                vec![
+                    sample_message(0, MessageRole::User, 1_700_000_100_000, "nested question"),
+                    sample_message(1, MessageRole::Agent, 1_700_000_100_001, "nested answer"),
+                ],
+            ),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            claude_id,
+            Some(workspace_root_id),
+            &sample_conversation(
+                "claude_code",
+                &workspace_root,
+                &root_session_path,
+                "root-session",
+                "Root Session",
+                1_700_000_200_000,
+                vec![
+                    sample_message(0, MessageRole::User, 1_700_000_200_000, "root question"),
+                    sample_message(1, MessageRole::Agent, 1_700_000_200_001, "root answer"),
+                ],
+            ),
+        )
+        .unwrap();
+
+    let mut cmd = base_cmd(tmp.path());
+    cmd.current_dir(&cwd);
+    cmd.args([
+        "sessions",
+        "--current",
+        "--json",
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+    ]);
+
+    let output = cmd.assert().success().get_output().clone();
+    let json: Value = serde_json::from_slice(&output.stdout).expect("valid current sessions json");
+    let sessions = json["sessions"].as_array().expect("sessions array");
+    assert_eq!(sessions.len(), 1, "--current should default to one session");
+    assert_eq!(
+        sessions[0]["path"].as_str().unwrap(),
+        nested_session_path.to_string_lossy(),
+        "closest matching workspace should win over a newer parent workspace session"
+    );
+    assert_eq!(
+        sessions[0]["workspace"].as_str().unwrap(),
+        workspace_nested.to_string_lossy()
+    );
+}
+
+#[test]
 fn parse_export_with_format() {
     let cli = Cli::try_parse_from([
         "cass",

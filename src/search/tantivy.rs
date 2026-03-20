@@ -116,7 +116,7 @@ impl TantivyIndex {
                 workspace: workspace.clone(),
                 workspace_original: workspace_original.clone(),
                 source_path: source_path.clone(),
-                msg_idx: msg.idx as u64,
+                msg_idx: msg.idx.max(0) as u64,
                 created_at: msg.created_at.or(started_at_fallback),
                 title: title.clone(),
                 content: msg.content.clone(),

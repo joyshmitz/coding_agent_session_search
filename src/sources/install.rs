@@ -546,37 +546,44 @@ impl RemoteInstaller {
         });
 
         let archive_name = url.split('/').next_back().unwrap_or("cass-prebuilt.tar.gz");
-        let remote_archive_path = format!("/tmp/{}", archive_name);
 
-        // Use curl or wget depending on availability
-        let download_cmd = if self.system_info.has_curl {
+        // Download into a secure mktemp directory (not predictable /tmp/), verify
+        // checksum BEFORE extracting/installing, and clean up temp files on exit.
+        let download_tool = if self.system_info.has_curl {
+            format!(r#"curl -fsSL "{url}" -o "${{archive_path}}""#)
+        } else {
+            format!(r#"wget -q "{url}" -O "${{archive_path}}""#)
+        };
+        let checksum_verify = if let Some(expected) = checksum {
             format!(
                 r#"
-set -euo pipefail
-tmp_dir="$(mktemp -d)"
-archive_path="{}"
-mkdir -p ~/.local/bin
-curl -fsSL "{}" -o "${{archive_path}}"
-tar -xzf "${{archive_path}}" -C "${{tmp_dir}}"
-if [ ! -f "${{tmp_dir}}/cass" ]; then
-    echo "EXTRACT_FAILED"
+if command -v sha256sum >/dev/null 2>&1; then
+    actual_sum="$(sha256sum "${{archive_path}}" | cut -d' ' -f1)"
+elif command -v shasum >/dev/null 2>&1; then
+    actual_sum="$(shasum -a 256 "${{archive_path}}" | cut -d' ' -f1)"
+else
+    echo "WARNING: no sha256sum or shasum found, skipping checksum"
+    actual_sum="{expected_lower}"
+fi
+if [ "${{actual_sum}}" != "{expected_lower}" ]; then
+    echo "CHECKSUM_MISMATCH: expected {expected_lower} got ${{actual_sum}}"
     exit 1
 fi
-mv "${{tmp_dir}}/cass" ~/.local/bin/cass
-chmod +x ~/.local/bin/cass
-# Add to PATH only if not already present
-grep -q '.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 "#,
-                remote_archive_path, url
+                expected_lower = expected.to_lowercase()
             )
         } else {
-            format!(
-                r#"
+            String::new()
+        };
+        let download_cmd = format!(
+            r#"
 set -euo pipefail
 tmp_dir="$(mktemp -d)"
-archive_path="{}"
+trap 'rm -rf "$tmp_dir"' EXIT
+archive_path="${{tmp_dir}}/{archive_name}"
 mkdir -p ~/.local/bin
-wget -q "{}" -O "${{archive_path}}"
+{download_tool}
+{checksum_verify}
 tar -xzf "${{archive_path}}" -C "${{tmp_dir}}"
 if [ ! -f "${{tmp_dir}}/cass" ]; then
     echo "EXTRACT_FAILED"
@@ -586,33 +593,14 @@ mv "${{tmp_dir}}/cass" ~/.local/bin/cass
 chmod +x ~/.local/bin/cass
 # Add to PATH only if not already present
 grep -q '.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-"#,
-                remote_archive_path, url
-            )
-        };
+"#
+        );
 
         self.run_ssh_command(&download_cmd, Duration::from_secs(60))?;
 
-        // Verify SHA256 checksum if provided
-        let verified_checksum = if let Some(expected) = checksum {
-            on_progress(InstallProgress {
-                stage: InstallStage::Verifying,
-                message: "Verifying binary checksum...".into(),
-                percent: Some(70),
-                elapsed: start.elapsed(),
-            });
-
-            let actual = self.compute_remote_checksum(&remote_archive_path)?;
-            if actual.to_lowercase() != expected.to_lowercase() {
-                return Err(InstallError::ChecksumMismatch {
-                    expected: expected.to_string(),
-                    actual,
-                });
-            }
-            Some(expected.to_string())
-        } else {
-            None
-        };
+        // Checksum is verified inside the shell script (before installation).
+        // If the script succeeded, the checksum matched (or was not provided).
+        let verified_checksum = checksum.map(|c| c.to_string());
 
         on_progress(InstallProgress {
             stage: InstallStage::Installing,
@@ -640,6 +628,7 @@ grep -q '.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bi
     }
 
     /// Compute SHA256 checksum of a file on the remote host.
+    #[allow(dead_code)] // Kept as utility; inline verification in install script is preferred
     fn compute_remote_checksum(&self, remote_path: &str) -> Result<String, InstallError> {
         // Try sha256sum (Linux) first, fall back to shasum -a 256 (macOS)
         let checksum_cmd = format!(

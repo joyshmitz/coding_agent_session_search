@@ -9620,6 +9620,7 @@ fn run_doctor(
 struct SessionSummaryRecord {
     agent: String,
     workspace: Option<PathBuf>,
+    workspace_match_distance: Option<usize>,
     title: Option<String>,
     source_path: PathBuf,
     started_at: Option<i64>,
@@ -9652,12 +9653,24 @@ fn normalize_session_filter_path(path: &Path) -> CliResult<PathBuf> {
     Ok(std::fs::canonicalize(&absolute).unwrap_or(absolute))
 }
 
-fn workspace_matches_filter(candidate: Option<&Path>, target: &Path) -> bool {
-    let Some(candidate) = candidate else {
-        return false;
-    };
+fn workspace_match_distance(candidate: Option<&Path>, target: &Path) -> Option<usize> {
+    let candidate = candidate?;
     let candidate = std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
-    candidate == target || candidate.starts_with(target) || target.starts_with(&candidate)
+
+    if candidate == target {
+        return Some(0);
+    }
+
+    let candidate_depth = candidate.components().count();
+    let target_depth = target.components().count();
+
+    if candidate.starts_with(target) {
+        Some(candidate_depth.saturating_sub(target_depth))
+    } else if target.starts_with(&candidate) {
+        Some(target_depth.saturating_sub(candidate_depth))
+    } else {
+        None
+    }
 }
 
 fn run_sessions(
@@ -9746,6 +9759,7 @@ fn run_sessions(
                 SessionSummaryRecord {
                     agent,
                     workspace: workspace.map(PathBuf::from),
+                    workspace_match_distance: None,
                     title,
                     source_path: source_path_buf,
                     started_at,
@@ -9759,13 +9773,18 @@ fn run_sessions(
         .collect();
 
     if let Some(target) = target_workspace.as_deref() {
-        sessions.retain(|session| workspace_matches_filter(session.workspace.as_deref(), target));
+        for session in &mut sessions {
+            session.workspace_match_distance =
+                workspace_match_distance(session.workspace.as_deref(), target);
+        }
+        sessions.retain(|session| session.workspace_match_distance.is_some());
     }
 
     sessions.sort_by(|left, right| {
-        right
-            .modified_at
-            .cmp(&left.modified_at)
+        left.workspace_match_distance
+            .unwrap_or(usize::MAX)
+            .cmp(&right.workspace_match_distance.unwrap_or(usize::MAX))
+            .then_with(|| right.modified_at.cmp(&left.modified_at))
             .then_with(|| right.started_at.cmp(&left.started_at))
             .then_with(|| left.source_path.cmp(&right.source_path))
     });
