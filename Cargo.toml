@@ -14,7 +14,7 @@ anyhow = "*"
 thiserror = "*"
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter", "fmt", "ansi"] }
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "9b0e5af", features = ["test-internals"] }
+asupersync = { path = "../asupersync", features = ["test-internals"] }
 clap = { version = "*", features = ["derive", "cargo", "env", "unicode", "wrap_help"] }
 clap_complete = "*"
 clap_mangen = "*"
@@ -152,6 +152,12 @@ opt-level = "z"
 inherits = "release"
 debug = true
 strip = false
+
+[patch."https://github.com/Dicklesworthstone/asupersync"]
+asupersync = { path = "../asupersync" }
+franken-decision = { path = "../asupersync/franken_decision" }
+franken-evidence = { path = "../asupersync/franken_evidence" }
+franken-kernel = { path = "../asupersync/franken_kernel" }
 
 [workspace.metadata.dist]
 targets = ["x86_64-unknown-linux-gnu"]
