@@ -1059,6 +1059,55 @@
             "has_json_output": true
         },
         {
+            "name": "sessions",
+            "description": "List recent sessions, with optional workspace/current-session filtering",
+            "arguments": [
+                {
+                    "name": "workspace",
+                    "description": "Filter to sessions for this workspace/project directory",
+                    "arg_type": "option",
+                    "value_type": "path",
+                    "required": false
+                },
+                {
+                    "name": "current",
+                    "description": "Resolve the current workspace automatically and return the most recent match",
+                    "arg_type": "flag",
+                    "required": false,
+                    "default": "false",
+                    "enum_values": [
+                        "true",
+                        "false"
+                    ]
+                },
+                {
+                    "name": "limit",
+                    "description": "Maximum sessions to return (defaults: 10, or 1 with --current)",
+                    "arg_type": "option",
+                    "value_type": "integer",
+                    "required": false
+                },
+                {
+                    "name": "data-dir",
+                    "description": "Override data dir",
+                    "arg_type": "option",
+                    "value_type": "path",
+                    "required": false
+                },
+                {
+                    "name": "json",
+                    "description": "Output as JSON",
+                    "arg_type": "flag",
+                    "required": false,
+                    "enum_values": [
+                        "true",
+                        "false"
+                    ]
+                }
+            ],
+            "has_json_output": true
+        },
+        {
             "name": "export",
             "description": "Export a conversation to markdown or other formats",
             "arguments": [

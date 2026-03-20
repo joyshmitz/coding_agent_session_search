@@ -207,7 +207,12 @@ impl BakeoffComparison {
 
 /// Compute NDCG@k for a list of relevances in rank order.
 /// Non-finite or <= 0 relevances are treated as non-relevant.
-pub fn ndcg_at_k(relevances: &[f64], k: usize) -> f64 {
+///
+/// `all_ground_truth` should contain ALL ground-truth relevances for the query
+/// (not just those that appeared in the results). The IDCG is computed from
+/// the ideal ranking of these values. Passing only the returned-doc relevances
+/// would inflate NDCG scores for poor retrievers.
+pub fn ndcg_at_k(relevances: &[f64], k: usize, all_ground_truth: &[f64]) -> f64 {
     if k == 0 || relevances.is_empty() {
         return 0.0;
     }
@@ -215,7 +220,7 @@ pub fn ndcg_at_k(relevances: &[f64], k: usize) -> f64 {
     if dcg == 0.0 {
         return 0.0;
     }
-    let mut ideal: Vec<f64> = relevances
+    let mut ideal: Vec<f64> = all_ground_truth
         .iter()
         .map(|rel| if rel.is_finite() { rel.max(0.0) } else { 0.0 })
         .collect();
@@ -572,7 +577,9 @@ impl EvaluationHarness {
                 .map(|id| *relevance_map.get(id.as_str()).unwrap_or(&0.0))
                 .collect();
 
-            let ndcg = ndcg_at_k(&relevances, self.config.ndcg_k);
+            // All ground-truth relevances (for ideal DCG computation)
+            let all_gt: Vec<f64> = relevance_map.values().copied().collect();
+            let ndcg = ndcg_at_k(&relevances, self.config.ndcg_k, &all_gt);
 
             query_results.push(QueryEvalResult {
                 query: query_with_judgments.query.clone(),
@@ -764,21 +771,22 @@ mod tests {
     #[test]
     fn ndcg_perfect_is_one() {
         let relevances = vec![3.0, 2.0, 1.0];
-        let ndcg = ndcg_at_k(&relevances, 3);
+        let ndcg = ndcg_at_k(&relevances, 3, &relevances);
         assert!((ndcg - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn ndcg_zero_when_no_relevance() {
         let relevances = vec![0.0, 0.0, 0.0];
-        let ndcg = ndcg_at_k(&relevances, 3);
+        let ndcg = ndcg_at_k(&relevances, 3, &relevances);
         assert_eq!(ndcg, 0.0);
     }
 
     #[test]
     fn ndcg_handles_partial_relevance() {
-        let relevances = vec![1.0, 0.0, 2.0];
-        let ndcg = ndcg_at_k(&relevances, 3);
+        let all_gt = vec![2.0, 1.0, 0.0];
+        let returned = vec![1.0, 0.0, 2.0]; // out of ideal order
+        let ndcg = ndcg_at_k(&returned, 3, &all_gt);
         assert!(ndcg > 0.0 && ndcg < 1.0);
     }
 

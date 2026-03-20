@@ -4076,11 +4076,13 @@ impl SearchClient {
         };
         let mut sql =
             format!(
-                "SELECT {title_expr}, {content_expr}, a.slug, w.path, c.source_path, m.created_at, m.idx
+                "SELECT {title_expr}, {content_expr}, a.slug, w.path, c.source_path, m.created_at, m.idx, \
+                 c.source_id, c.origin_host, COALESCE(s.kind, 'local')
              FROM messages m
              JOIN conversations c ON m.conversation_id = c.id
              JOIN agents a ON c.agent_id = a.id
              LEFT JOIN workspaces w ON c.workspace_id = w.id
+             LEFT JOIN sources s ON c.source_id = s.id
              WHERE 1=1"
             );
         let mut params: Vec<ParamValue> = Vec::new();
@@ -4110,6 +4112,17 @@ impl SearchClient {
             params.push(ParamValue::from(created_to));
         }
 
+        // Apply source filter
+        match &filters.source_filter {
+            SourceFilter::All => {}
+            SourceFilter::Local => sql.push_str(" AND c.source_id = 'local'"),
+            SourceFilter::Remote => sql.push_str(" AND c.source_id != 'local'"),
+            SourceFilter::SourceId(id) => {
+                sql.push_str(" AND c.source_id = ?");
+                params.push(ParamValue::from(id.as_str()));
+            }
+        }
+
         sql.push_str(&format!(
             " ORDER BY m.created_at IS NULL, m.created_at {order}, m.id {order} LIMIT ? OFFSET ?"
         ));
@@ -4129,6 +4142,13 @@ impl SearchClient {
                 let source_path: String = row.get_typed(4)?;
                 let created_at: Option<i64> = row.get_typed(5)?;
                 let idx: Option<i64> = row.get_typed(6)?;
+                let source_id: String = row
+                    .get_typed::<Option<String>>(7)?
+                    .unwrap_or_else(default_source_id);
+                let origin_host: Option<String> = row.get_typed(8)?;
+                let origin_kind: String = row
+                    .get_typed::<Option<String>>(9)?
+                    .unwrap_or_else(default_origin_kind);
                 let line_number = idx.map(|i| (i + 1) as usize);
                 let snippet = if field_mask.wants_snippet() {
                     snippet_from_content(&raw_content)
@@ -4160,9 +4180,9 @@ impl SearchClient {
                     created_at,
                     line_number,
                     match_type: MatchType::Exact,
-                    source_id: default_source_id(),
-                    origin_kind: default_origin_kind(),
-                    origin_host: None,
+                    source_id,
+                    origin_kind,
+                    origin_host,
                 })
             })?;
         Ok(rows)

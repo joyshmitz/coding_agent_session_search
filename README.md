@@ -56,11 +56,15 @@ cass health --json || cass index --full
 # 2) Search across all agent history
 cass search "authentication error" --robot --limit 5 --fields minimal
 
-# 3) View + expand a hit (use source_path/line_number from search output)
+# 3) Find the current or recent session for this workspace
+cass sessions --current --json
+cass sessions --workspace "$(pwd)" --json --limit 5
+
+# 4) View + expand a hit (use source_path/line_number from search output)
 cass view /path/to/session.jsonl -n 42 --json
 cass expand /path/to/session.jsonl -n 42 -C 3 --json
 
-# 4) Discover the full machine API
+# 5) Discover the full machine API
 cass robot-docs guide
 cass robot-docs schemas
 ```
@@ -745,6 +749,12 @@ The `retryable` field tells agents whether a retry might succeed (e.g., transien
 Beyond search, `cass` provides commands for deep-diving into specific sessions:
 
 ```bash
+# Discover the current session for this workspace
+cass sessions --current --json
+
+# List recent sessions for a specific project
+cass sessions --workspace /path/to/project --json --limit 5
+
 # Export full conversation to shareable format
 cass export /path/to/session.jsonl --format markdown -o conversation.md
 cass export /path/to/session.jsonl --format json --include-tools
@@ -753,6 +763,9 @@ cass export /path/to/session.jsonl --format json --include-tools
 cass export-html /path/to/session.jsonl                     # To Downloads folder
 cass export-html session.jsonl --encrypt --password "pwd"   # With password protection
 cass export-html session.jsonl --open --json                # Open in browser, JSON output
+
+# Common agent flow: find current session, then export it
+cass export-html "$(cass sessions --current --json | jq -r '.sessions[0].path')" --json
 
 # Expand context around a specific line (from search result)
 cass expand /path/to/session.jsonl -n 42 -C 5 --json
@@ -2237,6 +2250,7 @@ cass completions bash > ~/.bash_completion.d/cass
 | `health` | Minimal health check (<50ms), exit 0=healthy, 1=unhealthy |
 | `capabilities` | Discover features, versions, limits (for agent introspection) |
 | `introspect` | Full API schema: commands, arguments, response shapes |
+| `sessions [--workspace DIR] [--current]` | Discover recent session files for follow-up actions |
 | `context <path>` | Find related sessions by workspace, day, or agent |
 | `view <path> -n N` | View source file at specific line (follow-up on search) |
 | `export <path>` | Export conversation to markdown/JSON |

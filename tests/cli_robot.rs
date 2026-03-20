@@ -1180,6 +1180,25 @@ fn introspect_arguments_capture_types_defaults_and_repeatable() {
 }
 
 #[test]
+fn introspect_sessions_command_exposes_workspace_current_and_limit() {
+    let json = fetch_introspect_json();
+
+    let sessions = find_command(&json, "sessions");
+    let workspace = find_arg(sessions, "workspace");
+    assert_eq!(workspace["value_type"], "path");
+    assert_eq!(workspace["arg_type"], "option");
+
+    let current = find_arg(sessions, "current");
+    assert_eq!(current["arg_type"], "flag");
+
+    let limit = find_arg(sessions, "limit");
+    assert_eq!(limit["value_type"], "integer");
+
+    let data_dir = find_arg(sessions, "data-dir");
+    assert_eq!(data_dir["value_type"], "path");
+}
+
+#[test]
 fn diag_json_reports_paths_and_connectors() {
     let mut cmd = base_cmd();
     cmd.args([

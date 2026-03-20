@@ -5426,10 +5426,11 @@ impl CassApp {
                     TimeFilterPreset::Today => TimePreset::Today,
                     TimeFilterPreset::LastWeek => TimePreset::Week,
                 };
-                let now = chrono::Utc::now().timestamp();
+                let now_ms = chrono::Utc::now().timestamp_millis();
                 let from_ts = match from {
-                    TimeFilterPreset::Today => now - (now % 86400),
-                    TimeFilterPreset::LastWeek => now - (7 * 86400),
+                    TimeFilterPreset::Today => parse_time_input("today")
+                        .unwrap_or_else(|| now_ms - now_ms.rem_euclid(86_400_000)),
+                    TimeFilterPreset::LastWeek => now_ms - (7 * 86_400_000),
                 };
                 ftui::Cmd::msg(CassMsg::FilterTimeSet {
                     from: Some(from_ts),
@@ -15371,12 +15372,18 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::TimePresetCycled => {
                 self.push_undo("Cycle time preset");
                 self.time_preset = self.time_preset.next();
-                let now = chrono::Utc::now().timestamp();
+                let now_ms = chrono::Utc::now().timestamp_millis();
                 let (from, to) = match self.time_preset {
                     TimePreset::All => (None, None),
-                    TimePreset::Today => (Some(now - (now % 86400)), None),
-                    TimePreset::Week => (Some(now - 7 * 86400), None),
-                    TimePreset::Month => (Some(now - 30 * 86400), None),
+                    TimePreset::Today => (
+                        Some(
+                            parse_time_input("today")
+                                .unwrap_or_else(|| now_ms - now_ms.rem_euclid(86_400_000)),
+                        ),
+                        None,
+                    ),
+                    TimePreset::Week => (Some(now_ms - 7 * 86_400_000), None),
+                    TimePreset::Month => (Some(now_ms - 30 * 86_400_000), None),
                     TimePreset::Custom => (self.filters.created_from, self.filters.created_to),
                 };
                 self.filters.created_from = from;
@@ -23093,19 +23100,29 @@ mod tests {
             from: TimeFilterPreset::Today,
         });
         assert_eq!(app.time_preset, TimePreset::Today);
-        assert!(matches!(
-            extract_msgs(cmd).as_slice(),
-            [CassMsg::FilterTimeSet { .. }]
-        ));
+        match extract_msgs(cmd).as_slice() {
+            [
+                CassMsg::FilterTimeSet {
+                    from: Some(from),
+                    to: None,
+                },
+            ] => assert!(*from > 1_000_000_000_000),
+            other => panic!("unexpected palette command: {other:?}"),
+        }
 
         let cmd = app.palette_result_to_cmd(PaletteResult::SetTimeFilter {
             from: TimeFilterPreset::LastWeek,
         });
         assert_eq!(app.time_preset, TimePreset::Week);
-        assert!(matches!(
-            extract_msgs(cmd).as_slice(),
-            [CassMsg::FilterTimeSet { .. }]
-        ));
+        match extract_msgs(cmd).as_slice() {
+            [
+                CassMsg::FilterTimeSet {
+                    from: Some(from),
+                    to: None,
+                },
+            ] => assert!(*from > 1_000_000_000_000),
+            other => panic!("unexpected palette command: {other:?}"),
+        }
     }
     #[test]
     fn palette_filter_mode_round_trip() {
@@ -25877,17 +25894,20 @@ mod tests {
         let _ = app.update(CassMsg::TimePresetCycled);
         assert_eq!(app.time_preset, TimePreset::Today);
         assert!(app.filters.created_from.is_some());
+        assert!(app.filters.created_from.unwrap() > 1_000_000_000_000);
         assert!(app.filters.created_to.is_none());
 
         // Cycle: Today -> Week
         let _ = app.update(CassMsg::TimePresetCycled);
         assert_eq!(app.time_preset, TimePreset::Week);
         assert!(app.filters.created_from.is_some());
+        assert!(app.filters.created_from.unwrap() > 1_000_000_000_000);
 
         // Cycle: Week -> Month
         let _ = app.update(CassMsg::TimePresetCycled);
         assert_eq!(app.time_preset, TimePreset::Month);
         assert!(app.filters.created_from.is_some());
+        assert!(app.filters.created_from.unwrap() > 1_000_000_000_000);
 
         // Cycle: Month -> All (clears timestamps)
         let _ = app.update(CassMsg::TimePresetCycled);

@@ -8,11 +8,13 @@
 //! export, export-html, sources subcommands, models subcommands.
 
 use assert_cmd::Command;
+use coding_agent_search::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
 use predicates::prelude::*;
 use predicates::str::contains;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 use tempfile::TempDir;
 
 /// Create a base command with isolated test environment.
@@ -51,6 +53,55 @@ fn simple_cmd() -> Command {
     std::mem::forget(tmp);
 
     cmd
+}
+
+fn sample_agent(slug: &str, name: &str) -> Agent {
+    Agent {
+        id: None,
+        slug: slug.to_string(),
+        name: name.to_string(),
+        version: None,
+        kind: AgentKind::Cli,
+    }
+}
+
+fn sample_message(idx: i64, role: MessageRole, ts: i64, content: &str) -> Message {
+    Message {
+        id: None,
+        idx,
+        role,
+        author: None,
+        created_at: Some(ts),
+        content: content.to_string(),
+        extra_json: json!({}),
+        snippets: Vec::new(),
+    }
+}
+
+fn sample_conversation(
+    agent_slug: &str,
+    workspace: &Path,
+    source_path: &Path,
+    external_id: &str,
+    title: &str,
+    started_at: i64,
+    messages: Vec<Message>,
+) -> Conversation {
+    Conversation {
+        id: None,
+        agent_slug: agent_slug.to_string(),
+        workspace: Some(workspace.to_path_buf()),
+        external_id: Some(external_id.to_string()),
+        title: Some(title.to_string()),
+        source_path: source_path.to_path_buf(),
+        started_at: Some(started_at),
+        ended_at: messages.last().and_then(|msg| msg.created_at),
+        approx_tokens: None,
+        metadata_json: json!({}),
+        messages,
+        source_id: "local".to_string(),
+        origin_host: None,
+    }
 }
 
 // =============================================================================
@@ -726,6 +777,176 @@ fn parse_context_with_limit() {
         }
         other => panic!("expected context command, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_sessions_with_workspace_and_limit() {
+    let cli = Cli::try_parse_from([
+        "cass",
+        "sessions",
+        "--workspace",
+        "/path/to/project",
+        "--limit",
+        "3",
+        "--json",
+    ])
+    .expect("parse sessions with workspace and limit");
+    match cli.command {
+        Some(Commands::Sessions {
+            workspace,
+            current,
+            limit,
+            json,
+            ..
+        }) => {
+            assert_eq!(workspace.unwrap().to_str().unwrap(), "/path/to/project");
+            assert!(!current);
+            assert_eq!(limit, Some(3));
+            assert!(json);
+        }
+        other => panic!("expected sessions command, got {other:?}"),
+    }
+}
+
+#[test]
+fn sessions_json_reports_recent_and_current_workspace_sessions() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let db_path = data_dir.join("agent_search.db");
+    let storage = coding_agent_search::storage::sqlite::FrankenStorage::open(&db_path).unwrap();
+
+    let workspace_a = tmp.path().join("workspace-a");
+    let workspace_a_nested = workspace_a.join("src");
+    let workspace_b = tmp.path().join("workspace-b");
+    fs::create_dir_all(&workspace_a_nested).unwrap();
+    fs::create_dir_all(&workspace_b).unwrap();
+
+    let session_a_old = tmp.path().join("claude-old.jsonl");
+    let session_a_new = tmp.path().join("claude-new.jsonl");
+    let session_b = tmp.path().join("codex.jsonl");
+    fs::write(&session_a_old, "{\"session\":\"old\"}\n").unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    fs::write(&session_a_new, "{\"session\":\"new\"}\n").unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    fs::write(&session_b, "{\"session\":\"other\"}\n").unwrap();
+
+    let claude_id = storage
+        .ensure_agent(&sample_agent("claude_code", "Claude Code"))
+        .unwrap();
+    let codex_id = storage
+        .ensure_agent(&sample_agent("codex", "Codex"))
+        .unwrap();
+    let workspace_a_id = storage
+        .ensure_workspace(&workspace_a, Some("workspace-a"))
+        .unwrap();
+    let workspace_b_id = storage
+        .ensure_workspace(&workspace_b, Some("workspace-b"))
+        .unwrap();
+
+    storage
+        .insert_conversation_tree(
+            claude_id,
+            Some(workspace_a_id),
+            &sample_conversation(
+                "claude_code",
+                &workspace_a,
+                &session_a_old,
+                "claude-old",
+                "Old Claude Session",
+                1_700_000_000_000,
+                vec![
+                    sample_message(0, MessageRole::User, 1_700_000_000_000, "old question"),
+                    sample_message(1, MessageRole::Agent, 1_700_000_000_001, "old answer"),
+                ],
+            ),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            claude_id,
+            Some(workspace_a_id),
+            &sample_conversation(
+                "claude_code",
+                &workspace_a,
+                &session_a_new,
+                "claude-new",
+                "Newest Claude Session",
+                1_700_000_100_000,
+                vec![
+                    sample_message(0, MessageRole::User, 1_700_000_100_000, "new question"),
+                    sample_message(1, MessageRole::Agent, 1_700_000_100_001, "new answer"),
+                ],
+            ),
+        )
+        .unwrap();
+    storage
+        .insert_conversation_tree(
+            codex_id,
+            Some(workspace_b_id),
+            &sample_conversation(
+                "codex",
+                &workspace_b,
+                &session_b,
+                "codex-other",
+                "Other Workspace Session",
+                1_700_000_200_000,
+                vec![
+                    sample_message(0, MessageRole::User, 1_700_000_200_000, "other question"),
+                    sample_message(1, MessageRole::Agent, 1_700_000_200_001, "other answer"),
+                ],
+            ),
+        )
+        .unwrap();
+
+    let mut all_cmd = base_cmd(tmp.path());
+    all_cmd.args([
+        "sessions",
+        "--json",
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+    ]);
+    let all_output = all_cmd.assert().success().get_output().clone();
+    let all_json: Value = serde_json::from_slice(&all_output.stdout).expect("valid sessions json");
+    let all_sessions = all_json["sessions"].as_array().expect("sessions array");
+    assert_eq!(all_sessions.len(), 3, "should list all recent sessions");
+    assert_eq!(
+        all_sessions[0]["path"].as_str().unwrap(),
+        session_b.to_string_lossy(),
+        "most recently modified file should come first"
+    );
+    assert_eq!(all_sessions[0]["message_count"], 2);
+    assert_eq!(all_sessions[0]["human_turns"], 1);
+    assert!(all_sessions[0]["size_bytes"].is_number());
+
+    let mut current_cmd = base_cmd(tmp.path());
+    current_cmd.current_dir(&workspace_a_nested);
+    current_cmd.args([
+        "sessions",
+        "--current",
+        "--json",
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+    ]);
+    let current_output = current_cmd.assert().success().get_output().clone();
+    let current_json: Value =
+        serde_json::from_slice(&current_output.stdout).expect("valid current sessions json");
+    let current_sessions = current_json["sessions"].as_array().expect("sessions array");
+    assert_eq!(
+        current_sessions.len(),
+        1,
+        "--current should return one best match"
+    );
+    assert_eq!(
+        current_sessions[0]["path"].as_str().unwrap(),
+        session_a_new.to_string_lossy(),
+        "current workspace should resolve to newest matching workspace session"
+    );
+    assert_eq!(
+        current_sessions[0]["workspace"].as_str().unwrap(),
+        workspace_a.to_string_lossy()
+    );
 }
 
 #[test]

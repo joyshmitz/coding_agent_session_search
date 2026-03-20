@@ -413,12 +413,9 @@ impl SyncEngine {
                 SyncMethod::Rsync => {
                     self.sync_path_rsync(host, remote_path, &mirror_dir, remote_home.as_deref())
                 }
-                SyncMethod::WslRsync => self.sync_path_wsl_rsync(
-                    host,
-                    remote_path,
-                    &mirror_dir,
-                    remote_home.as_deref(),
-                ),
+                SyncMethod::WslRsync => {
+                    self.sync_path_wsl_rsync(host, remote_path, &mirror_dir, remote_home.as_deref())
+                }
                 SyncMethod::Scp => {
                     self.sync_path_scp(host, remote_path, &mirror_dir, remote_home.as_deref())
                 }
@@ -1050,8 +1047,34 @@ impl SyncEngine {
             "SFTP connection parameters"
         );
 
-        // Connect via TCP
-        let tcp = match TcpStream::connect((hostname, port)) {
+        // Connect via TCP with connection timeout
+        let conn_timeout = std::time::Duration::from_secs(self.connection_timeout);
+        let addr = format!("{}:{}", hostname, port);
+        let sock_addr: std::net::SocketAddr = match addr.parse().or_else(|_| {
+            // Resolve hostname to socket address
+            use std::net::ToSocketAddrs;
+            (hostname, port)
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .ok_or(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "cannot resolve hostname",
+                ))
+        }) {
+            Ok(a) => a,
+            Err(e) => {
+                return PathSyncResult {
+                    remote_path: remote_path.to_string(),
+                    local_path,
+                    success: false,
+                    error: Some(format!("DNS resolution failed for {hostname}:{port}: {e}")),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    ..Default::default()
+                };
+            }
+        };
+        let tcp = match TcpStream::connect_timeout(&sock_addr, conn_timeout) {
             Ok(t) => t,
             Err(e) => {
                 return PathSyncResult {

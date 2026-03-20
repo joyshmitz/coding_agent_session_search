@@ -154,7 +154,7 @@ impl Default for ExportModalState {
 }
 
 fn timestamp_to_utc(ts: i64) -> Option<chrono::DateTime<chrono::Utc>> {
-    if ts.abs() >= 10_000_000_000 {
+    if ts.unsigned_abs() >= 10_000_000_000 {
         chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ts)
     } else {
         chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)

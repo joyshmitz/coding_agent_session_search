@@ -479,6 +479,24 @@ pub enum Commands {
         #[arg(long, default_value_t = 5)]
         limit: usize,
     },
+    /// List recent sessions, with optional workspace/current-session filtering
+    Sessions {
+        /// Filter to sessions for this workspace/project directory
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        workspace: Option<PathBuf>,
+        /// Resolve the current workspace automatically and return the most recent match
+        #[arg(long, default_value_t = false)]
+        current: bool,
+        /// Maximum sessions to return (defaults: 10, or 1 with --current)
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+    },
     /// Export a conversation to markdown or other formats
     Export {
         /// Path to session file
@@ -1578,6 +1596,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         ("q", "search"),
         ("lookup", "search"),
         ("grep", "search"),
+        ("session", "sessions"),
         // Stats aliases
         ("ls", "stats"),
         ("list", "stats"),
@@ -1809,12 +1828,12 @@ fn format_missing_subcommand_error(args: &[String]) -> String {
         ),
         "sources" => (
             &[
-                "list", "add", "remove", "sync", "status", "mappings", "discover", "wizard",
+                "list", "add", "remove", "doctor", "sync", "mappings", "discover", "setup",
             ],
             &[
                 "cass sources list --json",
                 "cass sources add user@host --name myserver",
-                "cass sources status --json",
+                "cass sources doctor --json",
             ],
         ),
         "models" => (
@@ -1943,6 +1962,8 @@ fn detect_command_intent(raw_str: &str) -> String {
         || raw_str.contains("grep")
     {
         "search for sessions or messages".to_string()
+    } else if raw_str.contains("session") || raw_str.contains("current") {
+        "discover or list session files".to_string()
     } else if raw_str.contains("doc") || raw_str.contains("help") || raw_str.contains("robot") {
         "get robot-mode documentation".to_string()
     } else if raw_str.contains("stats") || raw_str.contains("ls") || raw_str.contains("list") {
@@ -1976,6 +1997,12 @@ fn get_contextual_examples(intent: &str) -> Vec<&'static str> {
             "cass search \"database\" --robot --since 2024-01-01",
             "cass search \"TODO\" --robot --workspace /path/to/project",
         ]
+    } else if intent.contains("session") {
+        vec![
+            "cass sessions --current --json",
+            "cass sessions --workspace /path/to/project --json --limit 5",
+            "cass sessions --json --limit 10",
+        ]
     } else if intent.contains("documentation") {
         vec![
             "cass robot-docs commands",
@@ -1986,9 +2013,8 @@ fn get_contextual_examples(intent: &str) -> Vec<&'static str> {
     } else if intent.contains("statistics") || intent.contains("list") {
         vec![
             "cass stats --robot",
-            "cass stats --robot --agent claude",
-            "cass stats --robot --workspace /path",
-            "cass stats --robot --since 2024-01-01",
+            "cass stats --robot --source local",
+            "cass stats --robot --by-source",
         ]
     } else if intent.contains("index") {
         vec![
@@ -1998,16 +2024,15 @@ fn get_contextual_examples(intent: &str) -> Vec<&'static str> {
         ]
     } else if intent.contains("view") {
         vec![
-            "cass view <session-id> --robot",
-            "cass view <session-id> --robot --full",
-            "cass view <session-id> --robot --fields content,timestamp",
+            "cass view <session-path> --robot",
+            "cass view <session-path> -n 42 --json",
         ]
     } else if intent.contains("capabilities") {
         vec!["cass capabilities --json", "cass introspect --json"]
     } else if intent.contains("diagnostics") {
         vec!["cass diag --robot", "cass diag --robot --verbose"]
     } else if intent.contains("status") {
-        vec!["cass status --robot", "cass status --robot --watch"]
+        vec!["cass status --robot"]
     } else if intent.contains("health") {
         vec!["cass health --json"]
     } else {
@@ -3409,6 +3434,22 @@ async fn execute_cli(
                 } => {
                     run_context(&path, &data_dir, cli.db.clone(), json, limit)?;
                 }
+                Commands::Sessions {
+                    workspace,
+                    current,
+                    limit,
+                    data_dir,
+                    json,
+                } => {
+                    run_sessions(
+                        workspace.as_ref(),
+                        current,
+                        limit,
+                        &data_dir,
+                        cli.db.clone(),
+                        json,
+                    )?;
+                }
                 Commands::Export {
                     path,
                     format,
@@ -4179,19 +4220,75 @@ fn state_meta_json(
                     .and_then(|s| s.parse::<i64>().ok());
             }
             Err(e) => {
-                // Capture the open error for structured reporting (e.g. WAL corruption).
-                // Do not panic — the health check must always return valid JSON.
                 let msg = e.to_string();
-                db_open_error = Some(if msg.contains("salt")
+                let is_wal_corruption = msg.contains("salt")
                     || msg.contains("WAL")
                     || msg.contains("wal")
                     || msg.contains("corrupt")
-                    || msg.contains("Corrupt")
-                {
-                    format!("WAL frame salt mismatch - database may need recovery: {msg}")
+                    || msg.contains("Corrupt");
+
+                // Auto-repair: checkpoint the WAL via rusqlite to clear corruption,
+                // then retry the frankensqlite open.
+                if is_wal_corruption {
+                    tracing::warn!(
+                        "WAL corruption detected, attempting auto-repair via checkpoint"
+                    );
+                    let repaired = (|| -> Result<(), Box<dyn std::error::Error>> {
+                        let repair_conn = rusqlite::Connection::open_with_flags(
+                            db_path,
+                            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                        )?;
+                        repair_conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+                        drop(repair_conn);
+                        Ok(())
+                    })();
+                    match repaired {
+                        Ok(()) => {
+                            tracing::info!("WAL checkpoint repair succeeded, retrying open");
+                            match lazy.get("state-meta-retry") {
+                                Ok(conn) => {
+                                    use frankensqlite::compat::{ConnectionExt, RowExt};
+                                    use frankensqlite::params;
+                                    db_opened = true;
+                                    conversation_count = conn
+                                        .query_row_map(
+                                            "SELECT COUNT(*) FROM conversations",
+                                            params![],
+                                            |r| r.get_typed(0),
+                                        )
+                                        .unwrap_or(0);
+                                    message_count = conn
+                                        .query_row_map(
+                                            "SELECT COUNT(*) FROM messages",
+                                            params![],
+                                            |r| r.get_typed(0),
+                                        )
+                                        .unwrap_or(0);
+                                    last_indexed_at = conn
+                                        .query_row_map(
+                                            "SELECT value FROM meta WHERE key = 'last_indexed_at'",
+                                            params![],
+                                            |r| r.get_typed::<String>(0),
+                                        )
+                                        .ok()
+                                        .and_then(|s| s.parse::<i64>().ok());
+                                }
+                                Err(retry_e) => {
+                                    db_open_error = Some(format!(
+                                        "WAL auto-repair succeeded but retry failed: {retry_e}"
+                                    ));
+                                }
+                            }
+                        }
+                        Err(repair_e) => {
+                            db_open_error = Some(format!(
+                                "WAL corruption detected and auto-repair failed: {msg} (repair error: {repair_e})"
+                            ));
+                        }
+                    }
                 } else {
-                    msg
-                });
+                    db_open_error = Some(msg);
+                }
             }
         }
     }
@@ -4466,6 +4563,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Health { .. }) => "health".to_string(),
         Some(Commands::Doctor { .. }) => "doctor".to_string(),
         Some(Commands::Context { .. }) => "context".to_string(),
+        Some(Commands::Sessions { .. }) => "sessions".to_string(),
         Some(Commands::Export { .. }) => "export".to_string(),
         Some(Commands::ExportHtml { .. }) => "export-html".to_string(),
         Some(Commands::Expand { .. }) => "expand".to_string(),
@@ -4504,6 +4602,7 @@ fn is_robot_mode(command: &Commands) -> bool {
         Commands::Capabilities { json, .. } => *json || env_robot_mode,
         Commands::Introspect { json, .. } => *json || env_robot_mode,
         Commands::Context { json, .. } => *json || env_robot_mode,
+        Commands::Sessions { json, .. } => *json || env_robot_mode,
         Commands::Expand { json, .. } => *json || env_robot_mode,
         Commands::ExportHtml { json, .. } => *json || env_robot_mode,
         Commands::Timeline { json, .. } => *json || env_robot_mode,
@@ -4749,6 +4848,7 @@ fn print_robot_help(wrap: WrapConfig) -> CliResult<()> {
         "  cass search \"bug fix\" --today        # Search today's sessions only",
         "  cass search \"api\" --week --agent codex  # Last 7 days, codex only",
         "  cass stats --json                    # Get index statistics",
+        "  cass sessions --current --json       # Find current workspace session",
         "  cass view /path/file.jsonl -n 42    # View file at line 42",
         "  cass robot-docs commands            # Machine-readable command list",
         "  cass --robot-docs=commands          # Also accepted (auto-normalized)",
@@ -4767,7 +4867,7 @@ fn print_robot_help(wrap: WrapConfig) -> CliResult<()> {
         "  stdout=data only; stderr=warnings/errors only (INFO auto-suppressed)",
         "  Use -v/--verbose with --json to enable INFO logs if needed",
         "",
-        "Subcommands: search | stats | view | index | tui | robot-docs <topic>",
+        "Subcommands: search | sessions | stats | view | index | tui | robot-docs <topic>",
         "Topics: commands | env | paths | schemas | guide | exit-codes | examples | contracts | wrap | sources",
         "Exit codes: 0 ok; 2 usage; 3 missing index/db; 9 unknown",
         "More: cass robot-docs examples | cass robot-docs commands",
@@ -4805,6 +4905,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass stats [--json] [--data-dir DIR]".to_string(),
             "  cass status [--json] [--stale-threshold N] [--data-dir DIR]".to_string(),
             "  cass diag [--json] [--verbose] [--data-dir DIR]".to_string(),
+            "  cass sessions [--workspace DIR] [--current] [--limit N] [--json]".to_string(),
             "  cass view <path> [-n LINE] [-C CONTEXT] [--json]".to_string(),
             "  cass index [--full] [--watch] [--json] [--data-dir DIR]".to_string(),
             "  cass tui [--once] [--data-dir DIR] [--reset-state] [--asciicast FILE]"
@@ -4870,6 +4971,10 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "# Filter by agent or workspace".to_string(),
             "  cass search \"error\" --agent codex         # codex sessions only".to_string(),
             "  cass search \"test\" --workspace /myproject # specific project".to_string(),
+            String::new(),
+            "# Discover session files for follow-up actions".to_string(),
+            "  cass sessions --current --json             # best match for current cwd".to_string(),
+            "  cass sessions --workspace /myproject --json --limit 5".to_string(),
             String::new(),
             "# Follow up on search results".to_string(),
             "  cass view /path/to/session.jsonl -n 42   # view line 42 with context".to_string(),
@@ -9511,6 +9616,230 @@ fn run_doctor(
     }
 }
 
+#[derive(Debug)]
+struct SessionSummaryRecord {
+    agent: String,
+    workspace: Option<PathBuf>,
+    title: Option<String>,
+    source_path: PathBuf,
+    started_at: Option<i64>,
+    modified_at: Option<i64>,
+    size_bytes: Option<u64>,
+    message_count: i64,
+    human_turns: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionSummaryEntry {
+    path: String,
+    workspace: Option<String>,
+    agent: String,
+    title: Option<String>,
+    modified: Option<String>,
+    size_bytes: Option<u64>,
+    message_count: i64,
+    human_turns: i64,
+}
+
+fn normalize_session_filter_path(path: &Path) -> CliResult<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| CliError::unknown(format!("current directory: {e}")))?
+            .join(path)
+    };
+    Ok(std::fs::canonicalize(&absolute).unwrap_or(absolute))
+}
+
+fn workspace_matches_filter(candidate: Option<&Path>, target: &Path) -> bool {
+    let Some(candidate) = candidate else {
+        return false;
+    };
+    let candidate = std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    candidate == target || candidate.starts_with(target) || target.starts_with(&candidate)
+}
+
+fn run_sessions(
+    workspace: Option<&PathBuf>,
+    current: bool,
+    limit: Option<usize>,
+    data_dir_override: &Option<PathBuf>,
+    db_override: Option<PathBuf>,
+    json: bool,
+) -> CliResult<()> {
+    use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
+
+    let conn = open_franken_analytics_db(data_dir_override, db_override.as_ref())?;
+    let target_workspace = match (workspace, current) {
+        (Some(path), _) => Some(normalize_session_filter_path(path)?),
+        (None, true) => Some(normalize_session_filter_path(
+            &std::env::current_dir()
+                .map_err(|e| CliError::unknown(format!("current directory: {e}")))?,
+        )?),
+        (None, false) => None,
+    };
+    let effective_limit = match limit {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None if current => Some(1),
+        None => Some(10),
+    };
+
+    let params: &[ParamValue] = &[];
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<i64>,
+        i64,
+        i64,
+    )> = conn
+        .query_map_collect(
+            "SELECT a.slug,
+                    w.path,
+                    c.title,
+                    c.source_path,
+                    c.started_at,
+                    COUNT(m.id) AS message_count,
+                    COALESCE(SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END), 0) AS human_turns
+             FROM conversations c
+             JOIN agents a ON c.agent_id = a.id
+             LEFT JOIN workspaces w ON c.workspace_id = w.id
+             LEFT JOIN messages m ON m.conversation_id = c.id
+             GROUP BY c.id, a.slug, w.path, c.title, c.source_path, c.started_at
+             ORDER BY c.started_at IS NULL, c.started_at DESC, c.id DESC",
+            params,
+            |row: &frankensqlite::Row| {
+                Ok((
+                    row.get_typed(0)?,
+                    row.get_typed(1)?,
+                    row.get_typed(2)?,
+                    row.get_typed(3)?,
+                    row.get_typed(4)?,
+                    row.get_typed(5)?,
+                    row.get_typed(6)?,
+                ))
+            },
+        )
+        .map_err(|e| CliError {
+            code: 9,
+            kind: "db-query",
+            message: format!("Failed to list sessions: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+
+    let mut sessions: Vec<SessionSummaryRecord> = rows
+        .into_iter()
+        .map(
+            |(agent, workspace, title, source_path, started_at, message_count, human_turns)| {
+                let source_path_buf = PathBuf::from(&source_path);
+                let metadata = std::fs::metadata(&source_path_buf).ok();
+                let modified_at = metadata
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .map(|ts| chrono::DateTime::<Utc>::from(ts).timestamp_millis());
+
+                SessionSummaryRecord {
+                    agent,
+                    workspace: workspace.map(PathBuf::from),
+                    title,
+                    source_path: source_path_buf,
+                    started_at,
+                    modified_at,
+                    size_bytes: metadata.as_ref().map(std::fs::Metadata::len),
+                    message_count,
+                    human_turns,
+                }
+            },
+        )
+        .collect();
+
+    if let Some(target) = target_workspace.as_deref() {
+        sessions.retain(|session| workspace_matches_filter(session.workspace.as_deref(), target));
+    }
+
+    sessions.sort_by(|left, right| {
+        right
+            .modified_at
+            .cmp(&left.modified_at)
+            .then_with(|| right.started_at.cmp(&left.started_at))
+            .then_with(|| left.source_path.cmp(&right.source_path))
+    });
+
+    if let Some(limit) = effective_limit {
+        sessions.truncate(limit);
+    }
+
+    let entries: Vec<SessionSummaryEntry> = sessions
+        .into_iter()
+        .map(|session| SessionSummaryEntry {
+            path: session.source_path.to_string_lossy().into_owned(),
+            workspace: session
+                .workspace
+                .map(|path| path.to_string_lossy().into_owned()),
+            agent: session.agent,
+            title: session.title,
+            modified: session.modified_at.and_then(|ts| {
+                chrono::DateTime::<Utc>::from_timestamp_millis(ts).map(|dt| dt.to_rfc3339())
+            }),
+            size_bytes: session.size_bytes,
+            message_count: session.message_count,
+            human_turns: session.human_turns,
+        })
+        .collect();
+
+    let structured_format = if json {
+        Some(RobotFormat::Json)
+    } else {
+        robot_format_from_env()
+    }
+    .map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if let Some(fmt) = structured_format {
+        let payload = serde_json::json!({ "sessions": entries });
+        return output_structured_value(payload, fmt);
+    }
+
+    if let Some(target) = target_workspace {
+        println!("Sessions for {}", target.display());
+    } else {
+        println!("Recent Sessions");
+    }
+    println!("{}", "─".repeat(72));
+
+    if entries.is_empty() {
+        println!("  No sessions found.");
+        return Ok(());
+    }
+
+    for (idx, session) in entries.iter().enumerate() {
+        let modified = session.modified.as_deref().unwrap_or("-");
+        let workspace = session.workspace.as_deref().unwrap_or("-");
+        println!(
+            "{:>2}. [{}] {}  {} msgs / {} human",
+            idx + 1,
+            modified,
+            session.agent,
+            session.message_count,
+            session.human_turns
+        );
+        println!("    workspace: {}", workspace);
+        println!("    path: {}", session.path);
+    }
+
+    Ok(())
+}
+
 /// Find related sessions for a given source path.
 /// Returns sessions that share the same workspace, same day, or same agent.
 fn run_context(
@@ -10748,6 +11077,32 @@ fn build_response_schemas() -> std::collections::HashMap<String, serde_json::Val
                     }
                 }
             }
+        }),
+    );
+    schemas.insert(
+        "sessions".to_string(),
+        json!({
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "workspace": { "type": ["string", "null"] },
+                            "agent": { "type": "string" },
+                            "title": { "type": ["string", "null"] },
+                            "modified": { "type": ["string", "null"] },
+                            "size_bytes": { "type": ["integer", "null"] },
+                            "message_count": { "type": "integer" },
+                            "human_turns": { "type": "integer" }
+                        },
+                        "required": ["path", "agent", "message_count", "human_turns"]
+                    }
+                }
+            },
+            "required": ["sessions"]
         }),
     );
     schemas.insert(

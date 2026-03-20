@@ -39,6 +39,15 @@ cass index --full
 ### Essential Commands
 
 ```bash
+# Find the current session for this workspace
+cass sessions --current --json
+
+# List recent sessions for a specific project
+cass sessions --workspace "$(pwd)" --json --limit 5
+
+# Common agent flow: find current session, then export it
+cass export-html "$(cass sessions --current --json | jq -r '.sessions[0].path')" --json
+
 # Search with JSON output
 cass search "authentication error" --robot --limit 5
 

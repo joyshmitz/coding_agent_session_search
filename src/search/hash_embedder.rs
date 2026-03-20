@@ -88,7 +88,7 @@ impl HashEmbedder {
     fn tokenize(text: &str) -> Vec<String> {
         text.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
-            .filter(|s| s.len() >= MIN_TOKEN_LEN)
+            .filter(|s| s.chars().count() >= MIN_TOKEN_LEN)
             .map(String::from)
             .collect()
     }
