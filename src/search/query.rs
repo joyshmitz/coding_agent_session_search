@@ -5082,7 +5082,6 @@ mod tests {
     use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
     use crate::search::tantivy::TantivyIndex;
     use crate::storage::sqlite::FrankenStorage;
-    use frankensqlite::compat::BatchExt;
     use serde_json::json;
     use tempfile::TempDir;
 

@@ -23,8 +23,7 @@ use base64::prelude::*;
 use chrono::Utc;
 use clap::{Arg, ArgAction, Command, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use indexer::IndexOptions;
-use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Write};
@@ -16849,11 +16848,12 @@ fn run_models_install(
     let pb_clone = pb.clone();
     let manifest_clone = manifest.clone();
 
-    // Run download on a fresh OS thread to avoid nested Tokio runtime drops from reqwest::blocking.
+    // Run download on a fresh OS thread so the model downloader owns its
+    // dedicated asupersync runtime and blocking file writes.
     let result = std::thread::spawn(move || {
         downloader.download(
             &manifest_clone,
-            Some(Box::new(move |progress| {
+            Some(std::sync::Arc::new(move |progress| {
                 pb_clone.set_position(progress.total_bytes);
             })),
         )

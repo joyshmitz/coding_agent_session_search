@@ -350,7 +350,7 @@ impl EvaluationCorpus {
         );
         corpus.add_document(
             "d4",
-            "async runtime setup with tokio for concurrent task processing and io operations",
+            "async runtime setup with asupersync for concurrent task processing and io operations",
         );
         corpus.add_document(
             "d5",
@@ -366,7 +366,7 @@ impl EvaluationCorpus {
         );
         corpus.add_document(
             "d8",
-            "http client requests using reqwest for making api calls to external services",
+            "http client requests using asupersync http primitives for external service calls",
         );
         corpus.add_document(
             "d9",
@@ -407,7 +407,7 @@ impl EvaluationCorpus {
         );
 
         corpus.add_query(
-            "async programming tokio",
+            "async programming asupersync",
             vec![
                 ("d4", 3.0), // Perfect match
                 ("d2", 1.0), // Async DB queries
