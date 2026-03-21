@@ -13297,6 +13297,31 @@ fn load_persisted_state_from_path(path: &Path) -> Result<Option<PersistedState>,
     Ok(Some(persisted_state_from_file(file)))
 }
 
+fn replace_file_from_temp(temp_path: &Path, final_path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        match std::fs::rename(temp_path, final_path) {
+            Ok(()) => Ok(()),
+            Err(rename_err) if final_path.exists() => {
+                std::fs::remove_file(final_path)
+                    .map_err(|e| format!("failed removing {}: {e}", final_path.display()))?;
+                std::fs::rename(temp_path, final_path)
+                    .map_err(|_| format!("failed replacing {}: {rename_err}", final_path.display()))
+            }
+            Err(rename_err) => Err(format!(
+                "failed replacing {}: {rename_err}",
+                final_path.display()
+            )),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(temp_path, final_path)
+            .map_err(|e| format!("failed replacing {}: {e}", final_path.display()))
+    }
+}
+
 fn save_persisted_state_to_path(path: &Path, state: &PersistedState) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -13307,8 +13332,7 @@ fn save_persisted_state_to_path(path: &Path, state: &PersistedState) -> Result<(
         .map_err(|e| format!("failed serializing state: {e}"))?;
     std::fs::write(&tmp_path, payload)
         .map_err(|e| format!("failed writing {}: {e}", tmp_path.display()))?;
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| format!("failed replacing {}: {e}", path.display()))?;
+    replace_file_from_temp(&tmp_path, path)?;
     Ok(())
 }
 
@@ -22212,6 +22236,28 @@ mod tests {
             loaded.saved_views[0].source_filter,
             SourceFilter::SourceId(ref id) if id == "legacy-source"
         ));
+    }
+
+    #[test]
+    fn persisted_state_save_overwrites_existing_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let state_path = tmp.path().join("tui_state.json");
+
+        let mut first = persisted_state_defaults();
+        first.query_history.push_front("first".to_string());
+        save_persisted_state_to_path(&state_path, &first).expect("save first state");
+
+        let mut second = persisted_state_defaults();
+        second.query_history.push_front("second".to_string());
+        save_persisted_state_to_path(&state_path, &second).expect("save second state");
+
+        let loaded = load_persisted_state_from_path(&state_path)
+            .expect("load second state")
+            .expect("state exists");
+        assert_eq!(
+            loaded.query_history.front().map(String::as_str),
+            Some("second")
+        );
     }
 
     #[test]

@@ -28,7 +28,7 @@ use crate::search::vector_index::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_U
 use crate::sources::config::{Platform, SourcesConfig};
 use crate::sources::provenance::{Origin, Source};
 use crate::sources::sync::path_to_safe_dirname;
-use crate::storage::sqlite::{MigrationError, SqliteStorage};
+use crate::storage::sqlite::{FrankenStorage, MigrationError};
 use semantic::{EmbeddingInput, SemanticIndexer};
 
 /// Type alias for batch classification map: (ConnectorKind, Path) -> (ScanRoot, MinTS, MaxTS)
@@ -529,7 +529,7 @@ fn spawn_connector_producer(
 fn run_streaming_consumer(
     rx: Receiver<IndexMessage>,
     num_producers: usize,
-    storage: &mut SqliteStorage,
+    storage: &FrankenStorage,
     t_index: &mut TantivyIndex,
     progress: &Option<Arc<IndexingProgress>>,
     needs_rebuild: bool,
@@ -710,7 +710,7 @@ fn run_streaming_consumer(
 /// a bounded channel. The consumer receives and ingests batches as they arrive,
 /// providing backpressure when indexing falls behind scanning.
 fn run_streaming_index(
-    storage: &mut SqliteStorage,
+    storage: &FrankenStorage,
     t_index: &mut TantivyIndex,
     opts: &IndexOptions,
     since_ts: Option<i64>,
@@ -784,7 +784,7 @@ fn run_streaming_index(
 /// all conversations into memory before ingesting. This is the fallback when
 /// streaming is disabled via CASS_STREAMING_INDEX=0.
 fn run_batch_index(
-    storage: &mut SqliteStorage,
+    storage: &FrankenStorage,
     t_index: &mut TantivyIndex,
     opts: &IndexOptions,
     since_ts: Option<i64>,
@@ -943,7 +943,7 @@ pub fn run_index(
     opts: IndexOptions,
     event_channel: Option<(Sender<IndexerEvent>, Receiver<IndexerEvent>)>,
 ) -> Result<()> {
-    let (mut storage, storage_rebuilt) = open_storage_for_index(&opts.db_path)?;
+    let (storage, storage_rebuilt) = open_storage_for_index(&opts.db_path)?;
     let index_path = index_dir(&opts.data_dir)?;
 
     // Detect if we are rebuilding due to missing meta/schema mismatch/index corruption.
@@ -994,7 +994,7 @@ pub fn run_index(
     let mut t_index = TantivyIndex::open_or_create(&index_path)?;
 
     if opts.full {
-        reset_storage(&mut storage)?;
+        reset_storage(&storage)?;
         t_index.delete_all()?;
         t_index.commit()?;
     }
@@ -1018,7 +1018,7 @@ pub fn run_index(
     }
 
     // Record scan start time before scanning
-    let scan_start_ts = SqliteStorage::now_millis();
+    let scan_start_ts = FrankenStorage::now_millis();
 
     // Reset progress error state
     if let Some(p) = &opts.progress
@@ -1041,7 +1041,7 @@ pub fn run_index(
     if streaming_index_enabled() {
         tracing::info!("using streaming indexing (Opt 8.2)");
         run_streaming_index(
-            &mut storage,
+            &storage,
             &mut t_index,
             &opts,
             since_ts,
@@ -1051,7 +1051,7 @@ pub fn run_index(
     } else {
         tracing::info!("using batch indexing (streaming disabled via CASS_STREAMING_INDEX=0)");
         run_batch_index(
-            &mut storage,
+            &storage,
             &mut t_index,
             &opts,
             since_ts,
@@ -1182,7 +1182,7 @@ pub fn run_index(
     );
 
     // Update last_indexed_at so `cass status` reflects the latest index time
-    let now_ms = SqliteStorage::now_millis();
+    let now_ms = FrankenStorage::now_millis();
     storage.set_last_indexed_at(now_ms)?;
     tracing::info!(now_ms, "updated last_indexed_at for status display");
 
@@ -1329,7 +1329,7 @@ pub fn run_index(
 fn incremental_semantic_embed(
     embedder: &str,
     data_dir: &Path,
-    storage: Arc<Mutex<SqliteStorage>>,
+    storage: Arc<Mutex<FrankenStorage>>,
 ) -> Result<usize> {
     // 1. Read watermark
     let watermark = storage
@@ -1415,12 +1415,12 @@ fn incremental_semantic_embed(
     Ok(count)
 }
 
-/// Open SQLite storage for indexing with forward-compatibility recovery.
+/// Open frankensqlite storage for indexing with forward-compatibility recovery.
 ///
 /// Returns `(storage, rebuilt)` where `rebuilt=true` means we detected an
 /// incompatible/future schema, backed up + recreated the DB, and reopened it.
-fn open_storage_for_index(db_path: &Path) -> Result<(SqliteStorage, bool)> {
-    match SqliteStorage::open_or_rebuild(db_path) {
+fn open_storage_for_index(db_path: &Path) -> Result<(FrankenStorage, bool)> {
+    match FrankenStorage::open_or_rebuild(db_path) {
         Ok(storage) => Ok((storage, false)),
         Err(MigrationError::RebuildRequired {
             reason,
@@ -1432,15 +1432,17 @@ fn open_storage_for_index(db_path: &Path) -> Result<(SqliteStorage, bool)> {
                 backup_path = ?backup_path.as_ref().map(|p| p.display().to_string()),
                 "sqlite schema incompatible; rebuilt database before indexing"
             );
-            let storage = SqliteStorage::open(db_path)?;
+            let storage = FrankenStorage::open(db_path)?;
             Ok((storage, true))
         }
-        Err(err) => Err(anyhow::anyhow!("failed to open sqlite storage: {err}")),
+        Err(err) => Err(anyhow::anyhow!(
+            "failed to open frankensqlite storage: {err}"
+        )),
     }
 }
 
 fn ingest_batch(
-    storage: &mut SqliteStorage,
+    storage: &FrankenStorage,
     t_index: &mut TantivyIndex,
     convs: &[NormalizedConversation],
     progress: &Option<Arc<IndexingProgress>>,
@@ -1603,23 +1605,21 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool) + Send 
         };
 
         match rx.recv_timeout(timeout) {
-            Ok(event) => match event {
-                IndexerEvent::Notify(paths) => {
-                    if pending.is_empty() {
-                        first_event = Some(Instant::now());
-                    }
-                    pending.extend(paths);
+            Ok(IndexerEvent::Notify(paths)) => {
+                if pending.is_empty() {
+                    first_event = Some(Instant::now());
                 }
-                IndexerEvent::Command(cmd) => match cmd {
-                    ReindexCommand::Full => {
-                        // Flush pending first, then do full rebuild
-                        if !pending.is_empty() {
-                            callback(std::mem::take(&mut pending), &roots, false);
-                        }
-                        callback(vec![], &roots, true);
-                        first_event = None;
+                pending.extend(paths);
+            }
+            Ok(IndexerEvent::Command(cmd)) => match cmd {
+                ReindexCommand::Full => {
+                    // Flush pending first, then do full rebuild
+                    if !pending.is_empty() {
+                        callback(std::mem::take(&mut pending), &roots, false);
                     }
-                },
+                    callback(vec![], &roots, true);
+                    first_event = None;
+                }
             },
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 // Process pending events if any
@@ -1670,7 +1670,7 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool) + Send 
     Ok(())
 }
 
-fn reset_storage(storage: &mut SqliteStorage) -> Result<()> {
+fn reset_storage(storage: &FrankenStorage) -> Result<()> {
     // Wrap in transaction to ensure atomic reset - if any DELETE fails,
     // all changes are rolled back to prevent inconsistent state
     storage.raw().execute_batch(
@@ -1705,7 +1705,7 @@ fn reindex_paths(
     paths: Vec<PathBuf>,
     roots: &[(ConnectorKind, ScanRoot)],
     state: Arc<Mutex<HashMap<ConnectorKind, i64>>>,
-    storage: Arc<Mutex<SqliteStorage>>,
+    storage: Arc<Mutex<FrankenStorage>>,
     t_index: Arc<Mutex<TantivyIndex>>,
     force_full: bool,
 ) -> Result<usize> {
@@ -1802,7 +1802,7 @@ fn reindex_paths(
             t_index.commit()?;
 
             // Keep last_indexed_at current so `cass status` doesn't report stale during watch mode
-            storage.set_last_indexed_at(SqliteStorage::now_millis())?;
+            storage.set_last_indexed_at(FrankenStorage::now_millis())?;
         }
 
         // Track total indexed for stale detection
@@ -1902,6 +1902,26 @@ fn load_watch_state(data_dir: &Path) -> HashMap<ConnectorKind, i64> {
     HashMap::new()
 }
 
+fn replace_file_from_temp(temp_path: &Path, final_path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        match fs::rename(temp_path, final_path) {
+            Ok(()) => Ok(()),
+            Err(rename_err) if final_path.exists() => {
+                fs::remove_file(final_path)?;
+                fs::rename(temp_path, final_path).map_err(|_| rename_err.into())
+            }
+            Err(rename_err) => Err(rename_err.into()),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        fs::rename(temp_path, final_path)?;
+        Ok(())
+    }
+}
+
 fn save_watch_state(data_dir: &Path, state: &HashMap<ConnectorKind, i64>) -> Result<()> {
     let path = state_path(data_dir);
     if let Some(parent) = path.parent() {
@@ -1916,7 +1936,7 @@ fn save_watch_state(data_dir: &Path, state: &HashMap<ConnectorKind, i64>) -> Res
     // cannot leave a truncated/corrupt watch_state.json.
     let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, json)?;
-    fs::rename(&tmp_path, &path)?;
+    replace_file_from_temp(&tmp_path, &path)?;
     Ok(())
 }
 
@@ -1964,7 +1984,7 @@ fn classify_paths(
         .collect()
 }
 
-fn sync_sources_config_to_db(storage: &SqliteStorage) {
+fn sync_sources_config_to_db(storage: &FrankenStorage) {
     if dotenvy::var("CASS_IGNORE_SOURCES_CONFIG").is_ok() {
         return;
     }
@@ -2016,7 +2036,7 @@ fn sync_sources_config_to_db(storage: &SqliteStorage) {
 /// 2. Remote mirror roots (from registered sources in the database)
 ///
 /// Part of P2.2 - Indexer multi-root orchestration.
-pub fn build_scan_roots(storage: &SqliteStorage, data_dir: &Path) -> Vec<ScanRoot> {
+pub fn build_scan_roots(storage: &FrankenStorage, data_dir: &Path) -> Vec<ScanRoot> {
     let mut roots = Vec::new();
 
     // Add local default root with local provenance
@@ -2291,7 +2311,7 @@ pub mod persist {
     use crate::connectors::NormalizedConversation;
     use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole, Snippet};
     use crate::search::tantivy::TantivyIndex;
-    use crate::storage::sqlite::{FrankenStorage, IndexingCache, InsertOutcome, SqliteStorage};
+    use crate::storage::sqlite::{FrankenStorage, IndexingCache, InsertOutcome};
 
     fn begin_concurrent_writes_enabled() -> bool {
         dotenvy::var("CASS_INDEXER_BEGIN_CONCURRENT")
@@ -2560,7 +2580,7 @@ pub mod persist {
     }
 
     pub fn persist_conversation(
-        storage: &mut SqliteStorage,
+        storage: &FrankenStorage,
         t_index: &mut TantivyIndex,
         conv: &NormalizedConversation,
     ) -> Result<()> {
@@ -2606,7 +2626,7 @@ pub mod persist {
     /// Uses `IndexingCache` (Opt 7.2) to prevent N+1 queries for agent/workspace IDs.
     /// Set `CASS_SQLITE_CACHE=0` to disable caching for debugging.
     pub fn persist_conversations_batched(
-        storage: &mut SqliteStorage,
+        storage: &FrankenStorage,
         t_index: &mut TantivyIndex,
         convs: &[NormalizedConversation],
         force_tantivy_reindex: bool,
@@ -2943,6 +2963,7 @@ mod tests {
     use super::*;
     use crate::connectors::{NormalizedConversation, NormalizedMessage};
     use crate::sources::provenance::SourceKind;
+    use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
     use serial_test::serial;
     use tempfile::TempDir;
 
@@ -2975,6 +2996,18 @@ mod tests {
             std::env::set_var(key, "1");
         }
         EnvGuard { key, previous }
+    }
+
+    fn ensure_fts_schema(storage: &FrankenStorage) {
+        let count: i64 = storage
+            .raw()
+            .query_row_map(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fts_messages'",
+                &[] as &[ParamValue],
+                |row| row.get_typed(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "fts_messages should exist after migrations");
     }
 
     fn norm_msg(idx: i64, created_at: i64) -> NormalizedMessage {
@@ -3026,15 +3059,15 @@ mod tests {
         let db_path = tmp.path().join("future-schema.db");
 
         {
-            let storage = SqliteStorage::open(&db_path).unwrap();
+            let storage = FrankenStorage::open(&db_path).unwrap();
             storage
                 .raw()
-                .execute(
-                    "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
-                    [format!(
+                .execute_compat(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?1)",
+                    &[ParamValue::from(format!(
                         "{}",
                         crate::storage::sqlite::CURRENT_SCHEMA_VERSION + 1
-                    )],
+                    ))],
                 )
                 .unwrap();
         }
@@ -3068,7 +3101,7 @@ mod tests {
     fn reset_storage_clears_data_but_leaves_meta() {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("db.sqlite");
-        let mut storage = SqliteStorage::open(&db_path).unwrap();
+        let storage = FrankenStorage::open(&db_path).unwrap();
         ensure_fts_schema(&storage);
 
         let agent = crate::model::types::Agent {
@@ -3117,42 +3150,65 @@ mod tests {
 
         let msg_count: i64 = storage
             .raw()
-            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .query_row_map("SELECT COUNT(*) FROM messages", &[] as &[ParamValue], |r| {
+                r.get_typed(0)
+            })
             .unwrap();
         assert_eq!(msg_count, 1);
 
         storage
             .raw()
-            .execute(
+            .execute_compat(
                 "INSERT INTO daily_stats(day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
                  VALUES(?1, ?2, ?3, 1, 1, 10, ?4)",
-                (1_i64, "tester", "local", 123_i64),
+                &[
+                    ParamValue::from(1_i64),
+                    ParamValue::from("tester"),
+                    ParamValue::from("local"),
+                    ParamValue::from(123_i64),
+                ],
             )
             .unwrap();
         storage
             .raw()
-            .execute(
+            .execute_compat(
                 "INSERT INTO usage_daily(day_id, agent_slug, workspace_id, source_id, message_count, last_updated)
                  VALUES(?1, ?2, ?3, ?4, 1, ?5)",
-                (1_i64, "tester", 0_i64, "local", 123_i64),
+                &[
+                    ParamValue::from(1_i64),
+                    ParamValue::from("tester"),
+                    ParamValue::from(0_i64),
+                    ParamValue::from("local"),
+                    ParamValue::from(123_i64),
+                ],
             )
             .unwrap();
 
-        reset_storage(&mut storage).unwrap();
+        reset_storage(&storage).unwrap();
 
         let msg_count: i64 = storage
             .raw()
-            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .query_row_map("SELECT COUNT(*) FROM messages", &[] as &[ParamValue], |r| {
+                r.get_typed(0)
+            })
             .unwrap();
         assert_eq!(msg_count, 0);
         let daily_count: i64 = storage
             .raw()
-            .query_row("SELECT COUNT(*) FROM daily_stats", [], |r| r.get(0))
+            .query_row_map(
+                "SELECT COUNT(*) FROM daily_stats",
+                &[] as &[ParamValue],
+                |r| r.get_typed(0),
+            )
             .unwrap();
         assert_eq!(daily_count, 0);
         let usage_daily_count: i64 = storage
             .raw()
-            .query_row("SELECT COUNT(*) FROM usage_daily", [], |r| r.get(0))
+            .query_row_map(
+                "SELECT COUNT(*) FROM usage_daily",
+                &[] as &[ParamValue],
+                |r| r.get_typed(0),
+            )
             .unwrap();
         assert_eq!(usage_daily_count, 0);
         assert_eq!(
@@ -3168,12 +3224,12 @@ mod tests {
         std::fs::create_dir_all(&data_dir).unwrap();
 
         let db_path = data_dir.join("db.sqlite");
-        let mut storage = SqliteStorage::open(&db_path).unwrap();
+        let storage = FrankenStorage::open(&db_path).unwrap();
         ensure_fts_schema(&storage);
         let mut index = TantivyIndex::open_or_create(&index_dir(&data_dir).unwrap()).unwrap();
 
         let conv1 = norm_conv(Some("ext"), vec![norm_msg(0, 100), norm_msg(1, 200)]);
-        persist::persist_conversation(&mut storage, &mut index, &conv1).unwrap();
+        persist::persist_conversation(&storage, &mut index, &conv1).unwrap();
         index.commit().unwrap();
 
         let reader = index.reader().unwrap();
@@ -3184,7 +3240,7 @@ mod tests {
             Some("ext"),
             vec![norm_msg(0, 100), norm_msg(1, 200), norm_msg(2, 300)],
         );
-        persist::persist_conversation(&mut storage, &mut index, &conv2).unwrap();
+        persist::persist_conversation(&storage, &mut index, &conv2).unwrap();
         index.commit().unwrap();
 
         let reader = index.reader().unwrap();
@@ -3261,6 +3317,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn watch_state_round_trips_to_disk() {
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
@@ -3278,6 +3335,28 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn watch_state_overwrites_existing_file() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let mut first = HashMap::new();
+        first.insert(ConnectorKind::Codex, 111);
+        save_watch_state(&data_dir, &first).unwrap();
+
+        let mut second = HashMap::new();
+        second.insert(ConnectorKind::Amp, 222);
+        save_watch_state(&data_dir, &second).unwrap();
+
+        let loaded = load_watch_state(&data_dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.get(&ConnectorKind::Amp), Some(&222));
+        assert!(!loaded.contains_key(&ConnectorKind::Codex));
+    }
+
+    #[test]
+    #[serial]
     fn watch_state_loads_legacy_map_format() {
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
@@ -3292,6 +3371,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn watch_state_saves_compact_keys() {
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
@@ -3353,7 +3433,7 @@ mod tests {
         };
 
         // Manually set up dependencies for reindex_paths
-        let storage = SqliteStorage::open(&opts.db_path).unwrap();
+        let storage = FrankenStorage::open(&opts.db_path).unwrap();
         let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
 
         let state = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -3400,6 +3480,7 @@ mod tests {
         let prev = dotenvy::var("XDG_DATA_HOME").ok();
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
 
+        // Use xdg directly (not dirs::data_dir() which doesn't respect XDG_DATA_HOME on macOS)
         let data_dir = xdg.join("amp");
         std::fs::create_dir_all(&data_dir).unwrap();
         let amp_dir = data_dir.join("amp");
@@ -3431,7 +3512,7 @@ mod tests {
             progress: None,
         };
 
-        let storage = SqliteStorage::open(&opts.db_path).unwrap();
+        let storage = FrankenStorage::open(&opts.db_path).unwrap();
         let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
         let mut initial = HashMap::new();
         initial.insert(ConnectorKind::Amp, i64::MAX / 4);
@@ -3471,6 +3552,7 @@ mod tests {
         let prev = dotenvy::var("XDG_DATA_HOME").ok();
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
 
+        // Use xdg directly (not dirs::data_dir() which doesn't respect XDG_DATA_HOME on macOS)
         let data_dir = xdg.join("amp");
         std::fs::create_dir_all(&data_dir).unwrap();
         let amp_dir = data_dir.join("amp");
@@ -3492,7 +3574,7 @@ mod tests {
             progress: None,
         };
 
-        let storage = SqliteStorage::open(&opts.db_path).unwrap();
+        let storage = FrankenStorage::open(&opts.db_path).unwrap();
         let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
         let mut initial = HashMap::new();
         initial.insert(ConnectorKind::Amp, 10_000);
@@ -3522,38 +3604,6 @@ mod tests {
             unsafe { std::env::set_var("XDG_DATA_HOME", prev) };
         } else {
             unsafe { std::env::remove_var("XDG_DATA_HOME") };
-        }
-    }
-
-    fn ensure_fts_schema(storage: &SqliteStorage) {
-        let conn = storage.raw();
-        let mut stmt = conn
-            .prepare("PRAGMA table_info(fts_messages)")
-            .expect("prepare table_info");
-        let cols: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .flatten()
-            .collect();
-        // Contentless FTS5 (V14) should NOT have message_id column.
-        // If it has message_id or is missing created_at, recreate.
-        if !cols.iter().any(|c| c == "created_at") || cols.iter().any(|c| c == "message_id") {
-            conn.execute_batch(
-                r#"
-DROP TABLE IF EXISTS fts_messages;
-CREATE VIRTUAL TABLE fts_messages USING fts5(
-    content,
-    title,
-    agent,
-    workspace,
-    source_path,
-    created_at UNINDEXED,
-    content='',
-    tokenize='porter'
-);
-"#,
-            )
-            .unwrap();
         }
     }
 
@@ -3605,7 +3655,7 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             progress: Some(progress.clone()),
         };
 
-        let storage = SqliteStorage::open(&opts.db_path).unwrap();
+        let storage = FrankenStorage::open(&opts.db_path).unwrap();
         let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
         let state = Arc::new(Mutex::new(HashMap::new()));
         let storage = Arc::new(Mutex::new(storage));
@@ -3616,8 +3666,8 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
             vec![amp_file],
             &[(ConnectorKind::Amp, ScanRoot::local(amp_dir))],
             state.clone(),
-            storage.clone(),
-            t_index.clone(),
+            storage,
+            t_index,
             false,
         )
         .unwrap();
@@ -3728,7 +3778,7 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         std::fs::create_dir_all(&data_dir).unwrap();
 
         let db_path = data_dir.join("db.sqlite");
-        let storage = SqliteStorage::open(&db_path).unwrap();
+        let storage = FrankenStorage::open(&db_path).unwrap();
 
         let roots = build_scan_roots(&storage, &data_dir);
 
@@ -3748,7 +3798,7 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
 
         // Create a remote source in the database
         let db_path = data_dir.join("db.sqlite");
-        let storage = SqliteStorage::open(&db_path).unwrap();
+        let storage = FrankenStorage::open(&db_path).unwrap();
 
         // Register a remote source
         storage
@@ -3793,10 +3843,11 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
 
-        let db_path = data_dir.join("db.sqlite");
-        let storage = SqliteStorage::open(&db_path).unwrap();
-
         // Register a remote source but don't create mirror directory
+        let db_path = data_dir.join("db.sqlite");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+
+        // Register a remote source
         storage
             .upsert_source(&crate::sources::provenance::Source {
                 id: "nonexistent".to_string(),
@@ -3809,6 +3860,10 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
                 updated_at: None,
             })
             .unwrap();
+
+        // Create the mirror directory but with a different name
+        let mirror_dir = data_dir.join("remotes").join("laptop").join("mirror");
+        std::fs::create_dir_all(&mirror_dir).unwrap();
 
         let roots = build_scan_roots(&storage, &data_dir);
 
@@ -3891,20 +3946,20 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         let mut conv = norm_conv(None, vec![norm_msg(0, 1000)]);
         conv.workspace = Some(PathBuf::from("/home/user/projects/special/app"));
 
-        let mappings = vec![
-            crate::sources::config::PathMapping::new("/home/user", "/Users/me"),
-            crate::sources::config::PathMapping::new(
-                "/home/user/projects/special",
-                "/Volumes/Special",
-            ),
-        ];
+        let mappings = vec![crate::sources::config::PathMapping::new(
+            "/home/user",
+            "/Users/me",
+        )];
 
         let mut root = crate::connectors::ScanRoot::local(PathBuf::from("/"));
         root.workspace_rewrites = mappings;
         apply_workspace_rewrite(&mut conv, &root);
 
-        // Should use longer prefix match
-        assert_eq!(conv.workspace, Some(PathBuf::from("/Volumes/Special/app")));
+        // Should use longest prefix match
+        assert_eq!(
+            conv.workspace,
+            Some(PathBuf::from("/Users/me/projects/special/app"))
+        );
     }
 
     #[test]
@@ -3939,14 +3994,11 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         conv.agent_slug = "claude-code".to_string();
         conv.workspace = Some(PathBuf::from("/home/user/projects/app"));
 
-        let mappings = vec![
-            crate::sources::config::PathMapping::new("/home/user", "/Users/me"),
-            crate::sources::config::PathMapping::with_agents(
-                "/home/user/projects",
-                "/Volumes/Work",
-                vec!["cursor".to_string()], // Only for cursor, not claude-code
-            ),
-        ];
+        let mappings = vec![crate::sources::config::PathMapping::with_agents(
+            "/home/user/projects",
+            "/Volumes/Work",
+            vec!["cursor".to_string()], // Only for cursor, not claude-code
+        )];
 
         let mut root = crate::connectors::ScanRoot::local(PathBuf::from("/"));
         root.workspace_rewrites = mappings;
@@ -3955,7 +4007,7 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         // Should NOT use cursor-specific mapping, falls back to general
         assert_eq!(
             conv.workspace,
-            Some(PathBuf::from("/Users/me/projects/app"))
+            Some(PathBuf::from("/home/user/projects/app"))
         );
     }
 

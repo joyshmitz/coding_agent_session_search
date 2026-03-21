@@ -16,7 +16,7 @@ use frankensqlite::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use std::fs;
 
-/// Frankensqlite parameter list builder (avoids name conflict with rusqlite `params!`).
+/// Frankensqlite parameter list builder (avoids name conflict with rusqlite `fparams!`).
 macro_rules! fparams {
     () => {
         &[] as &[ParamValue]
@@ -730,13 +730,13 @@ pub fn create_backup(db_path: &Path) -> Result<Option<std::path::PathBuf>, Migra
 
     // Try to use SQLite's VACUUM INTO command first, which safely handles WAL files
     // and produces a clean, minimized backup.
-    let vacuum_success = Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    let vacuum_success = open_franken_with_flags(
+        &db_path.to_string_lossy(),
+        FrankenOpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .and_then(|conn| {
         let path_str = backup_path.to_string_lossy();
-        conn.execute("VACUUM INTO ?", params![path_str])
+        conn.execute_compat("VACUUM INTO ?", fparams![path_str.as_ref()])
     })
     .is_ok();
 
@@ -847,19 +847,17 @@ fn check_schema_compatibility(path: &Path) -> std::result::Result<SchemaCheck, r
     )?;
 
     // Check if meta table exists
-    let meta_exists: i32 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='meta'",
-        [],
-        |row| row.get(0),
+    let meta_exists: i32 = conn.query_row_map(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='meta'", &[],
+        |row| row.get_typed(0),
     )?;
 
     if meta_exists == 0 {
         // No meta table - could be empty or very old schema, needs rebuild
         // But first check if there are any tables at all
-        let table_count: i32 = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
-            [],
-            |row| row.get(0),
+        let table_count: i32 = conn.query_row_map(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'", &[],
+            |row| row.get_typed(0),
         )?;
 
         if table_count == 0 {
@@ -875,10 +873,9 @@ fn check_schema_compatibility(path: &Path) -> std::result::Result<SchemaCheck, r
 
     // Get the schema version
     let version: Option<i64> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'schema_version'",
-            [],
-            |row| row.get::<_, String>(0).map(|s| s.parse().ok()),
+        .query_row_map(
+            "SELECT value FROM meta WHERE key = 'schema_version'", &[],
+            |row| row.get_typed::<String>(0).map(|s| s.parse().ok()),
         )
         .ok()
         .flatten();
@@ -1498,9 +1495,8 @@ pub struct EmbeddingJobRow {
     pub completed_at: Option<String>,
 }
 
-pub struct SqliteStorage {
-    conn: Connection,
-}
+/// SqliteStorage is now a type alias for FrankenStorage (rusqlite extirpated).
+pub type SqliteStorage = FrankenStorage;
 
 /// Migration foundation for the future frankensqlite-backed storage backend.
 ///
@@ -2785,6 +2781,61 @@ impl FrankenStorage {
                 },
             )
             .with_context(|| "fetching messages for embedding")
+    }
+
+    /// Fetch messages for embedding generation that were inserted after `since_id`.
+    ///
+    /// Used by incremental semantic indexing in watch mode.
+    pub fn fetch_messages_for_embedding_since(
+        &self,
+        since_id: i64,
+    ) -> Result<Vec<MessageForEmbedding>> {
+        self.conn
+            .query_map_collect(
+                "SELECT m.id, m.created_at, c.agent_id, c.workspace_id, c.source_id, m.role, m.content
+                 FROM messages m
+                 JOIN conversations c ON m.conversation_id = c.id
+                 WHERE m.id > ?1
+                 ORDER BY m.id",
+                fparams![since_id],
+                |row| {
+                    let source_id: String = row.get_typed::<Option<String>>(4)?
+                        .unwrap_or_else(|| "local".to_string());
+                    Ok(MessageForEmbedding {
+                        message_id: row.get_typed(0)?,
+                        created_at: row.get_typed(1)?,
+                        agent_id: row.get_typed(2)?,
+                        workspace_id: row.get_typed(3)?,
+                        source_id_hash: crc32fast::hash(source_id.as_bytes()),
+                        role: row.get_typed(5)?,
+                        content: row.get_typed(6)?,
+                    })
+                },
+            )
+            .with_context(|| format!("fetching messages for embedding after id {since_id}"))
+    }
+
+    /// Get the watermark for incremental semantic embedding.
+    pub fn get_last_embedded_message_id(&self) -> Result<Option<i64>> {
+        let result: Result<String, _> = self.conn.query_row_map(
+            "SELECT value FROM meta WHERE key = 'last_embedded_message_id'",
+            fparams![],
+            |row| row.get_typed(0),
+        );
+        match result.optional() {
+            Ok(Some(s)) => Ok(s.parse().ok()),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Set the watermark for incremental semantic embedding.
+    pub fn set_last_embedded_message_id(&self, id: i64) -> Result<()> {
+        self.conn.execute_compat(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('last_embedded_message_id', ?1)",
+            fparams![id.to_string()],
+        )?;
+        Ok(())
     }
 
     /// Get embedding jobs for a database path.
@@ -4106,10 +4157,10 @@ impl FrankenStorage {
 
         let mut tx = self.conn.transaction()?;
 
-        tx.execute("DELETE FROM message_metrics", [])?;
-        tx.execute("DELETE FROM usage_hourly", [])?;
-        tx.execute("DELETE FROM usage_daily", [])?;
-        tx.execute("DELETE FROM usage_models_daily", [])?;
+        tx.execute("DELETE FROM message_metrics")?;
+        tx.execute("DELETE FROM usage_hourly")?;
+        tx.execute("DELETE FROM usage_daily")?;
+        tx.execute("DELETE FROM usage_models_daily")?;
 
         const CHUNK_SIZE: i64 = 10_000;
         let mut offset: i64 = 0;
@@ -4316,7 +4367,7 @@ impl FrankenStorage {
             .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
 
-        tx.execute("DELETE FROM daily_stats", [])?;
+        tx.execute("DELETE FROM daily_stats")?;
 
         tx.execute_compat(
             r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
@@ -4430,168 +4481,8 @@ impl FrankenStorage {
     }
 }
 
-impl SqliteStorage {
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating db directory {}", parent.display()))?;
-        }
-
-        let mut conn = Connection::open(path)
-            .with_context(|| format!("opening sqlite db at {}", path.display()))?;
-
-        apply_pragmas(&mut conn)?;
-        init_meta(&mut conn)?;
-        migrate(&mut conn)?;
-
-        Ok(Self { conn })
-    }
-
-    pub fn open_readonly(path: &Path) -> Result<Self> {
-        let conn = Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .with_context(|| format!("opening sqlite db readonly at {}", path.display()))?;
-
-        apply_common_pragmas(&conn)?;
-
-        Ok(Self { conn })
-    }
-
-    /// Open database with migration, backing up and signaling rebuild if schema is incompatible.
-    ///
-    /// This is the recommended entry point for the indexer. It handles:
-    /// - Schema version checking
-    /// - Automatic backup before destructive operations
-    /// - Cleanup of old backups
-    /// - Clear signaling when a full rebuild is required
-    ///
-    /// # Returns
-    /// - `Ok(storage)` if migration succeeded or no migration was needed
-    /// - `Err(MigrationError::RebuildRequired { .. })` if the caller should rebuild from scratch
-    ///
-    /// When `RebuildRequired` is returned, the caller should:
-    /// 1. Delete the database file (it's already backed up)
-    /// 2. Create a fresh database
-    /// 3. Re-index all conversations from source files
-    pub fn open_or_rebuild(path: &Path) -> std::result::Result<Self, MigrationError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        // Check if we need to handle an incompatible schema before opening
-        if path.exists() {
-            let check_result = check_schema_compatibility(path);
-            match check_result {
-                Ok(SchemaCheck::Compatible) => {
-                    // Continue with normal open
-                }
-                Ok(SchemaCheck::NeedsMigration) => {
-                    // Continue with normal open, migration will handle it
-                }
-                Ok(SchemaCheck::NeedsRebuild(reason)) => {
-                    // Schema from future or otherwise incompatible - trigger rebuild
-                    let backup_path = create_backup(path)?;
-                    cleanup_old_backups(path, MAX_BACKUPS)?;
-                    remove_database_files(path)?;
-                    return Err(MigrationError::RebuildRequired {
-                        reason,
-                        backup_path,
-                    });
-                }
-                Err(_) => {
-                    // If we can't even check, it's likely corrupt - trigger rebuild
-                    let backup_path = create_backup(path)?;
-                    cleanup_old_backups(path, MAX_BACKUPS)?;
-                    remove_database_files(path)?;
-                    return Err(MigrationError::RebuildRequired {
-                        reason: "Database appears corrupted".to_string(),
-                        backup_path,
-                    });
-                }
-            }
-        }
-
-        // Now open and migrate normally
-        let mut conn = Connection::open(path)?;
-        apply_pragmas(&mut conn).map_err(|e| MigrationError::Other(e.to_string()))?;
-        init_meta(&mut conn).map_err(|e| MigrationError::Other(e.to_string()))?;
-        migrate(&mut conn).map_err(|e| MigrationError::Other(e.to_string()))?;
-
-        Ok(Self { conn })
-    }
-
-    pub fn raw(&self) -> &Connection {
-        &self.conn
-    }
-
-    /// Resolve the primary SQLite database path for this connection.
-    ///
-    /// Uses `PRAGMA database_list` and returns the filename for `main`.
-    pub fn database_path(&self) -> Result<PathBuf> {
-        let path: String = self
-            .conn
-            .query_row("PRAGMA database_list", [], |row| row.get(2))
-            .with_context(|| "reading sqlite database path from PRAGMA database_list")?;
-        if path.is_empty() {
-            anyhow::bail!("sqlite main database path is empty (likely in-memory)");
-        }
-        Ok(PathBuf::from(path))
-    }
-
-    pub fn schema_version(&self) -> Result<i64> {
-        self.conn
-            .query_row(
-                "SELECT value FROM meta WHERE key='schema_version'",
-                [],
-                |row| row.get::<_, String>(0).map(|s| s.parse().unwrap_or(0)),
-            )
-            .optional()?
-            .ok_or_else(|| anyhow!("schema_version missing"))
-    }
-
-    pub fn ensure_agent(&self, agent: &Agent) -> Result<i64> {
-        let now = Self::now_millis();
-        self.conn.execute(
-            "INSERT INTO agents(slug, name, version, kind, created_at, updated_at) VALUES(?,?,?,?,?,?)
-             ON CONFLICT(slug) DO UPDATE SET name=excluded.name, version=excluded.version, kind=excluded.kind, updated_at=excluded.updated_at",
-            params![
-                &agent.slug,
-                &agent.name,
-                &agent.version,
-                agent_kind_str(agent.kind.clone()),
-                now,
-                now
-            ],
-        )?;
-
-        self.conn
-            .query_row(
-                "SELECT id FROM agents WHERE slug = ?",
-                params![&agent.slug],
-                |row| row.get(0),
-            )
-            .with_context(|| format!("fetching agent id for {}", agent.slug))
-    }
-
-    pub fn ensure_workspace(&self, path: &Path, display_name: Option<&str>) -> Result<i64> {
-        let path_str = path.to_string_lossy();
-        self.conn.execute(
-            "INSERT INTO workspaces(path, display_name) VALUES(?,?)
-             ON CONFLICT(path) DO UPDATE SET display_name=COALESCE(excluded.display_name, workspaces.display_name)",
-            params![path_str, display_name],
-        )?;
-
-        self.conn
-            .query_row(
-                "SELECT id FROM workspaces WHERE path = ?",
-                params![path_str],
-                |row| row.get(0),
-            )
-            .with_context(|| format!("fetching workspace id for {path_str}"))
-    }
-}
+// SqliteStorage impl block removed: SqliteStorage is now a type alias for FrankenStorage.
+// All methods are available through FrankenStorage.
 
 // -------------------------------------------------------------------------
 // IndexingCache (Opt 7.2) - N+1 Prevention for Agent/Workspace IDs
@@ -4626,6 +4517,31 @@ pub struct IndexingCache {
     misses: u64,
 }
 
+pub trait IndexingCacheStorage {
+    fn ensure_indexing_agent(&self, agent: &Agent) -> Result<i64>;
+    fn ensure_indexing_workspace(&self, path: &Path, display_name: Option<&str>) -> Result<i64>;
+}
+
+impl IndexingCacheStorage for FrankenStorage {
+    fn ensure_indexing_agent(&self, agent: &Agent) -> Result<i64> {
+        self.ensure_agent(agent)
+    }
+
+    fn ensure_indexing_workspace(&self, path: &Path, display_name: Option<&str>) -> Result<i64> {
+        self.ensure_workspace(path, display_name)
+    }
+}
+
+impl IndexingCacheStorage for SqliteStorage {
+    fn ensure_indexing_agent(&self, agent: &Agent) -> Result<i64> {
+        self.ensure_agent(agent)
+    }
+
+    fn ensure_indexing_workspace(&self, path: &Path, display_name: Option<&str>) -> Result<i64> {
+        self.ensure_workspace(path, display_name)
+    }
+}
+
 impl IndexingCache {
     /// Create a new empty cache.
     pub fn new() -> Self {
@@ -4649,14 +4565,17 @@ impl IndexingCache {
     ///
     /// Returns the cached ID if present, otherwise calls ensure_agent
     /// and caches the result.
-    pub fn get_or_insert_agent(&mut self, storage: &SqliteStorage, agent: &Agent) -> Result<i64> {
+    pub fn get_or_insert_agent<S>(&mut self, storage: &S, agent: &Agent) -> Result<i64>
+    where
+        S: IndexingCacheStorage + ?Sized,
+    {
         if let Some(&cached) = self.agent_ids.get(&agent.slug) {
             self.hits += 1;
             return Ok(cached);
         }
 
         self.misses += 1;
-        let id = storage.ensure_agent(agent)?;
+        let id = storage.ensure_indexing_agent(agent)?;
         self.agent_ids.insert(agent.slug.clone(), id);
         Ok(id)
     }
@@ -4667,7 +4586,7 @@ impl IndexingCache {
     /// and caches the result.
     pub fn get_or_insert_workspace(
         &mut self,
-        storage: &SqliteStorage,
+        storage: &impl IndexingCacheStorage,
         path: &Path,
         display_name: Option<&str>,
     ) -> Result<i64> {
@@ -4677,7 +4596,7 @@ impl IndexingCache {
         }
 
         self.misses += 1;
-        let id = storage.ensure_workspace(path, display_name)?;
+        let id = storage.ensure_indexing_workspace(path, display_name)?;
         self.workspace_ids.insert(path.to_path_buf(), id);
         Ok(id)
     }
@@ -5404,7 +5323,7 @@ impl PricingTable {
         )?;
         let entries = stmt
             .query_map([], |row| {
-                let effective_date: String = row.get(6)?;
+                let effective_date: String = row.get_typed(6)?;
                 let effective_day_id = date_str_to_day_id(&effective_date).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
                         6,
@@ -5416,12 +5335,12 @@ impl PricingTable {
                     )
                 })?;
                 Ok(PricingEntry {
-                    model_pattern: row.get(0)?,
-                    provider: row.get(1)?,
-                    input_cost_per_mtok: row.get(2)?,
-                    output_cost_per_mtok: row.get(3)?,
-                    cache_read_cost_per_mtok: row.get(4)?,
-                    cache_creation_cost_per_mtok: row.get(5)?,
+                    model_pattern: row.get_typed(0)?,
+                    provider: row.get_typed(1)?,
+                    input_cost_per_mtok: row.get_typed(2)?,
+                    output_cost_per_mtok: row.get_typed(3)?,
+                    cache_read_cost_per_mtok: row.get_typed(4)?,
+                    cache_creation_cost_per_mtok: row.get_typed(5)?,
                     effective_day_id,
                 })
             })?
@@ -5607,1755 +5526,11 @@ fn sql_like_match_bytes(val: &[u8], pat: &[u8]) -> bool {
     }
 }
 
-impl SqliteStorage {
-    pub fn insert_conversation_tree(
-        &mut self,
-        agent_id: i64,
-        workspace_id: Option<i64>,
-        conv: &Conversation,
-    ) -> Result<InsertOutcome> {
-        // Check for existing conversation with same (source_id, agent_id, external_id)
-        if let Some(ext) = &conv.external_id
-            && let Some(existing) = self
-                .conn
-                .query_row(
-                    "SELECT id FROM conversations WHERE source_id = ? AND agent_id = ? AND external_id = ?",
-                    params![&conv.source_id, agent_id, ext],
-                    |row| row.get(0),
-                )
-                .optional()?
-        {
-            return self.append_messages(existing, conv);
-        }
 
-        let tx = self.conn.transaction()?;
+// Second SqliteStorage impl block removed: SqliteStorage is now a type alias for FrankenStorage.
+// All methods (insert_conversation_tree, list_agents, list_conversations, etc.) are
+// available through FrankenStorage.
 
-        let conv_id = insert_conversation(&tx, agent_id, workspace_id, conv)?;
-        let mut fts_entries = Vec::with_capacity(conv.messages.len());
-        let mut total_chars: i64 = 0;
-        for msg in &conv.messages {
-            let msg_id = insert_message(&tx, conv_id, msg)?;
-            insert_snippets(&tx, msg_id, &msg.snippets)?;
-            fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
-            total_chars += msg.content.len() as i64;
-        }
-        // Batch insert FTS entries
-        batch_insert_fts_messages(&tx, &fts_entries)?;
-
-        // Update daily stats (+1 session, +N messages)
-        update_daily_stats_in_tx(
-            &tx,
-            &conv.agent_slug,
-            &conv.source_id,
-            conv.started_at,
-            1, // New session
-            conv.messages.len() as i64,
-            total_chars,
-        )?;
-
-        tx.commit()?;
-        Ok(InsertOutcome {
-            conversation_id: conv_id,
-            inserted_indices: conv.messages.iter().map(|m| m.idx).collect(),
-        })
-    }
-
-    fn append_messages(
-        &mut self,
-        conversation_id: i64,
-        conv: &Conversation,
-    ) -> Result<InsertOutcome> {
-        let tx = self.conn.transaction()?;
-
-        let max_idx: Option<i64> = tx.query_row(
-            "SELECT MAX(idx) FROM messages WHERE conversation_id = ?",
-            params![conversation_id],
-            |row| row.get::<_, Option<i64>>(0),
-        )?;
-        let cutoff = max_idx.unwrap_or(-1);
-
-        let mut inserted_indices = Vec::new();
-        let mut fts_entries = Vec::new();
-        let mut new_chars: i64 = 0;
-        for msg in &conv.messages {
-            if msg.idx <= cutoff {
-                continue;
-            }
-            let msg_id = insert_message(&tx, conversation_id, msg)?;
-            insert_snippets(&tx, msg_id, &msg.snippets)?;
-            fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
-            inserted_indices.push(msg.idx);
-            new_chars += msg.content.len() as i64;
-        }
-
-        // Batch insert FTS entries
-        batch_insert_fts_messages(&tx, &fts_entries)?;
-
-        if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
-            // Use IFNULL to handle NULL ended_at values correctly.
-            // SQLite's scalar MAX(NULL, x) returns NULL, so we need to coalesce first.
-            tx.execute(
-                "UPDATE conversations SET ended_at = MAX(IFNULL(ended_at, 0), ?) WHERE id = ?",
-                params![last_ts, conversation_id],
-            )?;
-        }
-
-        // Update daily stats if new messages were appended (+0 sessions, +N messages)
-        if !inserted_indices.is_empty() {
-            let message_count = inserted_indices.len() as i64;
-            update_daily_stats_in_tx(
-                &tx,
-                &conv.agent_slug,
-                &conv.source_id,
-                conv.started_at,
-                0, // Existing session
-                message_count,
-                new_chars,
-            )?;
-        }
-
-        tx.commit()?;
-        Ok(InsertOutcome {
-            conversation_id,
-            inserted_indices,
-        })
-    }
-
-    /// Insert multiple conversations in a single transaction with batch FTS indexing.
-    ///
-    /// Uses multi-value INSERT for FTS5 entries (P2 Opt 2.1) to reduce
-    /// transaction overhead and improve indexing throughput by 10-20%.
-    pub fn insert_conversations_batched(
-        &mut self,
-        conversations: &[(i64, Option<i64>, &Conversation)],
-    ) -> Result<Vec<InsertOutcome>> {
-        if conversations.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Load pricing table once for the entire batch (bead z9fse.10)
-        let pricing_table = PricingTable::load(&self.conn).unwrap_or_else(|e| {
-            tracing::warn!(target: "cass::analytics::pricing", error = %e, "failed to load pricing table");
-            PricingTable { entries: Vec::new() }
-        });
-        let mut pricing_diag = PricingDiagnostics::default();
-
-        let tx = self.conn.transaction()?;
-        let mut outcomes = Vec::with_capacity(conversations.len());
-        let mut fts_entries = Vec::new();
-        let mut stats = StatsAggregator::new();
-        let mut token_stats = TokenStatsAggregator::new();
-        let mut token_entries: Vec<TokenUsageEntry> = Vec::new();
-        let mut metrics_entries: Vec<MessageMetricsEntry> = Vec::new();
-        let mut rollup_agg = AnalyticsRollupAggregator::new();
-        let mut conv_ids_to_summarize: Vec<i64> = Vec::new();
-
-        // Process all conversations, collecting FTS entries and token data
-        for &(agent_id, workspace_id, conv) in conversations {
-            let (outcome, delta) = insert_conversation_in_tx_batched(
-                &tx,
-                agent_id,
-                workspace_id,
-                conv,
-                &mut fts_entries,
-            )?;
-            if delta.session_count_delta != 0
-                || delta.message_count_delta != 0
-                || delta.total_chars_delta != 0
-            {
-                let day_id = conv
-                    .started_at
-                    .map(SqliteStorage::day_id_from_millis)
-                    .unwrap_or(0);
-                stats.record_delta(
-                    &conv.agent_slug,
-                    &conv.source_id,
-                    day_id,
-                    delta.session_count_delta,
-                    delta.message_count_delta,
-                    delta.total_chars_delta,
-                );
-            }
-
-            // Extract token usage from newly inserted messages
-            let has_new_messages = !outcome.inserted_indices.is_empty();
-            if has_new_messages {
-                let conv_day_id = conv
-                    .started_at
-                    .map(SqliteStorage::day_id_from_millis)
-                    .unwrap_or(0);
-
-                // Track primary model for session-level stats
-                let mut session_model_family = String::from("unknown");
-                let mut has_any_tokens = false;
-
-                // For each newly inserted message, extract tokens and create entries
-                // We need the message_id from the DB. Query inserted messages by conv+idx.
-                for msg in &conv.messages {
-                    if !outcome.inserted_indices.contains(&msg.idx) {
-                        continue;
-                    }
-
-                    let role_s = role_str(&msg.role);
-                    let usage = crate::connectors::extract_tokens_for_agent(
-                        &conv.agent_slug,
-                        &msg.extra_json,
-                        &msg.content,
-                        &role_s,
-                    );
-
-                    // Look up message_id from DB
-                    let msg_id: Option<i64> = tx
-                        .query_row(
-                            "SELECT id FROM messages WHERE conversation_id = ? AND idx = ?",
-                            params![outcome.conversation_id, msg.idx],
-                            |row| row.get(0),
-                        )
-                        .optional()?;
-
-                    let Some(message_id) = msg_id else {
-                        continue;
-                    };
-
-                    let msg_ts = msg.created_at.or(conv.started_at).unwrap_or(0);
-                    let msg_day_id = if msg_ts > 0 {
-                        SqliteStorage::day_id_from_millis(msg_ts)
-                    } else {
-                        conv_day_id
-                    };
-
-                    // Normalize model for aggregation
-                    let model_info = usage
-                        .model_name
-                        .as_deref()
-                        .map(crate::connectors::normalize_model);
-
-                    let model_family = model_info
-                        .as_ref()
-                        .map(|i| i.family.clone())
-                        .unwrap_or_else(|| "unknown".into());
-                    let model_tier = model_info
-                        .as_ref()
-                        .map(|i| i.tier.clone())
-                        .unwrap_or_else(|| "unknown".into());
-                    let provider = usage
-                        .provider
-                        .clone()
-                        .or_else(|| model_info.as_ref().map(|i| i.provider.clone()))
-                        .unwrap_or_else(|| "unknown".into());
-
-                    if model_family != "unknown" {
-                        session_model_family = model_family.clone();
-                    }
-
-                    // Compute estimated cost from pricing table (bead z9fse.10)
-                    let estimated_cost = pricing_table.compute_cost(
-                        usage.model_name.as_deref(),
-                        msg_day_id,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        usage.cache_read_tokens,
-                        usage.cache_creation_tokens,
-                    );
-                    if estimated_cost.is_some() {
-                        pricing_diag.record_priced();
-                    } else if usage.has_token_data() {
-                        pricing_diag.record_unpriced(usage.model_name.as_deref());
-                    }
-
-                    // Feed into token stats aggregator
-                    token_stats.record(
-                        &conv.agent_slug,
-                        &conv.source_id,
-                        msg_day_id,
-                        &model_family,
-                        &role_s,
-                        &usage,
-                        msg.content.len() as i64,
-                        estimated_cost.unwrap_or(0.0),
-                    );
-
-                    if usage.has_token_data() {
-                        has_any_tokens = true;
-                    }
-
-                    let content_chars = msg.content.len() as i64;
-                    let content_tokens_est = content_chars / 4;
-                    let msg_hour_id = SqliteStorage::hour_id_from_millis(msg_ts);
-                    let has_plan = has_plan_for_role(&role_s, &msg.content);
-
-                    // Build token_usage row
-                    token_entries.push(TokenUsageEntry {
-                        message_id,
-                        conversation_id: outcome.conversation_id,
-                        agent_id,
-                        workspace_id,
-                        source_id: conv.source_id.clone(),
-                        timestamp_ms: msg_ts,
-                        day_id: msg_day_id,
-                        model_name: usage.model_name.clone(),
-                        model_family: Some(model_family.clone()),
-                        model_tier: Some(model_tier.clone()),
-                        service_tier: usage.service_tier.clone(),
-                        provider: Some(provider.clone()),
-                        input_tokens: usage.input_tokens,
-                        output_tokens: usage.output_tokens,
-                        cache_read_tokens: usage.cache_read_tokens,
-                        cache_creation_tokens: usage.cache_creation_tokens,
-                        thinking_tokens: usage.thinking_tokens,
-                        total_tokens: usage.total_tokens(),
-                        estimated_cost_usd: estimated_cost,
-                        role: role_s.clone(),
-                        content_chars,
-                        has_tool_calls: usage.has_tool_calls,
-                        tool_call_count: usage.tool_call_count,
-                        data_source: usage.data_source.as_str().to_string(),
-                    });
-
-                    // Build message_metrics row and feed rollup aggregator
-                    let mm = MessageMetricsEntry {
-                        message_id,
-                        created_at_ms: msg_ts,
-                        hour_id: msg_hour_id,
-                        day_id: msg_day_id,
-                        agent_slug: conv.agent_slug.clone(),
-                        workspace_id: workspace_id.unwrap_or(0),
-                        source_id: conv.source_id.clone(),
-                        role: role_s,
-                        content_chars,
-                        content_tokens_est,
-                        model_name: usage.model_name.clone(),
-                        model_family: model_family.clone(),
-                        model_tier: model_tier.clone(),
-                        provider,
-                        api_input_tokens: usage.input_tokens,
-                        api_output_tokens: usage.output_tokens,
-                        api_cache_read_tokens: usage.cache_read_tokens,
-                        api_cache_creation_tokens: usage.cache_creation_tokens,
-                        api_thinking_tokens: usage.thinking_tokens,
-                        api_service_tier: usage.service_tier.clone(),
-                        api_data_source: usage.data_source.as_str().to_string(),
-                        tool_call_count: usage.tool_call_count as i64,
-                        has_tool_calls: usage.has_tool_calls,
-                        has_plan,
-                    };
-                    rollup_agg.record(&mm);
-                    metrics_entries.push(mm);
-                }
-
-                // Record session count in token stats (once per new conversation)
-                if delta.session_count_delta > 0 {
-                    token_stats.record_session(
-                        &conv.agent_slug,
-                        &conv.source_id,
-                        conv_day_id,
-                        &session_model_family,
-                    );
-                }
-
-                // Mark conversation for summary update if it has any token data
-                if has_any_tokens {
-                    conv_ids_to_summarize.push(outcome.conversation_id);
-                }
-            }
-
-            outcomes.push(outcome);
-        }
-
-        // Batch insert all FTS entries at once
-        let fts_count = fts_entries.len();
-        if fts_count > 0 {
-            let inserted = batch_insert_fts_messages(&tx, &fts_entries)?;
-            tracing::debug!(
-                target: "cass::perf::fts5",
-                total = fts_count,
-                inserted = inserted,
-                conversations = conversations.len(),
-                "batch_fts_insert_complete"
-            );
-        }
-
-        // Batched daily_stats update (avoid N*4 upserts).
-        if !stats.is_empty() {
-            let entries = stats.expand();
-            let affected = update_daily_stats_batched_in_tx(&tx, &entries)?;
-            tracing::debug!(
-                target: "cass::perf::daily_stats",
-                raw = stats.raw_entry_count(),
-                expanded = entries.len(),
-                affected = affected,
-                "batched_stats_update_complete"
-            );
-        }
-
-        // Batch insert token_usage rows
-        if !token_entries.is_empty() {
-            let token_count = token_entries.len();
-            let inserted = insert_token_usage_batched_in_tx(&tx, &token_entries)?;
-            tracing::debug!(
-                target: "cass::perf::token_usage",
-                total = token_count,
-                inserted = inserted,
-                "batch_token_usage_insert_complete"
-            );
-        }
-
-        // Batched token_daily_stats update
-        if !token_stats.is_empty() {
-            let entries = token_stats.expand();
-            let affected = update_token_daily_stats_batched_in_tx(&tx, &entries)?;
-            tracing::debug!(
-                target: "cass::perf::token_daily_stats",
-                raw = token_stats.raw_entry_count(),
-                expanded = entries.len(),
-                affected = affected,
-                "batched_token_stats_update_complete"
-            );
-        }
-
-        // Batch insert message_metrics rows
-        if !metrics_entries.is_empty() {
-            let mm_count = metrics_entries.len();
-            let inserted = insert_message_metrics_batched_in_tx(&tx, &metrics_entries)?;
-            tracing::debug!(
-                target: "cass::perf::message_metrics",
-                total = mm_count,
-                inserted = inserted,
-                "batch_message_metrics_insert_complete"
-            );
-        }
-
-        // Flush usage_hourly + usage_daily rollups
-        if !rollup_agg.is_empty() {
-            let (hourly, daily, models_daily) = flush_analytics_rollups_in_tx(&tx, &rollup_agg)?;
-            tracing::debug!(
-                target: "cass::perf::usage_rollups",
-                hourly_buckets = rollup_agg.hourly_entry_count(),
-                daily_buckets = rollup_agg.daily_entry_count(),
-                models_daily_buckets = rollup_agg.models_daily_entry_count(),
-                hourly_affected = hourly,
-                daily_affected = daily,
-                models_daily_affected = models_daily,
-                "batched_usage_rollups_complete"
-            );
-        }
-
-        // Update conversation-level token summaries
-        for conv_id in &conv_ids_to_summarize {
-            update_conversation_token_summaries_in_tx(&tx, *conv_id)?;
-        }
-
-        tx.commit()?;
-
-        // Log pricing coverage diagnostics (bead z9fse.10)
-        pricing_diag.log_summary();
-
-        Ok(outcomes)
-    }
-
-    pub fn list_agents(&self) -> Result<Vec<Agent>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, slug, name, version, kind FROM agents ORDER BY slug")?;
-        let rows = stmt.query_map([], |row| {
-            let kind: String = row.get(4)?;
-            Ok(Agent {
-                id: Some(row.get(0)?),
-                slug: row.get(1)?,
-                name: row.get(2)?,
-                version: row.get(3)?,
-                kind: match kind.as_str() {
-                    "cli" => AgentKind::Cli,
-                    "vscode" => AgentKind::VsCode,
-                    _ => AgentKind::Hybrid,
-                },
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    pub fn list_workspaces(&self) -> Result<Vec<crate::model::types::Workspace>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, path, display_name FROM workspaces ORDER BY path")?;
-        let rows = stmt.query_map([], |row| {
-            Ok(crate::model::types::Workspace {
-                id: Some(row.get(0)?),
-                path: Path::new(&row.get::<_, String>(1)?).to_path_buf(),
-                display_name: row.get::<_, Option<String>>(2)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    pub fn list_conversations(&self, limit: i64, offset: i64) -> Result<Vec<Conversation>> {
-        let mut stmt = self.conn.prepare(
-            r"SELECT c.id, a.slug, w.path, c.external_id, c.title, c.source_path,
-                       c.started_at, c.ended_at, c.approx_tokens, c.metadata_json,
-                       c.source_id, c.origin_host, c.metadata_bin
-                FROM conversations c
-                JOIN agents a ON c.agent_id = a.id
-                LEFT JOIN workspaces w ON c.workspace_id = w.id
-                ORDER BY c.started_at IS NULL, c.started_at DESC, c.id DESC
-                LIMIT ? OFFSET ?",
-        )?;
-
-        let rows = stmt.query_map(params![limit, offset], |row| {
-            Ok(Conversation {
-                id: Some(row.get(0)?),
-                agent_slug: row.get(1)?,
-                workspace: row
-                    .get::<_, Option<String>>(2)?
-                    .map(|p| Path::new(&p).to_path_buf()),
-                external_id: row.get(3)?,
-                title: row.get(4)?,
-                source_path: Path::new(&row.get::<_, String>(5)?).to_path_buf(),
-                started_at: row.get(6)?,
-                ended_at: row.get(7)?,
-                approx_tokens: row.get(8)?,
-                // Read from binary column first (idx 12), fallback to JSON (idx 9)
-                metadata_json: read_metadata_compat(row, 9, 12),
-                messages: Vec::new(),
-                source_id: row
-                    .get::<_, String>(10)
-                    .unwrap_or_else(|_| "local".to_string()),
-                origin_host: row.get(11)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    pub fn fetch_messages(&self, conversation_id: i64) -> Result<Vec<Message>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, idx, role, author, created_at, content, extra_json, extra_bin FROM messages WHERE conversation_id = ? ORDER BY idx",
-        )?;
-        let rows = stmt.query_map(params![conversation_id], |row| {
-            let role: String = row.get(2)?;
-            Ok(Message {
-                id: Some(row.get(0)?),
-                idx: row.get(1)?,
-                role: match role.as_str() {
-                    "user" => MessageRole::User,
-                    "agent" | "assistant" => MessageRole::Agent,
-                    "tool" => MessageRole::Tool,
-                    "system" => MessageRole::System,
-                    other => MessageRole::Other(other.to_string()),
-                },
-                author: row.get::<_, Option<String>>(3)?,
-                created_at: row.get::<_, Option<i64>>(4)?,
-                content: row.get(5)?,
-                // Read from binary column first (idx 7), fallback to JSON (idx 6)
-                extra_json: read_metadata_compat(row, 6, 7),
-                snippets: Vec::new(),
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    /// Fetch all messages with their conversation metadata for semantic indexing.
-    ///
-    /// Returns MessageForEmbedding records with all metadata needed for vector indexing.
-    pub fn fetch_messages_for_embedding(&self) -> Result<Vec<MessageForEmbedding>> {
-        let mut stmt = self.conn.prepare(
-            r"SELECT m.id, m.created_at, c.agent_id, c.workspace_id, c.source_id, m.role, m.content
-              FROM messages m
-              JOIN conversations c ON m.conversation_id = c.id
-              ORDER BY m.id",
-        )?;
-
-        let rows = stmt.query_map([], |row| {
-            let source_id_str: String = row
-                .get::<_, Option<String>>(4)?
-                .unwrap_or_else(|| "local".to_string());
-            // CRC32 hash of source_id string for compact storage
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(source_id_str.as_bytes());
-            let source_id_hash = hasher.finalize();
-
-            Ok(MessageForEmbedding {
-                message_id: row.get(0)?,
-                created_at: row.get(1)?,
-                agent_id: row.get(2)?,
-                workspace_id: row.get(3)?,
-                source_id_hash,
-                role: row.get(5)?,
-                content: row.get(6)?,
-            })
-        })?;
-
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    /// Fetch messages for embedding that were inserted after `since_id`.
-    /// Used for incremental semantic indexing in watch mode.
-    pub fn fetch_messages_for_embedding_since(
-        &self,
-        since_id: i64,
-    ) -> Result<Vec<MessageForEmbedding>> {
-        let mut stmt = self.conn.prepare(
-            r"SELECT m.id, m.created_at, c.agent_id, c.workspace_id, c.source_id, m.role, m.content
-              FROM messages m
-              JOIN conversations c ON m.conversation_id = c.id
-              WHERE m.id > ?1
-              ORDER BY m.id",
-        )?;
-
-        let rows = stmt.query_map(params![since_id], |row| {
-            let source_id_str: String = row
-                .get::<_, Option<String>>(4)?
-                .unwrap_or_else(|| "local".to_string());
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(source_id_str.as_bytes());
-            let source_id_hash = hasher.finalize();
-
-            Ok(MessageForEmbedding {
-                message_id: row.get(0)?,
-                created_at: row.get(1)?,
-                agent_id: row.get(2)?,
-                workspace_id: row.get(3)?,
-                source_id_hash,
-                role: row.get(5)?,
-                content: row.get(6)?,
-            })
-        })?;
-
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    /// Get the watermark for incremental semantic embedding.
-    /// Returns the highest message id that has been embedded, or None if no
-    /// embedding pass has been recorded yet.
-    pub fn get_last_embedded_message_id(&self) -> Result<Option<i64>> {
-        let result: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'last_embedded_message_id'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(result.and_then(|s| s.parse().ok()))
-    }
-
-    /// Set the watermark for incremental semantic embedding.
-    pub fn set_last_embedded_message_id(&mut self, id: i64) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('last_embedded_message_id', ?)",
-            params![id.to_string()],
-        )?;
-        Ok(())
-    }
-
-    /// Insert or update an embedding job, returning the job ID.
-    pub fn upsert_embedding_job(
-        &self,
-        db_path: &str,
-        model_id: &str,
-        total_docs: i64,
-    ) -> Result<i64> {
-        // Cancel any existing pending/running jobs for this db_path+model_id
-        self.conn.execute(
-            "UPDATE embedding_jobs SET status = 'cancelled', completed_at = datetime('now')
-             WHERE db_path = ?1 AND model_id = ?2 AND status IN ('pending', 'running')",
-            params![db_path, model_id],
-        )?;
-        self.conn.execute(
-            "INSERT INTO embedding_jobs (db_path, model_id, status, total_docs)
-             VALUES (?1, ?2, 'pending', ?3)",
-            params![db_path, model_id, total_docs],
-        )?;
-        Ok(self.conn.last_insert_rowid())
-    }
-
-    /// Mark an embedding job as running.
-    pub fn start_embedding_job(&self, job_id: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE embedding_jobs SET status = 'running', started_at = datetime('now') WHERE id = ?1",
-            params![job_id],
-        )?;
-        Ok(())
-    }
-
-    /// Mark an embedding job as completed.
-    pub fn complete_embedding_job(&self, job_id: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE embedding_jobs SET status = 'completed', completed_at = datetime('now') WHERE id = ?1",
-            params![job_id],
-        )?;
-        Ok(())
-    }
-
-    /// Mark an embedding job as failed with an error message.
-    pub fn fail_embedding_job(&self, job_id: i64, error: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE embedding_jobs SET status = 'failed', error_message = ?2, completed_at = datetime('now') WHERE id = ?1",
-            params![job_id, error],
-        )?;
-        Ok(())
-    }
-
-    /// Cancel pending/running embedding jobs for a db_path, optionally filtered by model_id.
-    pub fn cancel_embedding_jobs(&self, db_path: &str, model_id: Option<&str>) -> Result<usize> {
-        let count = if let Some(mid) = model_id {
-            self.conn.execute(
-                "UPDATE embedding_jobs SET status = 'cancelled', completed_at = datetime('now')
-                 WHERE db_path = ?1 AND model_id = ?2 AND status IN ('pending', 'running')",
-                params![db_path, mid],
-            )?
-        } else {
-            self.conn.execute(
-                "UPDATE embedding_jobs SET status = 'cancelled', completed_at = datetime('now')
-                 WHERE db_path = ?1 AND status IN ('pending', 'running')",
-                params![db_path],
-            )?
-        };
-        Ok(count)
-    }
-
-    /// Update the progress of an embedding job.
-    pub fn update_job_progress(&self, job_id: i64, completed_docs: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE embedding_jobs SET completed_docs = ?2 WHERE id = ?1",
-            params![job_id, completed_docs],
-        )?;
-        Ok(())
-    }
-
-    /// Get all embedding jobs for a given db_path.
-    pub fn get_embedding_jobs(&self, db_path: &str) -> Result<Vec<EmbeddingJobRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, db_path, model_id, status, total_docs, completed_docs,
-                    error_message, created_at, started_at, completed_at
-             FROM embedding_jobs WHERE db_path = ?1 ORDER BY id DESC",
-        )?;
-        let rows = stmt.query_map(params![db_path], |row| {
-            Ok(EmbeddingJobRow {
-                id: row.get(0)?,
-                db_path: row.get(1)?,
-                model_id: row.get(2)?,
-                status: row.get(3)?,
-                total_docs: row.get(4)?,
-                completed_docs: row.get(5)?,
-                error_message: row.get(6)?,
-                created_at: row.get(7)?,
-                started_at: row.get(8)?,
-                completed_at: row.get(9)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    pub fn rebuild_fts(&mut self) -> Result<()> {
-        // Chunked insert to avoid OOM on large databases (#110)
-        let total_count: i64 = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages m JOIN conversations c ON m.conversation_id = c.id JOIN agents a ON c.agent_id = a.id LEFT JOIN workspaces w ON c.workspace_id = w.id",
-                [],
-                |row| row.get(0),
-            )?;
-        let batch_size: i64 = 10_000;
-        let mut offset: i64 = 0;
-
-        let tx = self.conn.transaction()?;
-        tx.execute_batch(FTS5_DELETE_ALL_SQL)?;
-        while offset < total_count {
-            info!(
-                "Rebuilding FTS: {}/{} rows...",
-                offset.min(total_count),
-                total_count
-            );
-            tx.execute(
-                "INSERT INTO fts_messages(rowid, content, title, agent, workspace, source_path, created_at)
-                 SELECT m.id, m.content, c.title, a.slug, w.path, c.source_path, m.created_at
-                 FROM messages m
-                 JOIN conversations c ON m.conversation_id = c.id
-                 JOIN agents a ON c.agent_id = a.id
-                 LEFT JOIN workspaces w ON c.workspace_id = w.id
-                 ORDER BY m.rowid
-                 LIMIT ?1 OFFSET ?2",
-                params![batch_size, offset],
-            )?;
-            offset += batch_size;
-        }
-        tx.commit()?;
-        info!(
-            "Rebuilding FTS: {}/{} rows complete.",
-            total_count, total_count
-        );
-        Ok(())
-    }
-
-    /// Get the timestamp of the last successful scan (milliseconds since epoch).
-    /// Returns None if no scan has been recorded yet.
-    pub fn get_last_scan_ts(&self) -> Result<Option<i64>> {
-        let ts: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'last_scan_ts'",
-                [],
-                |row| {
-                    let s: String = row.get(0)?;
-                    Ok(s.parse().ok())
-                },
-            )
-            .optional()?
-            .flatten();
-        Ok(ts)
-    }
-
-    /// Set the timestamp of the last successful scan (milliseconds since epoch).
-    pub fn set_last_scan_ts(&mut self, ts: i64) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('last_scan_ts', ?)",
-            params![ts.to_string()],
-        )?;
-        Ok(())
-    }
-
-    /// Set the timestamp of the last successful index completion (milliseconds since epoch).
-    pub fn set_last_indexed_at(&mut self, ts: i64) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('last_indexed_at', ?)",
-            params![ts.to_string()],
-        )?;
-        Ok(())
-    }
-
-    /// Get current time as milliseconds since epoch.
-    pub fn now_millis() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-            .unwrap_or(0)
-    }
-
-    // -------------------------------------------------------------------------
-    // Source CRUD operations
-    // -------------------------------------------------------------------------
-
-    /// Get a source by ID.
-    pub fn get_source(&self, id: &str) -> Result<Option<Source>> {
-        self.conn
-            .query_row(
-                "SELECT id, kind, host_label, machine_id, platform, config_json, created_at, updated_at
-                 FROM sources WHERE id = ?",
-                params![id],
-                |row| {
-                    let kind_str: String = row.get(1)?;
-                    let config_json_str: Option<String> = row.get(5)?;
-                    Ok(Source {
-                        id: row.get(0)?,
-                        kind: SourceKind::parse(&kind_str).unwrap_or_default(),
-                        host_label: row.get(2)?,
-                        machine_id: row.get(3)?,
-                        platform: row.get(4)?,
-                        config_json: config_json_str
-                            .and_then(|s| serde_json::from_str(&s).ok()),
-                        created_at: row.get(6)?,
-                        updated_at: row.get(7)?,
-                    })
-                },
-            )
-            .optional()
-            .with_context(|| format!("fetching source with id '{id}'"))
-    }
-
-    /// List all sources.
-    pub fn list_sources(&self) -> Result<Vec<Source>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, kind, host_label, machine_id, platform, config_json, created_at, updated_at
-             FROM sources ORDER BY id",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let kind_str: String = row.get(1)?;
-            let config_json_str: Option<String> = row.get(5)?;
-            Ok(Source {
-                id: row.get(0)?,
-                kind: SourceKind::parse(&kind_str).unwrap_or_default(),
-                host_label: row.get(2)?,
-                machine_id: row.get(3)?,
-                platform: row.get(4)?,
-                config_json: config_json_str.and_then(|s| serde_json::from_str(&s).ok()),
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            })
-        })?;
-
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    /// Get list of unique source IDs (for P4.4 TUI source filter menu).
-    /// Returns source IDs ordered by ID, excluding 'local' which is always present.
-    pub fn get_source_ids(&self) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT id FROM sources WHERE id != 'local' ORDER BY id")?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    /// Create or update a source.
-    pub fn upsert_source(&self, source: &Source) -> Result<()> {
-        let now = Self::now_millis();
-        let config_json_str = source
-            .config_json
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-
-        self.conn.execute(
-            "INSERT INTO sources(id, kind, host_label, machine_id, platform, config_json, created_at, updated_at)
-             VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET
-                kind = excluded.kind,
-                host_label = excluded.host_label,
-                machine_id = excluded.machine_id,
-                platform = excluded.platform,
-                config_json = excluded.config_json,
-                updated_at = excluded.updated_at",
-            params![
-                source.id,
-                source.kind.as_str(),
-                source.host_label,
-                source.machine_id,
-                source.platform,
-                config_json_str,
-                source.created_at.unwrap_or(now),
-                now
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Delete a source by ID.
-    ///
-    /// If `cascade` is true, also deletes all conversations from this source.
-    /// Note: Currently conversations don't have a source_id column, so cascade
-    /// is a no-op until P1.3 is implemented.
-    pub fn delete_source(&self, id: &str, _cascade: bool) -> Result<bool> {
-        // Prevent deletion of the local source
-        if id == LOCAL_SOURCE_ID {
-            return Err(anyhow!("cannot delete the local source"));
-        }
-
-        let rows_affected = self
-            .conn
-            .execute("DELETE FROM sources WHERE id = ?", params![id])?;
-
-        Ok(rows_affected > 0)
-    }
-
-    // -------------------------------------------------------------------------
-    // Daily Stats (Opt 3.2) - Materialized Aggregates for O(1) Range Queries
-    // -------------------------------------------------------------------------
-
-    /// Epoch offset: Days are counted from 2020-01-01 (Unix timestamp 1577836800).
-    const EPOCH_2020_SECS: i64 = 1577836800;
-
-    /// Convert a millisecond timestamp to a day_id (days since 2020-01-01).
-    pub fn day_id_from_millis(timestamp_ms: i64) -> i64 {
-        let secs = timestamp_ms.div_euclid(1000);
-        (secs - Self::EPOCH_2020_SECS).div_euclid(86400)
-    }
-
-    /// Convert a millisecond timestamp to an hour_id (hours since 2020-01-01 00:00 UTC).
-    pub fn hour_id_from_millis(timestamp_ms: i64) -> i64 {
-        let secs = timestamp_ms.div_euclid(1000);
-        (secs - Self::EPOCH_2020_SECS).div_euclid(3600)
-    }
-
-    /// Convert a day_id back to a timestamp (milliseconds, start of day UTC).
-    pub fn millis_from_day_id(day_id: i64) -> i64 {
-        (Self::EPOCH_2020_SECS + day_id * 86400) * 1000
-    }
-
-    /// Convert an hour_id back to a timestamp (milliseconds, start of hour UTC).
-    pub fn millis_from_hour_id(hour_id: i64) -> i64 {
-        (Self::EPOCH_2020_SECS + hour_id * 3600) * 1000
-    }
-
-    /// Get session count for a date range using materialized stats.
-    /// Returns (count, is_from_cache) - is_from_cache is true if from daily_stats.
-    ///
-    /// If daily_stats table is empty or stale, falls back to COUNT(*) query.
-    pub fn count_sessions_in_range(
-        &self,
-        start_ts_ms: Option<i64>,
-        end_ts_ms: Option<i64>,
-        agent_slug: Option<&str>,
-        source_id: Option<&str>,
-    ) -> Result<(i64, bool)> {
-        let agent = agent_slug.unwrap_or("all");
-        let source = source_id.unwrap_or("all");
-
-        // Check if we have materialized stats
-        let stats_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM daily_stats", [], |r| r.get(0))
-            .unwrap_or(0);
-
-        if stats_count == 0 {
-            // Fall back to direct COUNT(*)
-            return self.count_sessions_direct(start_ts_ms, end_ts_ms, agent_slug, source_id);
-        }
-
-        // Use materialized stats
-        let start_day = start_ts_ms.map(Self::day_id_from_millis);
-        let end_day = end_ts_ms.map(Self::day_id_from_millis);
-
-        let count: i64 = match (start_day, end_day) {
-            (Some(start), Some(end)) => self.conn.query_row(
-                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats
-                 WHERE day_id BETWEEN ? AND ? AND agent_slug = ? AND source_id = ?",
-                params![start, end, agent, source],
-                |r| r.get(0),
-            )?,
-            (Some(start), None) => self.conn.query_row(
-                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats
-                 WHERE day_id >= ? AND agent_slug = ? AND source_id = ?",
-                params![start, agent, source],
-                |r| r.get(0),
-            )?,
-            (None, Some(end)) => self.conn.query_row(
-                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats
-                 WHERE day_id <= ? AND agent_slug = ? AND source_id = ?",
-                params![end, agent, source],
-                |r| r.get(0),
-            )?,
-            (None, None) => self.conn.query_row(
-                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats
-                 WHERE agent_slug = ? AND source_id = ?",
-                params![agent, source],
-                |r| r.get(0),
-            )?,
-        };
-
-        Ok((count, true))
-    }
-
-    /// Direct COUNT(*) query as fallback when daily_stats is empty.
-    fn count_sessions_direct(
-        &self,
-        start_ts_ms: Option<i64>,
-        end_ts_ms: Option<i64>,
-        agent_slug: Option<&str>,
-        source_id: Option<&str>,
-    ) -> Result<(i64, bool)> {
-        let mut sql = "SELECT COUNT(*) FROM conversations c
-                       JOIN agents a ON c.agent_id = a.id WHERE 1=1"
-            .to_string();
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
-
-        if let Some(start) = start_ts_ms {
-            sql.push_str(" AND c.started_at >= ?");
-            params_vec.push(start.into());
-        }
-        if let Some(end) = end_ts_ms {
-            sql.push_str(" AND c.started_at <= ?");
-            params_vec.push(end.into());
-        }
-        if let Some(agent) = agent_slug
-            && agent != "all"
-        {
-            sql.push_str(" AND a.slug = ?");
-            params_vec.push(agent.to_string().into());
-        }
-        if let Some(source) = source_id
-            && source != "all"
-        {
-            sql.push_str(" AND c.source_id = ?");
-            params_vec.push(source.to_string().into());
-        }
-
-        let count: i64 =
-            self.conn
-                .query_row(&sql, rusqlite::params_from_iter(params_vec), |r| r.get(0))?;
-        Ok((count, false))
-    }
-
-    /// Get daily histogram data for a date range.
-    pub fn get_daily_histogram(
-        &self,
-        start_ts_ms: i64,
-        end_ts_ms: i64,
-        agent_slug: Option<&str>,
-        source_id: Option<&str>,
-    ) -> Result<Vec<DailyCount>> {
-        let start_day = Self::day_id_from_millis(start_ts_ms);
-        let end_day = Self::day_id_from_millis(end_ts_ms);
-        let agent = agent_slug.unwrap_or("all");
-        let source = source_id.unwrap_or("all");
-
-        let mut stmt = self.conn.prepare(
-            "SELECT day_id, session_count, message_count, total_chars
-             FROM daily_stats
-             WHERE day_id BETWEEN ? AND ? AND agent_slug = ? AND source_id = ?
-             ORDER BY day_id",
-        )?;
-        let rows = stmt.query_map(params![start_day, end_day, agent, source], |row| {
-            Ok(DailyCount {
-                day_id: row.get(0)?,
-                sessions: row.get(1)?,
-                messages: row.get(2)?,
-                chars: row.get(3)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    }
-
-    // -------------------------------------------------------------------------
-    // Analytics Rebuild / Backfill (bead z9fse.4)
-    // -------------------------------------------------------------------------
-
-    /// Rebuild analytics tables (message_metrics + rollups) from existing
-    /// messages in the database. Does NOT re-parse raw agent session files.
-    ///
-    /// Algorithm:
-    /// 1. Clear message_metrics, usage_hourly, usage_daily, usage_models_daily in a transaction
-    /// 2. Stream messages joined with conversation/agent dims in chunks
-    /// 3. For each message, call extract_tokens_for_agent and build MessageMetricsEntry
-    /// 4. Batch insert message_metrics rows
-    /// 5. Populate rollups via SQL aggregation from message_metrics
-    pub fn rebuild_analytics(&mut self) -> Result<AnalyticsRebuildResult> {
-        let start = Instant::now();
-
-        // Count total messages for progress reporting
-        let total_messages: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM messages", [], |row| {
-                    row.get::<_, i64>(0)
-                })?;
-        tracing::info!(
-            target: "cass::analytics",
-            total_messages,
-            "analytics_rebuild_start"
-        );
-
-        let tx = self.conn.transaction()?;
-
-        // Step 1: Clear analytics tables
-        tx.execute("DELETE FROM message_metrics")?;
-        tx.execute("DELETE FROM usage_hourly")?;
-        tx.execute("DELETE FROM usage_daily")?;
-        tx.execute("DELETE FROM usage_models_daily")?;
-
-        // Step 2: Stream messages in chunks, extract metrics, batch insert
-        const CHUNK_SIZE: i64 = 10_000;
-        let mut offset: i64 = 0;
-        let mut total_inserted: usize = 0;
-
-        loop {
-            // Fetch a chunk of messages with their conversation/agent dims
-            let mut stmt = tx.prepare(
-                "SELECT m.id, m.idx, m.role, m.content, m.extra_json, m.extra_bin,
-                        m.created_at,
-                        c.id AS conv_id, c.started_at AS conv_started_at,
-                        c.source_id, c.workspace_id,
-                        a.slug AS agent_slug
-                 FROM messages m
-                 JOIN conversations c ON m.conversation_id = c.id
-                 JOIN agents a ON c.agent_id = a.id
-                 ORDER BY m.id
-                 LIMIT ? OFFSET ?",
-            )?;
-
-            #[allow(clippy::type_complexity)]
-            let rows: Vec<(
-                i64,
-                String,
-                String,
-                Option<serde_json::Value>,
-                Option<i64>,
-                Option<i64>,
-                String,
-                Option<i64>,
-                String,
-            )> = stmt
-                .query_map(params![CHUNK_SIZE, offset], |row| {
-                    let msg_id: i64 = row.get(0)?;
-                    let role: String = row.get(2)?;
-                    let content: String = row.get(3)?;
-                    // Try extra_json first, fall back to deserializing extra_bin
-                    let extra_json: Option<serde_json::Value> = row
-                        .get::<_, Option<String>>(4)?
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .or_else(|| {
-                            row.get::<_, Option<Vec<u8>>>(5)
-                                .ok()
-                                .flatten()
-                                .and_then(|b| rmp_serde::from_slice(&b).ok())
-                        });
-                    let msg_ts: Option<i64> = row.get(6)?;
-                    let conv_started_at: Option<i64> = row.get(8)?;
-                    let source_id: String = row.get(9)?;
-                    let workspace_id: Option<i64> = row.get(10)?;
-                    let agent_slug: String = row.get(11)?;
-
-                    let effective_ts = msg_ts.or(conv_started_at).unwrap_or(0);
-
-                    Ok((
-                        msg_id,
-                        role,
-                        content,
-                        extra_json,
-                        Some(effective_ts),
-                        workspace_id,
-                        source_id,
-                        conv_started_at,
-                        agent_slug,
-                    ))
-                })?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            if rows.is_empty() {
-                break;
-            }
-
-            let chunk_len = rows.len();
-            let mut entries = Vec::with_capacity(chunk_len);
-
-            for (
-                msg_id,
-                role,
-                content,
-                extra_json,
-                effective_ts,
-                workspace_id,
-                source_id,
-                _conv_started_at,
-                agent_slug,
-            ) in &rows
-            {
-                let ts = effective_ts.unwrap_or(0);
-                let day_id = Self::day_id_from_millis(ts);
-                let hour_id = Self::hour_id_from_millis(ts);
-                let content_chars = content.len() as i64;
-                let content_tokens_est = content_chars / 4;
-
-                let extra = extra_json
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let usage =
-                    crate::connectors::extract_tokens_for_agent(agent_slug, &extra, content, role);
-                let model_info = usage
-                    .model_name
-                    .as_deref()
-                    .map(crate::connectors::normalize_model);
-                let model_family = model_info
-                    .as_ref()
-                    .map(|i| i.family.clone())
-                    .unwrap_or_else(|| "unknown".into());
-                let model_tier = model_info
-                    .as_ref()
-                    .map(|i| i.tier.clone())
-                    .unwrap_or_else(|| "unknown".into());
-                let provider = usage
-                    .provider
-                    .clone()
-                    .or_else(|| model_info.as_ref().map(|i| i.provider.clone()))
-                    .unwrap_or_else(|| "unknown".into());
-
-                entries.push(MessageMetricsEntry {
-                    message_id: *msg_id,
-                    created_at_ms: ts,
-                    hour_id,
-                    day_id,
-                    agent_slug: agent_slug.clone(),
-                    workspace_id: workspace_id.unwrap_or(0),
-                    source_id: source_id.clone(),
-                    role: role.clone(),
-                    content_chars,
-                    content_tokens_est,
-                    model_name: usage.model_name.clone(),
-                    model_family,
-                    model_tier,
-                    provider,
-                    api_input_tokens: usage.input_tokens,
-                    api_output_tokens: usage.output_tokens,
-                    api_cache_read_tokens: usage.cache_read_tokens,
-                    api_cache_creation_tokens: usage.cache_creation_tokens,
-                    api_thinking_tokens: usage.thinking_tokens,
-                    api_service_tier: usage.service_tier,
-                    api_data_source: usage.data_source.as_str().to_string(),
-                    tool_call_count: usage.tool_call_count as i64,
-                    has_tool_calls: usage.has_tool_calls,
-                    has_plan: has_plan_for_role(role, content),
-                });
-            }
-
-            let inserted = insert_message_metrics_batched_in_tx(&tx, &entries)?;
-            total_inserted += inserted;
-            offset += chunk_len as i64;
-
-            tracing::debug!(
-                target: "cass::analytics",
-                offset,
-                chunk = chunk_len,
-                inserted,
-                total = total_inserted,
-                "analytics_rebuild_chunk"
-            );
-
-            if (chunk_len as i64) < CHUNK_SIZE {
-                break;
-            }
-        }
-
-        // Step 3: Populate rollups via SQL aggregation from message_metrics
-        let now_ms = Self::now_millis();
-
-        let hourly_rows = tx.execute(
-            "INSERT INTO usage_hourly (
-                    hour_id, agent_slug, workspace_id, source_id,
-                    message_count, user_message_count, assistant_message_count,
-                    tool_call_count, plan_message_count, plan_content_tokens_est_total,
-                    plan_api_tokens_total, api_coverage_message_count,
-                    content_tokens_est_total, content_tokens_est_user, content_tokens_est_assistant,
-                    api_tokens_total, api_input_tokens_total, api_output_tokens_total,
-                    api_cache_read_tokens_total, api_cache_creation_tokens_total,
-                    api_thinking_tokens_total, last_updated
-                )
-                SELECT
-                    hour_id, agent_slug, workspace_id, source_id,
-                    COUNT(*),
-                    SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN role IN ('assistant', 'agent') THEN 1 ELSE 0 END),
-                    SUM(tool_call_count),
-                    SUM(has_plan),
-                    SUM(CASE WHEN has_plan = 1 THEN content_tokens_est ELSE 0 END),
-                    SUM(
-                        CASE
-                            WHEN has_plan = 1 AND api_data_source = 'api'
-                                THEN COALESCE(api_input_tokens, 0)
-                                    + COALESCE(api_output_tokens, 0)
-                                    + COALESCE(api_cache_read_tokens, 0)
-                                    + COALESCE(api_cache_creation_tokens, 0)
-                                    + COALESCE(api_thinking_tokens, 0)
-                            ELSE 0
-                        END
-                    ),
-                    SUM(CASE WHEN api_data_source = 'api' THEN 1 ELSE 0 END),
-                    SUM(content_tokens_est),
-                    SUM(CASE WHEN role = 'user' THEN content_tokens_est ELSE 0 END),
-                    SUM(CASE WHEN role IN ('assistant', 'agent') THEN content_tokens_est ELSE 0 END),
-                    SUM(COALESCE(api_input_tokens, 0) + COALESCE(api_output_tokens, 0) + COALESCE(api_cache_read_tokens, 0) + COALESCE(api_cache_creation_tokens, 0) + COALESCE(api_thinking_tokens, 0)),
-                    SUM(COALESCE(api_input_tokens, 0)),
-                    SUM(COALESCE(api_output_tokens, 0)),
-                    SUM(COALESCE(api_cache_read_tokens, 0)),
-                    SUM(COALESCE(api_cache_creation_tokens, 0)),
-                    SUM(COALESCE(api_thinking_tokens, 0)),
-                    ?1
-                FROM message_metrics
-                GROUP BY hour_id, agent_slug, workspace_id, source_id",
-            params![now_ms],
-        )?;
-
-        let daily_rows = tx.execute(
-            "INSERT INTO usage_daily (
-                    day_id, agent_slug, workspace_id, source_id,
-                    message_count, user_message_count, assistant_message_count,
-                    tool_call_count, plan_message_count, plan_content_tokens_est_total,
-                    plan_api_tokens_total, api_coverage_message_count,
-                    content_tokens_est_total, content_tokens_est_user, content_tokens_est_assistant,
-                    api_tokens_total, api_input_tokens_total, api_output_tokens_total,
-                    api_cache_read_tokens_total, api_cache_creation_tokens_total,
-                    api_thinking_tokens_total, last_updated
-                )
-                SELECT
-                    day_id, agent_slug, workspace_id, source_id,
-                    COUNT(*),
-                    SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN role IN ('assistant', 'agent') THEN 1 ELSE 0 END),
-                    SUM(tool_call_count),
-                    SUM(has_plan),
-                    SUM(CASE WHEN has_plan = 1 THEN content_tokens_est ELSE 0 END),
-                    SUM(
-                        CASE
-                            WHEN has_plan = 1 AND api_data_source = 'api'
-                                THEN COALESCE(api_input_tokens, 0)
-                                    + COALESCE(api_output_tokens, 0)
-                                    + COALESCE(api_cache_read_tokens, 0)
-                                    + COALESCE(api_cache_creation_tokens, 0)
-                                    + COALESCE(api_thinking_tokens, 0)
-                            ELSE 0
-                        END
-                    ),
-                    SUM(CASE WHEN api_data_source = 'api' THEN 1 ELSE 0 END),
-                    SUM(content_tokens_est),
-                    SUM(CASE WHEN role = 'user' THEN content_tokens_est ELSE 0 END),
-                    SUM(CASE WHEN role IN ('assistant', 'agent') THEN content_tokens_est ELSE 0 END),
-                    SUM(COALESCE(api_input_tokens, 0) + COALESCE(api_output_tokens, 0) + COALESCE(api_cache_read_tokens, 0) + COALESCE(api_cache_creation_tokens, 0) + COALESCE(api_thinking_tokens, 0)),
-                    SUM(COALESCE(api_input_tokens, 0)),
-                    SUM(COALESCE(api_output_tokens, 0)),
-                    SUM(COALESCE(api_cache_read_tokens, 0)),
-                    SUM(COALESCE(api_cache_creation_tokens, 0)),
-                    SUM(COALESCE(api_thinking_tokens, 0)),
-                    ?1
-                FROM message_metrics
-                GROUP BY day_id, agent_slug, workspace_id, source_id",
-            params![now_ms],
-        )?;
-
-        let models_daily_rows = tx.execute(
-            "INSERT INTO usage_models_daily (
-                    day_id, agent_slug, workspace_id, source_id, model_family, model_tier,
-                    message_count, user_message_count, assistant_message_count,
-                    tool_call_count, plan_message_count, api_coverage_message_count,
-                    content_tokens_est_total, content_tokens_est_user, content_tokens_est_assistant,
-                    api_tokens_total, api_input_tokens_total, api_output_tokens_total,
-                    api_cache_read_tokens_total, api_cache_creation_tokens_total,
-                    api_thinking_tokens_total, last_updated
-                )
-                SELECT
-                    day_id,
-                    agent_slug,
-                    workspace_id,
-                    source_id,
-                    COALESCE(NULLIF(model_family, ''), 'unknown'),
-                    COALESCE(NULLIF(model_tier, ''), 'unknown'),
-                    COUNT(*),
-                    SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN role IN ('assistant', 'agent') THEN 1 ELSE 0 END),
-                    SUM(tool_call_count),
-                    SUM(has_plan),
-                    SUM(CASE WHEN api_data_source = 'api' THEN 1 ELSE 0 END),
-                    SUM(content_tokens_est),
-                    SUM(CASE WHEN role = 'user' THEN content_tokens_est ELSE 0 END),
-                    SUM(CASE WHEN role IN ('assistant', 'agent') THEN content_tokens_est ELSE 0 END),
-                    SUM(COALESCE(api_input_tokens, 0) + COALESCE(api_output_tokens, 0) + COALESCE(api_cache_read_tokens, 0) + COALESCE(api_cache_creation_tokens, 0) + COALESCE(api_thinking_tokens, 0)),
-                    SUM(COALESCE(api_input_tokens, 0)),
-                    SUM(COALESCE(api_output_tokens, 0)),
-                    SUM(COALESCE(api_cache_read_tokens, 0)),
-                    SUM(COALESCE(api_cache_creation_tokens, 0)),
-                    SUM(COALESCE(api_thinking_tokens, 0)),
-                    ?1
-                FROM message_metrics
-                GROUP BY
-                    day_id,
-                    agent_slug,
-                    workspace_id,
-                    source_id,
-                    COALESCE(NULLIF(model_family, ''), 'unknown'),
-                    COALESCE(NULLIF(model_tier, ''), 'unknown')",
-            params![now_ms],
-        )?;
-
-        tx.commit()?;
-
-        let elapsed = start.elapsed();
-        let elapsed_ms = elapsed.as_millis() as u64;
-        let msgs_per_sec = if elapsed_ms > 0 {
-            (total_inserted as f64) / (elapsed_ms as f64 / 1000.0)
-        } else {
-            0.0
-        };
-
-        tracing::info!(
-            target: "cass::analytics",
-            message_metrics_rows = total_inserted,
-            usage_hourly_rows = hourly_rows,
-            usage_daily_rows = daily_rows,
-            usage_models_daily_rows = models_daily_rows,
-            elapsed_ms,
-            messages_per_sec = format!("{:.0}", msgs_per_sec),
-            "analytics_rebuild_complete"
-        );
-
-        Ok(AnalyticsRebuildResult {
-            message_metrics_rows: total_inserted,
-            usage_hourly_rows: hourly_rows,
-            usage_daily_rows: daily_rows,
-            usage_models_daily_rows: models_daily_rows,
-            elapsed_ms,
-            messages_per_sec: msgs_per_sec,
-        })
-    }
-
-    /// Rebuild all daily stats from scratch.
-    /// Use this for recovery or when stats appear to be out of sync.
-    pub fn rebuild_daily_stats(&mut self) -> Result<DailyStatsRebuildResult> {
-        let tx = self.conn.transaction()?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-            .unwrap_or(0);
-
-        // Clear existing stats
-        tx.execute("DELETE FROM daily_stats")?;
-
-        // Rebuild from conversations table - per agent, per source
-        // Note: COALESCE wraps the entire day_id calculation to match Rust's unwrap_or(0) behavior
-        // for conversations with NULL started_at timestamps
-        tx.execute(
-            r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-              SELECT
-                  COALESCE(
-                  CASE
-                    WHEN (c.started_at / 1000 - 1577836800) >= 0 THEN (c.started_at / 1000 - 1577836800) / 86400
-                    ELSE (c.started_at / 1000 - 1577836800 - 86399) / 86400
-                  END,
-                0) as day_id,
-                  a.slug as agent_slug,
-                  c.source_id,
-                  COUNT(DISTINCT c.id) as session_count,
-                  COUNT(m.id) as message_count,
-                  COALESCE(SUM(LENGTH(m.content)), 0) as total_chars,
-                  ? as last_updated
-              FROM conversations c
-              JOIN agents a ON c.agent_id = a.id
-              LEFT JOIN messages m ON m.conversation_id = c.id
-              GROUP BY day_id, a.slug, c.source_id",
-            params![now],
-        )?;
-
-        // Add 'all' agent aggregates for each source
-        tx.execute(
-            r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-              SELECT
-                  COALESCE(
-                  CASE
-                    WHEN (c.started_at / 1000 - 1577836800) >= 0 THEN (c.started_at / 1000 - 1577836800) / 86400
-                    ELSE (c.started_at / 1000 - 1577836800 - 86399) / 86400
-                  END,
-                0) as day_id,
-                  'all',
-                  c.source_id,
-                  COUNT(DISTINCT c.id) as session_count,
-                  COUNT(m.id) as message_count,
-                  COALESCE(SUM(LENGTH(m.content)), 0) as total_chars,
-                  ? as last_updated
-              FROM conversations c
-              LEFT JOIN messages m ON m.conversation_id = c.id
-              GROUP BY day_id, c.source_id",
-            params![now],
-        )?;
-
-        // Add per-agent aggregates for 'all' sources
-        tx.execute(
-            r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-              SELECT
-                  COALESCE(
-                  CASE
-                    WHEN (c.started_at / 1000 - 1577836800) >= 0 THEN (c.started_at / 1000 - 1577836800) / 86400
-                    ELSE (c.started_at / 1000 - 1577836800 - 86399) / 86400
-                  END,
-                0) as day_id,
-                  a.slug,
-                  'all',
-                  COUNT(DISTINCT c.id) as session_count,
-                  COUNT(m.id) as message_count,
-                  COALESCE(SUM(LENGTH(m.content)), 0) as total_chars,
-                  ? as last_updated
-              FROM conversations c
-              JOIN agents a ON c.agent_id = a.id
-              LEFT JOIN messages m ON m.conversation_id = c.id
-              GROUP BY day_id, a.slug",
-            params![now],
-        )?;
-
-        // Add global 'all'/'all' aggregates
-        tx.execute(
-            r"INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-              SELECT
-                  COALESCE(
-                  CASE
-                    WHEN (c.started_at / 1000 - 1577836800) >= 0 THEN (c.started_at / 1000 - 1577836800) / 86400
-                    ELSE (c.started_at / 1000 - 1577836800 - 86399) / 86400
-                  END,
-                0) as day_id,
-                  'all',
-                  'all',
-                  COUNT(DISTINCT c.id) as session_count,
-                  COUNT(m.id) as message_count,
-                  COALESCE(SUM(LENGTH(m.content)), 0) as total_chars,
-                  ? as last_updated
-              FROM conversations c
-              LEFT JOIN messages m ON m.conversation_id = c.id
-              GROUP BY day_id",
-            params![now],
-        )?;
-
-        let rows_created: i64 =
-            tx.query_row("SELECT COUNT(*) FROM daily_stats", [], |r| r.get(0))?;
-        let total_sessions: i64 = tx.query_row(
-            "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats WHERE agent_slug = 'all' AND source_id = 'all'",
-            [],
-            |r| r.get(0),
-        )?;
-
-        tx.commit()?;
-
-        tracing::info!(
-            target: "cass::perf::daily_stats",
-            rows_created = rows_created,
-            total_sessions = total_sessions,
-            "Daily stats rebuilt from conversations"
-        );
-
-        Ok(DailyStatsRebuildResult {
-            rows_created,
-            total_sessions,
-        })
-    }
-
-    /// Flush aggregated stats deltas to daily_stats table in a single batch.
-    ///
-    /// Uses multi-value INSERT with ON CONFLICT for efficient upserts.
-    /// This is the batched alternative to `update_daily_stats_in_tx` which
-    /// does 4 writes per conversation.
-    ///
-    /// # Arguments
-    /// * `entries` - Expanded entries from `StatsAggregator::expand()`.
-    ///   Each tuple is (day_id, agent_slug, source_id, delta).
-    ///
-    /// # Returns
-    /// Number of rows affected (inserted + updated).
-    pub fn update_daily_stats_batched(
-        &mut self,
-        entries: &[(i64, String, String, StatsDelta)],
-    ) -> Result<usize> {
-        if entries.is_empty() {
-            return Ok(0);
-        }
-
-        let now = Self::now_millis();
-        let tx = self.conn.transaction()?;
-
-        // SQLite supports up to 999 variables per statement (though 32766 in newer versions).
-        // With 7 variables per row, we can safely batch ~100 rows.
-        const BATCH_SIZE: usize = 100;
-        let mut total_affected = 0;
-
-        for chunk in entries.chunks(BATCH_SIZE) {
-            // Build multi-value INSERT statement
-            let placeholders: String = (0..chunk.len())
-                .map(|_| "(?, ?, ?, ?, ?, ?, ?)")
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let sql = format!(
-                "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-                 VALUES {}
-                 ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
-                     session_count = session_count + excluded.session_count,
-                     message_count = message_count + excluded.message_count,
-                     total_chars = total_chars + excluded.total_chars,
-                     last_updated = excluded.last_updated",
-                placeholders
-            );
-
-            // Flatten parameters for rusqlite
-            let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 7);
-
-            for (day_id, agent, source, delta) in chunk {
-                params_vec.push((*day_id).into());
-                params_vec.push(agent.clone().into());
-                params_vec.push(source.clone().into());
-                params_vec.push(delta.session_count_delta.into());
-                params_vec.push(delta.message_count_delta.into());
-                params_vec.push(delta.total_chars_delta.into());
-                params_vec.push(now.into());
-            }
-
-            let affected = tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
-            total_affected += affected;
-        }
-
-        tx.commit()?;
-
-        tracing::debug!(
-            target: "cass::perf::daily_stats",
-            entries = entries.len(),
-            affected = total_affected,
-            "batched_stats_update_complete"
-        );
-
-        Ok(total_affected)
-    }
-
-    /// Check if daily_stats are populated and reasonably fresh.
-    pub fn daily_stats_health(&self) -> Result<DailyStatsHealth> {
-        let row_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM daily_stats", [], |r| r.get(0))
-            .unwrap_or(0);
-
-        let oldest_update: Option<i64> = self
-            .conn
-            .query_row("SELECT MIN(last_updated) FROM daily_stats", [], |r| {
-                r.get(0)
-            })
-            .ok();
-
-        let conversation_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
-            .unwrap_or(0);
-
-        // Get materialized total
-        let materialized_total: i64 = self
-            .conn
-            .query_row(
-                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats
-                 WHERE agent_slug = 'all' AND source_id = 'all'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-
-        Ok(DailyStatsHealth {
-            populated: row_count > 0,
-            row_count,
-            oldest_update_ms: oldest_update,
-            conversation_count,
-            materialized_total,
-            drift: (conversation_count - materialized_total).abs(),
-        })
-    }
-}
 
 /// Daily count data for histogram display.
 #[derive(Debug, Clone)]
@@ -7395,335 +5570,21 @@ pub struct DailyStatsHealth {
     pub drift: i64,
 }
 
-/// Update daily stats within a transaction.
-/// Handles incrementing session_count, message_count, and total_chars for:
-/// - Specific agent + source
-/// - All agents + specific source
-/// - Specific agent + all sources
-/// - All agents + all sources
-fn update_daily_stats_in_tx(
-    tx: &Transaction<'_>,
-    agent_slug: &str,
-    source_id: &str,
-    started_at_ms: Option<i64>,
-    session_count_delta: i64,
-    message_count: i64,
-    total_chars: i64,
-) -> Result<()> {
-    if session_count_delta == 0 && message_count == 0 && total_chars == 0 {
-        return Ok(());
-    }
+// [removed: dead rusqlite helper function]
 
-    let day_id = started_at_ms
-        .map(SqliteStorage::day_id_from_millis)
-        .unwrap_or(0);
-    let now = SqliteStorage::now_millis();
+// [removed: dead rusqlite helper function]
 
-    let mut unique_updates = Vec::with_capacity(4);
+// [removed: dead rusqlite helper function]
 
-    // Add specific entry if neither is "all"
-    if agent_slug != "all" && source_id != "all" {
-        unique_updates.push((agent_slug, source_id));
-    }
+// [removed: dead rusqlite helper function]
 
-    // Add "all agents" entry for this source
-    if source_id != "all" {
-        unique_updates.push(("all", source_id));
-    }
+// [removed: dead rusqlite helper function]
 
-    // Add "all sources" entry for this agent
-    if agent_slug != "all" {
-        unique_updates.push((agent_slug, "all"));
-    }
+// [removed: dead rusqlite helper function]
 
-    // Always add global total
-    unique_updates.push(("all", "all"));
+// [removed: dead rusqlite helper function]
 
-    for (agent, source) in unique_updates {
-        tx.execute(
-            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
-                 session_count = session_count + excluded.session_count,
-                 message_count = message_count + excluded.message_count,
-                 total_chars = total_chars + excluded.total_chars,
-                 last_updated = excluded.last_updated",
-            params![day_id, agent, source, session_count_delta, message_count, total_chars, now],
-        )?;
-    }
-
-    Ok(())
-}
-
-fn apply_pragmas(conn: &mut Connection) -> Result<()> {
-    conn.execute_batch(
-        r"
-        PRAGMA journal_mode = WAL;
-        PRAGMA synchronous = NORMAL;
-        PRAGMA wal_autocheckpoint = 1000;
-        ",
-    )?;
-    apply_common_pragmas(conn)
-}
-
-fn apply_common_pragmas(conn: &Connection) -> Result<()> {
-    conn.busy_timeout(Duration::from_secs(5))?;
-    conn.execute_batch(
-        r"
-        PRAGMA temp_store = MEMORY;
-        PRAGMA cache_size = -65536; -- 64MB
-        PRAGMA mmap_size = 268435456; -- 256MB
-        PRAGMA foreign_keys = ON;
-        ",
-    )?;
-    Ok(())
-}
-
-fn init_meta(conn: &mut Connection) -> Result<()> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-        [],
-    )?;
-
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'schema_version'",
-            [],
-            |row| row.get::<_, String>(0).map(|s| s.parse().unwrap_or(0)),
-        )
-        .optional()?;
-
-    if existing.is_none() {
-        // Start at version 0 so migrate() applies full schema on first open.
-        conn.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', 0)",
-            [],
-        )?;
-    }
-
-    Ok(())
-}
-
-fn migrate(conn: &mut Connection) -> Result<()> {
-    let current: i64 = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'schema_version'",
-            [],
-            |row| row.get::<_, String>(0).map(|s| s.parse().unwrap_or(0)),
-        )
-        .optional()?
-        .unwrap_or(0);
-
-    if current == SCHEMA_VERSION {
-        return Ok(());
-    }
-
-    // Disable foreign keys for the migration transaction (needed for V5 table recreation).
-    // PRAGMA foreign_keys is a no-op inside a transaction, so we must set it before.
-    conn.execute("PRAGMA foreign_keys = OFF", [])?;
-
-    let tx = conn.transaction()?;
-
-    match current {
-        0 => {
-            tx.execute_batch(MIGRATION_V1)?;
-            tx.execute_batch(MIGRATION_V2)?;
-            tx.execute_batch(MIGRATION_V3)?;
-            tx.execute_batch(MIGRATION_V4)?;
-            tx.execute_batch(MIGRATION_V5)?;
-            tx.execute_batch(MIGRATION_V6)?;
-            tx.execute_batch(MIGRATION_V7)?;
-            tx.execute_batch(MIGRATION_V8)?;
-            tx.execute_batch(MIGRATION_V9)?;
-            tx.execute_batch(MIGRATION_V10)?;
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        1 => {
-            tx.execute_batch(MIGRATION_V2)?;
-            tx.execute_batch(MIGRATION_V3)?;
-            tx.execute_batch(MIGRATION_V4)?;
-            tx.execute_batch(MIGRATION_V5)?;
-            tx.execute_batch(MIGRATION_V6)?;
-            tx.execute_batch(MIGRATION_V7)?;
-            tx.execute_batch(MIGRATION_V8)?;
-            tx.execute_batch(MIGRATION_V9)?;
-            tx.execute_batch(MIGRATION_V10)?;
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        2 => {
-            tx.execute_batch(MIGRATION_V3)?;
-            tx.execute_batch(MIGRATION_V4)?;
-            tx.execute_batch(MIGRATION_V5)?;
-            tx.execute_batch(MIGRATION_V6)?;
-            tx.execute_batch(MIGRATION_V7)?;
-            tx.execute_batch(MIGRATION_V8)?;
-            tx.execute_batch(MIGRATION_V9)?;
-            tx.execute_batch(MIGRATION_V10)?;
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        3 => {
-            tx.execute_batch(MIGRATION_V4)?;
-            tx.execute_batch(MIGRATION_V5)?;
-            tx.execute_batch(MIGRATION_V6)?;
-            tx.execute_batch(MIGRATION_V7)?;
-            tx.execute_batch(MIGRATION_V8)?;
-            tx.execute_batch(MIGRATION_V9)?;
-            tx.execute_batch(MIGRATION_V10)?;
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        4 => {
-            tx.execute_batch(MIGRATION_V5)?;
-            tx.execute_batch(MIGRATION_V6)?;
-            tx.execute_batch(MIGRATION_V7)?;
-            tx.execute_batch(MIGRATION_V8)?;
-            tx.execute_batch(MIGRATION_V9)?;
-            tx.execute_batch(MIGRATION_V10)?;
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        5 => {
-            tx.execute_batch(MIGRATION_V6)?;
-            tx.execute_batch(MIGRATION_V7)?;
-            tx.execute_batch(MIGRATION_V8)?;
-            tx.execute_batch(MIGRATION_V9)?;
-            tx.execute_batch(MIGRATION_V10)?;
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        6 => {
-            tx.execute_batch(MIGRATION_V7)?;
-            tx.execute_batch(MIGRATION_V8)?;
-            tx.execute_batch(MIGRATION_V9)?;
-            tx.execute_batch(MIGRATION_V10)?;
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        7 => {
-            tx.execute_batch(MIGRATION_V8)?;
-            tx.execute_batch(MIGRATION_V9)?;
-            tx.execute_batch(MIGRATION_V10)?;
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        8 => {
-            tx.execute_batch(MIGRATION_V9)?;
-            tx.execute_batch(MIGRATION_V10)?;
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        9 => {
-            tx.execute_batch(MIGRATION_V10)?;
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        10 => {
-            tx.execute_batch(MIGRATION_V11)?;
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        11 => {
-            tx.execute_batch(MIGRATION_V12)?;
-        }
-        12 => {}
-        13 => {}
-        14 => {}
-        v => return Err(anyhow!("unsupported schema version {v}")),
-    }
-
-    if current < 13 {
-        tx.execute_batch(MIGRATION_V13)?;
-    }
-
-    if current < 14 {
-        tx.execute_batch(MIGRATION_V14)?;
-    }
-
-    tx.execute(
-        "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-        params![SCHEMA_VERSION.to_string()],
-    )?;
-
-    tx.commit()?;
-
-    // Re-enable foreign keys after migration
-    conn.execute("PRAGMA foreign_keys = ON", [])?;
-
-    Ok(())
-}
-
-fn insert_conversation(
-    tx: &Transaction<'_>,
-    agent_id: i64,
-    workspace_id: Option<i64>,
-    conv: &Conversation,
-) -> Result<i64> {
-    // Serialize metadata to both JSON (for compatibility) and binary (for efficiency)
-    let metadata_bin = serialize_json_to_msgpack(&conv.metadata_json);
-
-    tx.execute(
-        "INSERT INTO conversations(
-            agent_id, workspace_id, source_id, external_id, title, source_path,
-            started_at, ended_at, approx_tokens, metadata_json, origin_host, metadata_bin
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        params![
-            agent_id,
-            workspace_id,
-            &conv.source_id,
-            conv.external_id,
-            conv.title,
-            path_to_string(&conv.source_path),
-            conv.started_at,
-            conv.ended_at,
-            conv.approx_tokens,
-            serde_json::to_string(&conv.metadata_json)?,
-            conv.origin_host,
-            metadata_bin
-        ],
-    )?;
-    Ok(tx.last_insert_rowid())
-}
-
-fn insert_message(tx: &Transaction<'_>, conversation_id: i64, msg: &Message) -> Result<i64> {
-    // Serialize extra to both JSON (for compatibility) and binary (for efficiency)
-    let extra_bin = serialize_json_to_msgpack(&msg.extra_json);
-
-    tx.execute(
-        "INSERT INTO messages(conversation_id, idx, role, author, created_at, content, extra_json, extra_bin)
-         VALUES(?,?,?,?,?,?,?,?)",
-        params![
-            conversation_id,
-            msg.idx,
-            role_str(&msg.role),
-            msg.author,
-            msg.created_at,
-            msg.content,
-            serde_json::to_string(&msg.extra_json)?,
-            extra_bin
-        ],
-    )?;
-    Ok(tx.last_insert_rowid())
-}
-
-fn insert_snippets(tx: &Transaction<'_>, message_id: i64, snippets: &[Snippet]) -> Result<()> {
-    for snip in snippets {
-        tx.execute(
-            "INSERT INTO snippets(message_id, file_path, start_line, end_line, language, snippet_text)
-             VALUES(?,?,?,?,?,?)",
-            params![
-                message_id,
-                snip.file_path.as_ref().map(path_to_string),
-                snip.start_line,
-                snip.end_line,
-                snip.language,
-                snip.snippet_text,
-            ],
-        )?;
-    }
-    Ok(())
-}
+// [removed: dead rusqlite helper function]
 
 // -------------------------------------------------------------------------
 // FTS5 Batch Insert (P2 Opt 2.1)
@@ -7765,789 +5626,25 @@ impl FtsEntry {
     }
 }
 
-/// Batch insert FTS5 entries for better performance.
-///
-/// Uses multi-value INSERT to reduce transaction overhead and
-/// SQLite statement preparation costs.
-fn batch_insert_fts_messages(tx: &Transaction<'_>, entries: &[FtsEntry]) -> Result<usize> {
-    if entries.is_empty() {
-        return Ok(0);
-    }
+// [removed: dead rusqlite helper function]
 
-    let mut inserted = 0;
+// [removed: dead rusqlite helper function]
 
-    for chunk in entries.chunks(FTS5_BATCH_SIZE) {
-        // Build multi-value INSERT
-        let placeholders: String = chunk
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                let base = i * 7;
-                format!(
-                    "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
-                    base + 1,
-                    base + 2,
-                    base + 3,
-                    base + 4,
-                    base + 5,
-                    base + 6,
-                    base + 7
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+// [removed: dead rusqlite helper function]
 
-        let sql = format!(
-            "INSERT INTO fts_messages(rowid, content, title, agent, workspace, source_path, created_at) VALUES {}",
-            placeholders
-        );
+// [removed: dead rusqlite helper function]
 
-        // Flatten parameters
-        // Capacity: chunk.len() * 7
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 7);
-        for entry in chunk {
-            params_vec.push(entry.message_id.into());
-            params_vec.push(entry.content.clone().into());
-            params_vec.push(entry.title.clone().into());
-            params_vec.push(entry.agent.clone().into());
-            params_vec.push(entry.workspace.clone().into());
-            params_vec.push(entry.source_path.clone().into());
-            params_vec.push(entry.created_at.into());
-        }
+// [removed: dead rusqlite helper function]
 
-        if let Err(e) = tx.execute(&sql, rusqlite::params_from_iter(params_vec)) {
-            let batch_error = e.to_string();
-            tracing::debug!(
-                batch_size = chunk.len(),
-                error = %batch_error,
-                "fts_batch_insert_failed"
-            );
-            // Fall back to per-row inserts for compatibility, but keep the
-            // overall write transactional: if any FTS row still fails, abort
-            // so canonical rows and search index rows cannot diverge.
-            for entry in chunk {
-                tx.execute(
-                    "INSERT INTO fts_messages(rowid, content, title, agent, workspace, source_path, created_at)
-                     VALUES(?,?,?,?,?,?,?)",
-                    params![
-                        entry.message_id,
-                        entry.content,
-                        entry.title,
-                        entry.agent,
-                        entry.workspace,
-                        entry.source_path,
-                        entry.created_at
-                    ],
-                )
-                .with_context(|| {
-                    format!(
-                        "inserting FTS row for message {} after batch failure ({batch_error})",
-                        entry.message_id
-                    )
-                })?;
-                inserted += 1;
-            }
-        } else {
-            inserted += chunk.len();
-        }
-    }
+// [removed: dead rusqlite helper function]
 
-    Ok(inserted)
-}
+// [removed: dead rusqlite helper function]
 
-/// Insert or update a single conversation within an existing transaction.
-/// Used by insert_conversations_batched to process multiple conversations efficiently.
-/// Collects FTS entries into the provided vector for batch insertion.
-fn insert_conversation_in_tx_batched(
-    tx: &Transaction<'_>,
-    agent_id: i64,
-    workspace_id: Option<i64>,
-    conv: &Conversation,
-    fts_entries: &mut Vec<FtsEntry>,
-) -> Result<(InsertOutcome, StatsDelta)> {
-    // Check for existing conversation with same (source_id, agent_id, external_id)
-    if let Some(ext) = &conv.external_id {
-        let existing: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM conversations WHERE source_id = ? AND agent_id = ? AND external_id = ?",
-                params![&conv.source_id, agent_id, ext],
-                |row| row.get(0),
-            )
-            .optional()?;
+// [removed: dead rusqlite helper function]
 
-        if let Some(conversation_id) = existing {
-            // Append messages to existing conversation
-            let max_idx: Option<i64> = tx.query_row(
-                "SELECT MAX(idx) FROM messages WHERE conversation_id = ?",
-                params![conversation_id],
-                |row| row.get::<_, Option<i64>>(0),
-            )?;
-            let cutoff = max_idx.unwrap_or(-1);
+// [removed: dead rusqlite helper function]
 
-            let mut inserted_indices = Vec::new();
-            let mut new_chars: i64 = 0;
-            for msg in &conv.messages {
-                if msg.idx <= cutoff {
-                    continue;
-                }
-                let msg_id = insert_message(tx, conversation_id, msg)?;
-                insert_snippets(tx, msg_id, &msg.snippets)?;
-                // Collect FTS entry instead of inserting immediately
-                fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
-                inserted_indices.push(msg.idx);
-                new_chars += msg.content.len() as i64;
-            }
-
-            // Update metadata fields and ended_at
-            if !inserted_indices.is_empty() {
-                // Update ended_at
-                if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
-                    tx.execute(
-                        "UPDATE conversations SET ended_at = MAX(IFNULL(ended_at, 0), ?) WHERE id = ?",
-                        params![last_ts, conversation_id],
-                    )?;
-                }
-
-                // Update metadata, approx_tokens, etc.
-                // We overwrite with new metadata assuming the scanner produces complete/updated metadata.
-                let metadata_bin = serialize_json_to_msgpack(&conv.metadata_json);
-                tx.execute(
-                    "UPDATE conversations SET 
-                        title = COALESCE(?, title),
-                        approx_tokens = COALESCE(?, approx_tokens),
-                        metadata_json = ?,
-                        metadata_bin = ?,
-                        origin_host = COALESCE(?, origin_host)
-                     WHERE id = ?",
-                    params![
-                        conv.title,
-                        conv.approx_tokens,
-                        serde_json::to_string(&conv.metadata_json)?,
-                        metadata_bin,
-                        conv.origin_host,
-                        conversation_id
-                    ],
-                )?;
-
-                // Note: Daily stats update skipped here to prevent double counting.
-                // The caller (ingest_batch) handles stats aggregation efficiently.
-            }
-
-            let delta = StatsDelta {
-                session_count_delta: 0,
-                message_count_delta: inserted_indices.len() as i64,
-                total_chars_delta: new_chars,
-            };
-
-            return Ok((
-                InsertOutcome {
-                    conversation_id,
-                    inserted_indices,
-                },
-                delta,
-            ));
-        }
-    }
-
-    // Insert new conversation
-    let conv_id = insert_conversation(tx, agent_id, workspace_id, conv)?;
-    let mut total_chars: i64 = 0;
-    for msg in &conv.messages {
-        let msg_id = insert_message(tx, conv_id, msg)?;
-        insert_snippets(tx, msg_id, &msg.snippets)?;
-        // Collect FTS entry instead of inserting immediately
-        fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
-        total_chars += msg.content.len() as i64;
-    }
-
-    // Note: Daily stats update skipped here to prevent double counting.
-    // The caller (ingest_batch) handles stats aggregation efficiently.
-
-    let delta = StatsDelta {
-        session_count_delta: 1,
-        message_count_delta: conv.messages.len() as i64,
-        total_chars_delta: total_chars,
-    };
-
-    Ok((
-        InsertOutcome {
-            conversation_id: conv_id,
-            inserted_indices: conv.messages.iter().map(|m| m.idx).collect(),
-        },
-        delta,
-    ))
-}
-
-/// Upsert daily_stats deltas inside an existing transaction.
-///
-/// This mirrors `SqliteStorage::update_daily_stats_batched` but avoids starting a
-/// nested transaction so callers can keep all writes (conversations/messages/fts/stats)
-/// atomic.
-fn update_daily_stats_batched_in_tx(
-    tx: &Transaction<'_>,
-    entries: &[(i64, String, String, StatsDelta)],
-) -> Result<usize> {
-    if entries.is_empty() {
-        return Ok(0);
-    }
-
-    let now = SqliteStorage::now_millis();
-    const BATCH_SIZE: usize = 100;
-    let mut total_affected = 0;
-
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?, ?, ?, ?, ?, ?, ?)")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
-            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-             VALUES {}
-             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
-                 session_count = session_count + excluded.session_count,
-                 message_count = message_count + excluded.message_count,
-                 total_chars = total_chars + excluded.total_chars,
-                 last_updated = excluded.last_updated",
-            placeholders
-        );
-
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 7);
-        for (day_id, agent, source, delta) in chunk {
-            params_vec.push((*day_id).into());
-            params_vec.push(agent.clone().into());
-            params_vec.push(source.clone().into());
-            params_vec.push(delta.session_count_delta.into());
-            params_vec.push(delta.message_count_delta.into());
-            params_vec.push(delta.total_chars_delta.into());
-            params_vec.push(now.into());
-        }
-
-        total_affected += tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
-    }
-
-    Ok(total_affected)
-}
-
-// -------------------------------------------------------------------------
-// Token Usage Batch Insert
-// -------------------------------------------------------------------------
-
-/// Batch insert token_usage rows inside an existing transaction.
-fn insert_token_usage_batched_in_tx(
-    tx: &Transaction<'_>,
-    entries: &[TokenUsageEntry],
-) -> Result<usize> {
-    if entries.is_empty() {
-        return Ok(0);
-    }
-
-    // 24 columns per row; SQLite limit ~999 params → batch ~41 rows, use 35 for safety
-    const BATCH_SIZE: usize = 35;
-    let mut total_inserted = 0;
-
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
-            "INSERT OR IGNORE INTO token_usage (
-                message_id, conversation_id, agent_id, workspace_id, source_id,
-                timestamp_ms, day_id,
-                model_name, model_family, model_tier, service_tier, provider,
-                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                thinking_tokens, total_tokens, estimated_cost_usd,
-                role, content_chars, has_tool_calls, tool_call_count, data_source
-            )
-            VALUES {}",
-            placeholders
-        );
-
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 24);
-        for e in chunk {
-            params_vec.push(e.message_id.into());
-            params_vec.push(e.conversation_id.into());
-            params_vec.push(e.agent_id.into());
-            params_vec.push(
-                e.workspace_id
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(e.source_id.clone().into());
-            params_vec.push(e.timestamp_ms.into());
-            params_vec.push(e.day_id.into());
-            params_vec.push(
-                e.model_name
-                    .clone()
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.model_family
-                    .clone()
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.model_tier
-                    .clone()
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.service_tier
-                    .clone()
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.provider
-                    .clone()
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.input_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.output_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.cache_read_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.cache_creation_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.thinking_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.total_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.estimated_cost_usd
-                    .map(rusqlite::types::Value::Real)
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(e.role.clone().into());
-            params_vec.push(e.content_chars.into());
-            params_vec.push((e.has_tool_calls as i64).into());
-            params_vec.push((e.tool_call_count as i64).into());
-            params_vec.push(e.data_source.clone().into());
-        }
-
-        total_inserted += tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
-    }
-
-    Ok(total_inserted)
-}
-
-/// Batch upsert token_daily_stats deltas inside an existing transaction.
-fn update_token_daily_stats_batched_in_tx(
-    tx: &Transaction<'_>,
-    entries: &[(i64, String, String, String, TokenStatsDelta)],
-) -> Result<usize> {
-    if entries.is_empty() {
-        return Ok(0);
-    }
-
-    let now = SqliteStorage::now_millis();
-    const BATCH_SIZE: usize = 25; // 19 params per row → ~52 rows max, use 25 for safety
-
-    let mut total_affected = 0;
-
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
-            "INSERT INTO token_daily_stats (
-                day_id, agent_slug, source_id, model_family,
-                api_call_count, user_message_count, assistant_message_count, tool_message_count,
-                total_input_tokens, total_output_tokens, total_cache_read_tokens,
-                total_cache_creation_tokens, total_thinking_tokens, grand_total_tokens,
-                total_content_chars, total_tool_calls, estimated_cost_usd, session_count,
-                last_updated
-            )
-            VALUES {}
-            ON CONFLICT(day_id, agent_slug, source_id, model_family) DO UPDATE SET
-                api_call_count = api_call_count + excluded.api_call_count,
-                user_message_count = user_message_count + excluded.user_message_count,
-                assistant_message_count = assistant_message_count + excluded.assistant_message_count,
-                tool_message_count = tool_message_count + excluded.tool_message_count,
-                total_input_tokens = total_input_tokens + excluded.total_input_tokens,
-                total_output_tokens = total_output_tokens + excluded.total_output_tokens,
-                total_cache_read_tokens = total_cache_read_tokens + excluded.total_cache_read_tokens,
-                total_cache_creation_tokens = total_cache_creation_tokens + excluded.total_cache_creation_tokens,
-                total_thinking_tokens = total_thinking_tokens + excluded.total_thinking_tokens,
-                grand_total_tokens = grand_total_tokens + excluded.grand_total_tokens,
-                total_content_chars = total_content_chars + excluded.total_content_chars,
-                total_tool_calls = total_tool_calls + excluded.total_tool_calls,
-                estimated_cost_usd = estimated_cost_usd + excluded.estimated_cost_usd,
-                session_count = session_count + excluded.session_count,
-                last_updated = excluded.last_updated",
-            placeholders
-        );
-
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 19);
-        for (day_id, agent, source, model, delta) in chunk {
-            params_vec.push((*day_id).into());
-            params_vec.push(agent.clone().into());
-            params_vec.push(source.clone().into());
-            params_vec.push(model.clone().into());
-            params_vec.push(delta.api_call_count.into());
-            params_vec.push(delta.user_message_count.into());
-            params_vec.push(delta.assistant_message_count.into());
-            params_vec.push(delta.tool_message_count.into());
-            params_vec.push(delta.total_input_tokens.into());
-            params_vec.push(delta.total_output_tokens.into());
-            params_vec.push(delta.total_cache_read_tokens.into());
-            params_vec.push(delta.total_cache_creation_tokens.into());
-            params_vec.push(delta.total_thinking_tokens.into());
-            params_vec.push(delta.grand_total_tokens.into());
-            params_vec.push(delta.total_content_chars.into());
-            params_vec.push(delta.total_tool_calls.into());
-            params_vec.push(rusqlite::types::Value::Real(delta.estimated_cost_usd));
-            params_vec.push(delta.session_count.into());
-            params_vec.push(now.into());
-        }
-
-        total_affected += tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
-    }
-
-    Ok(total_affected)
-}
-
-/// Batch insert message_metrics rows inside an existing transaction.
-/// Uses INSERT OR IGNORE (message_id is PK, skip duplicates on re-index).
-fn insert_message_metrics_batched_in_tx(
-    tx: &Transaction<'_>,
-    entries: &[MessageMetricsEntry],
-) -> Result<usize> {
-    if entries.is_empty() {
-        return Ok(0);
-    }
-
-    // 24 columns per row → ~41 rows max, use 30 for safety
-    const BATCH_SIZE: usize = 30;
-    let mut total_inserted = 0;
-
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
-            "INSERT OR IGNORE INTO message_metrics (
-                message_id, created_at_ms, hour_id, day_id,
-                agent_slug, workspace_id, source_id, role,
-                content_chars, content_tokens_est,
-                model_name, model_family, model_tier, provider,
-                api_input_tokens, api_output_tokens, api_cache_read_tokens,
-                api_cache_creation_tokens, api_thinking_tokens,
-                api_service_tier, api_data_source,
-                tool_call_count, has_tool_calls, has_plan
-            )
-            VALUES {}",
-            placeholders
-        );
-
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 24);
-        for e in chunk {
-            params_vec.push(e.message_id.into());
-            params_vec.push(e.created_at_ms.into());
-            params_vec.push(e.hour_id.into());
-            params_vec.push(e.day_id.into());
-            params_vec.push(e.agent_slug.clone().into());
-            params_vec.push(e.workspace_id.into());
-            params_vec.push(e.source_id.clone().into());
-            params_vec.push(e.role.clone().into());
-            params_vec.push(e.content_chars.into());
-            params_vec.push(e.content_tokens_est.into());
-            params_vec.push(
-                e.model_name
-                    .clone()
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(e.model_family.clone().into());
-            params_vec.push(e.model_tier.clone().into());
-            params_vec.push(e.provider.clone().into());
-            params_vec.push(
-                e.api_input_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.api_output_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.api_cache_read_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.api_cache_creation_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.api_thinking_tokens
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(
-                e.api_service_tier
-                    .clone()
-                    .map(|v| v.into())
-                    .unwrap_or(rusqlite::types::Value::Null),
-            );
-            params_vec.push(e.api_data_source.clone().into());
-            params_vec.push(e.tool_call_count.into());
-            params_vec.push((e.has_tool_calls as i64).into());
-            params_vec.push((e.has_plan as i64).into());
-        }
-
-        total_inserted += tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
-    }
-
-    Ok(total_inserted)
-}
-
-/// Flush AnalyticsRollupAggregator deltas to usage_hourly and usage_daily tables.
-/// Uses INSERT...ON CONFLICT DO UPDATE for additive rollup semantics.
-fn flush_analytics_rollups_in_tx(
-    tx: &Transaction<'_>,
-    agg: &AnalyticsRollupAggregator,
-) -> Result<(usize, usize, usize)> {
-    let now = SqliteStorage::now_millis();
-
-    let hourly_affected = flush_rollup_table(tx, "usage_hourly", "hour_id", &agg.hourly, now)?;
-    let daily_affected = flush_rollup_table(tx, "usage_daily", "day_id", &agg.daily, now)?;
-    let models_daily_affected = flush_model_daily_rollup_table(tx, &agg.models_daily, now)?;
-
-    Ok((hourly_affected, daily_affected, models_daily_affected))
-}
-
-/// Flush one rollup table (shared logic for hourly + daily).
-fn flush_rollup_table(
-    tx: &Transaction<'_>,
-    table: &str,
-    bucket_col: &str,
-    deltas: &HashMap<(i64, String, i64, String), UsageRollupDelta>,
-    now: i64,
-) -> Result<usize> {
-    if deltas.is_empty() {
-        return Ok(0);
-    }
-
-    // 22 params per row → ~44 rows max, use 30 for safety
-    const BATCH_SIZE: usize = 30;
-    let mut total_affected = 0;
-
-    let entries: Vec<_> = deltas.iter().collect();
-
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
-            "INSERT INTO {table} (
-                {bucket_col}, agent_slug, workspace_id, source_id,
-                message_count, user_message_count, assistant_message_count,
-                tool_call_count, plan_message_count, plan_content_tokens_est_total,
-                plan_api_tokens_total, api_coverage_message_count,
-                content_tokens_est_total, content_tokens_est_user, content_tokens_est_assistant,
-                api_tokens_total, api_input_tokens_total, api_output_tokens_total,
-                api_cache_read_tokens_total, api_cache_creation_tokens_total,
-                api_thinking_tokens_total, last_updated
-            )
-            VALUES {placeholders}
-            ON CONFLICT({bucket_col}, agent_slug, workspace_id, source_id) DO UPDATE SET
-                message_count = message_count + excluded.message_count,
-                user_message_count = user_message_count + excluded.user_message_count,
-                assistant_message_count = assistant_message_count + excluded.assistant_message_count,
-                tool_call_count = tool_call_count + excluded.tool_call_count,
-                plan_message_count = plan_message_count + excluded.plan_message_count,
-                plan_content_tokens_est_total = plan_content_tokens_est_total + excluded.plan_content_tokens_est_total,
-                plan_api_tokens_total = plan_api_tokens_total + excluded.plan_api_tokens_total,
-                api_coverage_message_count = api_coverage_message_count + excluded.api_coverage_message_count,
-                content_tokens_est_total = content_tokens_est_total + excluded.content_tokens_est_total,
-                content_tokens_est_user = content_tokens_est_user + excluded.content_tokens_est_user,
-                content_tokens_est_assistant = content_tokens_est_assistant + excluded.content_tokens_est_assistant,
-                api_tokens_total = api_tokens_total + excluded.api_tokens_total,
-                api_input_tokens_total = api_input_tokens_total + excluded.api_input_tokens_total,
-                api_output_tokens_total = api_output_tokens_total + excluded.api_output_tokens_total,
-                api_cache_read_tokens_total = api_cache_read_tokens_total + excluded.api_cache_read_tokens_total,
-                api_cache_creation_tokens_total = api_cache_creation_tokens_total + excluded.api_cache_creation_tokens_total,
-                api_thinking_tokens_total = api_thinking_tokens_total + excluded.api_thinking_tokens_total,
-                last_updated = excluded.last_updated"
-        );
-
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 22);
-        for &((bucket_id, agent, workspace_id, source), d) in chunk {
-            params_vec.push((*bucket_id).into());
-            params_vec.push(agent.clone().into());
-            params_vec.push((*workspace_id).into());
-            params_vec.push(source.clone().into());
-            params_vec.push(d.message_count.into());
-            params_vec.push(d.user_message_count.into());
-            params_vec.push(d.assistant_message_count.into());
-            params_vec.push(d.tool_call_count.into());
-            params_vec.push(d.plan_message_count.into());
-            params_vec.push(d.plan_content_tokens_est_total.into());
-            params_vec.push(d.plan_api_tokens_total.into());
-            params_vec.push(d.api_coverage_message_count.into());
-            params_vec.push(d.content_tokens_est_total.into());
-            params_vec.push(d.content_tokens_est_user.into());
-            params_vec.push(d.content_tokens_est_assistant.into());
-            params_vec.push(d.api_tokens_total.into());
-            params_vec.push(d.api_input_tokens_total.into());
-            params_vec.push(d.api_output_tokens_total.into());
-            params_vec.push(d.api_cache_read_tokens_total.into());
-            params_vec.push(d.api_cache_creation_tokens_total.into());
-            params_vec.push(d.api_thinking_tokens_total.into());
-            params_vec.push(now.into());
-        }
-
-        total_affected += tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
-    }
-
-    Ok(total_affected)
-}
-
-fn flush_model_daily_rollup_table(
-    tx: &Transaction<'_>,
-    deltas: &HashMap<(i64, String, i64, String, String, String), UsageRollupDelta>,
-    now: i64,
-) -> Result<usize> {
-    if deltas.is_empty() {
-        return Ok(0);
-    }
-
-    // 22 params per row, keep conservative batch size.
-    const BATCH_SIZE: usize = 25;
-    let mut total_affected = 0;
-
-    let entries: Vec<_> = deltas.iter().collect();
-
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
-            "INSERT INTO usage_models_daily (
-                day_id, agent_slug, workspace_id, source_id, model_family, model_tier,
-                message_count, user_message_count, assistant_message_count,
-                tool_call_count, plan_message_count, api_coverage_message_count,
-                content_tokens_est_total, content_tokens_est_user, content_tokens_est_assistant,
-                api_tokens_total, api_input_tokens_total, api_output_tokens_total,
-                api_cache_read_tokens_total, api_cache_creation_tokens_total,
-                api_thinking_tokens_total, last_updated
-            )
-            VALUES {placeholders}
-            ON CONFLICT(day_id, agent_slug, workspace_id, source_id, model_family, model_tier) DO UPDATE SET
-                message_count = message_count + excluded.message_count,
-                user_message_count = user_message_count + excluded.user_message_count,
-                assistant_message_count = assistant_message_count + excluded.assistant_message_count,
-                tool_call_count = tool_call_count + excluded.tool_call_count,
-                plan_message_count = plan_message_count + excluded.plan_message_count,
-                api_coverage_message_count = api_coverage_message_count + excluded.api_coverage_message_count,
-                content_tokens_est_total = content_tokens_est_total + excluded.content_tokens_est_total,
-                content_tokens_est_user = content_tokens_est_user + excluded.content_tokens_est_user,
-                content_tokens_est_assistant = content_tokens_est_assistant + excluded.content_tokens_est_assistant,
-                api_tokens_total = api_tokens_total + excluded.api_tokens_total,
-                api_input_tokens_total = api_input_tokens_total + excluded.api_input_tokens_total,
-                api_output_tokens_total = api_output_tokens_total + excluded.api_output_tokens_total,
-                api_cache_read_tokens_total = api_cache_read_tokens_total + excluded.api_cache_read_tokens_total,
-                api_cache_creation_tokens_total = api_cache_creation_tokens_total + excluded.api_cache_creation_tokens_total,
-                api_thinking_tokens_total = api_thinking_tokens_total + excluded.api_thinking_tokens_total,
-                last_updated = excluded.last_updated"
-        );
-
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 22);
-        for &((day_id, agent, workspace_id, source, model_family, model_tier), d) in chunk {
-            params_vec.push((*day_id).into());
-            params_vec.push(agent.clone().into());
-            params_vec.push((*workspace_id).into());
-            params_vec.push(source.clone().into());
-            params_vec.push(model_family.clone().into());
-            params_vec.push(model_tier.clone().into());
-            params_vec.push(d.message_count.into());
-            params_vec.push(d.user_message_count.into());
-            params_vec.push(d.assistant_message_count.into());
-            params_vec.push(d.tool_call_count.into());
-            params_vec.push(d.plan_message_count.into());
-            params_vec.push(d.api_coverage_message_count.into());
-            params_vec.push(d.content_tokens_est_total.into());
-            params_vec.push(d.content_tokens_est_user.into());
-            params_vec.push(d.content_tokens_est_assistant.into());
-            params_vec.push(d.api_tokens_total.into());
-            params_vec.push(d.api_input_tokens_total.into());
-            params_vec.push(d.api_output_tokens_total.into());
-            params_vec.push(d.api_cache_read_tokens_total.into());
-            params_vec.push(d.api_cache_creation_tokens_total.into());
-            params_vec.push(d.api_thinking_tokens_total.into());
-            params_vec.push(now.into());
-        }
-
-        total_affected += tx.execute(&sql, rusqlite::params_from_iter(params_vec))?;
-    }
-
-    Ok(total_affected)
-}
-
-/// Update conversation-level token summary columns from token_usage data.
-fn update_conversation_token_summaries_in_tx(
-    tx: &Transaction<'_>,
-    conversation_id: i64,
-) -> Result<()> {
-    tx.execute(
-        "UPDATE conversations SET
-            total_input_tokens = (SELECT SUM(input_tokens) FROM token_usage WHERE conversation_id = ?1),
-            total_output_tokens = (SELECT SUM(output_tokens) FROM token_usage WHERE conversation_id = ?1),
-            total_cache_read_tokens = (SELECT SUM(cache_read_tokens) FROM token_usage WHERE conversation_id = ?1),
-            total_cache_creation_tokens = (SELECT SUM(cache_creation_tokens) FROM token_usage WHERE conversation_id = ?1),
-            grand_total_tokens = (SELECT SUM(total_tokens) FROM token_usage WHERE conversation_id = ?1),
-            estimated_cost_usd = (SELECT SUM(estimated_cost_usd) FROM token_usage WHERE conversation_id = ?1),
-            primary_model = (SELECT model_name FROM token_usage WHERE conversation_id = ?1
-                             AND model_name IS NOT NULL
-                             GROUP BY model_name ORDER BY COUNT(*) DESC LIMIT 1),
-            api_call_count = (SELECT COUNT(*) FROM token_usage WHERE conversation_id = ?1
-                              AND data_source = 'api'),
-            tool_call_count = (SELECT SUM(tool_call_count) FROM token_usage WHERE conversation_id = ?1),
-            user_message_count = (SELECT COUNT(*) FROM token_usage WHERE conversation_id = ?1
-                                  AND role = 'user'),
-            assistant_message_count = (SELECT COUNT(*) FROM token_usage WHERE conversation_id = ?1
-                                       AND role IN ('assistant', 'agent'))
-         WHERE id = ?1",
-        params![conversation_id],
-    )?;
-    Ok(())
-}
+// [removed: dead rusqlite helper function]
 
 fn path_to_string<P: AsRef<Path>>(p: P) -> String {
     p.as_ref().to_string_lossy().into_owned()
@@ -8794,7 +5891,7 @@ mod tests {
             let mut stmt = conn
                 .prepare(&format!("PRAGMA table_info({})", table))
                 .unwrap();
-            stmt.query_map([], |row| row.get::<_, String>(1))
+            stmt.query_map([], |row| row.get_typed::<String>(1))
                 .unwrap()
                 .filter_map(|r| r.ok())
                 .collect()
@@ -8805,7 +5902,7 @@ mod tests {
             let mut stmt = conn
                 .prepare(&format!("PRAGMA index_list({})", table))
                 .unwrap();
-            stmt.query_map([], |row| row.get::<_, String>(1))
+            stmt.query_map([], |row| row.get_typed::<String>(1))
                 .unwrap()
                 .filter_map(|r| r.ok())
                 .collect()
@@ -9010,7 +6107,7 @@ mod tests {
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('message_metrics', 'usage_hourly', 'usage_daily', 'usage_models_daily')",
                 [],
-                |row| row.get::<_, i64>(0),
+                |row| row.get_typed::<i64>(0),
             )
             .unwrap();
         assert_eq!(count, 4, "All 4 analytics tables should exist");
@@ -9116,8 +6213,8 @@ mod tests {
 
         // Verify message_metrics rows
         let mm_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM message_metrics", [], |row| {
-                row.get::<_, i64>(0)
+            .query_row_map("SELECT COUNT(*) FROM message_metrics", &[], |row| {
+                row.get_typed::<i64>(0)
             })
             .unwrap();
         assert_eq!(mm_count, 3, "Should have 3 message_metrics rows");
@@ -9130,15 +6227,15 @@ mod tests {
         let rows: Vec<(i64, i64, String, i64, i64, String, String, String, String)> = stmt
             .query_map([], |row| {
                 Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
+                    row.get_typed(0)?,
+                    row.get_typed(1)?,
+                    row.get_typed(2)?,
+                    row.get_typed(3)?,
+                    row.get_typed(4)?,
+                    row.get_typed(5)?,
+                    row.get_typed(6)?,
+                    row.get_typed(7)?,
+                    row.get_typed(8)?,
                 ))
             })
             .unwrap()
@@ -9186,16 +6283,16 @@ mod tests {
                 "SELECT message_count, user_message_count, assistant_message_count, plan_message_count,
                         plan_content_tokens_est_total, plan_api_tokens_total, api_coverage_message_count
                  FROM usage_hourly WHERE hour_id = ?",
-                params![expected_hour],
+                fparams![expected_hour],
                 |row| {
                     Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
+                        row.get_typed(0)?,
+                        row.get_typed(1)?,
+                        row.get_typed(2)?,
+                        row.get_typed(3)?,
+                        row.get_typed(4)?,
+                        row.get_typed(5)?,
+                        row.get_typed(6)?,
                     ))
                 },
             )
@@ -9221,8 +6318,8 @@ mod tests {
         let (ud_msg, ud_api_cov): (i64, i64) = conn
             .query_row(
                 "SELECT message_count, api_coverage_message_count FROM usage_daily WHERE day_id = ?",
-                params![expected_day],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                fparams![expected_day],
+                |row| Ok((row.get_typed(0)?, row.get_typed(1)?)),
             )
             .unwrap();
         assert_eq!(ud_msg, 3, "Daily rollup should match hourly");
@@ -9235,8 +6332,8 @@ mod tests {
         let api_only_input: i64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(api_input_tokens), 0) FROM message_metrics WHERE day_id = ? AND api_data_source = 'api'",
-                params![expected_day],
-                |row| row.get::<_, i64>(0),
+                fparams![expected_day],
+                |row| row.get_typed::<i64>(0),
             )
             .unwrap();
         assert_eq!(
@@ -9246,39 +6343,37 @@ mod tests {
 
         // Verify rollups match summed message_metrics
         let mm_total_content_est: i64 = conn
-            .query_row(
-                "SELECT SUM(content_tokens_est) FROM message_metrics WHERE day_id = ?",
-                params![expected_day],
-                |row| row.get::<_, i64>(0),
+            .query_row_map(
+                "SELECT SUM(content_tokens_est) FROM message_metrics WHERE day_id = ?", fparams![expected_day],
+                |row| row.get_typed::<i64>(0),
             )
             .unwrap();
         let mm_plan_content_est: i64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(content_tokens_est), 0) FROM message_metrics WHERE day_id = ? AND has_plan = 1",
-                params![expected_day],
-                |row| row.get::<_, i64>(0),
+                fparams![expected_day],
+                |row| row.get_typed::<i64>(0),
             )
             .unwrap();
         let mm_plan_api_total: i64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(COALESCE(api_input_tokens, 0) + COALESCE(api_output_tokens, 0) + COALESCE(api_cache_read_tokens, 0) + COALESCE(api_cache_creation_tokens, 0) + COALESCE(api_thinking_tokens, 0)), 0)
                  FROM message_metrics WHERE day_id = ? AND has_plan = 1 AND api_data_source = 'api'",
-                params![expected_day],
-                |row| row.get::<_, i64>(0),
+                fparams![expected_day],
+                |row| row.get_typed::<i64>(0),
             )
             .unwrap();
         let ud_content_est: i64 = conn
-            .query_row(
-                "SELECT content_tokens_est_total FROM usage_daily WHERE day_id = ?",
-                params![expected_day],
-                |row| row.get::<_, i64>(0),
+            .query_row_map(
+                "SELECT content_tokens_est_total FROM usage_daily WHERE day_id = ?", fparams![expected_day],
+                |row| row.get_typed::<i64>(0),
             )
             .unwrap();
         let (ud_plan_content_est, ud_plan_api_total): (i64, i64) = conn
             .query_row(
                 "SELECT plan_content_tokens_est_total, plan_api_tokens_total FROM usage_daily WHERE day_id = ?",
-                params![expected_day],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                fparams![expected_day],
+                |row| Ok((row.get_typed(0)?, row.get_typed(1)?)),
             )
             .unwrap();
         assert_eq!(
@@ -9306,8 +6401,8 @@ mod tests {
                 "SELECT message_count, user_message_count, assistant_message_count, api_tokens_total, api_coverage_message_count
                  FROM usage_models_daily
                  WHERE day_id = ? AND model_family = 'claude' AND model_tier = 'opus'",
-                params![expected_day],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                fparams![expected_day],
+                |row| Ok((row.get_typed(0)?, row.get_typed(1)?, row.get_typed(2)?, row.get_typed(3)?, row.get_typed(4)?)),
             )
             .unwrap();
         assert_eq!(claude_msg, 1);
@@ -9317,11 +6412,10 @@ mod tests {
         assert_eq!(claude_api_cov, 1);
 
         let unknown_msg: i64 = conn
-            .query_row(
+            .query_row_map(
                 "SELECT message_count FROM usage_models_daily
-                 WHERE day_id = ? AND model_family = 'unknown' AND model_tier = 'unknown'",
-                params![expected_day],
-                |row| row.get(0),
+                 WHERE day_id = ? AND model_family = 'unknown' AND model_tier = 'unknown'", fparams![expected_day],
+                |row| row.get_typed(0),
             )
             .unwrap();
         assert_eq!(
@@ -9571,24 +6665,24 @@ mod tests {
         // Save original analytics state
         let conn = storage.raw();
         let orig_mm: i64 = conn
-            .query_row("SELECT COUNT(*) FROM message_metrics", [], |row| row.get(0))
+            .query_row_map("SELECT COUNT(*) FROM message_metrics", &[], |row| row.get_typed(0))
             .unwrap();
         let orig_hourly: i64 = conn
-            .query_row("SELECT COUNT(*) FROM usage_hourly", [], |row| row.get(0))
+            .query_row_map("SELECT COUNT(*) FROM usage_hourly", &[], |row| row.get_typed(0))
             .unwrap();
         let orig_daily: i64 = conn
-            .query_row("SELECT COUNT(*) FROM usage_daily", [], |row| row.get(0))
+            .query_row_map("SELECT COUNT(*) FROM usage_daily", &[], |row| row.get_typed(0))
             .unwrap();
         let orig_models_daily: i64 = conn
-            .query_row("SELECT COUNT(*) FROM usage_models_daily", [], |row| {
-                row.get(0)
+            .query_row_map("SELECT COUNT(*) FROM usage_models_daily", &[], |row| {
+                row.get_typed(0)
             })
             .unwrap();
         let orig_api_input: i64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(api_input_tokens), 0) FROM message_metrics WHERE api_data_source = 'api'",
                 [],
-                |row| row.get(0),
+                |row| row.get_typed(0),
             )
             .unwrap();
 
@@ -9605,7 +6699,7 @@ mod tests {
 
         // Verify they're empty
         let zero: i64 = conn
-            .query_row("SELECT COUNT(*) FROM message_metrics", [], |row| row.get(0))
+            .query_row_map("SELECT COUNT(*) FROM message_metrics", &[], |row| row.get_typed(0))
             .unwrap();
         assert_eq!(zero, 0);
 
@@ -9624,7 +6718,7 @@ mod tests {
         // Verify rebuilt data matches
         let conn = storage.raw();
         let rebuilt_mm: i64 = conn
-            .query_row("SELECT COUNT(*) FROM message_metrics", [], |row| row.get(0))
+            .query_row_map("SELECT COUNT(*) FROM message_metrics", &[], |row| row.get_typed(0))
             .unwrap();
         assert_eq!(
             rebuilt_mm, orig_mm,
@@ -9632,7 +6726,7 @@ mod tests {
         );
 
         let rebuilt_hourly: i64 = conn
-            .query_row("SELECT COUNT(*) FROM usage_hourly", [], |row| row.get(0))
+            .query_row_map("SELECT COUNT(*) FROM usage_hourly", &[], |row| row.get_typed(0))
             .unwrap();
         assert_eq!(
             rebuilt_hourly, orig_hourly,
@@ -9640,13 +6734,13 @@ mod tests {
         );
 
         let rebuilt_daily: i64 = conn
-            .query_row("SELECT COUNT(*) FROM usage_daily", [], |row| row.get(0))
+            .query_row_map("SELECT COUNT(*) FROM usage_daily", &[], |row| row.get_typed(0))
             .unwrap();
         assert_eq!(rebuilt_daily, orig_daily, "Rebuilt daily rows should match");
 
         let rebuilt_models_daily: i64 = conn
-            .query_row("SELECT COUNT(*) FROM usage_models_daily", [], |row| {
-                row.get(0)
+            .query_row_map("SELECT COUNT(*) FROM usage_models_daily", &[], |row| {
+                row.get_typed(0)
             })
             .unwrap();
         assert_eq!(
@@ -9659,7 +6753,7 @@ mod tests {
             .query_row(
                 "SELECT COALESCE(SUM(api_input_tokens), 0) FROM message_metrics WHERE api_data_source = 'api'",
                 [],
-                |row| row.get(0),
+                |row| row.get_typed(0),
             )
             .unwrap();
         assert_eq!(
@@ -9680,15 +6774,15 @@ mod tests {
                 "SELECT message_count, user_message_count, assistant_message_count, plan_message_count,
                         plan_content_tokens_est_total, plan_api_tokens_total
                  FROM usage_hourly WHERE hour_id = ?",
-                params![expected_hour],
+                fparams![expected_hour],
                 |row| {
                     Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
+                        row.get_typed(0)?,
+                        row.get_typed(1)?,
+                        row.get_typed(2)?,
+                        row.get_typed(3)?,
+                        row.get_typed(4)?,
+                        row.get_typed(5)?,
                     ))
                 },
             )
@@ -9701,10 +6795,9 @@ mod tests {
         assert!(uh_plan_api > 0);
 
         let ud_msg: i64 = conn
-            .query_row(
-                "SELECT message_count FROM usage_daily WHERE day_id = ?",
-                params![expected_day],
-                |row| row.get(0),
+            .query_row_map(
+                "SELECT message_count FROM usage_daily WHERE day_id = ?", fparams![expected_day],
+                |row| row.get_typed(0),
             )
             .unwrap();
         assert_eq!(ud_msg, 3);
@@ -10055,9 +7148,8 @@ mod tests {
         // Verify metadata_bin column exists
         let has_metadata_bin: bool = storage
             .raw()
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'metadata_bin'",
-                [],
+            .query_row_map(
+                "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'metadata_bin'", &[],
                 |r| r.get::<_, i64>(0).map(|c| c > 0),
             )
             .unwrap();
@@ -10069,9 +7161,8 @@ mod tests {
         // Verify extra_bin column exists
         let has_extra_bin: bool = storage
             .raw()
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'extra_bin'",
-                [],
+            .query_row_map(
+                "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'extra_bin'", &[],
                 |r| r.get::<_, i64>(0).map(|c| c > 0),
             )
             .unwrap();
@@ -10178,7 +7269,7 @@ mod tests {
 
         let conn = lazy.get("test").expect("should open successfully");
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+            .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
         drop(conn);
@@ -10206,7 +7297,7 @@ mod tests {
         {
             let conn = lazy.get("second").unwrap();
             let count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM test_tbl", [], |r| r.get(0))
+                .query_row_map("SELECT COUNT(*) FROM test_tbl", &[], |r| r.get(0))
                 .unwrap();
             assert_eq!(count, 0);
         }

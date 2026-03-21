@@ -137,6 +137,7 @@ pub fn redaction_enabled() -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
 
     #[test]
     fn redacts_openai_key() {
@@ -253,11 +254,25 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn redaction_enabled_default() {
         // When env var is not set, should be enabled
         // Safety: only called in single-threaded test context
         unsafe { std::env::remove_var("CASS_REDACT_SECRETS") };
         assert!(redaction_enabled());
+    }
+
+    #[test]
+    #[serial]
+    fn redaction_can_be_disabled() {
+        unsafe { std::env::set_var("CASS_REDACT_SECRETS", "0") };
+        assert!(!redaction_enabled());
+
+        unsafe { std::env::set_var("CASS_REDACT_SECRETS", "false") };
+        assert!(!redaction_enabled());
+
+        // Restore for other tests
+        unsafe { std::env::remove_var("CASS_REDACT_SECRETS") };
     }
 
     #[test]

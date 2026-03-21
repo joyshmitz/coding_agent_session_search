@@ -515,6 +515,7 @@ mod tests {
     use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_state_should_check() {
         let mut state = UpdateState::default();
         assert!(state.should_check()); // Fresh state should check
@@ -528,6 +529,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_skip_version() {
         let mut state = UpdateState::default();
         assert!(!state.is_skipped("1.0.0"));
@@ -541,6 +543,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_update_info_should_show() {
         let info = UpdateInfo {
             latest_version: "1.0.0".into(),
@@ -570,6 +573,7 @@ mod tests {
     // =========================================================================
 
     #[test]
+    #[serial]
     fn test_version_comparison_upgrade_scenarios() {
         // Test various upgrade scenarios with semver comparison
         let test_cases = vec![
@@ -600,6 +604,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_update_state_persistence_round_trip() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let state_file = temp_dir.path().join("update_state.json");
@@ -636,6 +641,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_update_info_upgrade_workflow() {
         // Simulate the full upgrade decision workflow
 
@@ -683,6 +689,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_interval_respects_cadence() {
         let mut state = UpdateState::default();
 
@@ -703,6 +710,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_github_repo_constant_is_valid() {
         // Verify the repo constant is properly formatted
         assert!(GITHUB_REPO.contains('/'));
@@ -1143,6 +1151,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_http_timeout_is_reasonable() {
         const _: () = {
             // Verify the timeout constant is short enough for startup
@@ -1158,6 +1167,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn integration_check_interval_is_reasonable() {
         const _: () = {
             // Verify check interval is reasonable (not too frequent, not too rare)
