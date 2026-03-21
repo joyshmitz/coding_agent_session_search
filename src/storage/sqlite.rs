@@ -6,11 +6,10 @@ use anyhow::{Context, Result, anyhow};
 use frankensqlite::{
     Connection as FrankenConnection, Row as FrankenRow,
     compat::{
-        BatchExt as FrankenBatchExt, ConnectionExt as FrankenConnectionExt,
-        OpenFlags as FrankenOpenFlags, OptionalExtension as FrankenOptionalExtension, ParamValue,
-        RowExt as FrankenRowExt, Transaction as FrankenTransaction,
-        TransactionExt as FrankenTransactionExt, open_with_flags as open_franken_with_flags,
-        param_slice_to_values,
+        ConnectionExt as FrankenConnectionExt, OpenFlags as FrankenOpenFlags,
+        OptionalExtension as FrankenOptionalExtension, ParamValue, RowExt as FrankenRowExt,
+        Transaction as FrankenTransaction, TransactionExt as FrankenTransactionExt,
+        open_with_flags as open_franken_with_flags, param_slice_to_values,
     },
     migrate::MigrationRunner,
 };
@@ -641,6 +640,12 @@ pub const FTS5_REGISTER_SQL: &str = "\
         content='', tokenize='porter'\
     )";
 
+/// SQL to clear all rows from the contentless `fts_messages` table.
+///
+/// Contentless FTS5 tables reject ordinary `DELETE FROM ...` statements.
+pub const FTS5_DELETE_ALL_SQL: &str =
+    "INSERT INTO fts_messages(fts_messages) VALUES('delete-all');";
+
 /// Register the `fts_messages` FTS5 virtual table on a frankensqlite
 /// [`Connection`](FrankenConnection).
 ///
@@ -664,9 +669,11 @@ pub(crate) fn rebuild_fts_on_connection(conn: &FrankenConnection) -> Result<()> 
     let batch_size: i64 = 10_000;
     let mut offset: i64 = 0;
 
+    conn.execute_batch("DROP TABLE IF EXISTS fts_messages;")?;
+    register_fts5_on_connection(conn)?;
+
     conn.execute_batch("BEGIN;")?;
     let result = (|| -> Result<()> {
-        conn.execute_batch("DELETE FROM fts_messages;")?;
         while offset < total_count {
             info!(
                 "Rebuilding FTS: {}/{} rows...",
@@ -6033,7 +6040,7 @@ impl SqliteStorage {
         let mut offset: i64 = 0;
 
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM fts_messages", [])?;
+        tx.execute_batch(FTS5_DELETE_ALL_SQL)?;
         while offset < total_count {
             info!(
                 "Rebuilding FTS: {}/{} rows...",
@@ -10422,8 +10429,12 @@ mod tests {
         let result = runner.run(&conn).unwrap();
 
         assert!(result.was_fresh);
-        assert_eq!(result.applied, vec![13], "should apply combined V13");
-        assert_eq!(result.current, 13);
+        assert_eq!(
+            result.applied,
+            vec![13, 14],
+            "should apply combined V13 + FTS contentless V14"
+        );
+        assert_eq!(result.current, 14);
     }
 
     // =========================================================================
