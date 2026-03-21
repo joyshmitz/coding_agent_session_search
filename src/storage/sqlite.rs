@@ -2633,7 +2633,7 @@ impl FrankenStorage {
             }
         }
 
-        let tx = self.conn.transaction()?;
+        let mut tx = self.conn.transaction()?;
 
         let conv_id = franken_insert_conversation(&tx, agent_id, workspace_id, conv)?;
         let mut fts_entries = Vec::with_capacity(conv.messages.len());
@@ -2669,7 +2669,7 @@ impl FrankenStorage {
         conversation_id: i64,
         conv: &Conversation,
     ) -> Result<InsertOutcome> {
-        let tx = self.conn.transaction()?;
+        let mut tx = self.conn.transaction()?;
 
         let rows = tx.query_params(
             "SELECT MAX(idx) FROM messages WHERE conversation_id = ?1",
@@ -3055,7 +3055,7 @@ impl FrankenStorage {
         });
         let mut pricing_diag = PricingDiagnostics::default();
 
-        let tx = self.conn.transaction()?;
+        let mut tx = self.conn.transaction()?;
         let mut outcomes = Vec::with_capacity(conversations.len());
         let mut fts_entries = Vec::new();
         let mut stats = StatsAggregator::new();

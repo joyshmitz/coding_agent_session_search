@@ -485,7 +485,7 @@ fn bench_concurrent_writes(c: &mut Criterion) {
                             for seq in 0..100 {
                                 let mut guard = m.concurrent_writer().unwrap();
                                 with_retry(50, || {
-                                    let tx = guard.storage().raw().transaction()?;
+                                    let mut tx = guard.storage().raw().transaction()?;
                                     tx.execute(&format!(
                                         "INSERT INTO bench_raw (tid, seq, val) VALUES ({tid}, {seq}, 'bench-{tid}-{seq}')"
                                     ))?;

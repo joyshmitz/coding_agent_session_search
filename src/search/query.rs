@@ -4067,10 +4067,10 @@ impl SearchClient {
         let mut sql = format!(
             "SELECT {title_expr}, {content_expr}, {snippet_expr}, fts_messages.agent,
                     COALESCE(fts_messages.workspace, ''), fts_messages.source_path,
-                    fts_messages.created_at, m.idx, c.source_id, c.origin_host,
+                    CAST(fts_messages.created_at AS INTEGER), m.idx, c.source_id, c.origin_host,
                     COALESCE(s.kind, 'local'), bm25(fts_messages)
              FROM fts_messages
-             LEFT JOIN messages m ON fts_messages.message_id = m.id
+             LEFT JOIN messages m ON CAST(fts_messages.message_id AS INTEGER) = m.id
              LEFT JOIN conversations c ON m.conversation_id = c.id
              LEFT JOIN sources s ON c.source_id = s.id
              WHERE fts_messages MATCH ?"
@@ -4096,11 +4096,11 @@ impl SearchClient {
         }
 
         if let Some(created_from) = filters.created_from {
-            sql.push_str(" AND fts_messages.created_at >= ?");
+            sql.push_str(" AND CAST(fts_messages.created_at AS INTEGER) >= ?");
             params.push(ParamValue::from(created_from));
         }
         if let Some(created_to) = filters.created_to {
-            sql.push_str(" AND fts_messages.created_at <= ?");
+            sql.push_str(" AND CAST(fts_messages.created_at AS INTEGER) <= ?");
             params.push(ParamValue::from(created_to));
         }
 
@@ -4122,64 +4122,67 @@ impl SearchClient {
         params.push(ParamValue::from(limit as i64));
         params.push(ParamValue::from(offset as i64));
 
-        conn.query_map_collect(&sql, &params, |row: &frankensqlite::Row| {
-            let title: String = row.get_typed::<Option<String>>(0)?.unwrap_or_default();
-            let raw_content: String = row.get_typed(1)?;
-            let sql_snippet = row
-                .get_typed::<Option<String>>(2)?
-                .unwrap_or_default()
-                .replace("<b>", "**")
-                .replace("</b>", "**");
-            let agent: String = row.get_typed(3)?;
-            let workspace: String = row.get_typed(4)?;
-            let source_path: String = row.get_typed(5)?;
-            let created_at: Option<i64> = row.get_typed(6)?;
-            let idx: Option<i64> = row.get_typed(7)?;
-            let source_id: String = row
-                .get_typed::<Option<String>>(8)?
-                .unwrap_or_else(default_source_id);
-            let origin_host: Option<String> = row.get_typed(9)?;
-            let origin_kind: String = row
-                .get_typed::<Option<String>>(10)?
-                .unwrap_or_else(default_origin_kind);
-            let bm25_score: f64 = row.get_typed(11)?;
+        Ok(
+            conn.query_map_collect(&sql, &params, |row: &frankensqlite::Row| {
+                let title: String = row.get_typed::<Option<String>>(0)?.unwrap_or_default();
+                let raw_content: String = row.get_typed(1)?;
+                let sql_snippet = row
+                    .get_typed::<Option<String>>(2)?
+                    .unwrap_or_default()
+                    .replace("<b>", "**")
+                    .replace("</b>", "**");
+                let agent: String = row.get_typed(3)?;
+                let workspace: String = row.get_typed(4)?;
+                let source_path: String = row.get_typed(5)?;
+                let created_at: Option<i64> = row.get_typed(6)?;
+                let idx: Option<i64> = row.get_typed(7)?;
+                let source_id: String = row
+                    .get_typed::<Option<String>>(8)?
+                    .unwrap_or_else(default_source_id);
+                let origin_host: Option<String> = row.get_typed(9)?;
+                let origin_kind: String = row
+                    .get_typed::<Option<String>>(10)?
+                    .unwrap_or_else(default_origin_kind);
+                let bm25_score: f64 = row.get_typed(11)?;
 
-            let line_number = idx.map(|i| (i + 1) as usize);
-            let snippet = if field_mask.wants_snippet() {
-                sql_snippet
-            } else {
-                String::new()
-            };
-            let content = if field_mask.needs_content() {
-                raw_content
-            } else {
-                String::new()
-            };
-            let hash_basis = if content.is_empty() {
-                snippet.as_str()
-            } else {
-                content.as_str()
-            };
-            let content_hash = stable_hit_hash(hash_basis, &source_path, line_number, created_at);
+                let line_number = idx.map(|i| (i + 1) as usize);
+                let snippet = if field_mask.wants_snippet() {
+                    sql_snippet
+                } else {
+                    String::new()
+                };
+                let content = if field_mask.needs_content() {
+                    raw_content
+                } else {
+                    String::new()
+                };
+                let hash_basis = if content.is_empty() {
+                    snippet.as_str()
+                } else {
+                    content.as_str()
+                };
+                let content_hash =
+                    stable_hit_hash(hash_basis, &source_path, line_number, created_at);
 
-            Ok(SearchHit {
-                title,
-                snippet,
-                content,
-                content_hash,
-                score: (-bm25_score) as f32,
-                source_path,
-                agent,
-                workspace,
-                workspace_original: None,
-                created_at,
-                line_number,
-                match_type: query_match_type,
-                source_id,
-                origin_kind,
-                origin_host,
-            })
-        })
+                Ok(SearchHit {
+                    title,
+                    snippet,
+                    content,
+                    content_hash,
+                    score: (-bm25_score) as f32,
+                    source_path,
+                    agent,
+                    workspace,
+                    workspace_original: None,
+                    created_at,
+                    line_number,
+                    match_type: query_match_type,
+                    source_id,
+                    origin_kind,
+                    origin_host,
+                })
+            })?,
+        )
     }
 
     /// Browse messages ordered by date, without any text query.

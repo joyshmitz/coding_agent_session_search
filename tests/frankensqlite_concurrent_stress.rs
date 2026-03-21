@@ -133,7 +133,7 @@ fn stress_parallel_connector_writes() {
                     let val = format!("thread-{thread_id}-seq-{seq}");
                     let mut guard = m.concurrent_writer().expect("acquire writer");
                     with_retry(50, || {
-                        let tx = guard.storage().raw().transaction()?;
+                        let mut tx = guard.storage().raw().transaction()?;
                         tx.execute(&format!(
                             "INSERT INTO items (thread_id, seq, val) VALUES ({thread_id}, {seq}, '{val}')"
                         ))?;
@@ -217,7 +217,7 @@ fn stress_write_heavy_contention() {
                 for batch in 0..batches_per_thread {
                     with_retry(50, || {
                         let mut guard = m.concurrent_writer().expect("acquire writer");
-                        let tx = guard.storage().raw().transaction()?;
+                        let mut tx = guard.storage().raw().transaction()?;
                         for row_in_batch in 0..rows_per_batch {
                             let seq = batch * rows_per_batch + row_in_batch;
                             // Generate a unique ID per thread and seq to avoid auto-increment collisions
@@ -227,6 +227,7 @@ fn stress_write_heavy_contention() {
                             ))?;
                         }
                         tx.commit().map_err(anyhow::Error::new)?;
+                        drop(tx); // Release borrow on guard before mutable access
                         guard.mark_committed();
                         Ok(())
                     })
@@ -317,7 +318,7 @@ fn stress_read_write_mix() {
 
                 while start.elapsed() < duration {
                     let result = with_retry(30, || {
-                        let tx = conn.transaction()?;
+                        let mut tx = conn.transaction()?;
                         tx.execute(&format!(
                             "INSERT INTO items (thread_id, seq, val) VALUES ({thread_id}, {seq}, 'rw-mix')"
                         ))?;
@@ -423,7 +424,7 @@ fn stress_crash_recovery_uncommitted_data_absent() {
     // Commit some data first
     {
         let conn = open_configured(&db_path);
-        let tx = conn.transaction().unwrap();
+        let mut tx = conn.transaction().unwrap();
         tx.execute("INSERT INTO items (thread_id, seq, val) VALUES (0, 0, 'committed')")
             .unwrap();
         tx.commit().unwrap();
@@ -466,7 +467,7 @@ fn stress_large_transaction() {
 
     {
         let conn = open_configured(&db_path);
-        let tx = conn.transaction().unwrap();
+        let mut tx = conn.transaction().unwrap();
 
         for i in 0..num_rows {
             tx.execute(&format!(
@@ -530,7 +531,7 @@ fn stress_retry_convergence_conflicting_writes() {
                 for _ in 0..increments_per_thread {
                     let mut attempt = 0;
                     loop {
-                        let tx = conn.transaction().unwrap();
+                        let mut tx = conn.transaction().unwrap();
                         let rows = tx.query("SELECT val FROM counter WHERE id = 1").unwrap();
                         let current: i64 = rows[0].get_typed(0).unwrap();
                         let new_val = current + 1;
@@ -643,7 +644,7 @@ fn stress_connection_manager_parallel_writers() {
                 for seq in 0..writes_per_thread {
                     let mut guard = m.concurrent_writer().expect("acquire writer");
                     with_retry(50, || {
-                        let tx = guard.storage().raw().transaction()?;
+                        let mut tx = guard.storage().raw().transaction()?;
                         tx.execute(&format!(
                             "INSERT INTO cm_stress (tid, val) VALUES ({tid}, 'cm-{tid}-{seq}')"
                         ))?;

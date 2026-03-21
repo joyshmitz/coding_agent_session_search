@@ -291,7 +291,7 @@ impl BookmarkStore {
             serde_json::from_str(json).context("parsing bookmark JSON")?;
         let mut imported = 0;
 
-        let tx = self.conn.transaction()?;
+        let mut tx = self.conn.transaction()?;
 
         for mut bookmark in bookmarks {
             let line_number = line_number_to_db(bookmark.line_number)?;
