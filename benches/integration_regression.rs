@@ -132,12 +132,12 @@ fn setup_sqlite_db(conv_count: i64, msgs_per_conv: i64) -> (TempDir, SqliteStora
     let db_path = temp.path().join("sqlite.db");
     let index_path = index_dir(temp.path()).expect("index path");
 
-    let mut storage = SqliteStorage::open(&db_path).expect("open sqlite db");
+    let storage = SqliteStorage::open(&db_path).expect("open sqlite db");
     let mut t_index = TantivyIndex::open_or_create(&index_path).unwrap();
 
     for i in 0..conv_count {
         let conv = generate_conversation(i, msgs_per_conv);
-        persist_conversation(&mut storage, &mut t_index, &conv).expect("persist");
+        persist_conversation(&storage, &mut t_index, &conv).expect("persist");
     }
     t_index.commit().unwrap();
 
@@ -244,13 +244,13 @@ fn bench_insert_comparison(c: &mut Criterion) {
                 let temp = TempDir::new().unwrap();
                 let db_path = temp.path().join("bench.db");
                 let index_path = index_dir(temp.path()).expect("index path");
-                let mut storage = SqliteStorage::open(&db_path).unwrap();
+                let storage = SqliteStorage::open(&db_path).unwrap();
                 let mut t_index = TantivyIndex::open_or_create(&index_path).unwrap();
                 let mut conv_id = 0i64;
 
                 b.iter(|| {
                     let conv = generate_conversation(conv_id, msg_count);
-                    persist_conversation(&mut storage, &mut t_index, &conv).unwrap();
+                    persist_conversation(&storage, &mut t_index, &conv).unwrap();
                     conv_id += 1;
                 })
             },
@@ -529,9 +529,9 @@ fn bench_insert_scaling(c: &mut Criterion) {
                         .collect();
                     (temp, storage, t_index, convs)
                 },
-                |(_temp, mut storage, mut t_index, convs)| {
+                |(_temp, storage, mut t_index, convs)| {
                     for conv in &convs {
-                        persist_conversation(&mut storage, &mut t_index, conv).unwrap();
+                        persist_conversation(&storage, &mut t_index, conv).unwrap();
                     }
                     t_index.commit().unwrap();
                 },

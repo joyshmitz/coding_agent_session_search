@@ -204,7 +204,9 @@ fn index_local_and_remote_sources_preserves_provenance() {
     // Verify total count
     let total: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .unwrap();
     assert_eq!(total, 8, "should have 8 total conversations");
 
@@ -281,7 +283,7 @@ fn persist_conversation_extracts_provenance_from_metadata() {
     std::fs::create_dir_all(&data_dir).unwrap();
 
     let db_path = data_dir.join("provenance.db");
-    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+    let storage = SqliteStorage::open(&db_path).expect("open db");
 
     // Setup sources
     storage
@@ -305,7 +307,7 @@ fn persist_conversation_extracts_provenance_from_metadata() {
         now,
         vec![norm_msg(0, now, "Local test message")],
     );
-    persist::persist_conversation(&mut storage, &mut t_index, &local_conv).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &local_conv).unwrap();
 
     // Persist a remote conversation
     let remote_conv = norm_conv_with_provenance(
@@ -315,7 +317,7 @@ fn persist_conversation_extracts_provenance_from_metadata() {
         now + 1000,
         vec![norm_msg(0, now + 1000, "Remote test message")],
     );
-    persist::persist_conversation(&mut storage, &mut t_index, &remote_conv).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &remote_conv).unwrap();
     t_index.commit().unwrap();
 
     // Verify provenance was extracted correctly
@@ -635,7 +637,7 @@ fn incremental_index_new_remote_source() {
     std::fs::create_dir_all(&data_dir).unwrap();
 
     let db_path = data_dir.join("incremental.db");
-    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+    let storage = SqliteStorage::open(&db_path).expect("open db");
 
     let index_dir = data_dir.join("index");
     std::fs::create_dir_all(&index_dir).unwrap();
@@ -664,13 +666,15 @@ fn incremental_index_new_remote_source() {
         vec![norm_msg(0, now + 1000, "Local message 2")],
     );
 
-    persist::persist_conversation(&mut storage, &mut t_index, &local_conv1).unwrap();
-    persist::persist_conversation(&mut storage, &mut t_index, &local_conv2).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &local_conv1).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &local_conv2).unwrap();
     t_index.commit().unwrap();
 
     let initial_count: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .unwrap();
     assert_eq!(initial_count, 2, "should have 2 initial conversations");
 
@@ -695,13 +699,15 @@ fn incremental_index_new_remote_source() {
         vec![norm_msg(0, now + 11000, "Laptop message 2")],
     );
 
-    persist::persist_conversation(&mut storage, &mut t_index, &remote_conv1).unwrap();
-    persist::persist_conversation(&mut storage, &mut t_index, &remote_conv2).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &remote_conv1).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &remote_conv2).unwrap();
     t_index.commit().unwrap();
 
     let final_count: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .unwrap();
     assert_eq!(
         final_count,
@@ -739,7 +745,7 @@ fn incremental_append_to_remote_conversation() {
     std::fs::create_dir_all(&data_dir).unwrap();
 
     let db_path = data_dir.join("append.db");
-    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+    let storage = SqliteStorage::open(&db_path).expect("open db");
 
     let index_dir = data_dir.join("index");
     std::fs::create_dir_all(&index_dir).unwrap();
@@ -765,7 +771,7 @@ fn incremental_append_to_remote_conversation() {
             norm_msg(1, now + 100, "Second message"),
         ],
     );
-    persist::persist_conversation(&mut storage, &mut t_index, &conv_v1).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &conv_v1).unwrap();
     t_index.commit().unwrap();
 
     let initial_msg_count: i64 = storage
@@ -786,7 +792,7 @@ fn incremental_append_to_remote_conversation() {
             norm_msg(2, now + 200, "Third message"),
         ],
     );
-    persist::persist_conversation(&mut storage, &mut t_index, &conv_v2).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &conv_v2).unwrap();
     t_index.commit().unwrap();
 
     let final_msg_count: i64 = storage
@@ -798,7 +804,9 @@ fn incremental_append_to_remote_conversation() {
     // Verify conversation count didn't change (still 1)
     let conv_count: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .unwrap();
     assert_eq!(conv_count, 1, "should still have 1 conversation");
 
@@ -1013,7 +1021,7 @@ fn resync_same_conversation_updates_not_duplicates() {
     std::fs::create_dir_all(&data_dir).unwrap();
 
     let db_path = data_dir.join("resync.db");
-    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+    let storage = SqliteStorage::open(&db_path).expect("open db");
 
     let index_dir = data_dir.join("index");
     std::fs::create_dir_all(&index_dir).unwrap();
@@ -1039,12 +1047,14 @@ fn resync_same_conversation_updates_not_duplicates() {
             norm_msg(1, now + 100, "Second message"),
         ],
     );
-    persist::persist_conversation(&mut storage, &mut t_index, &conv_v1).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &conv_v1).unwrap();
     t_index.commit().unwrap();
 
     let count_after_first: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .unwrap();
     assert_eq!(
         count_after_first, 1,
@@ -1063,12 +1073,14 @@ fn resync_same_conversation_updates_not_duplicates() {
             norm_msg(2, now + 200, "Third message (new)"),
         ],
     );
-    persist::persist_conversation(&mut storage, &mut t_index, &conv_v2).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &conv_v2).unwrap();
     t_index.commit().unwrap();
 
     let count_after_second: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .unwrap();
     assert_eq!(
         count_after_second, 1,
@@ -1189,7 +1201,7 @@ fn dedup_within_source_not_across() {
     std::fs::create_dir_all(&data_dir).unwrap();
 
     let db_path = data_dir.join("dedup.db");
-    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+    let storage = SqliteStorage::open(&db_path).expect("open db");
 
     let index_dir = data_dir.join("index");
     std::fs::create_dir_all(&index_dir).unwrap();
@@ -1217,13 +1229,15 @@ fn dedup_within_source_not_across() {
                 &format!("Laptop message {}", i),
             )],
         );
-        persist::persist_conversation(&mut storage, &mut t_index, &conv).unwrap();
+        persist::persist_conversation(&storage, &mut t_index, &conv).unwrap();
     }
     t_index.commit().unwrap();
 
     let initial_count: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .unwrap();
     assert_eq!(initial_count, 3, "should have 3 conversations initially");
 
@@ -1240,14 +1254,16 @@ fn dedup_within_source_not_across() {
                 &format!("Laptop message {}", i),
             )],
         );
-        persist::persist_conversation(&mut storage, &mut t_index, &conv).unwrap();
+        persist::persist_conversation(&storage, &mut t_index, &conv).unwrap();
     }
     t_index.commit().unwrap();
 
     // Should still have same count (deduplicated within source)
     let final_count: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .unwrap();
     assert_eq!(
         final_count, initial_count,
@@ -1349,7 +1365,7 @@ fn update_conversation_preserves_metadata() {
     std::fs::create_dir_all(&data_dir).unwrap();
 
     let db_path = data_dir.join("metadata.db");
-    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+    let storage = SqliteStorage::open(&db_path).expect("open db");
 
     let index_dir = data_dir.join("index");
     std::fs::create_dir_all(&index_dir).unwrap();
@@ -1375,7 +1391,7 @@ fn update_conversation_preserves_metadata() {
             norm_msg(1, now + 100, "Message 2"),
         ],
     );
-    persist::persist_conversation(&mut storage, &mut t_index, &conv_v1).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &conv_v1).unwrap();
     t_index.commit().unwrap();
 
     // Get initial ended_at
@@ -1405,7 +1421,7 @@ fn update_conversation_preserves_metadata() {
             norm_msg(2, now + 200, "Message 3 (new)"),
         ],
     );
-    persist::persist_conversation(&mut storage, &mut t_index, &conv_v2).unwrap();
+    persist::persist_conversation(&storage, &mut t_index, &conv_v2).unwrap();
     t_index.commit().unwrap();
 
     // Verify ended_at was updated

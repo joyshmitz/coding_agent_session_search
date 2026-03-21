@@ -762,7 +762,7 @@ fn check_schema_compatibility(
     let meta_exists: i32 = conn.query_row_map(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='meta'",
         fparams![],
-        |row| Ok(row.get_typed(0)?),
+        |row| row.get_typed(0),
     )?;
 
     if meta_exists == 0 {
@@ -771,7 +771,7 @@ fn check_schema_compatibility(
         let table_count: i32 = conn.query_row_map(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
             fparams![],
-            |row| Ok(row.get_typed(0)?),
+            |row| row.get_typed(0),
         )?;
 
         if table_count == 0 {

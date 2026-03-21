@@ -62,12 +62,12 @@ fn setup_test_index(conv_count: i64, msgs_per_conv: i64) -> (TempDir, PathBuf, P
     let db_path = data_dir.join("concurrent_test.db");
     let index_path = index_dir(&data_dir).expect("index path");
 
-    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+    let storage = SqliteStorage::open(&db_path).expect("open db");
     let mut t_index = TantivyIndex::open_or_create(&index_path).unwrap();
 
     for i in 0..conv_count {
         let conv = generate_conversation(i, msgs_per_conv);
-        persist_conversation(&mut storage, &mut t_index, &conv).expect("persist");
+        persist_conversation(&storage, &mut t_index, &conv).expect("persist");
     }
     t_index.commit().unwrap();
 
@@ -302,12 +302,12 @@ fn concurrent_search_during_index() {
 
     // Create initial index with some data
     {
-        let mut storage = SqliteStorage::open(&db_path).expect("open db");
+        let storage = SqliteStorage::open(&db_path).expect("open db");
         let mut t_index = TantivyIndex::open_or_create(&index_path).unwrap();
 
         for i in 0..500 {
             let conv = generate_conversation(i, 5);
-            persist_conversation(&mut storage, &mut t_index, &conv).expect("persist");
+            persist_conversation(&storage, &mut t_index, &conv).expect("persist");
         }
         t_index.commit().unwrap();
     }
@@ -342,12 +342,12 @@ fn concurrent_search_during_index() {
 
     // Perform indexing while searches are running
     let index_handle = thread::spawn(move || {
-        let mut storage = SqliteStorage::open(&db_path).expect("open db");
+        let storage = SqliteStorage::open(&db_path).expect("open db");
         let mut t_index = TantivyIndex::open_or_create(&index_path).unwrap();
 
         for i in 500..1000 {
             let conv = generate_conversation(i, 5);
-            persist_conversation(&mut storage, &mut t_index, &conv).expect("persist");
+            persist_conversation(&storage, &mut t_index, &conv).expect("persist");
             if i % 100 == 0 {
                 t_index.commit().unwrap();
             }

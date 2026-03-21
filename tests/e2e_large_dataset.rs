@@ -115,7 +115,9 @@ fn count_conversations(db_path: &Path) -> i64 {
     let storage = SqliteStorage::open(db_path).expect("open sqlite");
     storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .expect("count conversations")
 }
 

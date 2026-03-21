@@ -94,9 +94,7 @@ fn rebuild_fts_repopulates_rows() {
 
     storage
         .raw()
-        .execute(
-            "INSERT INTO fts_messages(fts_messages) VALUES('delete-all')",
-        )
+        .execute("INSERT INTO fts_messages(fts_messages) VALUES('delete-all')")
         .unwrap();
     fts_count = storage
         .raw()
@@ -128,7 +126,9 @@ fn transaction_rolls_back_on_duplicate_idx() {
 
     let conv_count: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |c| c.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |c| {
+            c.get_typed(0)
+        })
         .unwrap();
     let msg_count: i64 = storage
         .raw()
@@ -146,10 +146,7 @@ fn insert_conversation_tree_rolls_back_when_fts_insert_fails() {
     let storage = SqliteStorage::open(&db_path).expect("open");
 
     let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
-    storage
-        .raw()
-        .execute("DROP TABLE fts_messages")
-        .unwrap();
+    storage.raw().execute("DROP TABLE fts_messages").unwrap();
 
     let conv = sample_conv(None, vec![msg(0, 1)]);
     let result = storage.insert_conversation_tree(agent_id, None, &conv);
@@ -160,7 +157,9 @@ fn insert_conversation_tree_rolls_back_when_fts_insert_fails() {
 
     let conv_count: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .unwrap();
     let msg_count: i64 = storage
         .raw()
@@ -185,10 +184,7 @@ fn insert_conversations_batched_rolls_back_when_fts_insert_fails() {
     let refs: Vec<(i64, Option<i64>, &Conversation)> =
         convs.iter().map(|conv| (agent_id, None, conv)).collect();
 
-    storage
-        .raw()
-        .execute("DROP TABLE fts_messages")
-        .unwrap();
+    storage.raw().execute("DROP TABLE fts_messages").unwrap();
 
     let result = storage.insert_conversations_batched(&refs);
     assert!(
@@ -198,7 +194,9 @@ fn insert_conversations_batched_rolls_back_when_fts_insert_fails() {
 
     let conv_count: i64 = storage
         .raw()
-        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| {
+            r.get_typed(0)
+        })
         .unwrap();
     let msg_count: i64 = storage
         .raw()
@@ -232,9 +230,11 @@ fn append_only_updates_existing_conversation() {
 
     let rows: Vec<(i64, i64)> = storage
         .raw()
-        .query_map_collect("SELECT idx, created_at FROM messages ORDER BY idx", &[], |r| {
-            Ok((r.get_typed(0)?, r.get_typed::<Option<i64>>(1)?.unwrap()))
-        })
+        .query_map_collect(
+            "SELECT idx, created_at FROM messages ORDER BY idx",
+            &[],
+            |r| Ok((r.get_typed(0)?, r.get_typed::<Option<i64>>(1)?.unwrap())),
+        )
         .unwrap();
     assert_eq!(rows, vec![(0, 100), (1, 200), (2, 300)]);
 
@@ -284,9 +284,11 @@ fn large_batch_insert_keeps_fts_in_sync() {
     // Spot check a few message rows for correct ordering and timestamps
     let rows: Vec<(i64, i64)> = storage
         .raw()
-        .query_map_collect("SELECT idx, created_at FROM messages ORDER BY idx LIMIT 3 OFFSET 197", &[], |r| {
-            Ok((r.get_typed(0)?, r.get_typed::<Option<i64>>(1)?.unwrap()))
-        })
+        .query_map_collect(
+            "SELECT idx, created_at FROM messages ORDER BY idx LIMIT 3 OFFSET 197",
+            &[],
+            |r| Ok((r.get_typed(0)?, r.get_typed::<Option<i64>>(1)?.unwrap())),
+        )
         .unwrap();
     assert_eq!(
         rows,
@@ -334,9 +336,7 @@ fn unsupported_schema_version_errors() {
     // Poison the schema_version to an unsupported future value
     storage
         .raw()
-        .execute(
-            "UPDATE meta SET value = '999' WHERE key = 'schema_version'",
-        )
+        .execute("UPDATE meta SET value = '999' WHERE key = 'schema_version'")
         .unwrap();
     drop(storage); // Close connection before reopening
 
@@ -361,7 +361,11 @@ fn fresh_db_creates_all_tables() {
     // Query sqlite_master for table names
     let tables: Vec<String> = storage
         .raw()
-        .query_map_collect("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", &[], |r| r.get_typed(0))
+        .query_map_collect(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+            &[],
+            |r| r.get_typed(0),
+        )
         .unwrap();
 
     assert!(tables.contains(&"meta".to_string()), "meta table exists");
@@ -435,7 +439,9 @@ fn agents_table_has_correct_columns() {
 
     let columns: Vec<String> = storage
         .raw()
-        .query_map_collect("PRAGMA table_info(agents)", &[], |r| r.get_typed::<String>(1))
+        .query_map_collect("PRAGMA table_info(agents)", &[], |r| {
+            r.get_typed::<String>(1)
+        })
         .unwrap();
 
     let missing: Vec<&str> = [
@@ -467,7 +473,9 @@ fn conversations_table_has_correct_columns() {
 
     let columns: Vec<String> = storage
         .raw()
-        .query_map_collect("PRAGMA table_info(conversations)", &[], |r| r.get_typed::<String>(1))
+        .query_map_collect("PRAGMA table_info(conversations)", &[], |r| {
+            r.get_typed::<String>(1)
+        })
         .unwrap();
 
     let expected = [
@@ -503,7 +511,9 @@ fn messages_table_has_correct_columns() {
 
     let columns: Vec<String> = storage
         .raw()
-        .query_map_collect("PRAGMA table_info(messages)", &[], |r| r.get_typed::<String>(1))
+        .query_map_collect("PRAGMA table_info(messages)", &[], |r| {
+            r.get_typed::<String>(1)
+        })
         .unwrap();
 
     assert!(columns.contains(&"id".to_string()));
@@ -655,7 +665,11 @@ fn migration_from_v1_applies_v2_and_v3() {
     // Verify FTS5 table was created
     let tables: Vec<String> = storage
         .raw()
-        .query_map_collect("SELECT name FROM sqlite_master WHERE type='table' AND name='fts_messages'", &[], |r| r.get_typed(0))
+        .query_map_collect(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fts_messages'",
+            &[],
+            |r| r.get_typed(0),
+        )
         .unwrap();
 
     assert_eq!(tables.len(), 1, "fts_messages should exist after migration");
@@ -776,9 +790,9 @@ fn foreign_keys_are_enforced() {
     let storage = SqliteStorage::open(&db_path).expect("open");
 
     // Try to insert a conversation with non-existent agent_id
-    let result = storage.raw().execute(
-        "INSERT INTO conversations(agent_id, source_path) VALUES(999, '/test')",
-    );
+    let result = storage
+        .raw()
+        .execute("INSERT INTO conversations(agent_id, source_path) VALUES(999, '/test')");
 
     assert!(
         result.is_err(),
@@ -1007,7 +1021,9 @@ fn sources_table_has_correct_columns() {
 
     let columns: Vec<String> = storage
         .raw()
-        .query_map_collect("PRAGMA table_info(sources)", &[], |r| r.get_typed::<String>(1))
+        .query_map_collect("PRAGMA table_info(sources)", &[], |r| {
+            r.get_typed::<String>(1)
+        })
         .unwrap();
 
     assert!(columns.contains(&"id".to_string()));
@@ -1966,7 +1982,11 @@ fn daily_stats_table_created_on_fresh_db() {
     // Check that daily_stats table exists
     let tables: Vec<String> = storage
         .raw()
-        .query_map_collect("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_stats'", &[], |r| r.get_typed(0))
+        .query_map_collect(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='daily_stats'",
+            &[],
+            |r| r.get_typed(0),
+        )
         .unwrap();
 
     assert_eq!(tables.len(), 1, "daily_stats table should exist");
@@ -1974,7 +1994,9 @@ fn daily_stats_table_created_on_fresh_db() {
     // Check columns
     let columns: Vec<String> = storage
         .raw()
-        .query_map_collect("PRAGMA table_info(daily_stats)", &[], |r| r.get_typed::<String>(1))
+        .query_map_collect("PRAGMA table_info(daily_stats)", &[], |r| {
+            r.get_typed::<String>(1)
+        })
         .unwrap();
 
     assert!(columns.contains(&"day_id".to_string()));

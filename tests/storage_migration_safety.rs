@@ -142,9 +142,11 @@ fn test_migration_v1_to_current_preserves_data() {
 
     // Verify V4 features (Sources)
     let source_count: i64 = conn
-        .query_row_map("SELECT COUNT(*) FROM sources WHERE id = 'local'", &[], |r| {
-            r.get_typed(0)
-        })
+        .query_row_map(
+            "SELECT COUNT(*) FROM sources WHERE id = 'local'",
+            &[],
+            |r| r.get_typed(0),
+        )
         .unwrap();
     assert_eq!(source_count, 1, "Local source should be created");
 

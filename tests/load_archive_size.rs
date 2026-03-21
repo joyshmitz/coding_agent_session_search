@@ -155,13 +155,13 @@ fn setup_load_index(
     let db_path = data_dir.join("load_test.db");
     let index_path = index_dir(&data_dir).expect("index path");
 
-    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+    let storage = SqliteStorage::open(&db_path).expect("open db");
     let mut t_index = TantivyIndex::open_or_create(&index_path).unwrap();
 
     let start = Instant::now();
     for i in 0..conv_count {
         let conv = generate_conversation(i, msgs_per_conv, content_size);
-        persist_conversation(&mut storage, &mut t_index, &conv).expect("persist");
+        persist_conversation(&storage, &mut t_index, &conv).expect("persist");
 
         // Progress logging for large tests
         if (i + 1) % 1000 == 0 {

@@ -370,6 +370,87 @@ jobs:
           echo "     cass-linux-arm64.tar.gz: ${{ steps.checksums.outputs.linux_arm64 }}"
           echo "     cass-darwin-arm64.tar.gz: ${{ steps.checksums.outputs.darwin_arm64 }}"
 
+      - name: Verify live Homebrew formula matches release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          formula_url="https://raw.githubusercontent.com/Dicklesworthstone/homebrew-tap/main/Formula/cass.rb"
+          expected_version="${{ needs.release.outputs.version }}"
+          expected_linux_amd64="${{ steps.checksums.outputs.linux_amd64 }}"
+          expected_linux_arm64="${{ steps.checksums.outputs.linux_arm64 }}"
+          expected_darwin_arm64="${{ steps.checksums.outputs.darwin_arm64 }}"
+
+          fetch_formula() {
+            curl --fail --silent --show-error --location \
+              --retry 4 \
+              --retry-all-errors \
+              --retry-delay 2 \
+              --connect-timeout 10 \
+              --max-time 30 \
+              "${formula_url}"
+          }
+
+          extract_sha() {
+            local formula="$1"
+            local asset="$2"
+            printf '%s\n' "${formula}" | sed -n "/${asset//./\\.}/{n;s/.*sha256 \"\\([0-9a-f]\\{64\\}\\)\".*/\\1/p;}"
+          }
+
+          saw_expected_version="false"
+
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if ! formula="$(fetch_formula)"; then
+              if [[ "${attempt}" -lt 12 ]]; then
+                echo "Failed to fetch Homebrew formula on attempt ${attempt}; retrying in 10s..."
+                sleep 10
+                continue
+              fi
+              echo "::warning::Unable to fetch the live Homebrew formula after repeated retries."
+              echo "::warning::Skipping checksum enforcement because GitHub raw content was unreachable."
+              exit 0
+            fi
+            actual_version="$(printf '%s\n' "${formula}" | sed -n 's/.*version \"\\([^\"]*\\)\".*/\\1/p' | head -1)"
+            actual_linux_amd64="$(extract_sha "${formula}" "cass-linux-amd64.tar.gz")"
+            actual_linux_arm64="$(extract_sha "${formula}" "cass-linux-arm64.tar.gz")"
+            actual_darwin_arm64="$(extract_sha "${formula}" "cass-darwin-arm64.tar.gz")"
+
+            if [[ "${actual_version}" == "${expected_version}" \
+              && "${actual_linux_amd64}" == "${expected_linux_amd64}" \
+              && "${actual_linux_arm64}" == "${expected_linux_arm64}" \
+              && "${actual_darwin_arm64}" == "${expected_darwin_arm64}" ]]; then
+              echo "Homebrew tap formula is up to date."
+              exit 0
+            fi
+
+            if [[ "${actual_version}" == "${expected_version}" ]]; then
+              saw_expected_version="true"
+              break
+            fi
+
+            if [[ "${attempt}" -lt 12 ]]; then
+              echo "Homebrew formula not updated yet or has mismatched checksums; retrying in 10s..."
+              sleep 10
+            fi
+          done
+
+          if [[ "${saw_expected_version}" != "true" ]]; then
+            echo "::warning::Homebrew tap formula did not update to v${expected_version} within the verification window."
+            echo "::warning::Skipping checksum enforcement because the tap update may still be queued."
+            exit 0
+          fi
+
+          echo "::error::Homebrew tap formula does not match the release after dispatch."
+          echo "::error::Expected version ${expected_version}"
+          echo "::error::Expected cass-linux-amd64.tar.gz ${expected_linux_amd64}"
+          echo "::error::Expected cass-linux-arm64.tar.gz ${expected_linux_arm64}"
+          echo "::error::Expected cass-darwin-arm64.tar.gz ${expected_darwin_arm64}"
+          echo "::error::Actual version ${actual_version}"
+          echo "::error::Actual cass-linux-amd64.tar.gz ${actual_linux_amd64}"
+          echo "::error::Actual cass-linux-arm64.tar.gz ${actual_linux_arm64}"
+          echo "::error::Actual cass-darwin-arm64.tar.gz ${actual_darwin_arm64}"
+          exit 1
+
   notify-scoop-bucket:
     name: Notify Scoop Bucket
     runs-on: ubuntu-latest

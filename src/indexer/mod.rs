@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, bounded};
+use notify::event::{AccessKind, AccessMode, MetadataKind, ModifyKind};
 use notify::{RecursiveMode, Watcher, recommended_watcher};
 
 use crate::connectors::NormalizedConversation;
@@ -1193,9 +1194,9 @@ pub fn run_index(
 
     if opts.watch || opts.watch_once_paths.is_some() {
         let opts_clone = opts.clone();
-        let state = Arc::new(Mutex::new(load_watch_state(&opts.data_dir)));
-        let storage = Arc::new(Mutex::new(storage));
-        let t_index = Arc::new(Mutex::new(t_index));
+        let state = Mutex::new(load_watch_state(&opts.data_dir));
+        let storage = Mutex::new(storage);
+        let t_index = Mutex::new(t_index);
 
         // Semantic embedding cooldown state for watch mode.
         // The initial pass already embedded everything, so we start the clock
@@ -1204,12 +1205,12 @@ pub fn run_index(
         let embedder_id = opts.embedder.clone();
         let data_dir_for_semantic = opts.data_dir.clone();
         let semantic_cooldown = Duration::from_secs(
-            std::env::var("CASS_WATCH_SEMANTIC_COOLDOWN_SECS")
+            dotenvy::var("CASS_WATCH_SEMANTIC_COOLDOWN_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60),
         );
-        let last_semantic_embed = Arc::new(Mutex::new(Instant::now()));
+        let last_semantic_embed = Mutex::new(Instant::now());
 
         // Initialize stale detector for watch mode
         let stale_detector = Arc::new(StaleDetector::from_env());
@@ -1251,23 +1252,16 @@ pub fn run_index(
                         &opts_clone,
                         all_root_paths,
                         roots,
-                        state.clone(),
-                        storage.clone(),
-                        t_index.clone(),
+                        &state,
+                        &storage,
+                        &t_index,
                         true,
                     );
                     // Record result to stale detector
                     detector_clone.record_scan(indexed.as_ref().copied().unwrap_or(0));
                 } else {
-                    indexed = reindex_paths(
-                        &opts_clone,
-                        paths,
-                        roots,
-                        state.clone(),
-                        storage.clone(),
-                        t_index.clone(),
-                        false,
-                    );
+                    indexed =
+                        reindex_paths(&opts_clone, paths, roots, &state, &storage, &t_index, false);
                     // Record result to stale detector
                     detector_clone.record_scan(indexed.as_ref().copied().unwrap_or(0));
 
@@ -1294,7 +1288,7 @@ pub fn run_index(
                         match incremental_semantic_embed(
                             &embedder_id,
                             &data_dir_for_semantic,
-                            storage.clone(),
+                            &storage,
                         ) {
                             Ok(0) => {} // no new messages to embed
                             Ok(n) => {
@@ -1329,7 +1323,7 @@ pub fn run_index(
 fn incremental_semantic_embed(
     embedder: &str,
     data_dir: &Path,
-    storage: Arc<Mutex<FrankenStorage>>,
+    storage: &Mutex<FrankenStorage>,
 ) -> Result<usize> {
     // 1. Read watermark
     let watermark = storage
@@ -1567,6 +1561,13 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool)>(
 
     let mut watcher = recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
+            if event.need_rescan() {
+                let _ = tx_clone.send(IndexerEvent::Command(ReindexCommand::Full));
+                return;
+            }
+            if !watch_event_should_trigger_reindex(&event) || event.paths.is_empty() {
+                return;
+            }
             let _ = tx_clone.send(IndexerEvent::Notify(event.paths));
         }
     })?;
@@ -1704,9 +1705,9 @@ fn reindex_paths(
     opts: &IndexOptions,
     paths: Vec<PathBuf>,
     roots: &[(ConnectorKind, ScanRoot)],
-    state: Arc<Mutex<HashMap<ConnectorKind, i64>>>,
-    storage: Arc<Mutex<FrankenStorage>>,
-    t_index: Arc<Mutex<TantivyIndex>>,
+    state: &Mutex<HashMap<ConnectorKind, i64>>,
+    storage: &Mutex<FrankenStorage>,
+    t_index: &Mutex<TantivyIndex>,
     force_full: bool,
 ) -> Result<usize> {
     // DO NOT lock storage/index here for the whole duration.
@@ -1789,14 +1790,14 @@ fn reindex_paths(
 
         // INGEST PHASE: Acquire locks briefly
         {
-            let mut storage = storage
+            let storage = storage
                 .lock()
                 .map_err(|_| anyhow::anyhow!("storage lock poisoned"))?;
             let mut t_index = t_index
                 .lock()
                 .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
 
-            ingest_batch(&mut storage, &mut t_index, &convs, &opts.progress, false)?;
+            ingest_batch(&storage, &mut t_index, &convs, &opts.progress, false)?;
 
             // Commit to Tantivy immediately to ensure index consistency before advancing watch state.
             t_index.commit()?;
@@ -2057,6 +2058,23 @@ fn classify_paths(
         .into_iter()
         .map(|((kind, _), (root, min_ts, max_ts))| (kind, root, min_ts, max_ts))
         .collect()
+}
+
+fn watch_event_should_trigger_reindex(event: &notify::Event) -> bool {
+    match event.kind {
+        notify::event::EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        notify::event::EventKind::Access(_) => false,
+        notify::event::EventKind::Create(_)
+        | notify::event::EventKind::Any
+        | notify::event::EventKind::Other => true,
+        // Incremental watch indexing is append-only today: once a path is gone,
+        // classify_paths() cannot derive a scan window from it and the ingest
+        // path cannot delete the stale conversation rows it previously indexed.
+        // Treat remove events as noise until delete-aware rebuilds exist.
+        notify::event::EventKind::Remove(_) => false,
+        notify::event::EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)) => false,
+        notify::event::EventKind::Modify(_) => true,
+    }
 }
 
 fn sync_sources_config_to_db(storage: &FrankenStorage) {
@@ -3392,6 +3410,70 @@ mod tests {
     }
 
     #[test]
+    fn watch_event_filter_ignores_read_access_noise() {
+        let event = notify::Event::new(notify::event::EventKind::Access(AccessKind::Read))
+            .add_path(PathBuf::from("/tmp/session.jsonl"));
+        assert!(
+            !watch_event_should_trigger_reindex(&event),
+            "read-only access events should not retrigger watch indexing"
+        );
+
+        let event = notify::Event::new(notify::event::EventKind::Access(AccessKind::Close(
+            AccessMode::Read,
+        )))
+        .add_path(PathBuf::from("/tmp/session.jsonl"));
+        assert!(
+            !watch_event_should_trigger_reindex(&event),
+            "close-after-read events should not retrigger watch indexing"
+        );
+    }
+
+    #[test]
+    fn watch_event_filter_keeps_mutating_events() {
+        let event = notify::Event::new(notify::event::EventKind::Access(AccessKind::Close(
+            AccessMode::Write,
+        )))
+        .add_path(PathBuf::from("/tmp/session.jsonl"));
+        assert!(
+            watch_event_should_trigger_reindex(&event),
+            "close-after-write events should still retrigger indexing"
+        );
+
+        let event = notify::Event::new(notify::event::EventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::WriteTime,
+        )))
+        .add_path(PathBuf::from("/tmp/session.jsonl"));
+        assert!(
+            watch_event_should_trigger_reindex(&event),
+            "write-time metadata changes should still retrigger indexing"
+        );
+    }
+
+    #[test]
+    fn watch_event_filter_ignores_access_time_metadata() {
+        let event = notify::Event::new(notify::event::EventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::AccessTime,
+        )))
+        .add_path(PathBuf::from("/tmp/session.jsonl"));
+        assert!(
+            !watch_event_should_trigger_reindex(&event),
+            "access-time metadata changes are read noise and should be ignored"
+        );
+    }
+
+    #[test]
+    fn watch_event_filter_ignores_remove_events_without_delete_support() {
+        let event = notify::Event::new(notify::event::EventKind::Remove(
+            notify::event::RemoveKind::File,
+        ))
+        .add_path(PathBuf::from("/tmp/session.jsonl"));
+        assert!(
+            !watch_event_should_trigger_reindex(&event),
+            "remove events should be ignored until watch mode can remove stale indexed rows"
+        );
+    }
+
+    #[test]
     #[serial]
     fn watch_state_round_trips_to_disk() {
         let tmp = TempDir::new().unwrap();
@@ -3522,9 +3604,9 @@ mod tests {
         let storage = FrankenStorage::open(&opts.db_path).unwrap();
         let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
 
-        let state = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let storage = std::sync::Arc::new(std::sync::Mutex::new(storage));
-        let t_index = std::sync::Arc::new(std::sync::Mutex::new(t_index));
+        let state = std::sync::Mutex::new(std::collections::HashMap::new());
+        let storage = std::sync::Mutex::new(storage);
+        let t_index = std::sync::Mutex::new(t_index);
 
         // Need roots for reindex_paths
         let roots = vec![(ConnectorKind::Amp, ScanRoot::local(amp_dir))];
@@ -3533,9 +3615,9 @@ mod tests {
             &opts,
             vec![amp_file.clone()],
             &roots,
-            state.clone(),
-            storage.clone(),
-            t_index.clone(),
+            &state,
+            &storage,
+            &t_index,
             false,
         )
         .unwrap();
@@ -3544,11 +3626,6 @@ mod tests {
         assert!(loaded.contains_key(&ConnectorKind::Amp));
         let ts = loaded.get(&ConnectorKind::Amp).copied().unwrap();
         assert!(ts > 0);
-
-        // Explicitly drop resources to release locks before cleanup
-        drop(t_index);
-        drop(storage);
-        drop(state);
 
         if let Some(prev) = prev {
             unsafe { std::env::set_var("XDG_DATA_HOME", prev) };
@@ -3602,18 +3679,18 @@ mod tests {
         let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
         let mut initial = HashMap::new();
         initial.insert(ConnectorKind::Amp, i64::MAX / 4);
-        let state = Arc::new(Mutex::new(initial));
-        let storage = Arc::new(Mutex::new(storage));
-        let t_index = Arc::new(Mutex::new(t_index));
+        let state = Mutex::new(initial);
+        let storage = Mutex::new(storage);
+        let t_index = Mutex::new(t_index);
         let roots = vec![(ConnectorKind::Amp, ScanRoot::local(amp_dir))];
 
         let indexed = reindex_paths(
             &opts,
             vec![amp_file],
             &roots,
-            state.clone(),
-            storage,
-            t_index,
+            &state,
+            &storage,
+            &t_index,
             false,
         )
         .unwrap();
@@ -3664,18 +3741,18 @@ mod tests {
         let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
         let mut initial = HashMap::new();
         initial.insert(ConnectorKind::Amp, 10_000);
-        let state = Arc::new(Mutex::new(initial));
-        let storage = Arc::new(Mutex::new(storage));
-        let t_index = Arc::new(Mutex::new(t_index));
+        let state = Mutex::new(initial);
+        let storage = Mutex::new(storage);
+        let t_index = Mutex::new(t_index);
         let roots = vec![(ConnectorKind::Amp, ScanRoot::local(amp_dir))];
 
         let indexed = reindex_paths(
             &opts,
             vec![amp_file],
             &roots,
-            state.clone(),
-            storage,
-            t_index,
+            &state,
+            &storage,
+            &t_index,
             false,
         )
         .unwrap();
@@ -3743,17 +3820,17 @@ mod tests {
 
         let storage = FrankenStorage::open(&opts.db_path).unwrap();
         let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
-        let state = Arc::new(Mutex::new(HashMap::new()));
-        let storage = Arc::new(Mutex::new(storage));
-        let t_index = Arc::new(Mutex::new(t_index));
+        let state = Mutex::new(HashMap::new());
+        let storage = Mutex::new(storage);
+        let t_index = Mutex::new(t_index);
 
         reindex_paths(
             &opts,
             vec![amp_file],
             &[(ConnectorKind::Amp, ScanRoot::local(amp_dir))],
-            state.clone(),
-            storage.clone(),
-            t_index.clone(),
+            &state,
+            &storage,
+            &t_index,
             false,
         )
         .unwrap();

@@ -4693,6 +4693,8 @@ pub struct CassApp {
     // -- Status line ------------------------------------------------------
     /// Footer status text.
     pub status: String,
+    /// Whether startup state has already been applied before ftui init runs.
+    startup_state_bootstrapped: bool,
     /// Guard against overlapping index-refresh tasks.
     pub index_refresh_in_flight: bool,
     /// Shared progress handle for the background indexer (set during refresh).
@@ -4878,6 +4880,7 @@ impl Default for CassApp {
             cockpit: CockpitState::new(),
             sources_view: SourcesViewState::default(),
             status: String::new(),
+            startup_state_bootstrapped: false,
             index_refresh_in_flight: false,
             indexing_progress: None,
             index_progress_snapshot: IndexProgressSnapshot::default(),
@@ -5040,6 +5043,84 @@ impl CassApp {
 
     fn state_file_path(&self) -> PathBuf {
         self.data_dir.join(TUI_STATE_FILE_NAME)
+    }
+
+    fn apply_persisted_state(&mut self, state: &PersistedState, mark_first_run_dirty: bool) {
+        self.search_mode = state.search_mode;
+        self.match_mode = state.match_mode;
+        self.ranking_mode = state.ranking_mode;
+        self.context_window = state.context_window;
+        // If theme.json has an explicit preset, it is the source of truth.
+        // Otherwise fall back to legacy dark/light persisted state.
+        if let Some(config) = self.theme_config.as_ref() {
+            if let Some(preset) = config.base_preset {
+                self.theme_preset = preset;
+                self.theme_dark = !matches!(
+                    preset,
+                    UiThemePreset::Daylight | UiThemePreset::SolarizedLight
+                );
+            } else {
+                self.theme_dark = state.theme_dark;
+                self.theme_preset = if self.theme_dark {
+                    UiThemePreset::TokyoNight
+                } else {
+                    UiThemePreset::Daylight
+                };
+            }
+        } else {
+            self.theme_dark = state.theme_dark;
+            self.theme_preset = if self.theme_dark {
+                UiThemePreset::TokyoNight
+            } else {
+                UiThemePreset::Daylight
+            };
+        }
+        self.style_options.dark_mode = self.theme_dark;
+        self.style_options.preset = self.theme_preset;
+        self.density_mode = state.density_mode;
+        self.per_pane_limit = state.per_pane_limit;
+        self.query_history = state.query_history.clone();
+        self.saved_views = state.saved_views.clone();
+        self.analytics_filters.since_ms = state.analytics_since_ms;
+        self.analytics_filters.until_ms = state.analytics_until_ms;
+        self.analytics_filters.agents = state.analytics_agents.clone();
+        self.analytics_filters.workspaces = state.analytics_workspaces.clone();
+        self.analytics_filters.source_filter = state.analytics_source_filter.clone();
+        self.sort_saved_views();
+        self.clamp_saved_views_selection();
+        self.fancy_borders = state.fancy_borders;
+        self.help_pinned = state.help_pinned;
+        // Re-open help if the user pinned it, or on first run so key
+        // hints are immediately discoverable.
+        let should_show_help = state.help_pinned || !state.has_seen_help;
+        self.show_help = should_show_help;
+        self.help_scroll = 0;
+        self.has_seen_help = state.has_seen_help || should_show_help;
+        if should_show_help && !state.has_seen_help && mark_first_run_dirty {
+            // Persist first-run auto-help dismissal state.
+            self.dirty_since = Some(Instant::now());
+        } else {
+            self.dirty_since = None;
+        }
+        if should_show_help {
+            if self.focus_manager.current() != Some(focus_ids::HELP_OVERLAY) {
+                self.focus_manager.push_trap(focus_ids::GROUP_HELP);
+            }
+            self.focus_manager.focus(focus_ids::HELP_OVERLAY);
+        }
+    }
+
+    fn bootstrap_persisted_state(&mut self) {
+        match load_persisted_state_from_path(&self.state_file_path()) {
+            Ok(Some(state)) => self.apply_persisted_state(&state, true),
+            Ok(None) => self.apply_persisted_state(&persisted_state_defaults(), true),
+            Err(err) => {
+                if self.status.is_empty() {
+                    self.status = format!("Failed to load TUI state: {err}");
+                }
+            }
+        }
+        self.startup_state_bootstrapped = true;
     }
 
     fn capture_persisted_state(&self) -> PersistedState {
@@ -14167,8 +14248,15 @@ impl super::ftui_adapter::Model for CassApp {
     type Message = CassMsg;
 
     fn init(&mut self) -> ftui::Cmd<CassMsg> {
-        // Request state load on startup.
-        ftui::Cmd::msg(CassMsg::StateLoadRequested)
+        if self.startup_state_bootstrapped {
+            // Startup already applied persisted state synchronously, so begin
+            // initial browse/search immediately instead of showing a transient
+            // default frame and waiting for an async state-load task.
+            ftui::Cmd::msg(CassMsg::SearchRequested)
+        } else {
+            // Request state load on startup.
+            ftui::Cmd::msg(CassMsg::StateLoadRequested)
+        }
     }
 
     fn subscriptions(&self) -> Vec<Box<dyn Subscription<Self::Message>>> {
@@ -17606,67 +17694,8 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::StateLoaded(state) => {
                 self.clear_loading_context(LoadingContext::StateLoad);
-                self.search_mode = state.search_mode;
-                self.match_mode = state.match_mode;
-                self.ranking_mode = state.ranking_mode;
-                self.context_window = state.context_window;
-                // If theme.json has an explicit preset, it is the source of truth.
-                // Otherwise fall back to legacy dark/light persisted state.
-                if let Some(config) = self.theme_config.as_ref() {
-                    if let Some(preset) = config.base_preset {
-                        self.theme_preset = preset;
-                        self.theme_dark = !matches!(
-                            preset,
-                            UiThemePreset::Daylight | UiThemePreset::SolarizedLight
-                        );
-                    } else {
-                        self.theme_dark = state.theme_dark;
-                        self.theme_preset = if self.theme_dark {
-                            UiThemePreset::TokyoNight
-                        } else {
-                            UiThemePreset::Daylight
-                        };
-                    }
-                } else {
-                    self.theme_dark = state.theme_dark;
-                    self.theme_preset = if self.theme_dark {
-                        UiThemePreset::TokyoNight
-                    } else {
-                        UiThemePreset::Daylight
-                    };
-                }
-                self.style_options.dark_mode = self.theme_dark;
-                self.style_options.preset = self.theme_preset;
-                self.density_mode = state.density_mode;
-                self.per_pane_limit = state.per_pane_limit;
-                self.query_history = state.query_history;
-                self.saved_views = state.saved_views;
-                self.analytics_filters.since_ms = state.analytics_since_ms;
-                self.analytics_filters.until_ms = state.analytics_until_ms;
-                self.analytics_filters.agents = state.analytics_agents;
-                self.analytics_filters.workspaces = state.analytics_workspaces;
-                self.analytics_filters.source_filter = state.analytics_source_filter;
-                self.sort_saved_views();
-                self.clamp_saved_views_selection();
-                self.fancy_borders = state.fancy_borders;
-                self.help_pinned = state.help_pinned;
-                // Re-open help if the user pinned it, or on first run so key
-                // hints are immediately discoverable.
-                let should_show_help = state.help_pinned || !state.has_seen_help;
-                self.show_help = should_show_help;
-                self.help_scroll = 0;
-                self.has_seen_help = state.has_seen_help || should_show_help;
-                if should_show_help && !state.has_seen_help {
-                    // Persist first-run auto-help dismissal state.
-                    self.dirty_since = Some(Instant::now());
-                }
-                if should_show_help {
-                    if self.focus_manager.current() != Some(focus_ids::HELP_OVERLAY) {
-                        self.focus_manager.push_trap(focus_ids::GROUP_HELP);
-                    }
-                    self.focus_manager.focus(focus_ids::HELP_OVERLAY);
-                }
-                self.dirty_since = None;
+                self.apply_persisted_state(&state, true);
+                self.startup_state_bootstrapped = true;
                 // Fix #79: Trigger an initial search/browse on startup so the
                 // TUI is populated with recent sessions immediately, even when
                 // the query is empty.
@@ -17675,6 +17704,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::StateLoadFailed(err) => {
                 self.clear_loading_context(LoadingContext::StateLoad);
                 self.status = format!("Failed to load TUI state: {err}");
+                self.startup_state_bootstrapped = true;
                 ftui::Cmd::none()
             }
             CassMsg::StateSaveRequested => {
@@ -20966,6 +20996,7 @@ pub fn run_tui_ftui(
     model.db_path = data_dir.join("agent_search.db");
     model.latency_trace = latency_trace.clone();
     model.refresh_theme_config_from_data_dir();
+    model.bootstrap_persisted_state();
     model.search_service = match crate::search::tantivy::index_dir(&data_dir) {
         Ok(index_path) => match crate::search::query::SearchClient::open_with_options(
             &index_path,
@@ -22431,6 +22462,21 @@ mod tests {
     }
 
     #[test]
+    fn state_loaded_first_run_marks_state_dirty_for_persistence() {
+        let mut app = CassApp::default();
+        let mut state = persisted_state_defaults();
+        state.has_seen_help = false;
+        state.help_pinned = false;
+
+        let _ = app.update(CassMsg::StateLoaded(Box::new(state)));
+
+        assert!(
+            app.dirty_since.is_some(),
+            "first-run auto-help should mark state dirty so the seen flag persists"
+        );
+    }
+
+    #[test]
     fn state_loaded_with_seen_help_keeps_help_closed_when_not_pinned() {
         let mut app = CassApp::default();
         let mut state = persisted_state_defaults();
@@ -22449,6 +22495,17 @@ mod tests {
         let cmd = app.update(CassMsg::StateLoadRequested);
         let debug = format!("{cmd:?}");
         assert!(debug.contains("Task"), "expected Cmd::Task, got: {debug}");
+    }
+
+    #[test]
+    fn init_dispatches_search_when_startup_state_bootstrapped() {
+        let mut app = CassApp::default();
+        app.startup_state_bootstrapped = true;
+
+        assert!(matches!(
+            extract_msg(app.init()),
+            Some(CassMsg::SearchRequested)
+        ));
     }
 
     #[test]

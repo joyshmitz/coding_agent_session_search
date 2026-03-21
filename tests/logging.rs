@@ -81,7 +81,7 @@ fn persist_conversation_logs_counts() {
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
     let db_path = data_dir.join("db.sqlite");
-    let mut storage = SqliteStorage::open(&db_path).unwrap();
+    let storage = SqliteStorage::open(&db_path).unwrap();
     let mut index = TantivyIndex::open_or_create(&index_dir(&data_dir).unwrap()).unwrap();
 
     let conv = NormalizedConversation {
@@ -96,7 +96,7 @@ fn persist_conversation_logs_counts() {
         messages: vec![norm_msg(0), norm_msg(1)],
     };
 
-    persist_conversation(&mut storage, &mut index, &conv).unwrap();
+    persist_conversation(&storage, &mut index, &conv).unwrap();
 
     let out = trace.output();
     assert!(out.contains("persist_conversation"));
